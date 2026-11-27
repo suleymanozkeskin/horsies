@@ -7,7 +7,7 @@ import type {
   AppRerunAnswer,
   AppRerunFailure,
   CallerColumnRecord,
-  CallerKeyArg,
+  IdempotencyKeyArg,
   CallerRowArg,
   CallerStatementRecord,
   CallerStepRefusal,
@@ -16,6 +16,8 @@ import type {
   FamilyName,
   NotEligibleName,
   PreparedRerunWrite,
+  RegisteredTaskArg,
+  RegisteredTaskCodesArg,
   RerunAddon,
   RerunCommandArg,
   RerunInputArg,
@@ -52,7 +54,9 @@ export const writeMatches: Mutual<Write, PreparedRerunWrite> = true;
 
 export const commandMatches: Mutual<Generated.RerunCommandArg, RerunCommandArg> = true;
 export const deadlineMatches: Mutual<Generated.DeadlineArg, DeadlineArg> = true;
-export const callerKeyMatches: Mutual<Generated.CallerKeyArg, CallerKeyArg> = true;
+export const idempotencyKeyMatches: Mutual<Generated.IdempotencyKeyArg, IdempotencyKeyArg> = true;
+export const registeredTaskMatches: Mutual<Generated.RegisteredTaskArg, RegisteredTaskArg> = true;
+export const registeredTaskCodesMatches: Mutual<Generated.RegisteredTaskCodesArg, RegisteredTaskCodesArg> = true;
 export const policyMatches: Mutual<Generated.RerunPolicyArg, RerunPolicyArg> = true;
 export const retentionMatches: Mutual<Generated.RetentionArg, RetentionArg> = true;
 export const rerunInputMatches: Mutual<Generated.RerunInputArg, RerunInputArg> = true;

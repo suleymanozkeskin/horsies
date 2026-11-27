@@ -39,13 +39,13 @@ export interface TaskInfo {
   readonly taskId: TaskId;
   readonly taskName: string;
   readonly status: TaskStatus;
-  readonly queueName: string;
+  readonly queue: string;
   readonly priority: number;
   readonly retryCount: number;
   readonly maxRetries: number;
   readonly nextRetryAt: Recorded<Temporal.Instant>;
   readonly sentAt: Recorded<Temporal.Instant>;
-  readonly enqueuedAt: Temporal.Instant;
+  readonly dueAt: Temporal.Instant;
   readonly claimedAt: Recorded<Temporal.Instant>;
   readonly startedAt: Recorded<Temporal.Instant>;
   readonly completedAt: Recorded<Temporal.Instant>;
@@ -75,13 +75,13 @@ export function taskInfoOf(record: TaskInfoRecord): TaskInfo {
     taskId: taskIdFromCore(record.taskId, "taskInfo"),
     taskName: record.taskName,
     status: record.status,
-    queueName: record.queueName,
+    queue: record.queue,
     priority: record.priority,
     retryCount: record.retryCount,
     maxRetries: record.maxRetries,
     nextRetryAt: recordedInstant(record.nextRetryAt),
     sentAt: recordedInstant(record.sentAt),
-    enqueuedAt: instantOfMicros(record.enqueuedAtMicros),
+    dueAt: instantOfMicros(record.dueAtMicros),
     claimedAt: recordedInstant(record.claimedAt),
     startedAt: recordedInstant(record.startedAt),
     completedAt: recordedInstant(record.completedAt),

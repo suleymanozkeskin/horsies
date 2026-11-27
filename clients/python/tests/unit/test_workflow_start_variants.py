@@ -26,7 +26,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartError,
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 from tests.union_members import union_members
@@ -44,13 +44,13 @@ def _every_variant(cause: BaseException) -> list[WorkflowStartError]:
     ids = {'workflow_name': 'wf', 'workflow_id': WORKFLOW_ID}
     return [
         WorkflowStartBrokerNotConfigured(message=message, **ids),
-        WorkflowStartValidationFailed(message=message, exception=cause, **ids),
+        WorkflowStartValidationFailed(message=message, cause=cause, **ids),
         WorkflowStartIdConflict(
             message=message, existing_workflow_name='other-wf', **ids,
         ),
         WorkflowStartCommandConflict(message=message, **ids),
         WorkflowStartEnqueueFailed(
-            message=message, retryable=True, exception=cause, **ids,
+            message=message, retryable=True, cause=cause, **ids,
         ),
         WorkflowStartAsyncContext(message=message, **ids),
     ]
@@ -73,7 +73,7 @@ class TestVariantCatalog:
         assert built == set(union_members(WorkflowStartError))
 
     def test_the_retryable_variants_carry_a_start_id(self) -> None:
-        assert set(get_args(WorkflowStartRetryable.__value__)) == {
+        assert set(get_args(WorkflowStartResendable.__value__)) == {
             WorkflowStartEnqueueFailed,
             WorkflowStartAsyncContext,
         }
@@ -144,4 +144,4 @@ class TestValidationCause:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartValidationFailed)
-        assert isinstance(result.err_value.exception, WorkflowValidationError)
+        assert isinstance(result.err_value.cause, WorkflowValidationError)

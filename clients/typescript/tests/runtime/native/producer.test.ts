@@ -1,5 +1,5 @@
-// The producer end to end, with a built addon and a database: `Horsies.create`, a send, the task info and a result
-// read that times out. No worker runs, so the task stays PENDING.
+// The producer end to end, with a built addon and a database: the schema mode of the app's handle, `Horsies.create`, a
+// send, the task info and a result read that times out. No worker runs, so the task stays PENDING.
 //
 // Runs only where a built addon exists (`HORSIES_NATIVE_ADDON_PATH`) and `HORSIES_TEST_DATABASE_URL` names a
 // throwaway PostgreSQL database.
@@ -7,7 +7,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
+import { appCoreHandle } from "../../../horsies/src/app/core-access.ts";
+import { appInternals } from "../../../horsies/src/app/internals.ts";
+import { defineTask, h, Horsies, type SchemaMode } from "../../../horsies/src/index.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { testDatabaseUrl } from "./manifest.ts";
 
@@ -16,11 +18,12 @@ void requireDevAddon();
 
 const ping = defineTask({ name: "producer_end_to_end_ping", input: { n: h.int() }, output: h.int() });
 
-/** The app of the test database, or the failed test with every refusal. */
-function testApp(): Horsies {
+/** The app of the test database with the schema mode `schemaMode`, or the failed test with every refusal. */
+function testApp(schemaMode: SchemaMode = "MIGRATE_AND_VALIDATE"): Horsies {
   const created = Horsies.create({
-    broker: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
     tasks: [ping],
+    schemaMode,
   });
 
   if (!created.ok) {
@@ -29,6 +32,22 @@ function testApp(): Horsies {
 
   return created.value;
 }
+
+describe("the schema mode of the app's core handle", () => {
+  test("OBSERVE_ONLY and ASSUME_INITIALIZED run no schema step; the default installs or checks the schema", async () => {
+    for (const schemaMode of ["OBSERVE_ONLY", "ASSUME_INITIALIZED"] as const) {
+      const handle = appCoreHandle(appInternals(testApp(schemaMode)).core);
+
+      assert.deepEqual(await handle.installSchema(), { kind: "notRun" });
+      await handle.close();
+    }
+
+    const handle = appCoreHandle(appInternals(testApp()).core);
+
+    assert.equal((await handle.installSchema()).kind, "installed");
+    await handle.close();
+  });
+});
 
 describe("the producer with a database", () => {
   test("a send gives a handle; info gives PENDING; a bounded wait is waitTimeout", async () => {
@@ -48,7 +67,7 @@ describe("the producer with a database", () => {
     assert.equal(info.value.taskId, sent.value.taskId);
     assert.equal(info.value.taskName, "producer_end_to_end_ping");
     assert.equal(info.value.status, "PENDING");
-    assert.equal(info.value.queueName, "default");
+    assert.equal(info.value.queue, "default");
     assert.deepEqual(info.value.attempts, []);
 
     assert.deepEqual(await sent.value.get({ waitMs: 200 }), {

@@ -46,7 +46,7 @@ fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
         .function(workflow::step::handle)
         .node()
         .node_id(id)
-        .set(workflow::step::params::step(), id.to_owned())
+        .set(workflow::step::fields::step(), id.to_owned())
         .expect("a step input")
 }
 
@@ -60,8 +60,8 @@ fn slow_step(
         .function(workflow::slow_step::handle)
         .node()
         .node_id(id)
-        .set(workflow::slow_step::params::step(), id.to_owned())
-        .and_then(|node| node.set(workflow::slow_step::params::delay_ms(), delay_ms))
+        .set(workflow::slow_step::fields::step(), id.to_owned())
+        .and_then(|node| node.set(workflow::slow_step::fields::delay_ms(), delay_ms))
         .expect("a slow step input")
 }
 
@@ -105,7 +105,7 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
         .await
         .expect("read the workflow")
     {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
     }
 }

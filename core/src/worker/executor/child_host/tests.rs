@@ -17,7 +17,7 @@ use super::seats::{
     InFlightRuns, PollWatch, RunGate,
 };
 use super::*;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
 use crate::process_exit::{ExitDrain, ProcessExit};
@@ -91,13 +91,13 @@ fn child_mode_arguments_that_cannot_be_used_are_named() {
 
 #[test]
 fn every_end_has_its_protocol_code() {
-    assert_eq!(ChildHostExit::Stopped.code(), 0);
-    assert_eq!(ChildHostExit::ParentGone.code(), 71);
-    assert_eq!(ChildHostExit::BadParentFrame.code(), 72);
-    assert_eq!(ChildHostExit::BadArguments.code(), 73);
-    assert_eq!(ChildHostExit::BootFailed.code(), 75);
-    assert_eq!(ChildHostExit::ProtocolMismatch.code(), 78);
-    assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
+    assert_eq!(ChildHostExit::Stopped.exit_code(), 0);
+    assert_eq!(ChildHostExit::ParentGone.exit_code(), 71);
+    assert_eq!(ChildHostExit::BadParentFrame.exit_code(), 72);
+    assert_eq!(ChildHostExit::BadArguments.exit_code(), 73);
+    assert_eq!(ChildHostExit::BootFailed.exit_code(), 75);
+    assert_eq!(ChildHostExit::ProtocolMismatch.exit_code(), 78);
+    assert_eq!(ChildHostExit::ChildHookFailed.exit_code(), 173);
 }
 
 fn envelope_of(end: RunEnd) -> String {
@@ -131,7 +131,7 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
 
 #[test]
 fn a_task_error_becomes_the_error_envelope() {
-    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
+    let error = TaskError::built_in(OperationalCode::TaskException, "boom");
     let envelope = envelope_of(result_end(TaskResult::Err(error)));
     assert!(
         envelope.starts_with(r#"{"__h_task_result__":true,"ok":null,"err":{"#),

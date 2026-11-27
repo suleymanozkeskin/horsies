@@ -64,7 +64,7 @@ jobs:
       rust_toolchain: ${{ steps.toolchain.outputs.channel }}
       wheel_matrix: ${{ steps.platforms.outputs.wheel_matrix }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -214,7 +214,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -233,7 +233,7 @@ jobs:
           rust-toolchain: ${{ needs.metadata.outputs.rust_toolchain }}
 
       - name: Upload the source distribution
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: horsies-dist-sdist-${{ needs.metadata.outputs.version }}
           path: dist/*.tar.gz
@@ -283,7 +283,7 @@ jobs:
         with:
           python-version: '3.13'
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: false
@@ -388,7 +388,7 @@ jobs:
           async def main() -> None:
               app = Horsies(
                   AppConfig(
-                      broker=PostgresConfig(
+                      database=PostgresConfig(
                           database_url=SecretStr('postgresql://check:none@127.0.0.1:1/none'),
                       ),
                   ),
@@ -468,7 +468,7 @@ jobs:
           "$RUNNER_TEMP/import-check/bin/python" -I -c "$IMPORT_CHECK"
 
       - name: Upload the wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: horsies-dist-wheel-${{ matrix.name }}-${{ needs.metadata.outputs.version }}
           path: dist/*.whl
@@ -493,7 +493,7 @@ jobs:
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   build-crates:
     needs: [metadata, tests]
@@ -504,7 +504,7 @@ jobs:
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -561,7 +561,7 @@ jobs:
           echo "OK: $client carries no baseline/, migrations/ or webui-dist/"
 
       - name: Upload verified crates
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: horsies-crates-${{ needs.metadata.outputs.version }}
           path: |
@@ -599,7 +599,7 @@ jobs:
           fi
           echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -678,7 +678,7 @@ jobs:
           fi
           echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -752,7 +752,7 @@ jobs:
           fi
           echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -823,7 +823,7 @@ jobs:
           fi
           echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

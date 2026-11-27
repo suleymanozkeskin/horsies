@@ -16,7 +16,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -36,6 +36,7 @@ from ..domain import (
     PaymentCapture,
     PaymentIntent,
     PaymentRefund,
+    PaymentRetryCode,
     ReconciliationReport,
 )
 from . import store_failure
@@ -71,11 +72,12 @@ def _stored_authorization(
 
 @app.task(
     'authorize_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
+    error_codes=PaymentRetryCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.PSP_RETRY_BASE_SECONDS,
         max_retries=tuning.PSP_MAX_RETRIES,
-        auto_retry_for=[PSP_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[PaymentRetryCode.PSP_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def authorize_payment(
@@ -91,7 +93,7 @@ def authorize_payment(
             if counted is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to authorize',
                         data={'order_id': order_id},
                     ),
@@ -107,7 +109,7 @@ def authorize_payment(
     if simulate.draw(tuning.CARD_DECLINE_RATE, order_id, 'card'):
         return Err(
             TaskError(
-                error_code=CARD_DECLINED,
+                code=CARD_DECLINED,
                 message=f'issuer declined the card for order {order_id}',
                 data={
                     'order_id': order_id,
@@ -121,7 +123,7 @@ def authorize_payment(
     if provider_down and attempt <= tuning.PSP_FAILING_ATTEMPTS:
         return Err(
             TaskError(
-                error_code=PSP_UNAVAILABLE,
+                code=PSP_UNAVAILABLE,
                 message=f'payment provider unreachable on attempt {attempt}',
                 data={
                     'order_id': order_id,
@@ -153,7 +155,7 @@ def authorize_payment(
         return concurrent
     return Err(
         TaskError(
-            error_code=STORE_UNAVAILABLE,
+            code=STORE_UNAVAILABLE,
             message='authorization conflicted on insert but no row was found',
             data={'order_id': order_id},
         ),
@@ -162,10 +164,10 @@ def authorize_payment(
 
 @app.task(
     'capture_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def capture_payment(
@@ -196,7 +198,7 @@ def capture_payment(
             if payment is None:
                 return Err(
                     TaskError(
-                        error_code=PAYMENT_ALREADY_CAPTURED,
+                        code=PAYMENT_ALREADY_CAPTURED,
                         message=f'order {order_id} was captured by another attempt',
                         data={'order_id': order_id},
                     ),
@@ -231,7 +233,7 @@ def _capture_of(
     if existing.psp_reference != hold.psp_reference:
         return Err(
             TaskError(
-                error_code=PAYMENT_ALREADY_CAPTURED,
+                code=PAYMENT_ALREADY_CAPTURED,
                 message=(
                     f'order {existing.order_id} is already captured under a '
                     f'different authorization'
@@ -256,10 +258,10 @@ def _capture_of(
 
 @app.task(
     'refund_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def refund_payment(
@@ -275,7 +277,7 @@ def refund_payment(
             if capture is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'order {order_id} has no capture to refund',
                         data={'order_id': order_id},
                     ),
@@ -300,10 +302,10 @@ def refund_payment(
 
 @app.task(
     'reconcile_payments',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def reconcile_payments(*, window: str) -> Result[ReconciliationReport, TaskError]:
@@ -337,7 +339,7 @@ def _stored_refund(order_id: str) -> Result[PaymentRefund, TaskError]:
             if refund is None:
                 return Err(
                     TaskError(
-                        error_code=STORE_UNAVAILABLE,
+                        code=STORE_UNAVAILABLE,
                         message='refund conflicted on insert but no row was found',
                         data={'order_id': order_id},
                     ),

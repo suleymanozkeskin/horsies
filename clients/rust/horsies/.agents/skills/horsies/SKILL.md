@@ -57,7 +57,7 @@ read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 | `sqlx` | off | `horsies::rerun::SqlxCaller` |
 | `otel` | off | `horsies::otel`: OpenTelemetry spans of the sends, the workflow starts and the task bodies, and the producer metrics, with the global providers of `opentelemetry` 0.33 |
 
-Minimum Rust version: 1.91.
+Minimum Rust version: 1.95.
 
 ## Define a Task
 
@@ -75,7 +75,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 - A task is an `async fn` with `#[horsies::task]`, or a `fn` with
   `#[horsies::blocking_task]`.
 - It returns `Result<T, TaskError<E>>`. `T` is the output type. `E` is the
-  code type of the task's own errors (`#[derive(horsies::UserErrorCode)]`),
+  code type of the task's own errors (`#[derive(horsies::CustomErrorCode)]`),
   or `std::convert::Infallible` when the task has no codes of its own.
 - Every parameter is stored under its name, as Python stores keyword
   arguments: `add_numbers` stores `{"a": 2, "b": 3}`, and a single
@@ -111,7 +111,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies")
+        ..AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies")
     };
     let mut app = Horsies::new(config)?;
     let _add = add_numbers::register(&mut app)?;
@@ -163,7 +163,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("sent {} and {}", handle.task_id(), also.task_id());
     match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -212,7 +212,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -220,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -271,10 +271,10 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
+            fetch_report::node().set(fetch_report::fields::region(), "eu".to_owned())?,
         )?;
         let published = builder.task(
-            publish_report::node().arg_from(publish_report::params::report(), fetched),
+            publish_report::node().arg_from(publish_report::fields::report(), fetched),
         )?;
         Ok(WorkflowDefinitionConfig::new().output(published))
     }
@@ -297,15 +297,15 @@ impl WorkflowDefinition for DailyReport {
 | Operation | Returns |
 |---|---|
 | Task body | `Result<T, TaskError<E>>` |
-| `send`, `send_with_options`, `retry_send` | `Result<TaskHandle<T, E>, TaskSendError>` |
+| `send`, `send_with_options`, `resend` | `Result<TaskHandle<T, E>, TaskSendError>` |
 | `TaskHandle::get`, `Horsies::get_result` | `Result<TaskOutcome<T, E>, ReadError>` |
 | `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
 | Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |
-| `WorkflowHandle::get` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>` |
-| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, HandleOperationError>`) |
-| Health reads on the app | `Result<_, BrokerOperationError>` |
+| `WorkflowHandle::get` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>` |
+| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, WorkflowHandleError>`) |
+| Health reads on the app | `Result<_, DatabaseOperationError>` |
 | Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
-| `check`, `check_live` | `Result<CheckPassed, CheckReport>` |
+| `check`, `check_live` | `Result<CheckPassed, ValidationReport>` |
 
 Every error type is a closed catalog. Match on the variant or on the code.
 `retryable: true` means the cause may clear; it does not mean that a repeat
@@ -333,10 +333,10 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ## CLI
 
 ```bash
-./myapp worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
-./myapp scheduler [--loglevel LEVEL]
-./myapp check [--live] [--loglevel LEVEL]
-./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
+./myapp worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
+./myapp scheduler [--log-level LEVEL]
+./myapp check [--live] [--log-level LEVEL]
+./myapp metrics --metrics-listen HOST:PORT [--log-level LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/

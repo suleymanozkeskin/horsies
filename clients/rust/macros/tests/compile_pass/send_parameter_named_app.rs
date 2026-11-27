@@ -8,7 +8,7 @@ async fn app_parameter(app: String) -> Result<usize, TaskError<std::convert::Inf
 }
 
 fn main() {
-    let Ok(horsies_app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(horsies_app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;
@@ -16,5 +16,5 @@ fn main() {
     let _now = app_parameter::send(&horsies_app, "billing".to_owned());
     let _with_options = app_parameter::with_options(TaskSendOptions::new())
         .send(&horsies_app, "billing".to_owned());
-    let _field = app_parameter::params::app();
+    let _field = app_parameter::fields::app();
 }

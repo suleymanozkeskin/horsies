@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput, ItemFn};
 
 mod codegen;
+mod custom_error_code;
 mod parse;
-mod user_error_code;
 mod workflow_input;
 
 /// Define an async task.
@@ -17,7 +17,7 @@ mod workflow_input;
 ///
 /// The function returns `Result<T, TaskError<E>>`: `T` is the output type
 /// and `E` the code type of the task's own errors
-/// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
+/// (`#[derive(horsies::CustomErrorCode)]`, or `std::convert::Infallible`).
 /// Its parameters form the input, stored as Python stores keyword
 /// arguments: no parameter, or one parameter written `()`, is `()` (a send
 /// stores `{}`); any other parameters are a generated `Input` struct with
@@ -38,11 +38,11 @@ mod workflow_input;
 ///   of the body; default 1,000. `isolated`: the time from an operator
 ///   cancel to the kill of the child when the run has not ended; with none,
 ///   an operator cancel kills nothing.
-/// - `retry_policy = <RetryPolicy>` with `auto_retry_for = ["CODE", ...]`:
+/// - `retry_policy = <RetryPolicy>` with `retry_for = ["CODE", ...]`:
 ///   both or neither. A code is a built-in code (`TASK_TIMEOUT`,
 ///   `WORKER_CRASHED`, ...) or a code of `E`; any other is a compile
 ///   error.
-/// - `workflow_ctx`: the input gets the workflow context.
+/// - `workflow_context`: the input gets the workflow context.
 ///
 /// The attribute generates a module of the same name. It holds no state:
 /// each send names the app that it goes through, and a workflow builder
@@ -50,12 +50,12 @@ mod workflow_input;
 ///
 /// ```ignore
 /// let validate = validate_order::register(&mut app)?;   // TaskFunction<validate_order::Input, ValidatedOrder, OrderCode>
-/// let order_field = validate_order::params::order();    // InputField<validate_order::Input, Order>
+/// let order_field = validate_order::fields::order();    // InputField<validate_order::Input, Order>
 /// let handle = validate_order::send(&app, order).await?;
 /// let options = TaskSendOptions::new().delay(WholeSeconds::from_secs(30));
 /// let later = validate_order::with_options(options).send(&app, order).await?;
 /// let node = validate_order::node();                    // TaskNode<ValidatedOrder, validate_order::Input>
-/// let function = validate_order::handle(&runtime)?;     // from a TaskRuntime
+/// let function = validate_order::function(&runtime)?;   // from a TaskRuntime
 /// ```
 ///
 /// A send through an app that does not register the task is
@@ -97,10 +97,10 @@ pub fn blocking_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive typed workflow field tokens for a named-field struct: the params
-/// type of a workflow definition, which a sub-workflow node fills field by
+/// Derive typed workflow field tokens for a named-field struct: the
+/// parameters type of a workflow definition, which a sub-workflow node fills field by
 /// field. A task's input fields have their tokens in the task's own module
-/// (`task_name::params::<name>()`).
+/// (`task_name::fields::<name>()`).
 ///
 /// Generates one associated function `field_<name>()` per field that serde
 /// reads, with the key that serde reads: `rename`, `rename_all` and raw
@@ -127,23 +127,23 @@ pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive the code type of a task's own errors: `horsies::UserErrorCode`.
+/// Derive the code type of a task's own errors: `horsies::CustomErrorCode`.
 ///
 /// The enum has unit variants only. Each variant's code is its name in
 /// UPPER_SNAKE_CASE. A code with the name of a built-in or reserved code
 /// (`TASK_TIMEOUT`, `WORKFLOW_STOPPED`, ...) is a compile error.
 ///
 /// ```ignore
-/// #[derive(Debug, Clone, PartialEq, horsies::UserErrorCode)]
+/// #[derive(Debug, Clone, PartialEq, horsies::CustomErrorCode)]
 /// enum ChargeCode {
 ///     CardDeclined, // CARD_DECLINED
 ///     RateLimited,  // RATE_LIMITED
 /// }
 /// ```
-#[proc_macro_derive(UserErrorCode)]
-pub fn derive_user_error_code(item: TokenStream) -> TokenStream {
+#[proc_macro_derive(CustomErrorCode)]
+pub fn derive_custom_error_code(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    match user_error_code::derive_user_error_code(input) {
+    match custom_error_code::derive_custom_error_code(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

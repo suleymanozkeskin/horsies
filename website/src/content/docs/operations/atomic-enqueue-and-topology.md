@@ -3,7 +3,7 @@ title: Atomic Enqueue and Topology
 section: shared
 summary: Why a send cannot join the caller's database transaction, and the pattern that replaces it - send after commit, automatic resend, and an idempotency key.
 related: [deployment-topology, ../tasks/sending-tasks, ../rust/tasks/sending-tasks, ../tasks/errors, ../monitoring/action-semantics]
-tags: [operations, topology, enqueue, idempotency, idempotency_key, resend_on_transient_err, transaction]
+tags: [operations, topology, enqueue, idempotency, idempotency_key, resend_on_transient_error, transaction]
 ---
 
 # Atomic Enqueue and Topology
@@ -25,7 +25,7 @@ Two failure windows exist:
 | Send, then commit | The commit fails | A task exists for a write that did not happen |
 | Commit, then send | The send fails, or the process stops between the two | A write exists without its task |
 
-Horsies closes the first window by one rule: send after commit. Horsies narrows the second window with `resend_on_transient_err` and the idempotency key.
+Horsies closes the first window by one rule: send after commit. Horsies narrows the second window with `resend_on_transient_error` and the idempotency key.
 
 ## What Joins a Caller Transaction
 
@@ -40,11 +40,11 @@ No other operation does this:
 
 ### Send After Commit
 
-Commit the application transaction. Then send. Handle the error result of the send: after a retryable enqueue failure, repeat the same send with the retry method of the client. The repeat has the same task id and payload.
+Commit the application transaction. Then send. Handle the error result of the send: after a retryable enqueue failure, repeat the same send with the resend method of the client. The repeat has the same task id and payload.
 
 ### Resend Transient Failures
 
-Set `resend_on_transient_err` in the app config. The default is off.
+Set `resend_on_transient_error` in the app config. The default is off.
 
 Rules:
 
@@ -89,4 +89,4 @@ A workflow start has no idempotency key. A start with a fixed workflow id compar
 
 **Don't use a random key.** A key from `uuid4()` differs on each attempt, so it never matches a repeat. Derive the key from data that the attempts share.
 
-**Don't retry an idempotency key conflict in a tight loop.** The retry returns the same error until the reservation ends.
+**Don't retry an idempotency key conflict.** It is not retryable, and the retry methods refuse it. While the owner task is live, a repeat returns the same error. After the reservation ends, a repeat starts a second task under the key, with the other command. Send the same command as the owner task, or use another key.

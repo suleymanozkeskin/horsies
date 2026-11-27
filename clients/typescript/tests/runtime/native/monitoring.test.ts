@@ -3,7 +3,7 @@
 // bounds is refused before any connect. The cases that need a sent task or a running worker are end-to-end cases.
 
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 
 import type { CoreAccess } from "../../../horsies/src/app/core-access.ts";
 import { TaskId, WorkflowId } from "../../../horsies/src/contract/ids.ts";
@@ -13,7 +13,8 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
-import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
+import { createFreshDatabase, type FreshDatabase } from "./fresh-database.ts";
+import { manifestJson, manifestJsonWithSchema } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -60,9 +61,14 @@ function area(databaseUrl: string): MonitoringArea {
   return createMonitoringArea(access(buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER")));
 }
 
-/** The area of an installed test database. */
+/** The new empty database of this file: the rows of other test files are not in it. */
+let freshDatabase: FreshDatabase | undefined;
+
+/** The area of the installed database of this file. */
 async function installedArea(): Promise<MonitoringArea> {
-  const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+  assert.ok(freshDatabase !== undefined, "the database of this file is created before the tests");
+
+  const handle = buildCoreHandle(manifestJson(freshDatabase.url, false), "PRODUCER");
   const installed = await handle.installSchema();
 
   assert.equal(installed.kind, "installed");
@@ -71,6 +77,15 @@ async function installedArea(): Promise<MonitoringArea> {
 }
 
 describe("the reads of an installed database", () => {
+  before(async () => {
+    freshDatabase = await createFreshDatabase();
+  });
+
+  after(async () => {
+    await freshDatabase?.drop();
+    freshDatabase = undefined;
+  });
+
   test("each monitoring read answers its model", async () => {
     const { monitoring } = await installedArea();
     const stats = await monitoring.taskStats();
@@ -126,7 +141,7 @@ describe("the reads of an installed database", () => {
     });
     assert.deepEqual(await monitoring.getWorkflowNode(WORKFLOW_V4, 0), {
       ok: true,
-      value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
+      value: { kind: "notFound", workflowId: WORKFLOW_V4, nodeIndex: 0 },
     });
   });
 
@@ -147,7 +162,7 @@ describe("the reads of an installed database", () => {
 });
 
 describe("an unreachable database", () => {
-  test("each monitoring read is DB_OPERATION_FAILED with the retry rule of the cause", async () => {
+  test("each monitoring read is DATABASE_OPERATION_FAILED with the retry rule of the cause", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
 
     const reads = [
@@ -159,7 +174,7 @@ describe("an unreachable database", () => {
     ] as const;
 
     for (const [subject, read] of reads) {
-      assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED", subject);
+      assert.ok(!read.ok && read.error.code === "DATABASE_OPERATION_FAILED", subject);
       assert.ok(read.error.retryable, subject);
       assert.ok(read.error.message.startsWith(`${subject} failed:`), read.error.message);
     }
@@ -175,12 +190,12 @@ describe("an unreachable database", () => {
 
     assert.ok(!workers.ok && workers.error.code === "MONITORING_QUERY_FAILED");
     assert.ok(!coverage.ok && coverage.error.code === "MONITORING_QUERY_FAILED");
-    assert.ok(!ping.ok && ping.error.code === "DB_PING_FAILED");
+    assert.ok(!ping.ok && ping.error.code === "DATABASE_PING_FAILED");
     assert.ok(!pongs.ok && pongs.error.code === "WORKER_PING_FAILED");
-    assert.ok(!cancel.ok && cancel.error.code === "DB_OPERATION_FAILED" && cancel.error.retryable);
+    assert.ok(!cancel.ok && cancel.error.code === "DATABASE_OPERATION_FAILED" && cancel.error.retryable);
   });
 
-  test("each query bound is QUERY_REFUSED before the connect", async () => {
+  test("each query bound is invalidInput before the connect", async () => {
     const { monitoring } = area(REFUSED_DATABASE_URL);
     const until = Temporal.Now.instant();
 
@@ -195,11 +210,11 @@ describe("an unreachable database", () => {
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 0 })],
       ["limit", await monitoring.listWorkflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
+      ["nodeIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === field, field);
+      assert.ok(!read.ok && read.error.kind === "invalidInput" && "field" in read.error && read.error.field === field, field);
     }
   });
 

@@ -68,9 +68,9 @@ async def test_worker_processes_task_and_workflow_through_pgbouncer_split_urls()
             try:
                 with run_worker(PGB_INSTANCE, profile='isolated-1'):
                     task_handle = unwrap_send(await pgbouncer_tasks.double.send_async(value=21))
-                    assert_succeeded(await task_handle.get_async(timeout_ms=15000), 42)
+                    assert_succeeded(await task_handle.get_async(wait_ms=15000), 42)
 
                     workflow_handle = await start_ok_in_thread(pgbouncer_workflows.spec_smoke)
-                    assert_succeeded(await workflow_handle.get_async(timeout_ms=15000), 42)
+                    assert_succeeded(await workflow_handle.get_async(wait_ms=15000), 42)
             finally:
                 await instance_pgbouncer.broker.close_async()

@@ -65,12 +65,12 @@ SEEN_LOCK = threading.Lock()
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+        database=PostgresConfig(database_url=SecretStr(DB_URL)),
     ),
 )
 
 
-@APP.task(task_name='sync_start_subworkflow.value')
+@APP.task(name='sync_start_subworkflow.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -87,7 +87,7 @@ class SyncStartChild(WorkflowDefinition[int]):
     ) -> WorkflowSpec[int]:
         with SEEN_LOCK:
             SEEN.append(BuildSeen(value=value, thread_id=threading.get_ident()))
-        node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': value})
+        node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': value})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 

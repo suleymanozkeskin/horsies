@@ -1,6 +1,6 @@
 //! The rerun in the caller's transaction through both adapters, against
 //! PostgreSQL: a rerun commits or rolls back with the caller's transaction
-//! (Python `rerun_task(connection, ...)`), and each adapter encodes the
+//! (Python `rerun_task_in_async(connection, ...)`), and each adapter encodes the
 //! parameters and decodes every column of the source read, its NULLs
 //! included.
 //!
@@ -11,13 +11,16 @@
 #![cfg(all(feature = "tokio-postgres", feature = "sqlx"))]
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use horsies::rerun::{
-    rerun_task_in, AppRerunError, CallerRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask,
-    SqlxCaller, TaskAbsenceReason, TokioPostgresCaller, UnknownStoredFamily,
+    rerun_task_in, AppRerunError, CallerRerunError, EnqueueRetention, RegisteredTaskCodes,
+    RerunCommand, RerunEnqueuePolicy, RerunOutcome, SqlxCaller, TaskAbsenceReason,
+    TokioPostgresCaller, UnknownStoredFamily,
 };
 use horsies::{AppConfig, Horsies};
-use horsies_core::{BrokerError, OperationalErrorCode, TaskError, TaskResult};
+use horsies_core::{BrokerError, DeclaredErrorCodes, OperationalCode, TaskError, TaskResult};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -46,6 +49,10 @@ async fn install_template(url: &str) {
 /// The retention class of the seeded source and of the reruns.
 const CLASS: &str = "forever";
 const WORKER: &str = "rerun-adapter-worker";
+/// The task name of the seeded source.
+const TASK_NAME: &str = "rerun.adapter";
+/// The stored options of the seeded source.
+const SOURCE_OPTIONS: &str = "{\"timeout_ms\":5}";
 
 async fn pool_of(database: &TestDatabase) -> PgPool {
     PgPoolOptions::new()
@@ -56,12 +63,18 @@ async fn pool_of(database: &TestDatabase) -> PgPool {
 }
 
 fn policy() -> RerunEnqueuePolicy {
-    RerunEnqueuePolicy::new(CLASS, true, chrono::Duration::hours(24)).unwrap()
+    let retention = EnqueueRetention::from_class_key(CLASS).unwrap();
+    RerunEnqueuePolicy::new(retention, true, chrono::Duration::hours(24)).unwrap()
 }
 
 /// A FAILED plain task with a retained input, moved to history by the
 /// failure function (the seed of the core's rerun tests).
 async fn seed_failed_source(pool: &PgPool) -> Uuid {
+    seed_failed_source_with_options(pool, SOURCE_OPTIONS).await
+}
+
+/// [`seed_failed_source`] with the stored task options `task_options`.
+async fn seed_failed_source_with_options(pool: &PgPool, task_options: &str) -> Uuid {
     let task_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -75,7 +88,7 @@ async fn seed_failed_source(pool: &PgPool) -> Uuid {
              rerun_root_task_id, retain_rerun_input,
              created_at, updated_at
          ) VALUES (
-             $1, 'rerun.adapter', 'default', 50, '{\"k\":\"v\"}', '{\"timeout_ms\":5}',
+             $1, $5, 'default', 50, '{\"k\":\"v\"}', $6,
              'ISOLATED', 'RUNNING', NOW(), NOW(), NOW(), NOW(), $2, NULL, NULL, FALSE,
              81, 'adapter-host', 'adapter-process', 0, 3, 1, $3, $4, NULL, NULL, TRUE,
              NOW(), NOW()
@@ -85,11 +98,13 @@ async fn seed_failed_source(pool: &PgPool) -> Uuid {
     .bind(WORKER)
     .bind(vec![9_u8; 32])
     .bind(CLASS)
+    .bind(TASK_NAME)
+    .bind(task_options)
     .execute(pool)
     .await
     .unwrap();
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "adapter source"),
+        TaskError::built_in(OperationalCode::TaskException, "adapter source"),
     ))
     .unwrap();
     let finished: i64 = sqlx::query_scalar(
@@ -141,7 +156,7 @@ async fn a_tokio_postgres_rerun_commits_or_rolls_back_with_the_caller() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     let mut client = database.connect().await;
 
     let mut transaction = client.transaction().await.unwrap();
@@ -149,6 +164,7 @@ async fn a_tokio_postgres_rerun_commits_or_rolls_back_with_the_caller() {
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -162,6 +178,7 @@ async fn a_tokio_postgres_rerun_commits_or_rolls_back_with_the_caller() {
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -181,13 +198,14 @@ async fn a_sqlx_rerun_commits_or_rolls_back_with_the_caller() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
 
     let mut transaction = pool.begin().await.unwrap();
     let rolled_back = rerun_task_in(
         &mut SqlxCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -201,6 +219,7 @@ async fn a_sqlx_rerun_commits_or_rolls_back_with_the_caller() {
         &mut SqlxCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -219,7 +238,7 @@ async fn a_sqlx_rerun_commits_or_rolls_back_with_the_caller() {
 async fn an_absent_source_reads_through_both_adapters() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
-    let command = RerunTask::new(Uuid::new_v4(), None, None);
+    let command = RerunCommand::new(Uuid::new_v4(), None, None);
 
     let mut client = database.connect().await;
     let mut transaction = client.transaction().await.unwrap();
@@ -227,6 +246,7 @@ async fn an_absent_source_reads_through_both_adapters() {
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -238,6 +258,7 @@ async fn an_absent_source_reads_through_both_adapters() {
         &mut SqlxCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -286,7 +307,7 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
     corrupt_family_row(&pool, "GO").await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     let tasks_before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
         .fetch_one(&pool)
         .await
@@ -298,6 +319,7 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -311,11 +333,11 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
     );
     transaction.rollback().await.unwrap();
 
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).unwrap();
     match app.rerun_task(command, policy()).await {
-        Err(AppRerunError::Connect(BrokerError::UnknownStoredFamily(UnknownStoredFamily {
-            stored,
-        }))) => assert_eq!(stored, "GO"),
+        Err(AppRerunError::ConnectFailed(BrokerError::UnknownStoredFamily(
+            UnknownStoredFamily { stored },
+        ))) => assert_eq!(stored, "GO"),
         other => panic!("expected the unknown stored family at the install, got {other:?}"),
     }
     let tasks_after: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
@@ -323,6 +345,90 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
         .await
         .unwrap();
     assert_eq!(tasks_after, tasks_before);
+
+    pool.close().await;
+    database.drop().await;
+}
+
+/// The codes of an app that registers the seeded task with the custom
+/// codes `custom`.
+fn codes_declaring(custom: &[&str]) -> RegisteredTaskCodes {
+    let declared = DeclaredErrorCodes::parse(custom).unwrap();
+    RegisteredTaskCodes::new(BTreeMap::from([(TASK_NAME.to_owned(), declared)]))
+}
+
+/// A stored retry list that names the custom code `TRANSIENT` is checked
+/// against the codes of the calling app: a task that the app does not
+/// register and a code that the task does not declare are each refused
+/// before the write, and no new task exists; a declared code reruns.
+#[tokio::test]
+async fn a_stored_custom_retry_code_is_checked_against_the_app() {
+    let database = TestDatabase::create().await;
+    let pool = pool_of(&database).await;
+    let options = "{\"retry_policy\":{\"max_retries\":3,\"intervals\":[1,1,1],\
+                   \"backoff_strategy\":\"fixed\",\"jitter\":true,\
+                   \"retry_for\":[\"WORKER_CRASHED\",\"TRANSIENT\"]}}";
+    let source = seed_failed_source_with_options(&pool, options).await;
+    let command = RerunCommand::new(source, None, None);
+    let tasks_before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let mut transaction = pool.begin().await.unwrap();
+    let unregistered = rerun_task_in(
+        &mut SqlxCaller::new(&mut transaction),
+        &command,
+        &policy(),
+        &RegisteredTaskCodes::NONE,
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &unregistered,
+            CallerRerunError::TaskNotRegistered { task_name } if task_name == TASK_NAME
+        ),
+        "{unregistered:?}"
+    );
+    let undeclared = rerun_task_in(
+        &mut SqlxCaller::new(&mut transaction),
+        &command,
+        &policy(),
+        &codes_declaring(&["RATE_LIMITED"]),
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &undeclared,
+            CallerRerunError::RetryCodeNotDeclared { task_name, retry_code }
+                if task_name == TASK_NAME && retry_code == "TRANSIENT"
+        ),
+        "{undeclared:?}"
+    );
+    transaction.commit().await.unwrap();
+    let tasks_after: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tasks_after, tasks_before);
+
+    let mut transaction = pool.begin().await.unwrap();
+    let declared = rerun_task_in(
+        &mut SqlxCaller::new(&mut transaction),
+        &command,
+        &policy(),
+        &codes_declaring(&["TRANSIENT"]),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let rerun_id = enqueued(&declared, source);
+    transaction.commit().await.unwrap();
+    assert!(task_exists(&pool, rerun_id).await);
 
     pool.close().await;
     database.drop().await;

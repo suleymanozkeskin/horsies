@@ -126,7 +126,7 @@ async fn test_explicit_error_result() {
         .expect("send e2e_error");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "DELIBERATE_ERROR");
+            assert_eq!(error.code().as_str(), "DELIBERATE_ERROR");
             assert_eq!(error.message(), Some("This is intentional"));
             assert_eq!(
                 error.data().map(|data| data
@@ -206,7 +206,7 @@ async fn test_task_timeout_fails_with_task_timeout() {
 
 /// Old Rust `test_task_timeout_retry_opt_in`; Python:
 /// `test_task_timeout.py::test_timeout_fails_task_and_worker_survives` with
-/// `TASK_TIMEOUT` in `auto_retry_for`.
+/// `TASK_TIMEOUT` in `retry_for`.
 #[tokio::test]
 #[serial]
 async fn test_task_timeout_retry_opt_in() {
@@ -520,7 +520,7 @@ async fn test_task_cancelled() {
     .expect("cancel the pending task");
     match outcome(&handle, Duration::from_secs(1)).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_CANCELLED");
+            assert_eq!(error.code().as_str(), "TASK_CANCELLED");
             let data: serde_json::Value = error
                 .data()
                 .expect("TASK_CANCELLED stores data")
@@ -559,7 +559,7 @@ async fn test_task_cancelled_get_result() {
         .await
         .expect("read the result by id");
     match read {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "TASK_CANCELLED"),
         TaskOutcome::Succeeded(value) => panic!("the cancelled task succeeded with {value}"),
     }
 }
@@ -580,7 +580,7 @@ async fn test_task_info_after_completion() {
     let info = handle.info(ALL_PARTS).await.expect("read the info");
     assert_eq!(info.task_id, handle.task_id());
     assert_eq!(info.task_name, "e2e_simple");
-    assert_eq!(info.queue_name, "default");
+    assert_eq!(info.queue, "default");
     assert_eq!(info.status, TaskStatus::Completed);
     let result = info.result.expect("the result was asked for");
     assert_eq!(
@@ -624,13 +624,13 @@ async fn test_exponential_backoff_intervals() {
         .info(TaskInfoParts::default())
         .await
         .expect("read the info");
-    let mut enqueued = vec![first.enqueued_at];
+    let mut enqueued = vec![first.due_at];
     let _worker = suite.worker(Profile::Isolated1).await;
     poll::poll_until(Duration::from_secs(15), "the second retry", async || {
         let info = handle.info(TaskInfoParts::default()).await.ok()?;
         let count = usize::try_from(info.retry_count).ok()?;
         if count == enqueued.len() {
-            enqueued.push(info.enqueued_at);
+            enqueued.push(info.due_at);
         }
         assert_eq!(info.sent_at, first.sent_at, "sent_at changed on a retry");
         (enqueued.len() > 2).then_some(())
@@ -839,7 +839,7 @@ async fn test_wait_timeout() {
         .expect("send");
     let read = handle.get(within(Duration::from_millis(500))).await;
     assert!(
-        matches!(read, Err(ReadError::WaitTimedOut { .. })),
+        matches!(read, Err(ReadError::WaitTimeout { .. })),
         "{read:?}"
     );
 }
@@ -857,7 +857,7 @@ async fn test_library_error_code_in_user_task() {
         .expect("send");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_EXCEPTION");
+            assert_eq!(error.code().as_str(), "TASK_EXCEPTION");
             assert_eq!(error.message(), Some("boom"));
         }
         TaskOutcome::Succeeded(value) => panic!("e2e_error_code succeeded with {value}"),
@@ -878,7 +878,7 @@ async fn test_exception_becomes_error() {
         .expect("send");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "UNHANDLED_EXCEPTION");
+            assert_eq!(error.code().as_str(), "UNHANDLED_EXCEPTION");
             assert!(error.exception().is_some(), "a panic stores its record");
             let data: serde_json::Value = error
                 .data()
@@ -1148,7 +1148,7 @@ async fn test_send_suppressed() {
         .send(basic::simple::Input { x: 1 })
         .await;
     assert!(
-        matches!(refused, Err(TaskSendError::SendSuppressed { .. })),
+        matches!(refused, Err(TaskSendError::Suppressed { .. })),
         "{refused:?}"
     );
     let client = suite.client().await;

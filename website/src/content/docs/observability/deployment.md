@@ -11,11 +11,11 @@ Each example runs the same parts:
 | Part | Process | Port in the examples |
 |------|---------|----------------------|
 | Workers | `horsies worker <app> --profile <name> --metrics-listen 0.0.0.0:9464` | 9464 |
-| One fleet collector | `horsies metrics <app> --listen 0.0.0.0:9465` | 9465 |
+| One fleet collector | `horsies metrics <app> --metrics-listen 0.0.0.0:9465` | 9465 |
 | Prometheus | Scrapes both, and loads `deploy/prometheus/horsies-alerts.yaml` | 9090 |
 | OpenTelemetry Collector | Scrapes both, and exports OTLP with `deploy/otel-collector/collector.yaml` | none |
 
-Use Prometheus, the Collector, or both. The image `registry.example.com/myapp:1.0` holds your app and horsies, and the app reads its database URL from `DATABASE_URL`. A Rust app runs its own binary in place of `horsies`: `/app/myapp worker --profile default --metrics-listen 0.0.0.0:9464` and `/app/myapp metrics --listen 0.0.0.0:9465`.
+Use Prometheus, the Collector, or both. The image `registry.example.com/myapp:1.0` holds your app and horsies, and the app reads its database URL from `DATABASE_URL`. A Rust app runs its own binary in place of `horsies`: `/app/myapp worker --profile default --metrics-listen 0.0.0.0:9464` and `/app/myapp metrics --metrics-listen 0.0.0.0:9465`.
 
 ## Kubernetes
 
@@ -96,7 +96,7 @@ spec:
       containers:
         - name: metrics
           image: registry.example.com/myapp:1.0
-          command: ["horsies", "metrics", "myapp.instance:app", "--listen", "0.0.0.0:9465"]
+          command: ["horsies", "metrics", "myapp.instance:app", "--metrics-listen", "0.0.0.0:9465"]
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -249,7 +249,7 @@ services:
 
   metrics:
     image: registry.example.com/myapp:1.0
-    command: ["horsies", "metrics", "myapp.instance:app", "--listen", "0.0.0.0:9465"]
+    command: ["horsies", "metrics", "myapp.instance:app", "--metrics-listen", "0.0.0.0:9465"]
     environment:
       DATABASE_URL: postgresql://horsies:horsies@postgres:5432/horsies
     depends_on: [postgres]

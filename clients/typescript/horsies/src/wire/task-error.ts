@@ -1,7 +1,7 @@
 // The outcome of a task and its stored error: what a task read, an `h.taskOutcome` parameter and a workflow read give.
 
+import { WorkflowStatus } from "../_catalog/status.ts";
 import type { BuiltInTaskCode } from "../_catalog/task_code.ts";
-import type { WORKFLOW_STATUSES } from "../codec/bounds.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 
 // A task error code of horsies (a timeout, a crash, a cancel, an unhandled exception, and others): the core's built-in
@@ -9,8 +9,12 @@ import type { JsonValue } from "../codec/json-value.ts";
 // same type.
 export type { BuiltInTaskCode };
 
-/** The status of a workflow. */
-export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
+// The status of a workflow: the core's `WorkflowStatus` of the generated catalog, a value and a type of the same name,
+// as `TaskStatus` is.
+export { WorkflowStatus };
+
+/** The statuses of a workflow, in the core's order. */
+export const WORKFLOW_STATUSES: ReadonlyArray<WorkflowStatus> = Object.freeze(Object.values(WorkflowStatus));
 
 /** The stored record of an exception: the class name, its module, the message, the repr and the traceback. */
 export type ExceptionRecord = {

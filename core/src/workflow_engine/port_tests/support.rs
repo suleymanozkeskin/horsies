@@ -929,22 +929,22 @@ pub(super) fn result_of_end(
     wait: WorkflowWait,
 ) -> TaskResult<serde_json::Value> {
     match wait {
-        WorkflowWait::NotFound => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::NotFound => TaskResult::Err(TaskError::built_in(
             RetrievalCode::WorkflowNotFound,
             format!("workflow {workflow_id} not found"),
         )),
-        WorkflowWait::TimedOut => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::TimedOut => TaskResult::Err(TaskError::built_in(
             RetrievalCode::WaitTimeout,
             format!("workflow {workflow_id} is not terminal"),
         )),
-        WorkflowWait::Ended(WorkflowEnd::Paused) => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::Ended(WorkflowEnd::Paused) => TaskResult::Err(TaskError::built_in(
             OutcomeCode::WorkflowPaused,
             "workflow is paused awaiting intervention",
         )),
         WorkflowWait::Ended(WorkflowEnd::Ended {
             status,
             error: None,
-        }) => TaskResult::Err(TaskError::builtin(
+        }) => TaskResult::Err(TaskError::built_in(
             ended_code(status),
             format!("workflow {workflow_id} is {}", status.wire_value()),
         )),
@@ -1204,9 +1204,9 @@ async fn drive_parent_advances(
         });
 }
 
-/// A failure outcome with a user error code.
+/// A failure outcome with a custom error code.
 pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::new(error_code, message).expect("a user error code"))
+    TaskResult::Err(TaskError::custom(error_code, message).expect("a custom error code"))
 }
 
 /// A success outcome with `value`.

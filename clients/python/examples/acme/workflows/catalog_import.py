@@ -58,7 +58,7 @@ class CatalogImport(WorkflowDefinition[None]):
         """
         nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = [
             TaskNode(
-                fn=catalog_import_chunk,
+                function=catalog_import_chunk,
                 kwargs={'import_id': import_id, 'chunk_index': index},
                 node_id=f'chunk_{index:02d}',
             )

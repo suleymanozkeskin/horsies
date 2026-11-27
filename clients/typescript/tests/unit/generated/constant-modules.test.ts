@@ -3,12 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { TASK_LIST_BOUND } from "../../../horsies/src/_catalog/broker_bounds.ts";
 import {
   MAX_ATTEMPT,
+  MAX_EVENT_CUSTOM_CODE_CHARS,
+  MAX_EVENT_HANDLERS,
   MAX_EVENT_QUEUE_NAME_CHARS,
   MAX_EVENT_TASK_NAME_CHARS,
   MAX_EVENT_TRACE_CARRIER_CHARS,
-  MAX_EVENT_USER_CODE_CHARS,
   MAX_EVENT_WORKER_ID_CHARS,
+  MAX_HANDLER_NAME_CHARS,
   MAX_RETRY_COUNT,
+  UNKNOWN_HANDLER_NAME,
 } from "../../../horsies/src/_catalog/event_bounds.ts";
 import {
   BAD_ARGUMENTS_EXIT_CODE,
@@ -32,6 +35,8 @@ import {
   MONITORING_WINDOW_DEFAULT_SECONDS,
   MONITORING_WINDOW_MAX_SECONDS,
 } from "../../../horsies/src/_catalog/monitoring_bounds.ts";
+import { MAX_WAIT_LIMIT_MS } from "../../../horsies/src/_catalog/send_bounds.ts";
+import * as sendBounds from "../../../horsies/src/send/bounds.ts";
 
 // The largest exit status that a process reports to its parent.
 const maxExitStatus = 255;
@@ -62,10 +67,13 @@ const bounds = [
   MAX_RETRY_COUNT,
   MAX_EVENT_TASK_NAME_CHARS,
   MAX_EVENT_QUEUE_NAME_CHARS,
-  MAX_EVENT_USER_CODE_CHARS,
+  MAX_EVENT_CUSTOM_CODE_CHARS,
   MAX_EVENT_TRACE_CARRIER_CHARS,
   MAX_EVENT_WORKER_ID_CHARS,
   TASK_LIST_BOUND,
+  MAX_EVENT_HANDLERS,
+  MAX_HANDLER_NAME_CHARS,
+  MAX_WAIT_LIMIT_MS,
 ];
 
 describe("generated constant modules", () => {
@@ -86,5 +94,15 @@ describe("generated constant modules", () => {
 
   test("the largest attempt is one more than the largest retry count", () => {
     expect(MAX_ATTEMPT).toBe(MAX_RETRY_COUNT + 1);
+  });
+
+  test("the longest result wait is the largest u32 of milliseconds, and the send bounds hold no copy", () => {
+    expect(MAX_WAIT_LIMIT_MS).toBe(2 ** 32 - 1);
+    expect(Object.keys(sendBounds)).not.toContain("MAX_WAIT_LIMIT_MS");
+  });
+
+  test("the label value of an unknown handler fits the length rule of a handler name", () => {
+    expect(UNKNOWN_HANDLER_NAME.length).toBeGreaterThan(0);
+    expect(UNKNOWN_HANDLER_NAME.length).toBeLessThanOrEqual(MAX_HANDLER_NAME_CHARS);
   });
 });

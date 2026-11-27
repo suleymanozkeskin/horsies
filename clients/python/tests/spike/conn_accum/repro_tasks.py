@@ -18,7 +18,7 @@ from tests.spike.conn_accum.repro_app import app
 from tests.spike.conn_accum.repro_db import app_engine
 
 
-@app.task(task_name='repro_app_db_task')
+@app.task(name='repro_app_db_task')
 def app_db_task(*, sleep_ms: int) -> Result[str, TaskError]:
     """Check out the app-owned engine and hold the connection across a slow query."""
     with app_engine.connect() as conn:

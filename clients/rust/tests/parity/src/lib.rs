@@ -11,13 +11,13 @@ use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::rerun::{RerunCommand, RerunEnqueuePolicy, RerunOutcome};
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IntervalSchedule,
-    IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig, SchedulePattern,
-    SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren, SharedThreadSetting,
-    SubWorkflowParameters, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime, TaskSchedule,
-    TaskSendError, TaskSendOptions, UserErrorCode, WaitLimit, WorkerPong, WorkerProfile,
+    blocking_task, task, AppConfig, ChildPreload, CustomErrorCode, Horsies, HorsiesError,
+    IntervalSchedule, IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig,
+    SchedulePattern, SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren,
+    SharedThreadSetting, SubWorkflowParameters, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime,
+    TaskSchedule, TaskSendError, TaskSendOptions, WaitLimit, WorkerPong, WorkerProfile,
     WorkflowDefinition, WorkflowDefinitionConfig, WorkflowFunction, WorkflowHandle,
     WorkflowSpecBuilder,
 };
@@ -43,15 +43,15 @@ pub const CHILD_DEFINITION_KEY: &str = "crossclient.parity.child.v1";
 pub const PARENT_NAME: &str = "parity_parent";
 pub const PARENT_DEFINITION_KEY: &str = "crossclient.parity.parent.v1";
 
-/// The retries of a send of the form [`SendForm::RetryOfAsyncContext`].
+/// The resends of a send of the form [`SendForm::RetryOfAsyncContext`].
 const SEND_RETRIES: usize = 2;
 
 pub const SCHEDULE_NAME: &str = "parity_slots";
 /// The task of each slot of the schedule.
 pub const SLOT_TASK_NAME: &str = "parity.add";
-/// The interval of the schedule, in hours: longer than any run, so a slot
+/// The interval of the schedule, one hour: longer than any run, so a slot
 /// is due only after the runner moves the schedule back.
-const SCHEDULE_INTERVAL_HOURS: u32 = 1;
+const SCHEDULE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SCHEDULE_MAX_CATCH_UP_RUNS: u32 = 2;
 const SCHEDULE_CHECK_INTERVAL_S: u32 = 1;
 
@@ -66,7 +66,7 @@ const PING_WINDOW: Duration = Duration::from_secs(2);
 const PING_ATTEMPTS: usize = 10;
 
 /// The codes of the parity tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum ParityCode {
     Refused,
     Transient,
@@ -90,16 +90,16 @@ pub async fn add(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 /// A task error with no retry.
 #[task("parity.refuse")]
 pub async fn refuse(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
 }
 
 /// A task error that the policy retries until the retries run out.
-#[task("parity.transient", retry_policy = retry_policy(), auto_retry_for = ["TRANSIENT"])]
+#[task("parity.transient", retry_policy = retry_policy(), retry_for = ["TRANSIENT"])]
 pub async fn transient(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -117,7 +117,7 @@ pub fn sleep_past_deadline() -> Result<String, TaskError<Infallible>> {
 pub async fn double(upstream: TaskOutcome<i64, Infallible>) -> Result<i64, TaskError<ParityCode>> {
     match upstream {
         TaskOutcome::Succeeded(value) => Ok(value * 2),
-        TaskOutcome::Failed(_) => Err(TaskError::user(
+        TaskOutcome::Failed(_) => Err(TaskError::custom(
             ParityCode::UpstreamFailed,
             "the upstream failed",
         )),
@@ -133,7 +133,7 @@ pub async fn add_async(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[task("parity.refuse_async", execution = shared_async, timeout_ms = 30_000)]
 pub async fn refuse_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
@@ -144,10 +144,10 @@ pub async fn refuse_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = retry_policy(),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn transient_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -173,7 +173,7 @@ pub fn add_thread(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[blocking_task("parity.refuse_thread", execution = shared_thread, timeout_ms = 30_000)]
 pub fn refuse_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
@@ -184,10 +184,10 @@ pub fn refuse_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
     execution = shared_thread,
     timeout_ms = 30_000,
     retry_policy = retry_policy(),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub fn transient_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -223,13 +223,13 @@ impl WorkflowDefinition for ParityChain {
         let first = builder.task(
             add::node()
                 .node_id("add")
-                .set(add::params::a(), 2)?
-                .set(add::params::b(), 3)?,
+                .set(add::fields::a(), 2)?
+                .set(add::fields::b(), 3)?,
         )?;
         let second = builder.task(
             double::node()
                 .node_id("double")
-                .arg_from(double::params::upstream(), first),
+                .arg_from(double::fields::upstream(), first),
         )?;
         Ok(WorkflowDefinitionConfig::new().output(second))
     }
@@ -255,8 +255,8 @@ impl WorkflowDefinition for ParityChild {
         let added = builder.task(
             add::node()
                 .node_id("add")
-                .set(add::params::a(), 2)?
-                .set(add::params::b(), 3)?,
+                .set(add::fields::a(), 2)?
+                .set(add::fields::b(), 3)?,
         )?;
         Ok(WorkflowDefinitionConfig::new().output(added))
     }
@@ -284,7 +284,7 @@ impl WorkflowDefinition for ParityParent {
         let doubled = builder.task(
             double::node()
                 .node_id("double")
-                .arg_from(double::params::upstream(), child),
+                .arg_from(double::fields::upstream(), child),
         )?;
         Ok(WorkflowDefinitionConfig::new().output(doubled))
     }
@@ -305,10 +305,10 @@ pub struct ParityApp {
 ///
 /// Errors: the config refusal, or the first registration refusal.
 pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url);
-    config.broker.pool_size = 5;
-    config.broker.max_overflow = 5;
-    config.broker.retain_rerun_input_default = true;
+    let mut config = AppConfig::from_database_url(database_url);
+    config.database.pool_size = 5;
+    config.database.max_overflow = 5;
+    config.database.retain_rerun_input_default = true;
     config.worker_profiles = profiles();
     config.schedule = Some(schedules());
     let mut app = Horsies::new(config)?;
@@ -336,8 +336,7 @@ pub fn build_app(database_url: &str) -> Result<ParityApp, HorsiesError> {
 /// scheduler process of the `schedule_slots` scenario runs it.
 fn schedules() -> ScheduleConfig {
     let every_hour = SchedulePattern::Interval(IntervalSchedule {
-        hours: Some(SCHEDULE_INTERVAL_HOURS),
-        ..IntervalSchedule::default()
+        every: SCHEDULE_INTERVAL,
     });
     ScheduleConfig::new(vec![TaskSchedule::new(
         SCHEDULE_NAME,
@@ -394,7 +393,7 @@ pub enum SendForm {
     /// One send.
     Direct,
     /// A blocking send on a thread of the running tokio runtime, refused
-    /// with `ASYNC_CONTEXT` before any statement; then two `retry_send`
+    /// with `ASYNC_CONTEXT` before any statement; then two `resend`
     /// calls with its error, which write one task under the prepared id.
     RetryOfAsyncContext,
 }
@@ -713,15 +712,15 @@ fn member(send: &Send, name: &str) -> Result<i64, SendRefused> {
         .ok_or_else(|| SendRefused(format!("{} has no input {name}", send.task_name)))
 }
 
-/// The id of the task that two retries of a refused blocking send wrote.
+/// The id of the task that two resends of a refused blocking send wrote.
 /// Only `parity.add` has this form.
 async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     let runtime = app.task_runtime();
     let function = match send.task_name {
         "parity.add" => {
-            add::handle(&runtime).map_err(|missing| SendRefused(missing.to_string()))?
+            add::function(&runtime).map_err(|missing| SendRefused(missing.to_string()))?
         }
-        other => return Err(SendRefused(format!("the retry form has no task {other}"))),
+        other => return Err(SendRefused(format!("the resend form has no task {other}"))),
     };
     let input = add::Input {
         a: member(send, "a")?,
@@ -747,9 +746,9 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     };
     let mut ids = Vec::with_capacity(SEND_RETRIES);
     for _attempt in 0..SEND_RETRIES {
-        let handle = function.retry_send(&refused).await.map_err(|error| {
+        let handle = function.resend(&refused).await.map_err(|error| {
             SendRefused(format!(
-                "the retry of {} was refused: {error}",
+                "the resend of {} was refused: {error}",
                 send.task_name
             ))
         })?;
@@ -758,7 +757,7 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     match ids.as_slice() {
         [first, second] if first == second => Ok(*first),
         _ => Err(SendRefused(format!(
-            "the retries of {} wrote other tasks: {ids:?}",
+            "the resends of {} wrote other tasks: {ids:?}",
             send.task_name
         ))),
     }
@@ -788,7 +787,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
                 a: member(send, "a")?,
                 b: member(send, "b")?,
             };
-            add::handle(&runtime)
+            add::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -798,7 +797,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = refuse::Input {
                 value: member(send, "value")?,
             };
-            refuse::handle(&runtime)
+            refuse::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -808,13 +807,13 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = transient::Input {
                 value: member(send, "value")?,
             };
-            transient::handle(&runtime)
+            transient::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
                 .map(|h| h.task_id())
         }
-        "parity.sleep_past_deadline" => sleep_past_deadline::handle(&runtime)
+        "parity.sleep_past_deadline" => sleep_past_deadline::function(&runtime)
             .map_err(missing)?
             .send_with_options(options, ())
             .await
@@ -824,7 +823,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
                 a: member(send, "a")?,
                 b: member(send, "b")?,
             };
-            add_async::handle(&runtime)
+            add_async::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -834,7 +833,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = refuse_async::Input {
                 value: member(send, "value")?,
             };
-            refuse_async::handle(&runtime)
+            refuse_async::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -844,13 +843,13 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = transient_async::Input {
                 value: member(send, "value")?,
             };
-            transient_async::handle(&runtime)
+            transient_async::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
                 .map(|h| h.task_id())
         }
-        "parity.async_past_deadline" => async_past_deadline::handle(&runtime)
+        "parity.async_past_deadline" => async_past_deadline::function(&runtime)
             .map_err(missing)?
             .send_with_options(options, ())
             .await
@@ -860,7 +859,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
                 a: member(send, "a")?,
                 b: member(send, "b")?,
             };
-            add_thread::handle(&runtime)
+            add_thread::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -870,7 +869,7 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = refuse_thread::Input {
                 value: member(send, "value")?,
             };
-            refuse_thread::handle(&runtime)
+            refuse_thread::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
@@ -880,13 +879,13 @@ async fn send_one(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
             let input = transient_thread::Input {
                 value: member(send, "value")?,
             };
-            transient_thread::handle(&runtime)
+            transient_thread::function(&runtime)
                 .map_err(missing)?
                 .send_with_options(options, input)
                 .await
                 .map(|h| h.task_id())
         }
-        "parity.thread_past_deadline" => thread_past_deadline::handle(&runtime)
+        "parity.thread_past_deadline" => thread_past_deadline::function(&runtime)
             .map_err(missing)?
             .send_with_options(options, ())
             .await
@@ -904,14 +903,14 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
     let limit = WaitLimit::Within(RESULT_WAIT);
     match app.get_result::<i64, ParityCode>(source, limit).await {
         Ok(TaskOutcome::Failed(error))
-            if *error.code() == TaskErrorCode::User(ParityCode::Refused) => {}
+            if *error.code() == TaskErrorCode::Custom(ParityCode::Refused) => {}
         other => {
             return Err(SendRefused(format!(
                 "the rerun source {source} did not end with REFUSED: {other:?}"
             )))
         }
     }
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     match app
         .rerun_task(command, RerunEnqueuePolicy::standard(true))
         .await
@@ -929,14 +928,14 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
 /// The answers to a ping of every worker, once `expected` workers answered
 /// one ping.
 async fn every_worker(app: &Horsies, expected: usize) -> Result<Vec<WorkerPong>, SendRefused> {
+    let min_responses = match NonZeroUsize::new(expected) {
+        Some(count) => horsies::MinResponses::AtLeast(count),
+        None => horsies::MinResponses::FullWindow,
+    };
     let mut answered: Vec<WorkerPong> = Vec::new();
     for _attempt in 0..PING_ATTEMPTS {
         answered = app
-            .ping_workers(
-                PingTarget::EveryWorker,
-                PING_WINDOW,
-                NonZeroUsize::new(expected),
-            )
+            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, min_responses)
             .await
             .map_err(|refused| SendRefused(format!("ping_workers was refused: {refused}")))?;
         if answered.len() >= expected {
@@ -964,7 +963,7 @@ async fn ping(app: &Horsies, expected: usize) -> Result<String, SendRefused> {
         .ping_workers(
             PingTarget::Worker(first.worker_id.clone()),
             PING_WINDOW,
-            None,
+            horsies::MinResponses::FullWindow,
         )
         .await
         .map_err(|refused| {

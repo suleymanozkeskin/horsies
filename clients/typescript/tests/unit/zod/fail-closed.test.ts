@@ -6,10 +6,11 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
+import { checkMemberKind } from "../../../horsies/src/wire/check.ts";
 import { compileMember, compileValue } from "../../../horsies/src/zod/adapter.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { isSupported, SUPPORTED_ZOD, zodSchemaOf } from "../../../horsies/src/zod/version.ts";
-import { withDefinition } from "./support.ts";
+import { computedDefaultText, withDefinition } from "./support.ts";
 
 /** The rule, path, zod type and name of each refusal of a schema as a whole value. */
 function refusals(schema: ZodSchema): readonly (readonly string[])[] {
@@ -92,13 +93,17 @@ describe("fail closed: unknown definition parts", () => {
     }
   });
 
-  test("a .prefault() value that zod does not decode is a refused default", () => {
+  test("a .prefault() value that zod does not decode is a refused default: checkKind refuses it", () => {
     const prefault = z.int().prefault(7);
     const notDecoded = withDefinition(prefault, { ...prefault._zod.def, defaultValue: "seven" });
     const member = compileMember(notDecoded);
 
     assert.ok(member.ok);
-    assert.equal(member.value.presence.mode === "defaulted" && member.value.presence.fallback.state, "refused");
+    assert.equal(computedDefaultText(member.value.presence), "CheckFailed");
+    assert.deepEqual(
+      checkMemberKind(member.value.kind, member.value.presence).map((refused) => refused.rule),
+      ["DefaultNotStored"],
+    );
   });
 });
 

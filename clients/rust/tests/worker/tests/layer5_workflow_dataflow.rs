@@ -44,7 +44,7 @@ fn produce(suite: &Suite, id: &str, value: i64) -> TaskNode<i64, workflow::produ
         .function(workflow::produce_int::handle)
         .node()
         .node_id(id)
-        .set(workflow::produce_int::params::value(), value)
+        .set(workflow::produce_int::fields::value(), value)
         .expect("a produce input")
 }
 
@@ -58,7 +58,7 @@ fn double(
         .function(workflow::double::handle)
         .node()
         .node_id(id)
-        .arg_from(workflow::double::params::input_result(), source)
+        .arg_from(workflow::double::fields::input_result(), source)
 }
 
 /// A node `id` that fails with `DELIBERATE_FAILURE`.
@@ -135,8 +135,8 @@ async fn test_args_from_multiple_dependencies() {
             .function(workflow::sum_two::handle)
             .node()
             .node_id("sum")
-            .arg_from(workflow::sum_two::params::first(), a)
-            .arg_from(workflow::sum_two::params::second(), b),
+            .arg_from(workflow::sum_two::fields::first(), a)
+            .arg_from(workflow::sum_two::fields::second(), b),
     );
     let _output = spec.output(sum);
     let handle = start::<i64>(&suite, spec).await;
@@ -169,7 +169,7 @@ async fn test_failed_propagation_via_args_from() {
         .await
         .expect("read node b");
     match read {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "DELIBERATE_FAILURE"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "DELIBERATE_FAILURE"),
         TaskOutcome::Succeeded(value) => panic!("node b succeeded with {value}"),
     }
 }
@@ -191,7 +191,7 @@ async fn test_skipped_propagation() {
             .function(workflow::check_upstream_skipped::handle)
             .node()
             .node_id("c")
-            .arg_from(workflow::check_upstream_skipped::params::input_result(), b)
+            .arg_from(workflow::check_upstream_skipped::fields::input_result(), b)
             .allow_failed_dependencies(true),
     );
     let _output = spec.output(c);
@@ -253,8 +253,8 @@ async fn test_dual_injection_same_node() {
             .function(workflow::mixed_reader::handle)
             .node()
             .node_id("reader")
-            .arg_from(workflow::mixed_reader::params::from_args(), a)
-            .set(workflow::mixed_reader::params::ctx_source(), "a".to_owned())
+            .arg_from(workflow::mixed_reader::fields::from_args(), a)
+            .set(workflow::mixed_reader::fields::ctx_source(), "a".to_owned())
             .expect("a reader input")
             .workflow_context_from([a]),
     );
@@ -281,7 +281,7 @@ async fn test_workflow_ctx_single_dependency() {
             .function(workflow::ctx_reader::handle)
             .node()
             .node_id("reader")
-            .set(workflow::ctx_reader::params::source(), "a".to_owned())
+            .set(workflow::ctx_reader::fields::source(), "a".to_owned())
             .expect("a reader input")
             .waits_for(a)
             .workflow_context_from([a]),
@@ -306,8 +306,8 @@ async fn test_workflow_ctx_multiple_dependencies() {
             .function(workflow::ctx_sum::handle)
             .node()
             .node_id("sum")
-            .set(workflow::ctx_sum::params::first(), "a".to_owned())
-            .and_then(|node| node.set(workflow::ctx_sum::params::second(), "b".to_owned()))
+            .set(workflow::ctx_sum::fields::first(), "a".to_owned())
+            .and_then(|node| node.set(workflow::ctx_sum::fields::second(), "b".to_owned()))
             .expect("a sum input")
             .waits_for_all([a, b])
             .workflow_context_from([a, b]),
@@ -332,8 +332,8 @@ async fn test_mixed_args_from_and_ctx() {
             .function(workflow::mixed_reader::handle)
             .node()
             .node_id("reader")
-            .arg_from(workflow::mixed_reader::params::from_args(), a)
-            .set(workflow::mixed_reader::params::ctx_source(), "b".to_owned())
+            .arg_from(workflow::mixed_reader::fields::from_args(), a)
+            .set(workflow::mixed_reader::fields::ctx_source(), "b".to_owned())
             .expect("a reader input")
             .waits_for(b)
             .workflow_context_from([b]),
@@ -359,7 +359,7 @@ async fn test_args_from_dict_serialization() {
             .function(workflow::produce_dict::handle)
             .node()
             .node_id("a")
-            .set(workflow::produce_dict::params::value(), "hello".to_owned())
+            .set(workflow::produce_dict::fields::value(), "hello".to_owned())
             .expect("a dict input"),
     );
     let b = add(
@@ -368,7 +368,7 @@ async fn test_args_from_dict_serialization() {
             .function(workflow::receive_dict::handle)
             .node()
             .node_id("b")
-            .arg_from(workflow::receive_dict::params::input_result(), a),
+            .arg_from(workflow::receive_dict::fields::input_result(), a),
     );
     let _output = spec.output(b);
     let handle = start::<serde_json::Value>(&suite, spec).await;
@@ -395,7 +395,7 @@ async fn test_join_ctx_gating() {
             .function(workflow::ctx_reader::handle)
             .node()
             .node_id("reader")
-            .set(workflow::ctx_reader::params::source(), "b".to_owned())
+            .set(workflow::ctx_reader::fields::source(), "b".to_owned())
             .expect("a reader input")
             .waits_for_all([a, b])
             .join_any()
@@ -433,8 +433,8 @@ async fn wrapped_input_args_from_deserializes_under_strict() {
             .function(workflow::sum_two::handle)
             .node()
             .node_id("sum")
-            .arg_from(workflow::sum_two::params::first(), a)
-            .arg_from(workflow::sum_two::params::second(), b),
+            .arg_from(workflow::sum_two::fields::first(), a)
+            .arg_from(workflow::sum_two::fields::second(), b),
     );
     let _output = spec.output(sum);
     let handle = start::<i64>(&suite, spec).await;

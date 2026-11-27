@@ -4,7 +4,7 @@
 import { RESERVATION_WINDOW_MICROS_MAX, RESERVATION_WINDOW_MICROS_MIN } from "../_catalog/manifest.ts";
 import { RETENTION_DAYS_MAX, RETENTION_DAYS_MIN } from "../_catalog/worker_manifest.ts";
 import type {
-  CallerKeyArg,
+  IdempotencyKeyArg,
   DeadlineArg,
   RerunCommandArg,
   RerunPolicyArg,
@@ -68,19 +68,19 @@ export function parseRerunRequest(command: RerunCommand, policy: RerunEnqueuePol
 
 /** The record of `command`. Pure. */
 function parseCommand(command: RerunCommand): Result<RerunCommandArg, RerunInvalidCommand> {
-  const deadline = parseDeadline(command.goodUntil);
+  const goodUntil = parseDeadline(command.goodUntil);
 
-  if (!deadline.ok) {
-    return deadline;
+  if (!goodUntil.ok) {
+    return goodUntil;
   }
 
-  const callerKey = parseIdempotencyKey(command.idempotencyKey);
+  const idempotencyKey = parseIdempotencyKey(command.idempotencyKey);
 
-  if (!callerKey.ok) {
-    return callerKey;
+  if (!idempotencyKey.ok) {
+    return idempotencyKey;
   }
 
-  return ok({ sourceTaskId: command.sourceTaskId, deadline: deadline.value, callerKey: callerKey.value });
+  return ok({ sourceTaskId: command.sourceTaskId, goodUntil: goodUntil.value, idempotencyKey: idempotencyKey.value });
 }
 
 /** The record of `goodUntil`: the instant cut toward the past to the microsecond. Pure. */
@@ -102,7 +102,7 @@ function parseDeadline(deadline: RerunDeadline): Result<DeadlineArg, RerunInvali
 }
 
 /** The record of an idempotency key; an omitted key is an unkeyed rerun. Pure. */
-function parseIdempotencyKey(key: string | undefined): Result<CallerKeyArg, RerunInvalidCommand> {
+function parseIdempotencyKey(key: string | undefined): Result<IdempotencyKeyArg, RerunInvalidCommand> {
   if (key === undefined) {
     return ok({ kind: "unkeyed" });
   }

@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import * as otel from "@opentelemetry/api";
+import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
 
 import type { BodyEnd, BodyObserver } from "../../../../horsies/src/child/body-observer.ts";
 import type { BodyFactsRecord, BodyCarrierRecord } from "../../../../horsies/src/native/child/addon.ts";
@@ -132,6 +133,52 @@ describe("the attempt span", () => {
       span.links.map((link) => link.context.spanId),
       [send.spanId],
     );
+  });
+
+  test("linkedToSend keeps the baggage of the carrier in the context where the body runs; childOfSend does too", async () => {
+    otel.propagation.disable();
+    otel.propagation.setGlobalPropagator(
+      new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()] }),
+    );
+
+    const entries: { key: string; value: string }[] = [];
+    const span = otel.trace.getTracer("sender").startSpan("send resize");
+
+    const sending = otel.propagation.setBaggage(
+      otel.trace.setSpan(otel.ROOT_CONTEXT, span),
+      otel.propagation.createBaggage({ tenant: { value: "acme" } }),
+    );
+
+    otel.propagation.inject(sending, entries, {
+      set: (carrier, key, value) => {
+        carrier.push({ key, value });
+      },
+    });
+    span.end();
+
+    for (const parentage of ["childOfSend", "linkedToSend"] as const) {
+      let tenant: string | undefined;
+
+      await runBody(
+        observerOf(parentage).observer,
+        factsWith({ kind: "carrier", entries }, NOT_IN_WORKFLOW),
+        { kind: "returned" },
+        async () => {
+          tenant = otel.propagation.getBaggage(otel.context.active())?.getEntry("tenant")?.value;
+        },
+      );
+      assert.equal(tenant, "acme", parentage);
+    }
+  });
+
+  test("linkedToSend with a carrier that holds no valid span: a root span with no link", async () => {
+    const carrier: BodyCarrierRecord = { kind: "carrier", entries: [{ key: "traceparent", value: "not-a-traceparent" }] };
+
+    await runBody(observerOf("linkedToSend").observer, factsWith(carrier, NOT_IN_WORKFLOW), { kind: "returned" });
+
+    const span = onlySpan(sdk.spans(), "run resize");
+
+    assert.deepEqual([span.parentSpanContext, span.links], [undefined, []]);
   });
 
   test("no carrier: a root span with no link, in both parentages", async () => {

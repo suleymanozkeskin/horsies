@@ -1,4 +1,4 @@
-//! The core's checks of a schedule declaration, which `app.schedules` calls
+//! The core's checks of a schedule declaration, which `Horsies.create` calls
 //! on a main thread. Each starts no core, opens no connection and reads no
 //! clock, so a task child that runs the entry before `cli.run` still lets
 //! the child host shape its process runtime.
@@ -18,7 +18,7 @@
 //!   chooses no retention.
 //!
 //! No check applies the fork and stop rule of a core call: each reads only
-//! its arguments and the core's tables, so `app.schedules` never throws.
+//! its arguments and the core's tables, so the declaration of the `schedule` section never throws.
 
 use chrono_tz::Tz;
 use horsies_core::scheduler_manifest::PatternJson;
@@ -190,7 +190,7 @@ fn config_facts(text: &str, queue_names: &[String]) -> Result<SchedulerConfigFac
                 bytes: bigint_of_u64(bytes),
             },
         },
-        retain_rerun_input: config.broker.retain_rerun_input_default,
+        retain_rerun_input: config.database.retain_rerun_input_default,
         queues,
     })
 }
@@ -233,10 +233,10 @@ mod tests {
     use super::*;
 
     const DEFAULT_MODE: &str =
-        r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}}"#;
+        r#"{"database": {"database_url": "postgresql://127.0.0.1:55432/horsies"}}"#;
 
     const CUSTOM_MODE: &str = r#"{
-        "broker": {"database_url": "postgresql://127.0.0.1:55432/horsies", "retain_rerun_input_default": true},
+        "database": {"database_url": "postgresql://127.0.0.1:55432/horsies", "retain_rerun_input_default": true},
         "queue_mode": "custom",
         "custom_queues": [{"name": "urgent", "priority": 20}, {"name": "bulk"}],
         "payload": {"reject_bytes": 4096},
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn a_pattern_that_breaks_a_rule_is_refused_with_the_rule() {
         let PatternCheck::Refused { cause } =
-            pattern_check(r#"{"type":"hourly","minute":60,"second":0}"#.to_owned())
+            pattern_check(r#"{"kind":"hourly","minute":60,"second":0}"#.to_owned())
         else {
             panic!("minute 60 breaks the hourly rule");
         };
@@ -287,14 +287,14 @@ mod tests {
     #[test]
     fn a_time_with_a_fraction_of_a_second_is_refused() {
         assert!(matches!(
-            pattern_check(r#"{"type":"daily","time":"09:30:00.5"}"#.to_owned()),
+            pattern_check(r#"{"kind":"daily","time":"09:30:00.5"}"#.to_owned()),
             PatternCheck::Refused { .. }
         ));
     }
 
     #[test]
     fn a_text_that_is_not_a_pattern_is_refused() {
-        let PatternCheck::Refused { cause } = pattern_check(r#"{"type":"yearly"}"#.to_owned())
+        let PatternCheck::Refused { cause } = pattern_check(r#"{"kind":"yearly"}"#.to_owned())
         else {
             panic!("yearly is not a pattern of the core");
         };
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn a_config_text_that_does_not_read_is_a_client_defect() {
         assert!(matches!(
-            facts(r#"{"broker": {}}"#, &[]),
+            facts(r#"{"database": {}}"#, &[]),
             Err(NativeThrown::ClientDefect { .. })
         ));
     }

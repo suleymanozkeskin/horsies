@@ -15,7 +15,6 @@ from typing import (
     Self,
     Annotated,
     Final,
-    Union,
     cast,
     overload,
 )
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
 from horsies._catalog.task_codes import ContractCode as ContractCode
-from horsies._catalog.task_codes import OperationalErrorCode as OperationalErrorCode
+from horsies._catalog.task_codes import OperationalCode as OperationalCode
 from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
 from horsies._catalog.task_codes import RetrievalCode as RetrievalCode
 from horsies.core.types.json_value import JsonInput, JsonValue
@@ -44,11 +43,10 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.exception_mapper import (
     RESERVED_NON_TASK_CODES,
     reserved_code_message,
-    validate_error_code_string,
 )
 
 type BuiltInTaskCode = (
-    OperationalErrorCode
+    OperationalCode
     | ContractCode
     | RetrievalCode
     | OutcomeCode
@@ -57,11 +55,11 @@ type BuiltInTaskCode = (
 BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] = {}
 """Maps every built-in error code string to its canonical enum member.
 
-Used by ``TaskError._coerce_error_code`` for round-trip coercion and by
+Used by ``TaskError._validate_code`` for round-trip coercion and by
 ``horsies check`` for reserved-code collision detection.
 """
 for _family in (
-    OperationalErrorCode,
+    OperationalCode,
     ContractCode,
     RetrievalCode,
     OutcomeCode,
@@ -78,7 +76,7 @@ for _family in (
 
 
 _BUILTIN_FAMILIES = (
-    OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
+    OperationalCode, ContractCode, RetrievalCode, OutcomeCode,
 )
 
 BUILTIN_FAMILIES: Final = _BUILTIN_FAMILIES
@@ -90,7 +88,7 @@ C = TypeVar('C', covariant=True, default=str)
 that the task declares with `error_codes=`."""
 
 
-class FlattenedException(TypedDict):
+class ExceptionRecord(TypedDict):
     """Wire-safe dict form of a ``BaseException``.
 
     Produced by ``flatten_exception`` (``codec/error_payload.py``) before
@@ -131,8 +129,8 @@ class TaskError(BaseModel, Generic[C]):
     """The error of a task: the ``Err`` of what a body returns, and the
     ``Failed`` of what a reader gets.
 
-    ``error_code`` carries one of four built-in families
-    (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
+    ``code`` carries one of four built-in families
+    (``OperationalCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a custom code of the task: a ``str``, or a member of
     the ``Enum`` class that the task declares with ``error_codes=``.
     ``TaskError[C]`` is generic in the type of the custom code, with the
@@ -140,19 +138,19 @@ class TaskError(BaseModel, Generic[C]):
     ``Result[T, TaskError[E]]`` declares ``error_codes=E``; its body passes
     members of ``E``, and its readers get members of ``E``.
 
-    **Required field**: ``error_code`` is required and must not be null, on
+    **Required field**: ``code`` is required and must not be null, on
     the wire and in the type, because retry matching and outcome routing read
     it. A stored error without a code is stored data that does not parse.
     ``message``, ``data`` and ``exception`` are optional.
 
     **Construction**: built-in code values must be passed as enum
-    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR",
-    message="...")`` raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
+    members, not raw strings.  ``TaskError(code="DATABASE_ERROR",
+    message="...")`` raises ``ValueError``.  Use ``OperationalCode.DATABASE_ERROR``
     instead.  A custom code is a ``str`` or a member of a custom ``Enum``
     whose value is that ``str``; both follow the code-text rules.
 
     **Serialization**: built-in codes are serialized as tagged dicts
-    ``{"__builtin_task_code__": "BROKER_ERROR"}`` so they round-trip
+    ``{"__builtin_task_code__": "DATABASE_ERROR"}`` so they round-trip
     through ``model_validate()`` / ``model_validate_json()`` without
     ambiguity.  A custom code is serialized as its text: the ``str``, or
     the value of the member. A decode gives the text; the reader of a task
@@ -162,22 +160,27 @@ class TaskError(BaseModel, Generic[C]):
     ``model_validate_json()`` everywhere — including nested models.
     No special rehydration methods needed.
 
+    **Stored form**: the ``err`` slot of a stored result holds the code
+    under the key ``error_code``, the field name of the core's task error.
+    ``encode_task_error`` writes that key at the place of ``code``, and
+    ``decode_task_error`` reads it back into ``code``.
+
     **Unknown keys**: refused at construction and at decode. A stored value
     with a key that this class does not declare is stored data that does not
-    parse. Subclasses inherit the rule, so ``SubWorkflowError`` accepts its
+    parse. Subclasses inherit the rule, so ``SubWorkflowFailure`` accepts its
     own fields and no others.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
-    exception: BaseException | FlattenedException | None = None
+    exception: BaseException | ExceptionRecord | None = None
     # The type checker sees the code type of the error. At run time the
     # before validator is the one check: it keeps a custom `Enum` member as
     # the member, which a `str` field would turn into its text.
     if TYPE_CHECKING:
-        error_code: C | BuiltInTaskCode
+        code: C | BuiltInTaskCode
     else:
-        error_code: SkipValidation[object]
+        code: SkipValidation[object]
     # A writer gives `JsonInput`, and a reader gets `JsonValue`. No check runs at
     # construction: a TaskError is built inside `except` blocks, and that build must
     # not raise. `reportable_error` checks `data` at the wire.
@@ -187,10 +190,10 @@ class TaskError(BaseModel, Generic[C]):
         data: SkipValidation[JsonValue] = None
     message: str | None = None
 
-    @field_validator('error_code', mode='before')
+    @field_validator('code', mode='before')
     @classmethod
-    def _validate_error_code(cls, value: object) -> object:
-        """Validate and coerce error_code values.
+    def _validate_code(cls, value: object) -> object:
+        """Validate and coerce code values.
 
         Accepts:
         - BuiltInTaskCode enum members (pass through)
@@ -210,11 +213,11 @@ class TaskError(BaseModel, Generic[C]):
         if isinstance(value, _BUILTIN_FAMILIES):
             return value
         if value is None:
-            raise ValueError('error_code must not be null')
+            raise ValueError('code must not be null')
         if isinstance(value, dict):
             if '__builtin_task_code__' not in value:
                 raise ValueError(
-                    'error_code dict must contain "__builtin_task_code__" key',
+                    'code dict must contain "__builtin_task_code__" key',
                 )
             raw = cast('dict[str, object]', value)['__builtin_task_code__']
             if not isinstance(raw, str):
@@ -241,18 +244,18 @@ class TaskError(BaseModel, Generic[C]):
             _refuse_reserved_code_text(value)
             return value
         raise ValueError(
-            f'error_code must be a str, a custom Enum member or a built-in '
+            f'code must be a str, a custom Enum member or a built-in '
             f'code; got {type(value).__name__}',
         )
 
-    @field_serializer('error_code', when_used='always')
+    @field_serializer('code', when_used='always')
     @classmethod
-    def _serialize_error_code(
+    def _serialize_code(
         cls,
         value: object,
         _info: Any,
     ) -> dict[str, str] | str:
-        """Serialize error_code with tagged format for built-in codes.
+        """Serialize code with tagged format for built-in codes.
 
         Built-in enum members become ``{"__builtin_task_code__": "VALUE"}``
         so round-trip identity is preserved. A custom code becomes its text:
@@ -267,10 +270,10 @@ class TaskError(BaseModel, Generic[C]):
     @classmethod
     def _serialize_exception(
         cls,
-        value: BaseException | FlattenedException | None,
+        value: BaseException | ExceptionRecord | None,
         _info: Any,
-    ) -> FlattenedException | None:
-        """Serialize a live exception to its wire-safe FlattenedException form.
+    ) -> ExceptionRecord | None:
+        """Serialize a live exception to its wire-safe ExceptionRecord form.
 
         json.dumps cannot encode a BaseException, so without this any caller
         doing model_dump(mode='json') / model_dump_json() crashes (the codec
@@ -297,7 +300,7 @@ def _refuse_reserved_code_text(text: str) -> None:
         )
     if text in RESERVED_NON_TASK_CODES:
         raise ValueError(
-            reserved_code_message(text, field_name='error_code'),
+            reserved_code_message(text, field_name='code'),
         )
 
 
@@ -368,7 +371,7 @@ def custom_code_type_of(annot: object) -> CustomCodeType | NotATaskErrorType:
             return NotATaskErrorType()
 
 
-class SubWorkflowError(TaskError):
+class SubWorkflowFailure(TaskError):
     """
     Error representing a failed subworkflow.
 
@@ -376,7 +379,7 @@ class SubWorkflowError(TaskError):
     task failures via pattern matching:
 
         match outcome:
-            case Failed(SubWorkflowError() as e):
+            case Failed(SubWorkflowFailure() as e):
                 print(f"Subworkflow {e.sub_workflow_id} failed")
             case Failed(e):
                 print(f"Task error: {e.message}")
@@ -434,13 +437,13 @@ class TaskInfo:
     task_id: UUID
     task_name: str
     status: TaskStatus
-    queue_name: str
+    queue: str
     priority: int
     retry_count: int
     max_retries: int
     next_retry_at: datetime.datetime | None
     sent_at: datetime.datetime | None
-    enqueued_at: datetime.datetime
+    due_at: datetime.datetime
     claimed_at: datetime.datetime | None
     started_at: datetime.datetime | None
     completed_at: datetime.datetime | None
@@ -523,16 +526,26 @@ class RetryPolicy(BaseModel):
     Retry policy configuration for tasks.
 
     Two strategies supported:
-    1. Fixed: Uses intervals list exactly as specified
-    2. Exponential: Uses intervals[0] as base, exponentially increases
+    1. Fixed: Uses the intervals_seconds list exactly as specified
+    2. Exponential: Uses intervals_seconds[0] as base, exponentially increases
 
     Fields:
         max_retries: maximum number of retry attempts (initial send not counted)
-        intervals: delay intervals in seconds between retry attempts
-        backoff_strategy: 'fixed' uses intervals as-is, 'exponential' uses intervals[0] as base
+        intervals_seconds: delay intervals in seconds between retry attempts
+        backoff_strategy: 'fixed' uses intervals_seconds as-is, 'exponential' uses
+            intervals_seconds[0] as base
         jitter: whether to add ±25% randomization to delays
         max_delay_seconds: optional maximum delay after backoff and jitter
-        auto_retry_for: error codes that trigger automatic retries
+        retry_for: the code members that start a retry: members of the
+            built-in code enums (`OperationalCode`, `ContractCode`,
+            `RetrievalCode`, `OutcomeCode`), or members of the `Enum` class
+            that the task declares with `error_codes=`. At least one.
+
+    `retry_for` takes no plain `str`. The model keeps each entry as it
+    is given: the task decorator checks the entries against the codes of
+    the task (`check_retry_codes`) and refuses any other entry with
+    `TASK_INVALID_OPTIONS`. The JSON form (`model_dump(mode='json')`), which
+    the stored task options hold, has the value of each member.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
@@ -545,7 +558,7 @@ class RetryPolicy(BaseModel):
             description='Number of retry attempts (1-20)',
         ),
     ] = 3
-    intervals: Annotated[
+    intervals_seconds: Annotated[
         list[
             Annotated[
                 PositiveInt,
@@ -560,60 +573,62 @@ class RetryPolicy(BaseModel):
         Optional[PositiveInt],
         Field(description='Optional maximum retry delay in seconds'),
     ] = None
-    auto_retry_for: Annotated[
-        list[Union[str, BuiltInTaskCode]],
-        Field(min_length=1),
-    ]
+    # The type checker sees code members only. At run time the field keeps
+    # each entry as it is given, so that the task decorator, which knows the
+    # task, refuses a wrong entry with the task's name.
+    if TYPE_CHECKING:
+        retry_for: Annotated[
+            list[BuiltInTaskCode | Enum],
+            Field(min_length=1),
+        ]
+    else:
+        retry_for: Annotated[
+            list[object],
+            Field(min_length=1),
+        ]
 
     @model_validator(mode='after')
     def validate_strategy_consistency(self) -> Self:
-        """Validate that backoff strategy is consistent with intervals configuration."""
+        """Validate that backoff strategy is consistent with intervals_seconds configuration."""
 
         if self.backoff_strategy == 'fixed':
-            # Fixed strategy: intervals length should match max_retries
-            if len(self.intervals) != self.max_retries:
+            # Fixed strategy: intervals_seconds length should match max_retries
+            if len(self.intervals_seconds) != self.max_retries:
                 raise ValueError(
-                    f'Fixed backoff strategy requires intervals length ({len(self.intervals)}) '
+                    f'Fixed backoff strategy requires intervals_seconds length '
+                    f'({len(self.intervals_seconds)}) '
                     f'to match max_retries ({self.max_retries}). '
-                    f'Either adjust intervals list or use exponential strategy.'
+                    f'Either adjust intervals_seconds list or use exponential strategy.'
                 )
 
         elif self.backoff_strategy == 'exponential':
             # Exponential strategy: should have exactly one base interval
-            if len(self.intervals) != 1:
+            if len(self.intervals_seconds) != 1:
                 raise ValueError(
                     f'Exponential backoff strategy requires exactly one base interval, '
-                    f'got {len(self.intervals)} intervals. Use intervals=[base_seconds] for exponential backoff.'
+                    f'got {len(self.intervals_seconds)} intervals. '
+                    f'Use intervals_seconds=[base_seconds] for exponential backoff.'
                 )
 
-        return self
-
-    @model_validator(mode='after')
-    def validate_error_code_fields(self) -> Self:
-        """Validate that auto_retry_for entries are valid error code strings."""
-        for entry in self.auto_retry_for:
-            code = entry.value if isinstance(entry, Enum) else entry
-            err = validate_error_code_string(code, field_name='auto_retry_for')
-            if err is not None:
-                raise ValueError(err)
         return self
 
     # Convenience constructors to prevent misconfiguration at call sites
     @classmethod
     def fixed(
         cls,
-        intervals: list[int],
+        intervals_seconds: list[int],
         *,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        retry_for: list[BuiltInTaskCode | Enum],
         jitter: bool = True,
     ) -> 'RetryPolicy':
-        """Create a fixed backoff policy where intervals length defines max_retries."""
+        """Create a fixed backoff policy where the length of intervals_seconds
+        defines max_retries."""
         return cls(
-            max_retries=len(intervals),
-            intervals=intervals,
+            max_retries=len(intervals_seconds),
+            intervals_seconds=intervals_seconds,
             backoff_strategy='fixed',
             jitter=jitter,
-            auto_retry_for=auto_retry_for,
+            retry_for=retry_for,
         )
 
     @classmethod
@@ -622,7 +637,7 @@ class RetryPolicy(BaseModel):
         base_seconds: int,
         *,
         max_retries: int,
-        auto_retry_for: list[Union[str, BuiltInTaskCode]],
+        retry_for: list[BuiltInTaskCode | Enum],
         jitter: bool = True,
         max_delay_seconds: int | None = None,
     ) -> 'RetryPolicy':
@@ -633,11 +648,11 @@ class RetryPolicy(BaseModel):
         """
         return cls(
             max_retries=max_retries,
-            intervals=[base_seconds],
+            intervals_seconds=[base_seconds],
             backoff_strategy='exponential',
             jitter=jitter,
             max_delay_seconds=max_delay_seconds,
-            auto_retry_for=auto_retry_for,
+            retry_for=retry_for,
         )
 
 
@@ -647,15 +662,15 @@ class TaskOptions(BaseModel):
 
     Fields:
         task_name: Unique task identifier (mandatory - decoupled from function names)
-        queue_name: Target queue name (validated against app config at definition time)
+        queue: Target queue name (validated against app config at definition time)
         good_until: Task expiry deadline (task skipped if not claimed by this time)
-        retry_policy: Retry timing and backoff configuration (includes auto_retry_for)
+        retry_policy: Retry timing and backoff configuration (includes retry_for)
         timeout_ms: Execution time limit. Measured by the worker parent from
             the moment a child takes the task (time waiting for a free child
             does not count). On expiry the task fails with
             OutcomeCode.TASK_TIMEOUT and the child process is killed with the
             subprocesses in its session; retry only happens when
-            'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
+            OutcomeCode.TASK_TIMEOUT is listed in retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
             are for exceptional hangs, not routine control flow. A
             SHARED_ASYNC task on a shared async child is cancelled instead,
@@ -673,7 +688,7 @@ class TaskOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     task_name: str
-    queue_name: Optional[str] = None
+    queue: Optional[str] = None
     good_until: Optional[datetime.datetime] = None
     retry_policy: Optional[RetryPolicy] = None
     timeout_ms: Annotated[
@@ -689,24 +704,26 @@ class TaskOptions(BaseModel):
 
     @field_validator('good_until')
     @classmethod
-    def reject_naive_good_until(cls, v: datetime.datetime | None) -> datetime.datetime | None:
+    def reject_naive_good_until(
+        cls, value: datetime.datetime | None,
+    ) -> datetime.datetime | None:
         """Reject naive datetimes — they are ambiguous and break fingerprinting."""
-        if v is not None and v.tzinfo is None:
+        if value is not None and value.tzinfo is None:
             raise ValueError(
                 'good_until must be timezone-aware (got naive datetime). '
                 'Use e.g. datetime.now(timezone.utc) or a tz-aware value.',
             )
-        return v
+        return value
 
 
-# Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary
+# Rebuild SubWorkflowFailure to resolve forward reference to SubWorkflowSummary
 def _rebuild_subworkflow_error() -> None:
-    """Rebuild SubWorkflowError after SubWorkflowSummary is importable."""
+    """Rebuild SubWorkflowFailure after SubWorkflowSummary is importable."""
     from horsies.core.models.workflow import SubWorkflowSummary  # noqa: F811
 
     _ = SubWorkflowSummary  # keep in scope for model_rebuild forward ref resolution
 
-    SubWorkflowError.model_rebuild()
+    SubWorkflowFailure.model_rebuild()
 
 
 _rebuild_subworkflow_error()

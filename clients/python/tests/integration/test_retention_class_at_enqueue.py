@@ -51,13 +51,13 @@ def _test_app(broker: PostgresBroker) -> Horsies:
     global _TEST_APP
     if _TEST_APP is None:
         cfg = AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
 
-        @_TEST_APP.task(task_name='retention_enqueue_test')
+        @_TEST_APP.task(name='retention_enqueue_test')
         def _retention_enqueue_test(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -80,14 +80,14 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
     global _DECLARING_APP
     if _DECLARING_APP is None:
         cfg = AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             ),
             retention=RetentionConfig(retention_periods=(DECLARED_PERIOD,)),
         )
         _DECLARING_APP = Horsies(cfg)
 
-        @_DECLARING_APP.task(task_name='retention_declared_test')
+        @_DECLARING_APP.task(name='retention_declared_test')
         def _retention_declared_test(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 

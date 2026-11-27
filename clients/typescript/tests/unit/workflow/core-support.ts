@@ -111,7 +111,7 @@ export function rawStartEnqueueFailed(workflowName: string, retryable: boolean):
       ...startSlots(workflowName),
       { name: "retryable", value: { kind: "flag", value: retryable } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {
@@ -138,7 +138,7 @@ export function rawValidationFailed(workflowName: string): RawCatalogError {
     class: "WorkflowStartValidationFailed",
     slots: [
       ...startSlots(workflowName),
-      { name: "exception", value: { kind: "exception", exception: { kind: "noCause" } } },
+      { name: "cause", value: { kind: "exception", exception: { kind: "noCause" } } },
     ],
   };
 }
@@ -148,16 +148,16 @@ export function rawCommandConflict(workflowName: string): RawCatalogError {
   return { class: "WorkflowStartCommandConflict", slots: startSlots(workflowName) };
 }
 
-/** A raw `HandleDbOperationFailed`. */
+/** A raw `WorkflowHandleDatabaseOperationFailed`. */
 export function rawDbFailed(): RawCatalogError {
   return {
-    class: "HandleDbOperationFailed",
+    class: "WorkflowHandleDatabaseOperationFailed",
     slots: [
       { name: "message", value: { kind: "text", text: "connection refused" } },
       { name: "retryable", value: { kind: "flag", value: true } },
       { name: "workflow_id", value: { kind: "uuid", text: WORKFLOW_ID } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {

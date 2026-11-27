@@ -15,6 +15,7 @@ import type {
   WorkerPreparation,
   WorkerRunEnded,
 } from "../../horsies/src/native/worker/addon.ts";
+import type { ManifestProbeAddon, WorkerManifestProbe } from "../runtime/native/manifest-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const parseListenAddressMatches: SameFunction<
@@ -46,3 +47,11 @@ export const runEndedMatches: Mutual<Generated.WorkerRunEnded, WorkerRunEnded> =
 export const stepMatches: Mutual<Generated.ConnectivityStep, ConnectivityStep> = true;
 export const liveCheckMatches: Mutual<Generated.LiveCheckOutcome, LiveCheckOutcome> = true;
 export const backlogMatches: Mutual<Generated.LogBacklog, LogBacklog> = true;
+
+// The test export of a build with the cargo feature `test-probes` (`build:dev`).
+export const probeParseWorkerManifestMatches: SameFunction<
+  typeof Generated.probeParseWorkerManifest,
+  ManifestProbeAddon["probeParseWorkerManifest"]
+> = true;
+
+export const workerManifestProbeMatches: Mutual<Generated.WorkerManifestProbe, WorkerManifestProbe> = true;

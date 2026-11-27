@@ -10,7 +10,11 @@ export interface DownSlot {
   failed_boots: number;
 }
 
-export type SlotHealthKind = 'all_serving' | 'slots_down';
+/** Whether any slot was down when the worker wrote its snapshot; the down
+ * slots are in slot order. */
+export type SlotHealth =
+  | { kind: 'all_serving' }
+  | { kind: 'slots_down'; slots: DownSlot[] };
 
 /** The worker profile that a snapshot names. `not_recorded`: the snapshot
  * holds no profile name, because a worker of a build before schema migration
@@ -31,7 +35,7 @@ export interface WorkerState {
   worker_started_at: string;
   /** Seconds since `worker_started_at`, exact to the microsecond. */
   uptime_seconds: number | null;
-  processes: number;
+  child_count: number;
   queues: string[];
   queue_max_concurrency: Record<string, number>;
   tasks_running: number;
@@ -40,26 +44,29 @@ export interface WorkerState {
   memory_usage_mb: number | null;
   memory_percent: number | null;
   cpu_percent: number | null;
-  slot_health: SlotHealthKind;
-  /** Empty unless `slot_health` is `slots_down`; in slot order. */
-  down_slots: DownSlot[];
+  slot_health: SlotHealth;
   /** The worker profile that the worker ran. */
   profile: SnapshotProfile;
 }
 
 /** One worker's reply to an active liveness ping. */
-export interface WorkerPing {
+export interface WorkerPong {
   worker_id: string;
   hostname: string;
   pid: number;
   round_trip_ms: number;
 }
 
+/** The database part of a liveness report: the latency of a `SELECT 1`
+ * round trip in milliseconds, or unreachable. */
+export type DatabaseLiveness =
+  | { kind: 'ping'; latency_ms: number }
+  | { kind: 'unreachable' };
+
 /** DB reachability plus the set of workers that answered an active ping. */
 export interface LivenessReport {
-  db_latency_ms: number | null;
-  db_reachable: boolean;
-  workers: WorkerPing[];
+  database: DatabaseLiveness;
+  workers: WorkerPong[];
 }
 
 /** One timeseries point for a worker's load/resource charts. */
@@ -84,47 +91,47 @@ export interface ScheduleState {
 
 export type ExecutionClass = 'ISOLATED' | 'SHARED_ASYNC' | 'SHARED_THREAD';
 
-/** One claim budget of a live worker. `free` is `capacity - in_flight`, at
- * least 0; `capacity` counts the children or seats in service. */
+/** One claim budget of a live worker. `capacity` counts the children or
+ * seats in service; the free capacity is `capacity - in_flight`, at least 0
+ * (`freeCapacity`). */
 export interface BudgetLoad {
   budget: ExecutionClass;
   capacity: number;
   serves: ExecutionClass[];
   in_flight: number;
-  free: number;
 }
 
 /** The claim budgets of one live worker. */
-export interface WorkerClassLoad {
+export interface WorkerExecutionClassLoad {
   worker_id: string;
   snapshot_at: string;
   budgets: BudgetLoad[];
 }
 
 /** Whether live workers serve a pending stream. */
-export type StreamCoverage =
+export type StreamCoverageState =
   | { kind: 'served'; workers: number; capacity: number }
   | { kind: 'no_capacity'; workers: number }
   | { kind: 'unserved' };
 
 /** How long the stream's rows wait. `none_due`: every row is due later.
- * `wait_s` is in seconds, exact to the microsecond. */
+ * `wait_seconds` is in seconds, exact to the microsecond. */
 export type StreamWait =
-  | { kind: 'waiting'; oldest_due_at: string; wait_s: number }
+  | { kind: 'due'; oldest_due_at: string; wait_seconds: number }
   | { kind: 'none_due'; next_due_at: string };
 
 /** The PENDING rows of one queue and one execution class. */
 export interface PendingStream {
-  queue_name: string;
+  queue: string;
   execution: ExecutionClass;
-  coverage: StreamCoverage;
+  coverage: StreamCoverageState;
   wait: StreamWait;
 }
 
 /** Pending streams and the budget load of each live worker. */
-export interface ClassReport {
+export interface ExecutionClassReport {
   checked_at: string;
-  live_window_s: number;
+  live_window_seconds: number;
   streams: PendingStream[];
-  workers: WorkerClassLoad[];
+  workers: WorkerExecutionClassLoad[];
 }

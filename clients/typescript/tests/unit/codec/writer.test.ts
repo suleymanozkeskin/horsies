@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { encodeWithReadBack } from "../../../horsies/src/codec/read-back.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
@@ -196,6 +196,21 @@ describe("writer: each refusal", () => {
     assert.equal(refused(h.int(), 1.5).refusal, "NotSafeInteger");
     assert.equal(refused(h.int(), 2 ** 53).refusal, "NotSafeInteger");
     assert.equal(refused(h.int(), Number.NaN).refusal, "NotSafeInteger");
+  });
+
+  test("NotSafeInteger: a fraction, NaN and an infinity get the whole-number text, with no builder name", () => {
+    for (const value of [7.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(refused(h.int(), value).detail, "the integer kind takes a whole number");
+    }
+  });
+
+  test("NotSafeInteger: a whole number outside the safe range gets the range text, with no builder name", () => {
+    for (const value of [2 ** 53, -(2 ** 53), 1e300]) {
+      assert.equal(
+        refused(h.int(), value).detail,
+        "the integer kind takes a whole number from -(2^53 - 1) to 2^53 - 1; the bigint kind takes a larger one",
+      );
+    }
   });
 
   test("IntegerTooLong: an integer of 4,301 digits", () => {

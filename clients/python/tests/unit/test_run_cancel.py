@@ -90,7 +90,7 @@ WAIT_S: Final = 10.0
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:password@localhost/unused'),
         ),
     ),

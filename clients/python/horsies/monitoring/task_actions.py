@@ -46,7 +46,7 @@ from typing import assert_never
 from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCode
 from horsies._catalog.monitoring_errors import (
     TaskActionCoreError as TaskActionCoreError,
-    TaskActionDbOperationFailed as TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed as TaskActionDatabaseOperationFailed,
     TaskActionIsWorkflowTask as TaskActionIsWorkflowTask,
     TaskActionNotCancellable as TaskActionNotCancellable,
     TaskActionNotFound as TaskActionNotFound,
@@ -87,14 +87,14 @@ def _db_err(
     message: str,
     retryable: bool,
     exc: BaseException,
-) -> Err[TaskActionDbOperationFailed]:
+) -> Err[TaskActionDatabaseOperationFailed]:
     """The core of this process could not run the cancel."""
     return Err(
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=f'Task cancel failed: {message}',
             retryable=retryable,
             task_id=task_id,
-            exception=exc,
+            cause=exc,
         )
     )
 
@@ -116,7 +116,7 @@ def _cancel_answer(
             TaskActionNotFound()
             | TaskActionNotCancellable()
             | TaskActionIsWorkflowTask()
-            | TaskActionDbOperationFailed()
+            | TaskActionDatabaseOperationFailed()
             | TaskActionStoredDataInvalid()
         ):
             return Err(outcome)
@@ -149,7 +149,7 @@ async def cancel_task(
 
     Raises:
         HorsiesError: the app cannot build its broker
-            (``BROKER_INIT_FAILED``, ``Horsies.get_broker``). Nothing ran.
+            (``DATABASE_INIT_FAILED``, ``Horsies.get_broker``). Nothing ran.
         ForkedAfterCoreStart, CoreStopped: the core of this process refuses
             every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: the cancel outcome contradicts the function (a lost

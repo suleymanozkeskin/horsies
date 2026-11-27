@@ -39,7 +39,7 @@ impl WorkflowDefinition for Restock {
             let node_id = feed_node_id(supplier);
             feeds.push(
                 builder.task(sync_supplier_feed::node().node_id(node_id.clone()).set(
-                    sync_supplier_feed::params::supplier(),
+                    sync_supplier_feed::fields::supplier(),
                     (*supplier).to_owned(),
                 )?)?,
             );
@@ -50,7 +50,7 @@ impl WorkflowDefinition for Restock {
         let update = builder.task(
             update_stock_levels::node()
                 .node_id("update_stock_levels")
-                .set(update_stock_levels::params::feed_node_ids(), feed_ids)?
+                .set(update_stock_levels::fields::feed_node_ids(), feed_ids)?
                 .waits_for_all(feeds.iter().copied())
                 .workflow_context_from(feeds.iter().copied())
                 .join_quorum(quorum),

@@ -74,7 +74,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
             if is_err(r):
                 return False
             handle = r.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -357,7 +357,7 @@ def test_multi_worker_no_double_execution() -> None:
                 # Use unique tokens for each task
                 tokens = [f'multiworker_task_{i}' for i in range(num_tasks)]
                 handles = [unwrap_send(basic_tasks.idempotent_task.send(token=token)) for token in tokens]
-                results = [h.get(timeout_ms=30000) for h in handles]
+                results = [h.get(wait_ms=30000) for h in handles]
 
                 # All tasks should succeed (no DOUBLE_EXECUTION errors)
                 for i, r in enumerate(results):
@@ -1143,7 +1143,7 @@ def test_softcap_lease_no_double_execution(
                     unwrap_send(instance_softcap.slow_idempotent_task.send(token=token, duration_ms=1500))
                     for token in tokens
                 ]
-                results = [h.get(timeout_ms=60_000) for h in handles]
+                results = [h.get(wait_ms=60_000) for h in handles]
 
                 # All tasks should succeed (no DOUBLE_EXECUTION errors)
                 for i, r in enumerate(results):
@@ -1409,7 +1409,7 @@ def _start_requeue_guard_worker(database_url: str, output: Path) -> subprocess.P
                 'uv', 'run', 'horsies', 'worker',
                 REQUEUE_GUARD_INSTANCE,
                 '--profile=isolated-1',
-                '--loglevel=warning',
+                '--log-level=warning',
             ],
             env=env,
             stdout=output_file,

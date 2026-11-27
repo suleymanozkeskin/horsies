@@ -3,7 +3,7 @@
 Covers the strict producer/worker binding:
 
 - Unknown kwarg names rejected (encode + decode).
-- User-supplied engine-injected names (workflow_ctx / workflow_meta)
+- User-supplied engine-injected names (workflow_context / workflow_meta)
   rejected at encode.
 - User-supplied TaskOutcome-typed kwargs rejected at encode; engine
   envelopes for TaskOutcome-typed params pass through at decode.
@@ -32,7 +32,7 @@ def _task_a(value: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnus
     ...
 
 
-def _task_with_ctx(value: int, workflow_ctx: object) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+def _task_with_ctx(value: int, workflow_context: object) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
@@ -97,9 +97,9 @@ class TestEncodeStrictBinding:
     def test_workflow_ctx_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
-            match="kwarg 'workflow_ctx' is engine-injected",
+            match="kwarg 'workflow_context' is engine-injected",
         ):
-            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
+            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_context': 'x'})
 
     def test_workflow_meta_user_supplied_rejected(self) -> None:
         with pytest.raises(
@@ -350,7 +350,7 @@ from horsies.core.codec.kwargs import (  # noqa: E402
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
 )
-from horsies.core.errors import ErrorCode, WorkflowValidationError  # noqa: E402
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError  # noqa: E402
 from horsies.core.models.workflow import (  # noqa: E402
     SubWorkflowNode,
     TaskNode,
@@ -365,7 +365,7 @@ def _mock_workflow_def_task() -> Any:
 
     fn = MagicMock(spec=lambda: None)
     fn.task_name = 'mock_task'
-    fn._original_fn = lambda: Ok(0)
+    fn._original_function = lambda: Ok(0)
     return fn
 
 
@@ -544,7 +544,7 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             _node_wire(workflow_def, {'a': 1})
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
         assert 'takes nothing from a node' in str(caught.value)
 
     @pytest.mark.parametrize(
@@ -555,7 +555,7 @@ class TestSubworkflowNodeKwargs:
     def test_a_catch_all_takes_no_args_from(
         self, workflow_def: type[WorkflowDefinition[int]],
     ) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_definition=workflow_def,
             waits_for=[source],
@@ -565,7 +565,7 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             WorkflowSpec(name='wire', nodes=[source, node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_declared_catch_all_with_nothing_bound_is_valid(self) -> None:
         assert _node_wire(_OpaqueParamsWorkflow, {}) == {}
@@ -577,10 +577,10 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             _node_wire(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_definition=_NamedAppWorkflow,
             waits_for=[source],
@@ -591,7 +591,7 @@ class TestSubworkflowNodeKwargs:
         with pytest.raises(WorkflowValidationError) as caught:
             WorkflowSpec(name='wire', nodes=[source, node])
 
-        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_key_that_names_the_catch_all_is_refused(self) -> None:
         with pytest.raises(WorkflowValidationError):

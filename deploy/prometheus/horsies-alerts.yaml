@@ -2,7 +2,7 @@
 #
 # The series come from two scrape jobs: the worker endpoints
 # (`horsies worker ... --metrics-listen HOST:PORT`) and the fleet collector
-# (`horsies metrics ... --listen HOST:PORT`). Each metric name and label is in
+# (`horsies metrics ... --metrics-listen HOST:PORT`). Each metric name and label is in
 # core/src/telemetry/catalog_snapshot.txt.
 #
 # The fleet series are aggregated with `max`, so two fleet collectors give

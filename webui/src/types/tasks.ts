@@ -21,7 +21,7 @@ export type ErrorCategory =
   | 'CONTRACT'
   | 'RETRIEVAL'
   | 'OUTCOME'
-  | 'DOMAIN';
+  | 'CUSTOM';
 
 /** One leaf task row, shaped for the list view. */
 export interface TaskSummary {

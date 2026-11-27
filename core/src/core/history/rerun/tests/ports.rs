@@ -43,8 +43,9 @@ async fn a_refused_value_in_a_stored_envelope_fails_closed() {
         .expect("store the refused value");
         let outcome = broker
             .rerun_task(
-                RerunTask::new(source, None, None),
+                RerunCommand::new(source, None, None),
                 policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE,
             )
             .await
             .expect("rerun outcome");

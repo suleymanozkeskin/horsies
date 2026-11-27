@@ -15,18 +15,19 @@ describe("workflowStartCoreErrorFromNative", () => {
         message: MESSAGE,
         workflow_name: WORKFLOW_NAME,
         workflow_id: WORKFLOW_ID,
-        exception: NO_CAUSE,
+        cause: NO_CAUSE,
       },
     });
 
     expectConverted(value, {
       shown: {
+        kind: "validationFailed",
         code: "VALIDATION_FAILED",
         retryable: false,
         workflowName: WORKFLOW_NAME,
         workflowId: WORKFLOW_ID,
       },
-      hidden: ["message", "exception"],
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: NO_CAUSE,
     });
@@ -45,6 +46,7 @@ describe("workflowStartCoreErrorFromNative", () => {
 
     expectConverted(value, {
       shown: {
+        kind: "idConflict",
         code: "WORKFLOW_ID_CONFLICT",
         retryable: false,
         workflowName: WORKFLOW_NAME,
@@ -65,6 +67,7 @@ describe("workflowStartCoreErrorFromNative", () => {
 
     expectConverted(value, {
       shown: {
+        kind: "commandConflict",
         code: "WORKFLOW_COMMAND_CONFLICT",
         retryable: false,
         workflowName: WORKFLOW_NAME,
@@ -84,18 +87,19 @@ describe("workflowStartCoreErrorFromNative", () => {
         retryable: true,
         workflow_name: WORKFLOW_NAME,
         workflow_id: WORKFLOW_ID,
-        exception: CONNECTION_FAILURE,
+        cause: CONNECTION_FAILURE,
       },
     });
 
     expectConverted(value, {
       shown: {
+        kind: "enqueueFailed",
         code: "ENQUEUE_FAILED",
         retryable: true,
         workflowName: WORKFLOW_NAME,
         workflowId: WORKFLOW_ID,
       },
-      hidden: ["message", "exception"],
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: CONNECTION_FAILURE,
     });

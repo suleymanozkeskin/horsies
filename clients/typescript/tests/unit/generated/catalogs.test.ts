@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { ErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../../../horsies/src/_catalog/error_codes.ts";
 import {
   TASK_TERMINAL_STATES,
   TaskStatus,
@@ -15,7 +15,7 @@ import { TaskSendErrorCode } from "../../../horsies/src/_catalog/task_send.ts";
 describe("code catalogs", () => {
   test("a member name maps to its wire value", () => {
     expect(TaskStatus.PENDING).toBe("PENDING");
-    expect(ErrorCode.WORKFLOW_NO_NAME).toBe("HRS-001");
+    expect(HorsiesErrorCode.WORKFLOW_NO_NAME).toBe("HRS-001");
   });
 
   test("a member that only a blocking form gives stays in its catalog", () => {

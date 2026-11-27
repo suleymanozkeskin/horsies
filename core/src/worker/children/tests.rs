@@ -293,11 +293,11 @@ fn the_pending_limit_covers_the_claim_budget() {
 #[test]
 fn the_exit_rule_follows_stale_running_recovery() {
     let mut recovery = RecoveryConfig {
-        auto_fail_stale_running: true,
+        fail_stale_running: true,
         ..RecoveryConfig::default()
     };
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::LeaveToRecovery);
-    recovery.auto_fail_stale_running = false;
+    recovery.fail_stale_running = false;
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::WaitForExit);
 }
 
@@ -403,7 +403,7 @@ fn the_preload_plan_takes_the_mode_the_command_and_the_init_frame_of_the_first_k
 fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
     let no_preload = profile(serde_json::json!({
         "isolated": {"kind": "isolated_children", "count": 1},
-        "preload": "none",
+        "preload": "no_preload",
     }));
     assert!(preload_plan(&no_preload, &launch_with_preload()).is_none());
     let library = profile(serde_json::json!({

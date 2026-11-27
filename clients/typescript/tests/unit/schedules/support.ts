@@ -7,7 +7,6 @@ import { createHorsies, type Horsies } from "../../../horsies/src/app.ts";
 import type { HorsiesConfig } from "../../../horsies/src/app/create.ts";
 import type { AppContext } from "../../../horsies/src/app/context.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
-import type { AnyTaskContract } from "../../../horsies/src/contract/define-task.ts";
 import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type {
@@ -22,11 +21,7 @@ import {
   type ScheduleCoreAccess,
   type ScheduleCoreCalls,
 } from "../../../horsies/src/schedules/app-member.ts";
-import {
-  declaredEntries,
-  type ScheduleEntries,
-  type ScheduleSection,
-} from "../../../horsies/src/schedules/entry.ts";
+import type { DeclaredEntry, ScheduleSection, TaskSchedule } from "../../../horsies/src/schedules/entry.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { DATABASE_URL, fakeEnvironment, OPTIONS_TEXT } from "../app/support.ts";
 
@@ -51,9 +46,9 @@ export const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null
 /** A pattern of every minute at second 0. */
 export const HOURLY = { kind: "hourly", minute: 0 } as const;
 
-/** The app of `config`, built with the fakes; a refused create fails the test. */
-function appOf(config: HorsiesConfig): Horsies {
-  const created = createHorsies(config, fakeEnvironment());
+/** The app of `config`, built with the fakes and the schedule calls `scheduleCalls`; a refused create fails the test. */
+export function appOf(config: HorsiesConfig, scheduleCalls?: ScheduleCoreCalls): Horsies {
+  const created = createHorsies(config, fakeEnvironment(scheduleCalls === undefined ? {} : { scheduleCalls }));
 
   if (!created.ok) {
     assert.fail(`the test app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
@@ -64,13 +59,13 @@ function appOf(config: HorsiesConfig): Horsies {
 
 /** The app of the default queue mode with `report`, `ping` and `upstreamOnly`. */
 export function defaultModeApp(): Horsies {
-  return appOf({ broker: { databaseUrl: DATABASE_URL }, tasks: [report, ping, upstreamOnly] });
+  return appOf({ database: { databaseUrl: DATABASE_URL }, tasks: [report, ping, upstreamOnly] });
 }
 
 /** The app of the custom queues `standard` and `urgent` with `sync`. */
 export function customModeApp(): Horsies {
   return appOf({
-    broker: { databaseUrl: DATABASE_URL },
+    database: { databaseUrl: DATABASE_URL },
     queueMode: "custom",
     customQueues: [
       { name: "standard", priority: 50 },
@@ -162,16 +157,19 @@ export function fakeCore(script: CoreScript = {}): FakeCore {
   };
 }
 
-/** Declare `entries` and `section` on `app` with the core access `access`; give the context. */
-export function declare<const T extends readonly AnyTaskContract[]>(
-  app: Horsies,
-  entries: ScheduleEntries<T>,
-  access: ScheduleCoreAccess,
-  section: ScheduleSection = {},
-): AppContext {
-  const context = appInternals(app);
+/** The switches of a schedule section, without its schedules. */
+export type SectionSwitches = Omit<ScheduleSection, "schedules">;
 
-  declareSchedules(context, declaredEntries(entries), section, access);
+/**
+ * Declare the section of `switches` with `entries` on `app` (an app with no `schedule` section) with the core access
+ * `access`; give the context. Each entry is a plain object, as a caller with no type check writes it.
+ */
+export function declare(app: Horsies, entries: readonly DeclaredEntry[], access: ScheduleCoreAccess, switches: SectionSwitches = {}): AppContext {
+  const context = appInternals(app);
+  // SAFETY: the brand of `TaskSchedule` is a typecheck fact only; the runtime checks under test read the plain entry.
+  const schedules = entries as readonly TaskSchedule[];
+
+  declareSchedules(context, { ...switches, schedules }, access);
 
   return context;
 }

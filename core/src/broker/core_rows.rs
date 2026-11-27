@@ -254,13 +254,15 @@ pub(crate) fn expired_list_row(
 /// Reads a [`StaleTaskRow`] from a `TASK` row of the stale list.
 fn stale_task_row(row: &Row, statement: &TypedStatement) -> Result<StaleTaskRow, RowDecodeError> {
     Ok(StaleTaskRow {
-        id: column(row, statement, "task_id")?,
+        task_id: column(row, statement, "task_id")?,
         task_name: column(row, statement, "task_name")?,
         worker_hostname: column(row, statement, "worker_hostname")?,
         worker_pid: column(row, statement, "worker_pid")?,
         worker_process_name: column(row, statement, "worker_process_name")?,
         started_at: column(row, statement, "started_at")?,
-        last_heartbeat: column(row, statement, "last_heartbeat")?,
+        // The output column of `horsies_list_stale_tasks` keeps its schema
+        // name `last_heartbeat`.
+        last_heartbeat_at: column(row, statement, "last_heartbeat")?,
     })
 }
 
@@ -269,15 +271,24 @@ fn expired_task_row(
     row: &Row,
     statement: &TypedStatement,
 ) -> Result<ExpiredTaskRow, RowDecodeError> {
+    // The statement gives the interval as whole microseconds, in the
+    // column `expired_for_us`. A deadline that passed is never negative.
+    let expired_for_micros: i64 = column(row, statement, "expired_for_us")?;
+    let expired_for = u64::try_from(expired_for_micros)
+        .map(std::time::Duration::from_micros)
+        .map_err(|_| RowDecodeError::Shape {
+            statement: statement.name(),
+            reason: format!("expired_for_us {expired_for_micros} is negative"),
+        })?;
     Ok(ExpiredTaskRow {
-        id: column(row, statement, "task_id")?,
+        task_id: column(row, statement, "task_id")?,
         task_name: column(row, statement, "task_name")?,
         queue_name: column(row, statement, "queue_name")?,
         priority: column(row, statement, "priority")?,
         sent_at: column(row, statement, "sent_at")?,
         enqueued_at: column(row, statement, "enqueued_at")?,
         good_until: column(row, statement, "good_until")?,
-        expired_for_us: column(row, statement, "expired_for_us")?,
+        expired_for,
     })
 }
 

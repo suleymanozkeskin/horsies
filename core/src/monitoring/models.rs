@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::time_text;
 use super::timing_models::{AttemptPhasesInfo, NodeTimingInfo, RunTimingInfo};
+use crate::broker::{SlotHealth, SnapshotProfile, WorkerPong};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::Execution;
 
@@ -18,7 +19,7 @@ pub enum ErrorCategory {
     Contract,
     Retrieval,
     Outcome,
-    Domain,
+    Custom,
 }
 
 impl ErrorCategory {
@@ -27,7 +28,7 @@ impl ErrorCategory {
         Self::Contract,
         Self::Retrieval,
         Self::Outcome,
-        Self::Domain,
+        Self::Custom,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -36,7 +37,7 @@ impl ErrorCategory {
             Self::Contract => "CONTRACT",
             Self::Retrieval => "RETRIEVAL",
             Self::Outcome => "OUTCOME",
-            Self::Domain => "DOMAIN",
+            Self::Custom => "CUSTOM",
         }
     }
 }
@@ -350,55 +351,16 @@ pub struct WorkflowNodeDetail {
     pub attempts: Vec<TaskAttemptDetail>,
 }
 
-/// One slot that was down when the worker wrote its snapshot (Python
-/// `DownSlotInfo`, `clients/python/horsies/monitoring/models.py:307-318`).
-///
-/// `cause` describes the cause of the last failed child start, and `detail`
-/// is its error text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct DownSlotInfo {
-    pub slot: u32,
-    pub cause: String,
-    pub detail: String,
-    #[serde(serialize_with = "time_text::utc")]
-    pub down_since: DateTime<Utc>,
-    pub failed_boots: u64,
-}
-
-/// Whether any slot of a worker was down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum SlotHealthKind {
-    AllServing,
-    SlotsDown,
-}
-
-/// The worker profile that a snapshot names, tagged by `kind`: `named` or
-/// `not_recorded` (Python `ProfileNamedInfo`, `ProfileNotRecordedInfo`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SnapshotProfileInfo {
-    /// The worker ran the profile `name` of `AppConfig.worker_profiles`.
-    Named { name: String },
-    /// The snapshot holds no profile name: a worker of a build before
-    /// schema migration 1004 wrote it.
-    NotRecorded,
-}
-
 /// Latest state snapshot for one worker (Python `WorkerStateInfo`,
 /// `clients/python/horsies/monitoring/models.py`).
 ///
-/// `down_slots` lists the down slots in slot order; it is empty unless
-/// `slot_health` is `slots_down`. `profile` names the worker profile that
-/// the worker ran.
+/// `slot_health` says whether any slot was down, with the down slots in
+/// slot order. `profile` names the worker profile that the worker ran.
 ///
 /// `snapshot_age_seconds` (from `snapshot_at`) and `uptime_seconds` (from
 /// `worker_started_at`) are measured to the database time of the read, and
 /// serialize as numbers of seconds, exact to the microsecond.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerStateInfo {
     pub worker_id: String,
@@ -415,7 +377,7 @@ pub struct WorkerStateInfo {
     #[serde(with = "time_text::optional_seconds")]
     #[cfg_attr(test, schemars(with = "Option<f64>"))]
     pub uptime_seconds: Option<TimeDelta>,
-    pub processes: i32,
+    pub child_count: i32,
     pub queues: Vec<String>,
     pub queue_max_concurrency: BTreeMap<String, i64>,
     pub tasks_running: i32,
@@ -424,120 +386,30 @@ pub struct WorkerStateInfo {
     pub memory_usage_mb: Option<f64>,
     pub memory_percent: Option<f64>,
     pub cpu_percent: Option<f64>,
-    pub slot_health: SlotHealthKind,
-    pub down_slots: Vec<DownSlotInfo>,
-    pub profile: SnapshotProfileInfo,
+    pub slot_health: SlotHealth,
+    pub profile: SnapshotProfile,
 }
 
-/// One claim budget of a live worker (Python `BudgetLoadInfo`,
-/// `clients/python/horsies/monitoring/models.py:354-367`).
-///
-/// `capacity` (children or seats in service) and `serves` come from the
-/// worker's latest snapshot. `in_flight` counts, at the read, its `RUNNING`
-/// rows and `CLAIMED` rows with a live lease of the classes in `serves`.
-/// `free` is `capacity` minus `in_flight`, at least 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct BudgetLoadInfo {
-    pub budget: Execution,
-    pub capacity: u64,
-    pub serves: Vec<Execution>,
-    pub in_flight: u64,
-    pub free: u64,
-}
-
-/// The claim budgets of one live worker, in execution class order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct WorkerClassLoadInfo {
-    pub worker_id: String,
-    #[serde(serialize_with = "time_text::utc")]
-    pub snapshot_at: DateTime<Utc>,
-    pub budgets: Vec<BudgetLoadInfo>,
-}
-
-/// Whether live workers serve a pending stream, tagged by `kind`: `served`,
-/// `no_capacity` or `unserved` (Python `StreamServedInfo`,
-/// `StreamNoCapacityInfo`, `StreamUnservedInfo`,
-/// `clients/python/horsies/monitoring/models.py:378-400`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// The database part of a liveness report, tagged by `kind`: `ping` with
+/// the latency of a `SELECT 1` round trip in milliseconds (Python
+/// `DatabasePing`), or `unreachable` when the ping failed (Python
+/// `DatabaseUnreachable`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StreamCoverageInfo {
-    /// `workers` counts the live workers that serve the stream; `capacity`
-    /// sums the capacity in service of the budget that serves the class on
-    /// each.
-    Served { workers: usize, capacity: u64 },
-    /// Live workers serve the stream, and none has capacity in service for it.
-    NoCapacity { workers: usize },
-    /// No live worker serves the stream.
-    Unserved,
+pub enum DatabaseLiveness {
+    /// The database answered the ping.
+    Ping { latency_ms: f64 },
+    /// The ping failed: the database was not reachable.
+    Unreachable,
 }
 
-/// How long the stream's rows wait, tagged by `kind`: `waiting` or
-/// `none_due` (Python `StreamWaitingInfo`, `StreamNoneDueInfo`,
-/// `clients/python/horsies/monitoring/models.py:403-415`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StreamWaitInfo {
-    /// At least one row is due. `wait_s` is the wait of the oldest due row
-    /// at `checked_at`, as a number of seconds, exact to the microsecond.
-    Waiting {
-        #[serde(serialize_with = "time_text::utc")]
-        oldest_due_at: DateTime<Utc>,
-        #[serde(serialize_with = "time_text::seconds")]
-        #[cfg_attr(test, schemars(with = "f64"))]
-        wait_s: TimeDelta,
-    },
-    /// Every row is due later; `next_due_at` is the earliest due time.
-    NoneDue {
-        #[serde(serialize_with = "time_text::utc")]
-        next_due_at: DateTime<Utc>,
-    },
-}
-
-/// The `PENDING` rows of one queue and one execution class.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct PendingStreamInfo {
-    pub queue_name: String,
-    pub execution: Execution,
-    pub coverage: StreamCoverageInfo,
-    pub wait: StreamWaitInfo,
-}
-
-/// Pending streams and the budget load of each live worker (Python
-/// `ClassReportInfo`, `clients/python/horsies/monitoring/models.py:433-447`).
-///
-/// `checked_at` is database time. A worker is live while its latest snapshot
-/// is at most `live_window_s` old. `streams` is ordered by queue name, then
-/// by execution class. `workers` holds the live workers, by worker id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct ClassReportInfo {
-    #[serde(serialize_with = "time_text::utc")]
-    pub checked_at: DateTime<Utc>,
-    pub live_window_s: u64,
-    pub streams: Vec<PendingStreamInfo>,
-    pub workers: Vec<WorkerClassLoadInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-pub struct WorkerPingInfo {
-    pub worker_id: String,
-    pub hostname: String,
-    pub pid: i32,
-    pub round_trip_ms: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Database reachability plus the workers that answered an active ping.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct LivenessReport {
-    pub db_latency_ms: Option<f64>,
-    pub db_reachable: bool,
-    pub workers: Vec<WorkerPingInfo>,
+    pub database: DatabaseLiveness,
+    pub workers: Vec<WorkerPong>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

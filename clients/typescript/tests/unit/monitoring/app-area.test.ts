@@ -68,8 +68,8 @@ function fakeAddons(handle: NativeCoreHandle, called: string[]): MonitoringAddon
       return done("getStaleTasks", { kind: "complete" as const, rows: [] })(given);
     },
     getExpiredTasks: done("getExpiredTasks", { kind: "complete" as const, rows: [] }),
-    getClassCoverage: done("getClassCoverage", { checkedAtMicros: 0n, liveWorkers: 0n, streams: [] }),
-    getClassReport: done("getClassReport", { checkedAtMicros: 0n, streams: [], workers: [] }),
+    getExecutionClassCoverage: done("getExecutionClassCoverage", { checkedAtMicros: 0n, liveWorkers: 0n, streams: [] }),
+    getExecutionClassReport: done("getExecutionClassReport", { checkedAtMicros: 0n, liveWindowMicros: 0n, streams: [], workers: [] }),
   };
 
   const cancel: CancelAddon = {
@@ -126,8 +126,8 @@ describe("createMonitoringArea", () => {
       "getWorkerStateHistory",
       "getStaleTasks",
       "getExpiredTasks",
-      "getClassCoverage",
-      "getClassReport",
+      "getExecutionClassCoverage",
+      "getExecutionClassReport",
       "cancelTask",
       "pingWorkers",
     ]);

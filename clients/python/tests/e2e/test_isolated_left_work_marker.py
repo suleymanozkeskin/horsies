@@ -47,7 +47,7 @@ def _make_ready_check() -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 

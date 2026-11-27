@@ -348,8 +348,8 @@ const EXECUTION: LabelSpec = LabelSpec {
     name: LabelName::Execution,
     values: <Execution as LabelValue>::VALUES,
 };
-const KIND: LabelSpec = LabelSpec {
-    name: LabelName::Kind,
+const CHILD_EXECUTION: LabelSpec = LabelSpec {
+    name: LabelName::ChildExecution,
     values: <Execution as LabelValue>::VALUES,
 };
 const OUTCOME: LabelSpec = LabelSpec {
@@ -501,8 +501,8 @@ static CHILDREN_STARTED: MetricSpec = MetricSpec {
     kind: MetricKind::Counter,
     unit: MetricUnit::Count,
     recorder: Recorder::Worker,
-    help: "Child processes that sent their ready frame, by kind.",
-    labels: &[KIND],
+    help: "Child processes that sent their ready frame, by execution class.",
+    labels: &[CHILD_EXECUTION],
 };
 
 static CHILDREN_REPLACED: MetricSpec = MetricSpec {
@@ -510,9 +510,9 @@ static CHILDREN_REPLACED: MetricSpec = MetricSpec {
     kind: MetricKind::Counter,
     unit: MetricUnit::Count,
     recorder: Recorder::Worker,
-    help: "Child processes that ended and were replaced, by kind and reason.",
+    help: "Child processes that ended and were replaced, by execution class and reason.",
     labels: &[
-        KIND,
+        CHILD_EXECUTION,
         LabelSpec {
             name: LabelName::Reason,
             values: <ReplaceReason as LabelValue>::VALUES,
@@ -525,8 +525,8 @@ static CHILD_BOOT_DURATION: MetricSpec = MetricSpec {
     kind: MetricKind::Histogram(&DURATION_BUCKET_BOUNDS),
     unit: MetricUnit::Seconds,
     recorder: Recorder::Worker,
-    help: "Time from the start of a child process to its ready frame, by kind.",
-    labels: &[KIND],
+    help: "Time from the start of a child process to its ready frame, by execution class.",
+    labels: &[CHILD_EXECUTION],
 };
 
 static SEATS: MetricSpec = MetricSpec {
@@ -552,8 +552,8 @@ static SLOTS_DOWN: MetricSpec = MetricSpec {
     kind: MetricKind::Gauge,
     unit: MetricUnit::Count,
     recorder: Recorder::Worker,
-    help: "Child slots that are down, by kind.",
-    labels: &[KIND],
+    help: "Child slots that are down, by execution class.",
+    labels: &[CHILD_EXECUTION],
 };
 
 static CLAIM_PASSES: MetricSpec = MetricSpec {

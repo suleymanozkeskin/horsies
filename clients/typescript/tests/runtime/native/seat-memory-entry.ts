@@ -19,7 +19,7 @@ const probe = defineTask({ name: "probe", input: {}, output: h.int(), execution:
 // The isolate connects nowhere: the URL is never opened.
 const databaseUrl = { kind: "value", value: "postgresql://postgres@127.0.0.1:55432/horsies" } as const;
 
-const created = Horsies.create({ broker: { databaseUrl }, tasks: [allocate, probe] });
+const created = Horsies.create({ database: { databaseUrl }, tasks: [allocate, probe] });
 
 if (!created.ok) {
   throw new Error(`the fixture app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);

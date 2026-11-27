@@ -12,7 +12,7 @@
 //!    (Python's phases 3.1 and 3.2).
 //! 2. Task options: the rules of each registered task's options that the
 //!    task attribute checks at compile time, for a task registered by hand,
-//!    and Python's text rule of each `auto_retry_for` code
+//!    and Python's text rule of each `retry_for` code
 //!    (`check_error_code_text`).
 //! 3. Schedules (not for a worker, which never sends a scheduled task): per
 //!    enabled schedule, its task, its queue, its input read back with the
@@ -35,7 +35,7 @@ use horsies_core::{
 };
 
 use crate::process_state::refuse_in_a_fork;
-use crate::{AppRole, ErrorCode, Horsies, HorsiesError, ValidationReport};
+use crate::{AppRole, Horsies, HorsiesError, HorsiesErrorCode, ValidationReport};
 
 /// The check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,10 +50,10 @@ impl CheckPassed {
         self.task_count
     }
 
-    /// The error codes that each task declares (`UserErrorCode::CODES` of
+    /// The error codes that each task declares (`CustomErrorCode::CODES` of
     /// its code type), by task name, for each task that declares at least
     /// one. Each one is a value of the `error_code` metric label of its
-    /// task; another user code of the task counts as `undeclared`.
+    /// task; another custom code of the task counts as `undeclared`.
     pub fn declared_error_codes(&self) -> &BTreeMap<String, &'static [&'static str]> {
         &self.declared_error_codes
     }
@@ -81,45 +81,6 @@ impl std::fmt::Display for CheckPassed {
         }
     }
 }
-
-/// The refusals of the first phase of the check that refused, each with
-/// its code, notes and help.
-#[derive(Debug, Clone)]
-pub struct CheckReport {
-    report: ValidationReport,
-}
-
-impl CheckReport {
-    /// A report of `errors`, which hold at least one refusal.
-    pub(crate) fn of(phase: &str, errors: Vec<HorsiesError>) -> Self {
-        assert!(!errors.is_empty(), "a check report holds a refusal");
-        let mut report = ValidationReport::new(phase);
-        for error in errors {
-            report.add(error);
-        }
-        Self { report }
-    }
-
-    /// The refusals, in the order the phase found them.
-    pub fn errors(&self) -> &[HorsiesError] {
-        &self.report.errors
-    }
-
-    /// The phase that refused: `check`, `worker-startup` or
-    /// `scheduler-startup`.
-    pub fn phase(&self) -> &str {
-        &self.report.phase_name
-    }
-}
-
-impl std::fmt::Display for CheckReport {
-    /// Each refusal, then the count (Python `format_rust_style`).
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.report)
-    }
-}
-
-impl std::error::Error for CheckReport {}
 
 /// The phase name of `horsies check` (Python's report name).
 pub(crate) const CHECK: &str = "check";
@@ -152,9 +113,9 @@ impl Horsies {
     /// The static check: the phases of the module docs for the role of
     /// this process (a worker skips the schedules). No I/O.
     ///
-    /// Errors: [`CheckReport`] with the refusals of the first phase that
+    /// Errors: [`ValidationReport`] with the refusals of the first phase that
     /// refused.
-    pub fn check(&self) -> Result<CheckPassed, CheckReport> {
+    pub fn check(&self) -> Result<CheckPassed, ValidationReport> {
         self.check_scope(CheckScope::of_role(self.role()), CHECK)
     }
 
@@ -163,14 +124,14 @@ impl Horsies {
     /// writes nothing but the LISTEN probe's one NOTIFY in PgBouncer
     /// transaction mode. Installs no schema.
     ///
-    /// Errors: [`CheckReport`] with the refusals of the first phase that
+    /// Errors: [`ValidationReport`] with the refusals of the first phase that
     /// refused.
     ///
     /// # Panics
     ///
     /// After the static check passed, in a process that was forked without
     /// `exec` after the core's process runtime started. Nothing connected.
-    pub async fn check_live(&self) -> Result<CheckPassed, CheckReport> {
+    pub async fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let passed = self.check()?;
         refuse_in_a_fork(format_args!("Horsies::check_live"));
         let broker = match self.handle().broker().await {
@@ -182,7 +143,7 @@ impl Horsies {
         }
         match check_worker_connections(self.config(), &broker).await {
             errors if errors.is_empty() => Ok(passed),
-            errors => Err(CheckReport::of(CHECK, errors)),
+            errors => Err(ValidationReport::of(CHECK, errors)),
         }
     }
 
@@ -192,14 +153,14 @@ impl Horsies {
         &self,
         scope: CheckScope,
         phase: &'static str,
-    ) -> Result<CheckPassed, CheckReport> {
+    ) -> Result<CheckPassed, ValidationReport> {
         let workflow_errors = self.workflow_check_findings();
         if !workflow_errors.is_empty() {
-            return Err(CheckReport::of(phase, workflow_errors));
+            return Err(ValidationReport::of(phase, workflow_errors));
         }
         let option_errors = task_option_refusals(self.tasks().iter());
         if !option_errors.is_empty() {
-            return Err(CheckReport::of(phase, option_errors));
+            return Err(ValidationReport::of(phase, option_errors));
         }
         let schedule_errors = match (scope, &self.config().schedule) {
             (CheckScope::WithoutSchedules, _) | (CheckScope::WithSchedules, None) => Vec::new(),
@@ -210,7 +171,7 @@ impl Horsies {
                 task_count: self.tasks().len(),
                 declared_error_codes: declared_error_codes(self.tasks().iter()),
             }),
-            false => Err(CheckReport::of(phase, schedule_errors)),
+            false => Err(ValidationReport::of(phase, schedule_errors)),
         }
     }
 }
@@ -228,11 +189,11 @@ fn declared_error_codes<'a>(
 
 /// The report of a failed connect or ping (Python
 /// `_check_broker_connectivity`). Pure.
-pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
-    CheckReport::of(
+pub(crate) fn connectivity_report(cause: &str) -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")
-            .with_code(ErrorCode::BrokerInvalidUrl)
+            .with_code(HorsiesErrorCode::DatabaseInvalidUrl)
             .with_note(cause.to_owned())
             .with_help("check database_url in PostgresConfig")],
     )
@@ -241,7 +202,7 @@ pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
 /// The report of a refused connectivity step, with Python's two answers:
 /// the listener probe's, and the connectivity failure's for every other
 /// step. Pure.
-fn refusal_report(refused: &ConnectivityRefusal) -> CheckReport {
+fn refusal_report(refused: &ConnectivityRefusal) -> ValidationReport {
     match refused {
         ConnectivityRefusal::ListenerNotCapable(failure) => listener_report(&failure.to_string()),
         ConnectivityRefusal::PoolSettings(_)
@@ -253,17 +214,17 @@ fn refusal_report(refused: &ConnectivityRefusal) -> CheckReport {
 /// The report of a session URL that does not deliver a NOTIFY to a LISTEN
 /// in PgBouncer transaction mode (Python `_run_listener_probe`), with the
 /// probe's cause as a second note. Pure.
-fn listener_report(cause: &str) -> CheckReport {
-    CheckReport::of(
+fn listener_report(cause: &str) -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker listener capability check failed")
-            .with_code(ErrorCode::BrokerInvalidUrl)
+            .with_code(HorsiesErrorCode::DatabaseInvalidUrl)
             .with_note(
-                "session_database_url appears to be transaction-pooled; LISTEN notification \
-                 was not delivered",
+                "the session_database URL appears to be transaction-pooled; LISTEN \
+                 notification was not delivered",
             )
             .with_note(cause.to_owned())
-            .with_help("use a direct/session-capable Postgres URL for session_database_url")],
+            .with_help("set session_database to a separate direct/session-capable Postgres URL")],
     )
 }
 
@@ -307,16 +268,16 @@ fn options_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
             "give the retry policy a valid backoff strategy and intervals",
         ));
     }
-    match (&options.retry_policy, &options.auto_retry_for) {
+    match (&options.retry_policy, &options.retry_for) {
         (_, Some(codes)) if codes.is_empty() => refusals.push(option_error(
             name,
-            "auto_retry_for must not be empty".to_owned(),
+            "retry_for must not be empty".to_owned(),
             "list at least one error code that retries the task",
         )),
         (Some(_), None) => refusals.push(option_error(
             name,
-            "retry_policy requires auto_retry_for".to_owned(),
-            "list the error codes that retry the task in auto_retry_for",
+            "retry_policy requires retry_for".to_owned(),
+            "list the error codes that retry the task in retry_for",
         )),
         (None, None) | (_, Some(_)) => {}
     }
@@ -325,13 +286,13 @@ fn options_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
     refusals
 }
 
-/// The refusal of each `auto_retry_for` code whose text the retry code rule
+/// The refusal of each `retry_for` code whose text the retry code rule
 /// refuses (`check_error_code_text`), with Python's text. Python checks the
 /// text of each code, a built-in code's value included, when the
 /// `RetryPolicy` is built (`validate_error_code_fields`). Pure.
 fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
     options
-        .auto_retry_for
+        .retry_for
         .iter()
         .flatten()
         .filter_map(|code| {
@@ -339,9 +300,9 @@ fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
             check_error_code_text(&text).err().map(|refusal| {
                 option_error(
                     name,
-                    refusal.message("auto_retry_for", &text),
-                    "name each auto_retry_for code in UPPER_SNAKE_CASE, as the codes of a \
-                     UserErrorCode type are named",
+                    refusal.message("retry_for", &text),
+                    "name each retry_for code in UPPER_SNAKE_CASE, as the codes of a \
+                     CustomErrorCode type are named",
                 )
             })
         })
@@ -385,7 +346,7 @@ fn class_refusal(name: &str, options: &TaskOptions) -> Option<HorsiesError> {
 
 fn option_error(name: &str, message: String, help: &str) -> HorsiesError {
     HorsiesError::new(message)
-        .with_code(ErrorCode::TaskInvalidOptions)
+        .with_code(HorsiesErrorCode::TaskInvalidOptions)
         .with_note(format!("task '{name}'"))
         .with_help(help)
 }
@@ -395,7 +356,9 @@ mod tests {
     use std::sync::Arc;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
-    use horsies_core::{CancelGraceMs, RetryPolicy, TaskErrorCode, TaskResult, UserCode};
+    use horsies_core::{
+        CustomCode, RetryPolicy, TaskErrorCode, TaskResult, DEFAULT_CANCEL_GRACE_MS,
+    };
 
     use super::*;
     use crate::AppConfig;
@@ -411,9 +374,9 @@ mod tests {
     fn options(name: &str) -> TaskOptions {
         TaskOptions {
             task_name: name.to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: Execution::Isolated,
@@ -442,7 +405,7 @@ mod tests {
         let shared = TaskOptions {
             execution: Execution::SharedAsync,
             timeout_ms: Some(5_000),
-            cancel_grace_ms: Some(CancelGraceMs::DEFAULT),
+            cancel_grace_ms: Some(DEFAULT_CANCEL_GRACE_MS),
             ..options("echo")
         };
         assert!(refusal_texts("echo", &shared).is_empty());
@@ -453,7 +416,7 @@ mod tests {
     /// refusal of the static check, not the connectivity refusal.
     #[tokio::test]
     async fn the_live_check_refuses_with_the_static_check_before_any_connect() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://postgres@127.0.0.1:1/horsies",
         ))
         .unwrap();
@@ -463,21 +426,21 @@ mod tests {
         };
         app.register("bad_retry", task(policy_only)).unwrap();
         let report = app.check_live().await.unwrap_err();
-        assert_eq!(report.phase(), CHECK);
+        assert_eq!(report.phase_name(), CHECK);
         let messages: Vec<&str> = report
-            .errors()
+            .refusals()
             .iter()
             .map(|error| error.message.as_str())
             .collect();
         assert!(
-            messages.contains(&"retry_policy requires auto_retry_for"),
+            messages.contains(&"retry_policy requires retry_for"),
             "{messages:?}"
         );
         assert!(
             report
-                .errors()
+                .refusals()
                 .iter()
-                .all(|error| error.code != Some(ErrorCode::BrokerInvalidUrl)),
+                .all(|error| error.code != Some(HorsiesErrorCode::DatabaseInvalidUrl)),
             "{report}"
         );
     }
@@ -492,12 +455,12 @@ mod tests {
     #[test]
     fn retry_codes_and_policy_go_together() {
         let empty = TaskOptions {
-            auto_retry_for: Some(Vec::new()),
+            retry_for: Some(Vec::new()),
             ..options("echo")
         };
         assert_eq!(
             refusal_texts("echo", &empty),
-            vec!["auto_retry_for must not be empty"]
+            vec!["retry_for must not be empty"]
         );
         let policy_only = TaskOptions {
             retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
@@ -505,10 +468,10 @@ mod tests {
         };
         assert_eq!(
             refusal_texts("echo", &policy_only),
-            vec!["retry_policy requires auto_retry_for"]
+            vec!["retry_policy requires retry_for"]
         );
         let both = TaskOptions {
-            auto_retry_for: Some(vec![TaskErrorCode::from(
+            retry_for: Some(vec![TaskErrorCode::from(
                 horsies_core::OutcomeCode::TaskTimeout,
             )]),
             ..policy_only
@@ -516,34 +479,34 @@ mod tests {
         assert!(refusal_texts("echo", &both).is_empty());
     }
 
-    /// A user code accepts any text that is not a built-in or reserved name
-    /// (`UserCode::parse`, Python's `TaskError` rule); `auto_retry_for`
+    /// A custom code accepts any text that is not a built-in or reserved name
+    /// (`CustomCode::parse`, Python's `TaskError` rule); `retry_for`
     /// takes only the codes of the retry code rule, as Python's
     /// `RetryPolicy` does.
     #[test]
     fn a_retry_code_outside_the_retry_code_rule_is_refused_with_python_s_text() {
         let codes: Vec<TaskErrorCode> = ["my_error", "RateLimitError", "", "RATE_LIMITED"]
             .into_iter()
-            .map(|text| TaskErrorCode::User(UserCode::parse(text).expect("a user code")))
+            .map(|text| TaskErrorCode::Custom(CustomCode::parse(text).expect("a custom code")))
             .chain([TaskErrorCode::from(horsies_core::OutcomeCode::TaskTimeout)])
             .collect();
         let refused = TaskOptions {
             retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
-            auto_retry_for: Some(codes),
+            retry_for: Some(codes),
             ..options("echo")
         };
         assert_eq!(
             refusal_texts("echo", &refused),
             vec![
-                "auto_retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
+                "retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
                  RATE_LIMITED)",
-                "auto_retry_for 'RateLimitError' looks like an exception class name; retry \
+                "retry_for 'RateLimitError' looks like an exception class name; retry \
                  matching is error-code-only, use UPPER_SNAKE_CASE code names",
-                "auto_retry_for must be a non-empty string, got ''",
+                "retry_for must be a non-empty string, got ''",
             ]
         );
         let error = &options_refusals("echo", &refused)[0];
-        assert_eq!(error.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(error.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert_eq!(error.notes, vec!["task 'echo'"]);
     }
 
@@ -561,7 +524,7 @@ mod tests {
             (
                 Execution::SharedThread,
                 Some(1_000),
-                Some(CancelGraceMs::DEFAULT),
+                Some(DEFAULT_CANCEL_GRACE_MS),
                 "is for SHARED_ASYNC and ISOLATED tasks",
             ),
         ];
@@ -582,7 +545,7 @@ mod tests {
     /// cancel), or none.
     #[test]
     fn an_isolated_task_takes_a_cancel_grace_or_none() {
-        for cancel_grace_ms in [Some(CancelGraceMs::DEFAULT), None] {
+        for cancel_grace_ms in [Some(DEFAULT_CANCEL_GRACE_MS), None] {
             let accepted = TaskOptions {
                 execution: Execution::Isolated,
                 timeout_ms: None,
@@ -613,7 +576,7 @@ mod tests {
 
     #[test]
     fn an_app_with_no_task_passes_and_counts_none() {
-        let app = Horsies::new(AppConfig::for_database_url(
+        let app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
@@ -628,7 +591,7 @@ mod tests {
 
     #[test]
     fn the_check_reports_the_declared_codes_of_each_task_in_name_order() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
@@ -651,12 +614,12 @@ mod tests {
 
     #[test]
     fn a_report_names_its_phase_and_each_refusal() {
-        let report = CheckReport::of(
+        let report = ValidationReport::of(
             "worker-startup",
             vec![HorsiesError::new("first"), HorsiesError::new("second")],
         );
-        assert_eq!(report.phase(), "worker-startup");
-        assert_eq!(report.errors().len(), 2);
+        assert_eq!(report.phase_name(), "worker-startup");
+        assert_eq!(report.refusals().len(), 2);
         assert!(report
             .to_string()
             .ends_with("aborting due to 2 previous errors"));
@@ -680,9 +643,9 @@ mod tests {
             horsies_core::ListenProbeFailure::Interrupted(horsies_core::CheckInterruption::Stopped),
         );
         let report = refusal_report(&refused);
-        let error = &report.errors()[0];
+        let error = &report.refusals()[0];
         assert_eq!(error.message, "broker listener capability check failed");
-        assert_eq!(error.code, Some(ErrorCode::BrokerInvalidUrl));
+        assert_eq!(error.code, Some(HorsiesErrorCode::DatabaseInvalidUrl));
         assert!(error.notes[0].contains("transaction-pooled"));
         assert_eq!(error.notes[1], "the listener stopped during the probe");
     }
@@ -690,7 +653,10 @@ mod tests {
     #[test]
     fn a_failed_connect_is_python_s_connectivity_refusal() {
         let report = connectivity_report("connection refused");
-        assert_eq!(report.errors()[0].code, Some(ErrorCode::BrokerInvalidUrl));
-        assert_eq!(report.errors()[0].notes, vec!["connection refused"]);
+        assert_eq!(
+            report.refusals()[0].code,
+            Some(HorsiesErrorCode::DatabaseInvalidUrl)
+        );
+        assert_eq!(report.refusals()[0].notes, vec!["connection refused"]);
     }
 }

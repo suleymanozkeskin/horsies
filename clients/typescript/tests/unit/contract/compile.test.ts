@@ -134,11 +134,11 @@ describe("compileContract", () => {
   });
 
   test("the kind of a parameter with a refused name is still checked", () => {
-    const contract = defineTask({ name: "t", input: { workflow_ctx: h.float().default(Number.NaN) }, output: h.null() });
+    const contract = defineTask({ name: "t", input: { workflow_context: h.float().default(Number.NaN) }, output: h.null() });
 
     assert.deepEqual(refusalsOf(contract), [
-      ["ParameterName", "input.workflow_ctx"],
-      ["WireKind", "input.workflow_ctx"],
+      ["ParameterName", "input.workflow_context"],
+      ["WireKind", "input.workflow_context"],
     ]);
   });
 

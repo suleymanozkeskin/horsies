@@ -35,10 +35,10 @@ impl WorkflowDefinition for CatalogImport {
                 catalog_import_chunk::node()
                     .node_id(format!("chunk_{chunk_index:02}"))
                     .set(
-                        catalog_import_chunk::params::import_id(),
+                        catalog_import_chunk::fields::import_id(),
                         IMPORT_ID.to_owned(),
                     )?
-                    .set(catalog_import_chunk::params::chunk_index(), chunk_index)?,
+                    .set(catalog_import_chunk::fields::chunk_index(), chunk_index)?,
             )?;
         }
         Ok(WorkflowDefinitionConfig::new())

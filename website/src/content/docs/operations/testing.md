@@ -61,11 +61,11 @@ def describe(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
 @app.task('summarize')
 def summarize(
     *,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
-    if workflow_ctx is None:
-        return Err(TaskError(error_code='NO_CTX', message='Missing context'))
-    match workflow_ctx.result_for(FIRST_KEY):
+    if workflow_context is None:
+        return Err(TaskError(code='NO_CTX', message='Missing context'))
+    match workflow_context.result_for(FIRST_KEY):
         case Succeeded(first):
             return Ok(first)
         case Failed(error):
@@ -104,7 +104,7 @@ To test the failure path, pass `Failed(TaskError(...))`.
 
 ### Build a Workflow Context
 
-`WorkflowContext.from_serialized(...)` builds the context that a worker gives to a task with a `workflow_ctx` parameter.
+`WorkflowContext.from_serialized(...)` builds the context that a worker gives to a task with a `workflow_context` parameter.
 
 ```python
 from horsies import Succeeded, WorkflowContext
@@ -119,7 +119,7 @@ def test_workflow_context() -> None:
         task_name='summarize',
         results_by_node_id={FIRST_KEY.node_id: Succeeded(7)},
     )
-    assert summarize(workflow_ctx=ctx) == Ok(7)
+    assert summarize(workflow_context=ctx) == Ok(7)
 ```
 
 | Parameter | Type | Description |
@@ -184,7 +184,7 @@ def test_send_refuses_task_outcome() -> None:
     assert isinstance(sent.err_value, TaskSendValidationFailed)
 ```
 
-The same check applies to `workflow_ctx` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_ctx` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
+The same check applies to `workflow_context` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_context` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
 
 ## Suppress Sends
 
@@ -209,8 +209,8 @@ Rules:
 
 - The variable is read on each send. The value must be exactly `1` after trimming spaces. Any other value does not suppress.
 - The effect is local to the process. It does not affect other producers or workers.
-- It applies to `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`.
-- The retry methods refuse a `TaskSendSuppressed` error.
+- It applies to `.send()` and `.send_async()`, with or without `with_options(...)`.
+- The resend methods refuse a `TaskSendSuppressed` error.
 - Horsies turns on the same suppression by itself when it imports modules in a worker or scheduler, and during `app.check()`. A `.send()` at module level is a no-op in those phases.
 
 Code under test must treat `Err(TaskSendSuppressed)` as a normal return. A test that needs `Ok(handle)` needs a database.

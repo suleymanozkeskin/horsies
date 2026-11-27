@@ -37,14 +37,14 @@ PARENT_NAME: Final = 'tests.extension.parent'
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://extension@127.0.0.1:1/never_connected'),
         ),
     ),
 )
 
 
-@APP.task(task_name='tests.extension.value')
+@APP.task(name='tests.extension.value')
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -58,7 +58,7 @@ class ExtensionChild(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
         _ = (args, params)
-        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        node = TaskNode(function=value_task, kwargs={'value': 1})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
@@ -87,7 +87,7 @@ def subworkflow_start_request(workflow_id: uuid.UUID) -> WorkflowStartRequest:
         spec_json=spec_json,
         workflow_id=workflow_id,
         sent_at=datetime.now(UTC),
-        resend_on_transient_err=False,
+        resend_on_transient_error=False,
         trace=NoTraceCarrier(),
     )
 

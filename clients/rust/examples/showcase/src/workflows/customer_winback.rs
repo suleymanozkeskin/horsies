@@ -31,15 +31,15 @@ impl WorkflowDefinition for CustomerWinback {
             abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
-                    abandoned_cart_sweep::params::older_than_minutes(),
+                    abandoned_cart_sweep::fields::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?,
         )?;
         let blast = builder.task(
             winback_blast::node()
                 .node_id("winback_blast")
-                .set(winback_blast::params::segment(), SEGMENT.to_owned())?
-                .arg_from(winback_blast::params::sweep(), sweep),
+                .set(winback_blast::fields::segment(), SEGMENT.to_owned())?
+                .arg_from(winback_blast::fields::sweep(), sweep),
         )?;
         Ok(WorkflowDefinitionConfig::new().output(blast))
     }

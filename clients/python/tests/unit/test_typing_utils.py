@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Result
@@ -56,7 +56,7 @@ def _plain_fn(x: int, y: str) -> str:
     return f"{x}{y}"  # pragma: no cover
 
 
-def _fn_with_workflow_ctx(workflow_ctx: Any, x: int) -> None:
+def _fn_with_workflow_ctx(workflow_context: Any, x: int) -> None:
     pass  # pragma: no cover
 
 
@@ -102,7 +102,7 @@ class TestGetInspectTarget:
         def original() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -115,7 +115,7 @@ class TestGetInspectTarget:
         def wrapper() -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = "not_callable"  # type: ignore[attr-defined]
+        wrapper._original_function = "not_callable"  # type: ignore[attr-defined]
 
         # Act
         result = _get_inspect_target(wrapper)
@@ -184,7 +184,7 @@ class TestGetSignature:
         def wrapper(*args: Any, **kwargs: Any) -> None:
             pass  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         sig = _get_signature(wrapper)
@@ -344,7 +344,7 @@ class TestResolvedTypeHints:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             ...  # pragma: no cover
 
-        wrapper._original_fn = original  # type: ignore[attr-defined]
+        wrapper._original_function = original  # type: ignore[attr-defined]
 
         # Act
         hints = _resolved_type_hints(wrapper)
@@ -696,7 +696,7 @@ class TestResolveSourceNodeOkType:
         mock_fn.task_ok_type = int
 
         node = MagicMock(spec=TaskNode)
-        node.fn = mock_fn
+        node.function = mock_fn
 
         # Act
         with patch(
@@ -790,7 +790,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert "config.output" in exc_info.value.message
         assert "WorkflowDefinition[int]" in exc_info.value.message
 
@@ -876,7 +876,7 @@ class TestValidateWorkflowGenericOutputMatch:
             with pytest.raises(WorkflowValidationError) as exc_info:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_compatible_types_no_error(self) -> None:
         # Arrange

@@ -70,12 +70,12 @@ pub enum BodyForm {
 }
 
 /// Whether the child host writes the workflow context into the input of a
-/// task (`build_task_input`, `accepts_workflow_ctx`).
+/// task (`build_task_input`, `accepts_workflow_context`).
 #[napi(string_enum = "UPPER_SNAKE")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskContextUse {
     /// A task with `workflowContext: true`: the core writes the
-    /// `workflow_ctx` member for a node that names `workflowContextFrom`.
+    /// `workflow_context` member for a node that names `workflowContextFrom`.
     TakesContext,
     /// Any other task: the core removes the member.
     NoContext,
@@ -205,7 +205,7 @@ pub fn child_arguments(process_arguments: Vec<String>) -> Envelope<ChildArgument
             Ok(ArgumentsRead::Bad { cause }) => {
                 Envelope::Value(ChildArgumentsCheck::BadArguments {
                     cause,
-                    code: ChildHostExit::BadArguments.code(),
+                    code: ChildHostExit::BadArguments.exit_code(),
                 })
             }
             Err(thrown) => Envelope::Thrown(thrown),
@@ -256,7 +256,7 @@ fn resolve_once(slot: &Mutex<Option<ServeDeferred>>, envelope: Envelope<ChildSer
 
 /// Start the host thread with a duplicate of the child's socket; a socket
 /// that the OS refuses to duplicate or a thread that the OS refuses resolves
-/// with `CORE_START_FAILED`, and nothing runs.
+/// with `RUNTIME_START_FAILED`, and nothing runs.
 fn start_host(deferred: ServeDeferred, served: ServedApp) {
     let ServedApp {
         app,
@@ -269,7 +269,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
         Err(error) => {
             resolve_once(
                 &slot,
-                Envelope::Thrown(NativeThrown::CoreStartFailed {
+                Envelope::Thrown(NativeThrown::RuntimeStartFailed {
                     cause: format!("the child socket could not be kept open: {error}"),
                 }),
             );
@@ -286,7 +286,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
     if let Err(error) = started {
         resolve_once(
             &slot,
-            Envelope::Thrown(NativeThrown::CoreStartFailed {
+            Envelope::Thrown(NativeThrown::RuntimeStartFailed {
                 cause: format!("the child host thread did not start: {error}"),
             }),
         );
@@ -296,7 +296,7 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
 /// The end record of the host's exit. Pure.
 fn serve_end(exit: ChildHostExit) -> ChildServeEnd {
     ChildServeEnd {
-        code: exit.code(),
+        code: exit.exit_code(),
         exit: ChildExitName::of(exit),
     }
 }
@@ -410,11 +410,11 @@ fn task_registry(
 }
 
 /// `registered` with the context use of its entry: a task that takes the
-/// context accepts the `workflow_ctx` member; another task keeps the
+/// context accepts the `workflow_context` member; another task keeps the
 /// default, which removes it. Pure.
 fn with_context_use(registered: RegisteredTask, context: TaskContextUse) -> RegisteredTask {
     match context {
-        TaskContextUse::TakesContext => registered.with_workflow_ctx(),
+        TaskContextUse::TakesContext => registered.with_workflow_context(),
         TaskContextUse::NoContext => registered,
     }
 }
@@ -455,12 +455,16 @@ mod tests {
 
     #[test]
     fn a_task_that_takes_the_context_accepts_the_workflow_context() {
-        assert!(with_context_use(echo_task(), TaskContextUse::TakesContext).accepts_workflow_ctx());
+        assert!(
+            with_context_use(echo_task(), TaskContextUse::TakesContext).accepts_workflow_context()
+        );
     }
 
     #[test]
     fn a_task_that_takes_no_context_does_not_accept_the_workflow_context() {
-        assert!(!with_context_use(echo_task(), TaskContextUse::NoContext).accepts_workflow_ctx());
+        assert!(
+            !with_context_use(echo_task(), TaskContextUse::NoContext).accepts_workflow_context()
+        );
     }
 
     #[test]

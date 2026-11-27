@@ -45,7 +45,7 @@ from horsies._catalog.manifest import (
     TcpUserTimeoutConfigSystemDefault,
     dump_producer_manifest,
 )
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.history.identity.keys import (
     IDEMPOTENCY_WINDOW_MAX,
@@ -57,12 +57,14 @@ from horsies.core.manifest import (
     core_database_url,
     install_coverage_of,
     reservation_window_micros,
-    schema_mode_of,
     tcp_keepalives_of,
     tcp_user_timeout_of,
     to_producer_manifest,
+    wire_schema_mode,
 )
+from horsies.core.models import broker as broker_config
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode as AppSchemaMode
 
 pytestmark = [pytest.mark.unit]
 
@@ -72,19 +74,16 @@ SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
 # PostgresConfig field -> the manifest path it fills.
 MAPPED_FIELDS: Final[dict[str, str]] = {
     'database_url': 'database.database_url',
-    'session_database_url': 'database.session_database',
+    'session_database': 'database.session_database',
     'pgbouncer_transaction_mode': 'database.pgbouncer_transaction_mode',
     'pool_pre_ping': 'database.pool_pre_ping',
     'pool_size': 'database.pool_size',
     'max_overflow': 'database.max_overflow',
-    'pool_timeout': 'database.pool_timeout',
+    'pool_timeout_seconds': 'database.pool_timeout_seconds',
     'pool_recycle': 'database.pool_recycle',
     'echo': 'database.echo',
     'tcp_keepalives': 'database.tcp_keepalives',
-    'tcp_keepalives_idle': 'database.tcp_keepalives.idle_seconds',
-    'tcp_keepalives_interval': 'database.tcp_keepalives.interval_seconds',
-    'tcp_keepalives_count': 'database.tcp_keepalives.probes',
-    'tcp_user_timeout_ms': 'database.tcp_user_timeout',
+    'tcp_user_timeout': 'database.tcp_user_timeout',
     'retain_rerun_input_default': 'send.retain_rerun_input_default',
 }
 
@@ -107,19 +106,20 @@ MAX_DOCUMENT_DEPTH: Final = 8
 def _config_with_every_value_set() -> PostgresConfig:
     return PostgresConfig(
         database_url=SecretStr(MAIN_URL),
-        session_database_url=SecretStr(SESSION_URL),
+        session_database=broker_config.SessionDatabaseSeparate(url=SecretStr(SESSION_URL)),
         pgbouncer_transaction_mode=True,
         pool_pre_ping=False,
         pool_size=7,
         max_overflow=3,
-        pool_timeout=11,
-        pool_recycle=600,
+        pool_timeout_seconds=11,
+        pool_recycle=broker_config.PoolRecycleAfterSeconds(seconds=600),
         echo=True,
-        tcp_keepalives=True,
-        tcp_keepalives_idle=45,
-        tcp_keepalives_interval=7,
-        tcp_keepalives_count=5,
-        tcp_user_timeout_ms=1500,
+        tcp_keepalives=broker_config.TcpKeepalivesOn(
+            idle_seconds=45,
+            interval_seconds=7,
+            probes=5,
+        ),
+        tcp_user_timeout=broker_config.TcpUserTimeoutAfter(milliseconds=1500),
         retain_rerun_input_default=True,
     )
 
@@ -179,7 +179,7 @@ def test_a_config_resolves_field_by_field() -> None:
             pool_pre_ping=False,
             pool_size=7,
             max_overflow=3,
-            pool_timeout=11,
+            pool_timeout_seconds=11,
             pool_recycle=PoolRecycleAfterSeconds(seconds=600),
             echo=True,
             tcp_keepalives=TcpKeepalivesConfigOn(
@@ -213,7 +213,7 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
             'pool_pre_ping': True,
             'pool_size': 5,
             'max_overflow': 10,
-            'pool_timeout': 30,
+            'pool_timeout_seconds': 30,
             'pool_recycle': {'kind': 'AFTER_SECONDS', 'seconds': 1800},
             'echo': False,
             'tcp_keepalives': {
@@ -233,7 +233,7 @@ def test_the_dump_is_the_json_document_the_core_parses() -> None:
     assert manifest.database.session_database == SessionDatabaseSameAsDatabaseUrl()
 
 
-def _database_of(field: str, value: int) -> DatabaseManifest:
+def _database_of(field: str, value: object) -> DatabaseManifest:
     """The database manifest of a config with `field` set to `value`."""
     config = PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
     return to_producer_manifest(
@@ -247,8 +247,20 @@ def _refusal_of(field: str, value: int) -> ConfigurationError:
     with pytest.raises(ConfigurationError) as raised:
         PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
     error = raised.value
-    assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+    assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
     assert f'got: {field}={value}' in error.notes
+    return error
+
+
+def _recycle_refusal_of(seconds: int) -> ConfigurationError:
+    with pytest.raises(ConfigurationError) as raised:
+        PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            pool_recycle=broker_config.PoolRecycleAfterSeconds(seconds=seconds),
+        )
+    error = raised.value
+    assert error.code == HorsiesErrorCode.CONFIG_INVALID_DATABASE_POOL
+    assert f'got: pool_recycle.seconds={seconds}' in error.notes
     return error
 
 
@@ -283,55 +295,51 @@ def test_an_overflow_without_meaning_is_refused(overflow: int) -> None:
     _ = _refusal_of('max_overflow', overflow)
 
 
-def test_a_pool_timeout_of_zero_means_a_checkout_does_not_wait() -> None:
-    assert _database_of('pool_timeout', 0).pool_timeout == 0
+def test_a_pool_timeout_seconds_of_zero_means_a_checkout_does_not_wait() -> None:
+    assert _database_of('pool_timeout_seconds', 0).pool_timeout_seconds == 0
 
 
 @pytest.mark.parametrize('timeout', [-1, WHOLE_SECONDS_MAX + 1])
-def test_a_pool_timeout_without_meaning_is_refused(timeout: int) -> None:
-    _ = _refusal_of('pool_timeout', timeout)
+def test_a_pool_timeout_seconds_without_meaning_is_refused(timeout: int) -> None:
+    _ = _refusal_of('pool_timeout_seconds', timeout)
 
 
-def test_a_pool_recycle_of_minus_one_is_the_never_variant() -> None:
-    assert _database_of('pool_recycle', -1).pool_recycle == PoolRecycleNever()
+def test_pool_recycle_never_is_the_never_variant() -> None:
+    assert _database_of('pool_recycle', broker_config.PoolRecycleNever()).pool_recycle == (
+        PoolRecycleNever()
+    )
 
 
 @pytest.mark.parametrize('seconds', [0, 1800, WHOLE_SECONDS_MAX])
 def test_a_pool_recycle_age_is_a_number_of_seconds(seconds: int) -> None:
-    assert _database_of('pool_recycle', seconds).pool_recycle == (
+    recycle = broker_config.PoolRecycleAfterSeconds(seconds=seconds)
+    assert _database_of('pool_recycle', recycle).pool_recycle == (
         PoolRecycleAfterSeconds(seconds=seconds)
     )
 
 
-@pytest.mark.parametrize('seconds', [-5, -2, WHOLE_SECONDS_MAX + 1])
+@pytest.mark.parametrize('seconds', [-5, -1, WHOLE_SECONDS_MAX + 1])
 def test_a_pool_recycle_without_meaning_is_refused(seconds: int) -> None:
-    _ = _refusal_of('pool_recycle', seconds)
+    _ = _recycle_refusal_of(seconds)
 
 
-def test_keepalives_off_is_the_off_variant_whatever_the_three_values() -> None:
-    config = PostgresConfig.model_validate(
-        {
-            'database_url': MAIN_URL,
-            'tcp_keepalives': False,
-            'tcp_keepalives_idle': 0,
-            'tcp_keepalives_interval': 0,
-            'tcp_keepalives_count': 0,
-        },
+def test_keepalives_off_is_the_off_variant() -> None:
+    config = PostgresConfig(
+        database_url=SecretStr(MAIN_URL),
+        tcp_keepalives=broker_config.TcpKeepalivesOff(),
     )
     assert tcp_keepalives_of(config) == TcpKeepalivesConfigOff()
 
 
 def test_a_keepalive_value_that_the_validator_refuses_is_a_defect_here() -> None:
     with pytest.raises(ConfigurationError):
-        PostgresConfig.model_validate(
-            {'database_url': MAIN_URL, 'tcp_keepalives': True, 'tcp_keepalives_idle': 0},
+        PostgresConfig(
+            database_url=SecretStr(MAIN_URL),
+            tcp_keepalives=broker_config.TcpKeepalivesOn(idle_seconds=0),
         )
     unvalidated = PostgresConfig.model_construct(
         database_url=SecretStr(MAIN_URL),
-        tcp_keepalives=True,
-        tcp_keepalives_idle=0,
-        tcp_keepalives_interval=10,
-        tcp_keepalives_count=3,
+        tcp_keepalives=broker_config.TcpKeepalivesOn(idle_seconds=0),
     )
     with pytest.raises(AssertionError, match='keepalive values'):
         tcp_keepalives_of(unvalidated)
@@ -351,10 +359,11 @@ def test_keepalive_values_at_the_core_bounds_reach_the_manifest(
 ) -> None:
     config = PostgresConfig(
         database_url=SecretStr(MAIN_URL),
-        tcp_keepalives=True,
-        tcp_keepalives_idle=seconds,
-        tcp_keepalives_interval=seconds,
-        tcp_keepalives_count=probes,
+        tcp_keepalives=broker_config.TcpKeepalivesOn(
+            idle_seconds=seconds,
+            interval_seconds=seconds,
+            probes=probes,
+        ),
     )
     manifest = to_producer_manifest(
         config,
@@ -369,42 +378,65 @@ def test_keepalive_values_at_the_core_bounds_reach_the_manifest(
 
 
 @pytest.mark.parametrize(
-    ('field', 'value'),
+    ('setting', 'path', 'value'),
     [
-        ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX + 1),
-        ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX + 1),
-        ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX + 1),
-        ('tcp_user_timeout_ms', TCP_USER_TIMEOUT_MS_MAX + 1),
+        (
+            broker_config.TcpKeepalivesOn(idle_seconds=KEEPALIVE_SECONDS_MAX + 1),
+            'tcp_keepalives.idle_seconds',
+            KEEPALIVE_SECONDS_MAX + 1,
+        ),
+        (
+            broker_config.TcpKeepalivesOn(interval_seconds=KEEPALIVE_SECONDS_MAX + 1),
+            'tcp_keepalives.interval_seconds',
+            KEEPALIVE_SECONDS_MAX + 1,
+        ),
+        (
+            broker_config.TcpKeepalivesOn(probes=KEEPALIVE_PROBES_MAX + 1),
+            'tcp_keepalives.probes',
+            KEEPALIVE_PROBES_MAX + 1,
+        ),
+        (
+            broker_config.TcpUserTimeoutAfter(milliseconds=TCP_USER_TIMEOUT_MS_MAX + 1),
+            'tcp_user_timeout.milliseconds',
+            TCP_USER_TIMEOUT_MS_MAX + 1,
+        ),
     ],
 )
 def test_a_tcp_value_past_the_core_bound_is_refused_by_the_config(
-    field: str,
+    setting: object,
+    path: str,
     value: int,
 ) -> None:
+    field = path.partition('.')[0]
     with pytest.raises(ConfigurationError) as raised:
-        PostgresConfig.model_validate({'database_url': MAIN_URL, field: value})
-    assert raised.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-    assert f'got: {field}={value}' in raised.value.notes
+        PostgresConfig.model_validate({'database_url': MAIN_URL, field: setting})
+    assert raised.value.code == HorsiesErrorCode.CONFIG_INVALID_KEEPALIVE
+    assert f'got: {path}={value}' in raised.value.notes
 
 
-def test_a_tcp_user_timeout_of_zero_is_the_system_default() -> None:
-    assert _database_of('tcp_user_timeout_ms', 0).tcp_user_timeout == (
-        TcpUserTimeoutConfigSystemDefault()
-    )
+def test_the_tcp_user_timeout_system_default_is_its_variant() -> None:
+    assert _database_of(
+        'tcp_user_timeout', broker_config.TcpUserTimeoutSystemDefault(),
+    ).tcp_user_timeout == TcpUserTimeoutConfigSystemDefault()
 
 
 @pytest.mark.parametrize('milliseconds', [1, 30_000, TCP_USER_TIMEOUT_MS_MAX])
 def test_a_tcp_user_timeout_is_a_number_of_milliseconds(milliseconds: int) -> None:
-    assert _database_of('tcp_user_timeout_ms', milliseconds).tcp_user_timeout == (
+    timeout = broker_config.TcpUserTimeoutAfter(milliseconds=milliseconds)
+    assert _database_of('tcp_user_timeout', timeout).tcp_user_timeout == (
         TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
     )
 
 
 def test_a_tcp_user_timeout_that_the_validator_refuses_is_a_defect_here() -> None:
+    zero = broker_config.TcpUserTimeoutAfter(milliseconds=0)
     with pytest.raises(ConfigurationError):
-        PostgresConfig.model_validate({'database_url': MAIN_URL, 'tcp_user_timeout_ms': -1})
-    with pytest.raises(AssertionError, match='tcp_user_timeout_ms=-1'):
-        tcp_user_timeout_of(-1)
+        PostgresConfig(database_url=SecretStr(MAIN_URL), tcp_user_timeout=zero)
+    unvalidated = PostgresConfig.model_construct(
+        database_url=SecretStr(MAIN_URL), tcp_user_timeout=zero,
+    )
+    with pytest.raises(AssertionError, match='tcp_user_timeout.milliseconds=0'):
+        tcp_user_timeout_of(unvalidated)
 
 
 def test_a_url_with_another_scheme_is_a_defect_named_without_its_password() -> None:
@@ -463,32 +495,25 @@ def test_a_window_that_the_validator_refuses_is_a_defect_here(window: timedelta)
 
 
 @pytest.mark.parametrize(
-    ('run_schema_migrations', 'assume_initialized', 'mode'),
+    ('app_mode', 'mode'),
     [
-        (True, False, 'MIGRATE_AND_VALIDATE'),
-        (False, False, 'OBSERVE_ONLY'),
-        (True, True, 'ASSUME_INITIALIZED'),
-        (False, True, 'ASSUME_INITIALIZED'),
+        (AppSchemaMode.MIGRATE_AND_VALIDATE, 'MIGRATE_AND_VALIDATE'),
+        (AppSchemaMode.OBSERVE_ONLY, 'OBSERVE_ONLY'),
+        (AppSchemaMode.ASSUME_INITIALIZED, 'ASSUME_INITIALIZED'),
     ],
 )
-def test_the_broker_flags_give_one_schema_mode(
-    run_schema_migrations: bool,
-    assume_initialized: bool,
+def test_each_schema_mode_has_its_manifest_text(
+    app_mode: AppSchemaMode,
     mode: SchemaMode,
 ) -> None:
-    assert (
-        schema_mode_of(
-            run_schema_migrations=run_schema_migrations,
-            assume_initialized=assume_initialized,
-        )
-        == mode
-    )
+    assert wire_schema_mode(app_mode) == mode
+    assert app_mode.value == mode
 
 
 def test_an_assume_initialized_manifest_dumps_its_mode() -> None:
     manifest = to_producer_manifest(
         PostgresConfig(database_url=SecretStr(MAIN_URL)),
-        schema=schema_mode_of(run_schema_migrations=True, assume_initialized=True),
+        schema=wire_schema_mode(AppSchemaMode.ASSUME_INITIALIZED),
         idempotency_reservation_window=timedelta(hours=24),
     )
     document: object = json.loads(dump_producer_manifest(manifest))

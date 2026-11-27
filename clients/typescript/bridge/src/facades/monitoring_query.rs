@@ -119,7 +119,7 @@ pub enum ErrorCategoryArg {
     Contract,
     Retrieval,
     Outcome,
-    Domain,
+    Custom,
 }
 
 /// A count of a query: the core's default (of `TaskListQuery::new`,
@@ -437,7 +437,7 @@ const fn error_category(value: ErrorCategoryArg) -> ErrorCategory {
         ErrorCategoryArg::Contract => ErrorCategory::Contract,
         ErrorCategoryArg::Retrieval => ErrorCategory::Retrieval,
         ErrorCategoryArg::Outcome => ErrorCategory::Outcome,
-        ErrorCategoryArg::Domain => ErrorCategory::Domain,
+        ErrorCategoryArg::Custom => ErrorCategory::Custom,
     }
 }
 
@@ -731,7 +731,7 @@ mod tests {
             ErrorCategoryArg::Contract,
             ErrorCategoryArg::Retrieval,
             ErrorCategoryArg::Outcome,
-            ErrorCategoryArg::Domain,
+            ErrorCategoryArg::Custom,
         ];
         assert_eq!(error_categories(&categories), ErrorCategory::ALL.to_vec());
     }

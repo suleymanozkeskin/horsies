@@ -127,7 +127,7 @@ class Ok(Generic[T]):
         """
         return self._value
 
-    def unwrap_or_raise(self, e: object) -> T:
+    def unwrap_or_raise(self, exception: object) -> T:
         """
         Return the value.
         """
@@ -334,11 +334,11 @@ class Err(Generic[E]):
         """
         return op(self._value)
 
-    def unwrap_or_raise(self, e: Type[TBE]) -> NoReturn:
+    def unwrap_or_raise(self, exception: Type[TBE]) -> NoReturn:
         """
         The contained result is ``Err``, so raise the exception with the value.
         """
-        raise e(self._value)
+        raise exception(self._value)
 
     def map(self, op: object) -> Err[E]:
         """

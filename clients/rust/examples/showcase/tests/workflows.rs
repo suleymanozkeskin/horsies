@@ -13,8 +13,8 @@ use acme_showcase::workflows::{order_fulfillment, ALL_WORKFLOW_NAMES};
 use acme_showcase::{simulate, tuning};
 use chrono::Utc;
 use horsies::{
-    IntervalSchedule, ScheduleConfig, SchedulePattern, SchemaMode, TaskOutcome, TaskSchedule,
-    UserCode, WaitLimit, WorkflowReadError,
+    CustomCode, IntervalSchedule, ScheduleConfig, SchedulePattern, SchemaMode, TaskOutcome,
+    TaskSchedule, WaitLimit, WorkflowReadError,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -97,7 +97,7 @@ async fn seed_successful_order(store: &Store, prefix: &str, stock: i32, quantity
 async fn run_order(
     order: Order,
     url: &str,
-) -> Result<TaskOutcome<PaymentCapture, UserCode>, WorkflowReadError> {
+) -> Result<TaskOutcome<PaymentCapture, CustomCode>, WorkflowReadError> {
     let showcase =
         build_app_for_url(url, SchemaMode::MigrateAndValidate).expect("the showcase app");
     let _worker = support::WorkerProcess::start(&showcase).await;
@@ -193,7 +193,7 @@ async fn order_fulfillment_insufficient_stock_fails_before_payment() {
         Ok(TaskOutcome::Failed(error)) => error,
         other => panic!("insufficient stock must fail the workflow: {other:?}"),
     };
-    assert_eq!(error.code().text(), "INSUFFICIENT_STOCK");
+    assert_eq!(error.code().as_str(), "INSUFFICIENT_STOCK");
     assert_eq!(
         sqlx::query_scalar::<_, i32>(
             "SELECT authorization_attempts FROM acme_orders WHERE order_id = $1",
@@ -233,8 +233,7 @@ async fn compressed_schedule_sends_a_due_task() {
         format!("s3-compressed-{}", Uuid::new_v4().simple()),
         "prewarm_search",
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(1),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(1),
         }),
     )
     .input(&json!({ "campaign_id": marker.as_str() }))

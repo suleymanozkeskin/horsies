@@ -1,19 +1,21 @@
 // The error unions of the monitoring reads, the health reads and the cancel.
 //
 // - The core catalog errors come from the generated converters (`monitoring_errors.ts`, `broker_errors.ts`).
-// - `QUERY_REFUSED` is the one client code: an argument that the call refuses before any connect. Nothing ran.
+// - `invalidInput` (`INVALID_INPUT`) is one variant per union: an argument that the call refuses before any connect.
+//   Nothing ran. A monitoring read gives `QueryRefused` (the field and the rule). A health read gives
+//   `HealthInputRefused` (the read and the cause), for the client's own check of a worker id and for the core's check of
+//   a count, a wait or a threshold alike.
 // - `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat relay held its bound and sent nothing.
-// - Each health read lists only the broker codes that the read can give. A code outside the list is a defect of the
+// - Each health read lists only the database codes that the read can give. A code outside the list is a defect of the
 //   core: it crashes loud.
 
 import type {
-  BrokerCoreError,
-  BrokerInvalidInput,
-  BrokerListenerDisabled,
-  BrokerOperationFailed,
-  NativeBrokerCoreError,
+  DatabaseCoreError,
+  DatabaseListenerDisabled,
+  DatabaseOperationFailed,
+  NativeDatabaseCoreError,
 } from "../_catalog/broker_errors.ts";
-import { brokerCoreErrorFromNative } from "../_catalog/broker_errors.ts";
+import { databaseCoreErrorFromNative } from "../_catalog/broker_errors.ts";
 import { MonitoringQueryRefusalCode } from "../_catalog/monitoring.ts";
 import type {
   MonitoringQueryCoreError,
@@ -39,57 +41,77 @@ export type QueryRefusedField =
   | "workers"
   | "errorCodes"
   | "workflowName"
-  | "nodeIndex"
-  | "workerId";
+  | "nodeIndex";
 
 /** An argument that the call refuses before any connect: no statement ran. `reason` names the rule. */
 export interface QueryRefused {
-  readonly code: typeof MonitoringQueryRefusalCode.QUERY_REFUSED;
+  readonly kind: "invalidInput";
+  readonly code: typeof MonitoringQueryRefusalCode.INVALID_INPUT;
   readonly retryable: false;
   readonly field: QueryRefusedField;
   readonly reason: string;
 }
 
+/** The health read that refused its input. */
+export type HealthInputSubject = "pingWorkers" | "worker" | "workerHistory" | "staleTasks";
+
+/**
+ * An argument of a health read that the read refuses before any connect: no statement ran. `subject` names the read;
+ * `cause` names the argument and the rule that it breaks.
+ */
+export interface HealthInputRefused {
+  readonly kind: "invalidInput";
+  readonly code: "INVALID_INPUT";
+  readonly retryable: false;
+  readonly subject: HealthInputSubject;
+  readonly cause: string;
+}
+
 /** The error of a monitoring read with no query to refuse. */
-export type MonitoringCoreReadError = MonitoringQueryCoreError | SeatRelayFull;
+export type MonitoringQueryError = MonitoringQueryCoreError | SeatRelayFull;
 
 /** The error of a monitoring read with a query that the read can refuse. */
-export type MonitoringReadError = MonitoringCoreReadError | QueryRefused;
+export type MonitoringReadError = MonitoringQueryError | QueryRefused;
 
 /** The error of a cancel. */
 export type CancelTaskError = TaskActionCoreError | SeatRelayFull;
 
-/** `BrokerOperationFailed` with one code of its subset. */
-export type BrokerOperationFailedWith<Code extends BrokerOperationFailed["code"]> = BrokerOperationFailed & {
-  readonly code: Code;
-};
-
 /** The error of a database ping. */
-export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED"> | SeatRelayFull;
+export type PingDatabaseError = DatabaseOperationFailed<"DATABASE_PING_FAILED"> | SeatRelayFull;
 
 /** The error of a worker ping. */
 export type PingWorkersError =
-  | BrokerInvalidInput
-  | BrokerListenerDisabled
-  | BrokerOperationFailedWith<"WORKER_PING_FAILED">
-  | QueryRefused
+  | HealthInputRefused
+  | DatabaseListenerDisabled
+  | DatabaseOperationFailed<"WORKER_PING_FAILED">
   | SeatRelayFull;
 
 /** The error of a health read with no argument to refuse. */
-export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
+export type HealthReadError = DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
-/** The error of a health read of one worker. */
-export type WorkerReadError = HealthReadError | QueryRefused;
+/** The error of a health read with an argument that the core checks: the limit of `workerHistory`, the threshold of `staleTasks`. */
+export type HealthInputError = HealthInputRefused | DatabaseOperationFailed<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
-/** The error of a health read with a count or a threshold that the core checks: `staleTasks`. */
-export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
+/** The error of a health read of one worker: its worker id. */
+export type WorkerReadError = HealthReadError | HealthInputRefused;
 
 /** The error of the history read of one worker: its limit, and its worker id. */
-export type WorkerHistoryError = HealthInputError | QueryRefused;
+export type WorkerHistoryError = HealthInputError;
 
-/** The frozen `QUERY_REFUSED` of `field`. Pure. */
+/** The frozen `invalidInput` refusal of `field`. Pure. */
 export function queryRefused(field: QueryRefusedField, reason: string): QueryRefused {
-  return Object.freeze({ code: MonitoringQueryRefusalCode.QUERY_REFUSED, retryable: false, field, reason });
+  return Object.freeze({
+    kind: "invalidInput",
+    code: MonitoringQueryRefusalCode.INVALID_INPUT,
+    retryable: false,
+    field,
+    reason,
+  });
+}
+
+/** The frozen `invalidInput` refusal of the health read `subject`. Pure. */
+export function healthInputRefused(subject: HealthInputSubject, cause: string): HealthInputRefused {
+  return Object.freeze({ kind: "invalidInput", code: "INVALID_INPUT", retryable: false, subject, cause });
 }
 
 /** The monitoring query error of a raw record of the core. */
@@ -106,24 +128,25 @@ export function taskActionError(raw: RawCatalogError): TaskActionCoreError {
   return taskActionCoreErrorFromNative(nativeCatalogValue(raw) as NativeTaskActionCoreError);
 }
 
-/** The broker error of a raw record of the core. */
-export function brokerError(raw: RawCatalogError): BrokerCoreError {
-  // SAFETY: the health reads give the record of a value of the core's `BrokerOperationError`; the generated native
+/** The database error of a raw record of the core. */
+export function databaseError(raw: RawCatalogError): DatabaseCoreError {
+  // SAFETY: the health reads give the record of a value of the core's `DatabaseOperationError`; the generated native
   // types name the classes and slots of the same core catalog, and the converter throws for a class it does not know.
-  return brokerCoreErrorFromNative(nativeCatalogValue(raw) as NativeBrokerCoreError);
+  return databaseCoreErrorFromNative(nativeCatalogValue(raw) as NativeDatabaseCoreError);
 }
 
 /** The error of a database ping. Another code is a defect. */
 export function pingDatabaseError(raw: RawCatalogError): PingDatabaseError {
-  return readError("pingDatabase", brokerError(raw), PING_DATABASE_CODES);
+  return readError("pingDatabase", databaseError(raw), PING_DATABASE_CODES);
 }
 
 /** The error of a worker ping. Another code is a defect. */
 export function pingWorkersError(raw: RawCatalogError): PingWorkersError {
-  const error = readError("pingWorkers", brokerError(raw), PING_WORKERS_CODES);
+  const error = readError("pingWorkers", databaseError(raw), PING_WORKERS_CODES);
 
   switch (error.code) {
     case "INVALID_INPUT":
+      return healthInputRefused("pingWorkers", error.message);
     case "LISTENER_DISABLED":
     case "WORKER_PING_FAILED":
       return error;
@@ -134,15 +157,16 @@ export function pingWorkersError(raw: RawCatalogError): PingWorkersError {
 
 /** The error of a health read with no argument to refuse. Another code is a defect. */
 export function healthReadError(read: string, raw: RawCatalogError): HealthReadError {
-  return readError(read, brokerError(raw), HEALTH_READ_CODES);
+  return readError(read, databaseError(raw), HEALTH_READ_CODES);
 }
 
-/** The error of a health read with a count or a threshold. Another code is a defect. */
-export function healthInputError(read: string, raw: RawCatalogError): HealthInputError {
-  const error = readError(read, brokerError(raw), HEALTH_INPUT_CODES);
+/** The error of a health read with an argument that the core checks. Another code is a defect. */
+export function healthInputError(read: HealthInputSubject, raw: RawCatalogError): HealthInputError {
+  const error = readError(read, databaseError(raw), HEALTH_INPUT_CODES);
 
   switch (error.code) {
     case "INVALID_INPUT":
+      return healthInputRefused(read, error.message);
     case "MONITORING_QUERY_FAILED":
       return error;
     default:
@@ -150,23 +174,17 @@ export function healthInputError(read: string, raw: RawCatalogError): HealthInpu
   }
 }
 
-/** A code of the core's broker catalog. */
-type BrokerCode = BrokerCoreError["code"];
+/** A code of the core's database catalog. */
+type DatabaseCode = DatabaseCoreError["code"];
 
 /**
- * The broker errors whose code is one of `Code`: each class of the union with its code narrowed to `Code`, so
- * `BrokerOperationFailed` keeps only the operation codes of `Code`. A class with no code in `Code` drops out.
+ * The database errors whose code is one of `Code`. `DatabaseOperationFailed` is a union by code, so it keeps only the
+ * operation codes of `Code`.
  */
-type BrokerErrorWith<Code extends BrokerCode> = BrokerCoreError extends infer Error_
-  ? Error_ extends { readonly code: infer Member }
-    ? [Extract<Member, Code>] extends [never]
-      ? never
-      : Error_ & { readonly code: Extract<Member, Code> }
-    : never
-  : never;
+type DatabaseErrorWith<Code extends DatabaseCode> = Extract<DatabaseCoreError, { readonly code: Code }>;
 
 /** The one code that a database ping can give. */
-const PING_DATABASE_CODES: readonly "DB_PING_FAILED"[] = ["DB_PING_FAILED"];
+const PING_DATABASE_CODES: readonly "DATABASE_PING_FAILED"[] = ["DATABASE_PING_FAILED"];
 
 /** The codes that a worker ping can give. */
 const PING_WORKERS_CODES: readonly ("INVALID_INPUT" | "LISTENER_DISABLED" | "WORKER_PING_FAILED")[] = [
@@ -185,21 +203,21 @@ const HEALTH_INPUT_CODES: readonly ("INVALID_INPUT" | "MONITORING_QUERY_FAILED")
 ];
 
 /** `error` narrowed to the codes `codes` that the read `read` can give; another code is a defect. */
-function readError<Code extends BrokerCode>(
+function readError<Code extends DatabaseCode>(
   read: string,
-  error: BrokerCoreError,
+  error: DatabaseCoreError,
   codes: readonly Code[],
-): BrokerErrorWith<Code> {
+): DatabaseErrorWith<Code> {
   return hasCodeIn(error, codes) ? error : unexpectedCode(read, error);
 }
 
 /** Whether the code of `error` is one of `codes`. Pure. */
-function hasCodeIn<Code extends BrokerCode>(error: BrokerCoreError, codes: readonly Code[]): error is BrokerErrorWith<Code> {
+function hasCodeIn<Code extends DatabaseCode>(error: DatabaseCoreError, codes: readonly Code[]): error is DatabaseErrorWith<Code> {
   return codes.some((code) => code === error.code);
 }
 
-/** The defect of a broker code that the read `read` cannot give. */
-function unexpectedCode(read: string, error: BrokerCoreError): never {
+/** The defect of a database code that the read `read` cannot give. */
+function unexpectedCode(read: string, error: DatabaseCoreError): never {
   return raiseDefect(
     new ClientDefect({ subject: read, rule: `the core answered ${error.code}, which this read cannot give` }),
   );

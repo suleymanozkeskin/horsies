@@ -73,7 +73,7 @@ so a resume of a paused workflow can build the sub-workflows it owes.
 
 The Rust showcase registers 36 tasks, 12 workflows, 32 schedule entries, and
 29 enabled schedule entries. Every task returns `TaskError<AcmeCode>`, the
-showcase's code enum (`#[derive(horsies::UserErrorCode)]`). The 15 tasks
+showcase's code enum (`#[derive(horsies::CustomErrorCode)]`). The 15 tasks
 that use the Acme tables run in isolated children; the other 21 declare
 `execution = shared_async` with `timeout_ms = 30_000`. It serves four
 queues:

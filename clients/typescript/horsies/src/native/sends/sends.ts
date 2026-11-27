@@ -5,6 +5,7 @@
 // lower-case hyphenated form, and numbers in the bounds that the declarations name. A value that breaks such a rule
 // is a `ClientDefect` of the addon.
 
+import type { SchemaMode } from "../../_catalog/manifest.ts";
 import { nativeValue, nativeValueAsync } from "../call/envelope.ts";
 import type { CoreHandle } from "../handle/core-handle.ts";
 import type { TraceArgument } from "../values/records.ts";
@@ -31,11 +32,11 @@ import type {
 } from "./addon.ts";
 
 /**
- * The check of the JSON text of the core's `AppConfig`: the send rules, the producer manifest text and the coverage
- * values of an accepted config, or every refusal. Pure: starts no core.
+ * The check of the JSON text of the core's `AppConfig`: the send rules, the producer manifest text (with the schema
+ * mode `schemaMode`) and the coverage values of an accepted config, or every refusal. Pure: starts no core.
  */
-export function checkAppConfig(appConfigJson: string): AppConfigCheck {
-  return nativeValue("checkAppConfig", () => sendsAddon().checkAppConfig(appConfigJson));
+export function checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck {
+  return nativeValue("checkAppConfig", () => sendsAddon().checkAppConfig(appConfigJson, schemaMode));
 }
 
 /** The check of a declared error code list: one refusal per refused entry, in list order. Pure. */
@@ -56,7 +57,7 @@ export function storedOptionsText(options: NativeTaskOptions): string {
 /**
  * The prepared facts of one send: a new task id, the options text, the retention and the priority, or the send error
  * of a refused fact. Mints a task id and starts the log forwarder of the process, so the payload warning reaches the
- * log sink; starts no core. Throws `CoreStopped` in a process whose core stopped, and `CoreStartFailed` when the log
+ * log sink; starts no core. Throws `CoreStopped` in a process whose core stopped, and `RuntimeStartFailed` when the log
  * forwarder cannot start.
  */
 export function prepareSendFacts(rules: NativeSendRules, facts: SendFacts, options: NativeTaskOptions): PreparedSend {
@@ -93,7 +94,7 @@ export function processRole(): ProcessRoleName {
 
 /**
  * The core's task error of a body, or the refusal of its custom code. Starts the log forwarder of the process, so the
- * record of data that the codec cannot write reaches the log sink; starts no core. Throws `CoreStartFailed` when the
+ * record of data that the codec cannot write reaches the log sink; starts no core. Throws `RuntimeStartFailed` when the
  * log forwarder cannot start.
  */
 export function buildTaskError(parts: TaskErrorParts): TaskErrorBuild {

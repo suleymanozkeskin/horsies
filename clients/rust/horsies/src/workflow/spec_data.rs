@@ -21,7 +21,7 @@ use super::node::{JoinType, NodeDeadline, NodePriority};
 use super::spec::{SpecBody, SpecNode, SpecOutput, WorkflowSpec};
 use super::sub_workflow::NodeParams;
 use crate::registry::{check_queue, queue_priority};
-use crate::{AppConfig, ErrorCode, HorsiesError};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode};
 
 /// The member of a task node's options that holds its deadline.
 const GOOD_UNTIL_MEMBER: &str = "good_until";
@@ -207,7 +207,7 @@ fn unresolved_queue(spec: &WorkflowSpec, node: &SpecNode, refused: &HorsiesError
         "workflow '{}' node '{}' (task '{}') has a queue that the app does not admit",
         spec.name, node.node_id, node.name
     ))
-    .with_code(ErrorCode::WorkflowUnresolvedQueue)
+    .with_code(HorsiesErrorCode::WorkflowUnresolvedQueue)
     .with_note(refused.message.clone())
     .with_help("name a queue of the app, or leave the node on the task's queue")
 }
@@ -229,7 +229,7 @@ mod tests {
     use crate::{CustomQueueConfig, QueueMode};
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     fn charge() -> crate::TaskNode<f64, ChargeInput> {
@@ -305,7 +305,10 @@ mod tests {
         add(&mut builder, charge().queue("bulk"));
         let spec = builder.build().unwrap();
         let refused = client_spec(&spec, &config()).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnresolvedQueue));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnresolvedQueue)
+        );
     }
 
     #[test]

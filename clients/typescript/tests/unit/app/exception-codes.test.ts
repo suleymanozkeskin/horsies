@@ -54,6 +54,9 @@ const environment: CreateEnvironment = {
   otelApi: () => {
     throw new TypeError("not called with no tracing");
   },
+  scheduleCalls: () => {
+    throw new TypeError("not called on a worker thread");
+  },
 };
 
 const open = defineTask({ name: "open", input: {}, output: h.null() });
@@ -71,7 +74,7 @@ function appWith(...registrations: readonly ((app: ReturnType<typeof created>) =
 
 function created() {
   const outcome = createHorsies(
-    { broker: { databaseUrl: { kind: "value", value: "postgresql://127.0.0.1:55432/none" } }, tasks: [open, declared] },
+    { database: { databaseUrl: { kind: "value", value: "postgresql://127.0.0.1:55432/none" } }, tasks: [open, declared] },
     environment,
   );
 

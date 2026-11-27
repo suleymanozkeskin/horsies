@@ -160,7 +160,7 @@ Each task records timing information:
 
 | Field | Set When |
 |-------|----------|
-| `sent_at` | Immutable call-site timestamp -- when `.send()` or `.schedule()` was called. Captured inside the `TaskSendResult` flow before enqueue. |
+| `sent_at` | Immutable call-site timestamp -- when `.send()` was called. Captured inside the `TaskSendResult` flow before enqueue. |
 | `enqueued_at` | When task becomes eligible for claiming (updated on retry) |
 | `claimed_at` | Worker claims task |
 | `started_at` | Execution begins in child process |

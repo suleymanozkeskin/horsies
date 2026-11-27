@@ -26,7 +26,7 @@ use crate::task::body::{
     decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
     value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
-use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+use crate::{CustomErrorCode, HorsiesError, HorsiesErrorCode, TaskFunction, TaskOutcome};
 
 // ---------------------------------------------------------------------------
 // Types and references
@@ -195,7 +195,7 @@ impl<T> Eq for NodeKey<T> {}
 /// workflow: the member name that serde reads.
 ///
 /// `#[horsies::task]` generates one per parameter of a task
-/// (`name::params::field()`), and `#[derive(WorkflowInput)]` one per field
+/// (`name::fields::field()`), and `#[derive(WorkflowInput)]` one per field
 /// of a child workflow's params type (`Params::field_name()`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputField<I, F> {
@@ -427,7 +427,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
         InputRefused::NotAnObject => HorsiesError::new(format!(
             "the input of node {owner} is not a JSON object"
         ))
-        .with_code(ErrorCode::WorkflowPositionalArgsNotSupported)
+        .with_code(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         .with_help(
             "a workflow node takes its input as named members: give the task a struct input or \
              several parameters",
@@ -437,7 +437,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
             "the input of node {owner} has the member '{name}', a name that only the engine \
              writes"
         ))
-        .with_code(ErrorCode::WorkflowInvalidKwargKey)
+        .with_code(HorsiesErrorCode::WorkflowInvalidKwargKey)
         .with_help("keys that start with __h_ or __horsies_, and __builtin_task_code__, belong to the engine"),
     }
 }
@@ -446,7 +446,7 @@ fn not_serializable(owner: &str, cause: &str) -> HorsiesError {
     HorsiesError::new(format!(
         "the input of node {owner} does not serialize: {cause}"
     ))
-    .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+    .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable)
 }
 
 /// A serde_json error kind as text, with no value and no position.
@@ -503,9 +503,9 @@ pub(crate) enum NodeQueue {
 /// when a node is added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeRegistration {
-    pub(crate) queue_name: String,
+    pub(crate) queue: String,
     pub(crate) task_options: Option<String>,
-    pub(crate) accepts_workflow_ctx: bool,
+    pub(crate) accepts_workflow_context: bool,
 }
 
 /// A workflow node that runs a task with input `I` and output `T` (Python
@@ -617,7 +617,7 @@ impl<T, I> TaskNode<T, I> {
     /// Take the result of `source` as the field `field` (Python
     /// `args_from`). The field's type is the receiving type
     /// `TaskOutcome<S, E>`, with `S` the source's output type; `E` reads the
-    /// source's user codes (`UserCode` takes any). The node waits for
+    /// source's custom codes (`CustomCode` takes any). The node waits for
     /// `source`.
     pub fn arg_from<S, E>(
         mut self,
@@ -648,7 +648,7 @@ impl<T, I> TaskNode<T, I> {
 
     /// Give the task the results of `sources` in its workflow context. Each
     /// source must be a dependency of the node, and the task must take the
-    /// context (`workflow_ctx` on the task attribute).
+    /// context (`workflow_context` on the task attribute).
     pub fn workflow_context_from<D, R>(mut self, sources: D) -> Self
     where
         D: IntoIterator<Item = R>,
@@ -734,7 +734,7 @@ impl<A, T, E> TaskFunction<A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// A workflow node of the task with an empty input `{}` (Python
     /// `TaskNode(fn=task)`), as the generated `name::node()` makes it. The
@@ -780,9 +780,9 @@ pub(crate) mod tests {
     /// no workflow context.
     pub(crate) fn default_registration() -> NodeRegistration {
         NodeRegistration {
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             task_options: None,
-            accepts_workflow_ctx: false,
+            accepts_workflow_context: false,
         }
     }
 
@@ -846,7 +846,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .set(amount(), f64::NAN)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowKwargsNotSerializable)
+        );
         assert!(refused.message.contains("'charge'"), "{refused}");
     }
 
@@ -863,14 +866,14 @@ pub(crate) mod tests {
         let refused = task_node::<u32, u64>("double").set_input(5).unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
         let refused = task_node::<u32, u64>("double")
             .input_json("[1, 2]")
             .unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
     }
 
@@ -879,7 +882,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .input_json(r#"{"__h_workflow_meta__": {}}"#)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowInvalidKwargKey)
+        );
     }
 
     #[test]

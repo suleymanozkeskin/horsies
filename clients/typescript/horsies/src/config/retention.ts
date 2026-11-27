@@ -3,8 +3,17 @@
 // `core/src/core/config/retention.rs`). A refusal of a retention field has the code of the retention config
 // (`HRS-216`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
-import { PAUSED_AGE_MICROS_MAX, PAUSED_AGE_MICROS_MIN } from "../_catalog/worker_manifest.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import {
+  HEARTBEAT_LEAF_HORIZON_HOURS_MAX,
+  HEARTBEAT_LEAF_HORIZON_HOURS_MIN,
+  HISTORY_LEAF_HORIZON_DAYS_MAX,
+  HISTORY_LEAF_HORIZON_DAYS_MIN,
+  PAUSED_AGE_MICROS_MAX,
+  PAUSED_AGE_MICROS_MIN,
+  RETENTION_DAYS_MAX,
+  RETENTION_DAYS_MIN,
+} from "../_catalog/worker_manifest.ts";
 import { refusal } from "../app/refusal.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
@@ -67,16 +76,30 @@ const NANOSECONDS_PER_DAY = 24n * NANOSECONDS_PER_HOUR;
 const DAYS_PER_WEEK = 7n;
 
 /** A `u32` field of the retention config. */
-const RETENTION_U32 = u32Field(ErrorCode.CONFIG_INVALID_RETENTION);
+const RETENTION_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_RETENTION);
 
 /** A `u64` field of the retention config. */
-const RETENTION_U64 = u64Field(ErrorCode.CONFIG_INVALID_RETENTION);
+const RETENTION_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_RETENTION);
 
-/** A count of whole days whose seconds are a safe integer. */
-const DAY_COUNT: IntegerBound = Object.freeze({
-  min: 0,
-  max: Math.floor(Number.MAX_SAFE_INTEGER / SECONDS_PER_DAY),
-  code: ErrorCode.CONFIG_INVALID_RETENTION,
+/** A declared retention period: whole days from `RETENTION_DAYS_MIN` to `RETENTION_DAYS_MAX` (the core's `RetentionDays`). */
+const PERIOD_DAYS: IntegerBound = Object.freeze({
+  min: RETENTION_DAYS_MIN,
+  max: RETENTION_DAYS_MAX,
+  code: HorsiesErrorCode.CONFIG_INVALID_RETENTION,
+});
+
+/** The history horizon: the bounds of `CoverageRequest::new` and of the leaf functions. */
+const HISTORY_HORIZON_DAYS: IntegerBound = Object.freeze({
+  min: HISTORY_LEAF_HORIZON_DAYS_MIN,
+  max: HISTORY_LEAF_HORIZON_DAYS_MAX,
+  code: HorsiesErrorCode.CONFIG_INVALID_RETENTION,
+});
+
+/** The heartbeat horizon: the bounds of `CoverageRequest::new` and of the leaf functions. */
+const HEARTBEAT_HORIZON_HOURS: IntegerBound = Object.freeze({
+  min: HEARTBEAT_LEAF_HORIZON_HOURS_MIN,
+  max: HEARTBEAT_LEAF_HORIZON_HOURS_MAX,
+  code: HorsiesErrorCode.CONFIG_INVALID_RETENTION,
 });
 
 /** The core's `retention` object of `input`. Pure. */
@@ -93,18 +116,18 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
     optionalEntry("terminal_record_retention_hours", input.terminalRecordRetention, (value) =>
       hoursJson(value, memberPath(path, "terminalRecordRetention.hours")),
     ),
-    optionalEntry("paused_workflow_auto_cancel_after", input.pausedWorkflowCancelAfter, (value) =>
+    optionalEntry("paused_workflow_cancel_after", input.pausedWorkflowCancelAfter, (value) =>
       pausedExpiryJson(value, memberPath(path, "pausedWorkflowCancelAfter.age")),
     ),
     optionalEntry(
       "history_leaf_horizon_days",
       input.historyLeafHorizonDays,
-      integer("historyLeafHorizonDays", RETENTION_U32),
+      integer("historyLeafHorizonDays", HISTORY_HORIZON_DAYS),
     ),
     optionalEntry(
       "heartbeat_leaf_horizon_hours",
       input.heartbeatLeafHorizonHours,
-      integer("heartbeatLeafHorizonHours", RETENTION_U32),
+      integer("heartbeatLeafHorizonHours", HEARTBEAT_HORIZON_HOURS),
     ),
     optionalEntry("retention_periods", input.retentionPeriods, (periods) =>
       periodsJson(periods, memberPath(path, "retentionPeriods")),
@@ -113,12 +136,12 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
       queueRetentionJson(mapping, memberPath(path, "queueRetention")),
     ),
     optionalEntry(
-      "partition_maintenance_interval_s",
+      "partition_maintenance_interval_seconds",
       input.partitionMaintenanceIntervalSeconds,
       integer("partitionMaintenanceIntervalSeconds", RETENTION_U64),
     ),
     optionalEntry(
-      "retention_sweep_interval_s",
+      "retention_sweep_interval_seconds",
       input.retentionSweepIntervalSeconds,
       integer("retentionSweepIntervalSeconds", RETENTION_U64),
     ),
@@ -146,16 +169,16 @@ function periodsJson(periods: readonly RetentionPeriod[], path: string): Checked
   return checkedArray(periods.map((period, index) => daysJson(period.days, memberPath(itemPath(path, index), "days"))));
 }
 
-/** The core's form of a period of whole days: the duration as `[seconds, nanoseconds]`. Pure. */
+/** The core's form of a period of whole days, within `PERIOD_DAYS`: the duration as `[seconds, nanoseconds]`. Pure. */
 function daysJson(days: number, path: string): Checked<ConfigJson> {
-  return mapChecked(checkedInteger(days, DAY_COUNT, path), (whole) => Object.freeze([whole * SECONDS_PER_DAY, 0]));
+  return mapChecked(checkedInteger(days, PERIOD_DAYS, path), (whole) => Object.freeze([whole * SECONDS_PER_DAY, 0]));
 }
 
 function queueRetentionJson(mapping: Readonly<Record<string, QueueRetention>>, path: string): Checked<ConfigJson> {
   return checkedObject(
     Object.entries(mapping).map(([queue, retention]) => {
       const at = keyPath(path, queue);
-      const name = checkedText(queue, ErrorCode.CONFIG_INVALID_RETENTION, at);
+      const name = checkedText(queue, HorsiesErrorCode.CONFIG_INVALID_RETENTION, at);
 
       return name.kind === "refused" ? name : entry(queue, queueRetentionValue(retention, at));
     }),
@@ -194,7 +217,7 @@ function pausedAgeJson(age: Temporal.Duration, path: string): Checked<ConfigJson
   const help = ["give a positive age in days, hours, minutes, seconds or smaller units, in whole microseconds"];
 
   if (age.years !== 0 || age.months !== 0) {
-    return refused(refusal(ErrorCode.CONFIG_INVALID_RETENTION, path, "years and months have no fixed length", help));
+    return refused(refusal(HorsiesErrorCode.CONFIG_INVALID_RETENTION, path, "years and months have no fixed length", help));
   }
 
   const nanoseconds = durationNanoseconds(age);
@@ -207,7 +230,7 @@ function pausedAgeJson(age: Temporal.Duration, path: string): Checked<ConfigJson
   ) {
     return refused(
       refusal(
-        ErrorCode.CONFIG_INVALID_RETENTION,
+        HorsiesErrorCode.CONFIG_INVALID_RETENTION,
         path,
         `must be whole microseconds from ${PAUSED_AGE_MICROS_MIN} to ${PAUSED_AGE_MICROS_MAX}`,
         help,

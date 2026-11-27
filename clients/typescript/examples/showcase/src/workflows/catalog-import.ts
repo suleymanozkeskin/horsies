@@ -1,13 +1,11 @@
 // The catalog import: one node per chunk of a supplier catalog, all side by side.
 //
-// The Rust workflow has no output. A TypeScript workflow declares one (the owner's rule), so the output is the last
-// chunk node: the workflow reads as the chunk that closes the import. Every chunk must complete for the workflow to
-// complete.
+// As the Rust workflow, it has no output: its result is the outcome of each chunk node, by node id
+// (`WorkflowTerminalResults`). Every chunk must complete for the workflow to complete.
 
 import { defineWorkflow } from "horsies";
 
 import { catalogImportChunk } from "../contracts/analytics.ts";
-import { CatalogChunk } from "../domain.ts";
 import { CATALOG_IMPORT_CHUNKS } from "../tuning.ts";
 
 /** The import that the workflow imports. */
@@ -19,18 +17,12 @@ export function chunkNodeId(chunkIndex: number): `chunk_${string}` {
 }
 
 export const catalogImport = defineWorkflow(
-  { name: "catalog_import", definitionKey: "acme.catalog_import.v1", parameters: {}, outputType: CatalogChunk },
+  { name: "catalog_import", definitionKey: "acme.catalog_import.v1", parameters: {} },
   (w) => {
-    const chunks = Array.from({ length: CATALOG_IMPORT_CHUNKS }, (_unused, chunkIndex) =>
-      w.task(catalogImportChunk, { importId: IMPORT_ID, chunkIndex }, { nodeId: chunkNodeId(chunkIndex) }),
-    );
-
-    const last = chunks.at(-1);
-
-    if (last === undefined) {
-      throw new TypeError("catalog_import: CATALOG_IMPORT_CHUNKS is 0; the import has no chunk");
+    for (let chunkIndex = 0; chunkIndex < CATALOG_IMPORT_CHUNKS; chunkIndex += 1) {
+      w.task(catalogImportChunk, { importId: IMPORT_ID, chunkIndex }, { nodeId: chunkNodeId(chunkIndex) });
     }
 
-    return { output: last };
+    return {};
   },
 );

@@ -59,7 +59,7 @@ export interface JsonUnreadable {
   readonly message: string;
 }
 
-/** The cause of a failed core operation: the `exception` field of a catalog error. */
+/** The cause of a failed core operation: the `cause` field of a catalog error. */
 export type CoreCause =
   | CoreFailure
   | OutcomeDecodeError

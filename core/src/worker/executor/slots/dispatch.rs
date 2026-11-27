@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::core::task::error::OperationalErrorCode;
+use crate::core::task::error::OperationalCode;
 use crate::events::{AttemptNumber, AttemptStart, OperatorCancelEnd, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
@@ -159,10 +159,10 @@ pub enum LoopKillCode {
 }
 
 impl LoopKillCode {
-    pub fn code(self) -> OperationalErrorCode {
+    pub fn code(self) -> OperationalCode {
         match self {
-            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop,
-            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop,
+            Self::TaskBlockedLoop => OperationalCode::TaskBlockedLoop,
+            Self::NeighbourBlockedLoop => OperationalCode::NeighbourBlockedLoop,
         }
     }
 }

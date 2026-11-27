@@ -7,7 +7,7 @@
 //! Python's monitoring reads do not.
 //!
 //! - A read returns [`MonitoringResult`]. A connect that fails is
-//!   `DB_OPERATION_FAILED` with the read's name and the cause, and with the
+//!   `DATABASE_OPERATION_FAILED` with the read's name and the cause, and with the
 //!   retry rule of the cause; no statement ran.
 //! - The task detail answers [`TaskDetailRead::Found`], or
 //!   [`TaskDetailRead::NotFound`] with its [`TaskAbsenceReason`]. A run or a
@@ -33,16 +33,16 @@ use crate::Horsies;
 pub use horsies_core::monitoring::resolve_monitoring_window;
 pub use horsies_core::monitoring::{
     categorize_error_code, duration, elapsed, task_action_outcome, ActionBody, ActionConflictCode,
-    ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoadInfo,
-    CancelPolicy, CancelTaskBody, ClassReportInfo, DownSlotInfo, ErrorCategory, ErrorFacet,
-    FacetValue, Facets, GroupRow, HistoryContractSource, LivenessReport, MonitoringQueryError,
-    MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult, MonitoringWindow,
-    PageRefused, PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SnapshotProfileInfo,
-    SortDirection, StatusCount, StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason,
+    ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoad,
+    CancelPolicy, CancelTaskBody, DatabaseLiveness, DownSlot, DownSlots, ErrorCategory, ErrorFacet,
+    ExecutionClassReport, FacetValue, Facets, GroupRow, HistoryContractSource, LivenessReport,
+    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
+    MonitoringWindow, PageRefused, PendingStream, ScheduleStateInfo, SlotHealth, SnapshotProfile,
+    SortDirection, StatusCount, StreamCoverageState, StreamWait, TaskAbsenceReason,
     TaskActionError, TaskActionErrorCode, TaskActionResult, TaskAttemptDetail, TaskBreakdownQuery,
     TaskCancelled, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters,
     TaskGroupBy, TaskListPage, TaskListQuery, TaskRowInfo, TaskSortField, TaskStatusCountsQuery,
-    TaskSummary, WindowRefused, WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo,
+    TaskSummary, WindowRefused, WorkerExecutionClassLoad, WorkerHistoryPoint, WorkerPong,
     WorkerStateInfo, WorkflowEdge, WorkflowNodeDetail, WorkflowNodeSummary, WorkflowRunDetail,
     WorkflowRunSummary, WorkflowRunsQuery, INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND,
     MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
@@ -59,7 +59,7 @@ pub use horsies_core::monitoring::{
 /// The count of each task status over the live table and the history
 /// window, all seven statuses in their fixed order.
 ///
-/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for a history
+/// Errors: `DATABASE_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for a history
 /// row whose status is not a task status.
 pub async fn task_status_counts(
     app: &Horsies,
@@ -101,7 +101,7 @@ pub async fn list_tasks(app: &Horsies, query: &TaskListQuery) -> MonitoringResul
 /// found with its absence reason.
 ///
 /// Errors: `HISTORY_CONTRACT_VIOLATION` for a history row that does not
-/// decode; `DB_OPERATION_FAILED` otherwise.
+/// decode; `DATABASE_OPERATION_FAILED` otherwise.
 pub async fn get_task_detail(app: &Horsies, task_id: Uuid) -> MonitoringResult<TaskDetailRead> {
     let broker = monitoring_broker(app, "task detail query").await?;
     core_monitoring::get_task_detail(&broker, task_id).await
@@ -109,7 +109,7 @@ pub async fn get_task_detail(app: &Horsies, task_id: Uuid) -> MonitoringResult<T
 
 /// The distinct names of the root runs, at most [`LIST_ROW_BOUND`].
 ///
-/// Errors: `DB_OPERATION_FAILED`.
+/// Errors: `DATABASE_OPERATION_FAILED`.
 pub async fn list_workflow_names(app: &Horsies) -> MonitoringResult<Vec<String>> {
     let broker = monitoring_broker(app, "workflow names query").await?;
     core_monitoring::list_workflow_names(&broker).await
@@ -117,7 +117,7 @@ pub async fn list_workflow_names(app: &Horsies) -> MonitoringResult<Vec<String>>
 
 /// The newest root runs, filtered by workflow name and status.
 ///
-/// Errors: `DB_OPERATION_FAILED`.
+/// Errors: `DATABASE_OPERATION_FAILED`.
 pub async fn list_workflow_runs(
     app: &Horsies,
     query: &WorkflowRunsQuery,
@@ -130,7 +130,7 @@ pub async fn list_workflow_runs(
 /// ([`RunTimingInfo`] on the run, [`NodeTimingInfo`] on each node), or
 /// `None` when no run has the id. One statement reads the run.
 ///
-/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// Errors: `DATABASE_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
 /// attempt archive that does not decode.
 pub async fn get_workflow_run(
     app: &Horsies,
@@ -156,7 +156,7 @@ pub async fn get_workflow_node(
 /// Every schedule state, soonest next run first, at most
 /// [`LIST_ROW_BOUND`].
 ///
-/// Errors: `DB_OPERATION_FAILED`.
+/// Errors: `DATABASE_OPERATION_FAILED`.
 pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleStateInfo>> {
     let broker = monitoring_broker(app, "schedule state query").await?;
     core_monitoring::list_schedules(&broker).await
@@ -177,7 +177,7 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 ///
 /// Errors: `TASK_NOT_FOUND`, `TASK_IS_WORKFLOW_TASK`,
 /// `TASK_NOT_CANCELLABLE` (with the current status), `STORED_DATA_INVALID`,
-/// and `DB_OPERATION_FAILED`, also for a failed connect (nothing written).
+/// and `DATABASE_OPERATION_FAILED`, also for a failed connect (nothing written).
 pub async fn cancel_task(
     app: &Horsies,
     task_id: Uuid,
@@ -242,7 +242,7 @@ pub(crate) fn resume_children(app: &Horsies) -> Arc<dyn ChildSpecSource> {
 /// The connected broker of `app`'s read handle, for the monitoring read
 /// `operation`. Installs no schema.
 ///
-/// Errors: `DB_OPERATION_FAILED` with the retry rule of the failed connect.
+/// Errors: `DATABASE_OPERATION_FAILED` with the retry rule of the failed connect.
 ///
 /// # Panics
 ///
@@ -292,7 +292,7 @@ mod tests {
 
     /// An app with no task and no workflow. Building it does no I/O.
     fn app() -> Horsies {
-        Horsies::new(AppConfig::for_database_url(
+        Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap()
@@ -301,7 +301,10 @@ mod tests {
     #[test]
     fn a_failed_connect_is_db_operation_failed_with_the_read_and_the_retry_rule() {
         let error = connect_failed("task list query", BrokerError::ListenerClosed);
-        assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+        assert_eq!(
+            error.code(),
+            MonitoringQueryErrorCode::DatabaseOperationFailed
+        );
         assert!(error.message().starts_with("task list query failed: "));
         assert_eq!(
             error.retryable(),
@@ -309,8 +312,8 @@ mod tests {
         );
         assert!(matches!(
             error,
-            MonitoringQueryError::DbOperationFailed {
-                source: MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed),
+            MonitoringQueryError::DatabaseOperationFailed {
+                cause: MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed),
                 ..
             }
         ));

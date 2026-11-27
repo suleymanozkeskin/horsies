@@ -1,5 +1,5 @@
 //! Blocking forms of the async API, for a program that does not run a
-//! tokio runtime (Python's sync calls: `send` and `schedule`, the retries,
+//! tokio runtime (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and the sync methods of
 //! `WorkflowHandle`).
@@ -23,11 +23,11 @@
 //!   runtime, so it runs nothing and answers the `ASYNC_CONTEXT` member of
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
-//!   so `retry_send(&error).await` completes the same send),
-//!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
-//!   `CheckReport` with `HRS-217`,
+//!   so `resend(&error).await` completes the same send),
+//!   `ReadError::AsyncContext`, `DatabaseOperationError::AsyncContext`, a
+//!   `ValidationReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
-//!   start, `HandleErrorCode::AsyncContext`, or
+//!   start, `WorkflowHandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
 //! - A read that takes a `WaitLimit` checks it first, on any thread: a
 //!   `Within` limit above `MAX_WAIT_LIMIT_MS` is `ReadError::InvalidInput`
@@ -49,15 +49,14 @@ pub use workflow::{WorkflowFunctionView, WorkflowHandleView, WorkflowTemplateVie
 
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
-    FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
-    WorkerStateSnapshot,
+    process_role, thread_role, BrokerError, BrokerOperationSource, DatabaseErrorCode,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, ExecutionClassCoverage,
+    ExecutionClassReport, FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole,
+    WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -68,9 +67,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
-    StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WorkerHistoryLimit,
+    CheckPassed, CustomErrorCode, Horsies, HorsiesError, HorsiesErrorCode, MinResponses,
+    PingTarget, ReadError, StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts,
+    TaskOutcome, TaskSendOptions, ValidationReport, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -127,7 +126,7 @@ impl<'a, A, T, E> TaskFunctionView<'a, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskFunction::send`, blocking.
     pub fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
@@ -153,18 +152,18 @@ where
     pub fn with_options(
         &self,
         options: TaskSendOptions,
-    ) -> TaskFunctionSendOptionsView<'a, A, T, E> {
-        TaskFunctionSendOptionsView {
+    ) -> TaskFunctionWithOptionsView<'a, A, T, E> {
+        TaskFunctionWithOptionsView {
             function: self.function,
             options,
         }
     }
 
-    /// `TaskFunction::retry_send`, blocking. On a runtime thread it answers
+    /// `TaskFunction::resend`, blocking. On a runtime thread it answers
     /// `AsyncContext` again, with the same task id and payload.
-    pub fn retry_send(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error)?;
-        self.enqueue(task_id, payload, SendKind::Repeat, "retry_send")
+    pub fn resend(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
+        let (task_id, payload) = self.function.checked_resend_target(error)?;
+        self.enqueue(task_id, payload, SendKind::Repeat, "resend")
     }
 
     /// The checks of a first send, then the enqueue. A refused input is
@@ -204,7 +203,7 @@ where
                 message: format!(
                     "blocking {call} of task '{}' was called on a thread that runs a tokio \
                      runtime; its wait would stall the runtime, so nothing was written. Use \
-                     `{call}(...).await`; an async retry with this error sends the same task \
+                     `{call}(...).await`; an async resend with this error sends the same task \
                      id and payload.",
                     self.function.task_name()
                 ),
@@ -232,16 +231,16 @@ fn start_failed_send(
 }
 
 /// The blocking sends of one task with per-send options.
-pub struct TaskFunctionSendOptionsView<'a, A, T, E> {
+pub struct TaskFunctionWithOptionsView<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
     options: TaskSendOptions,
 }
 
-impl<A, T, E> TaskFunctionSendOptionsView<'_, A, T, E>
+impl<A, T, E> TaskFunctionWithOptionsView<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// Send the task with these options, now or after their delay,
     /// blocking.
@@ -267,15 +266,15 @@ impl<T, E> TaskHandle<T, E> {
 impl<T, E> TaskHandleView<'_, T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskHandle::get`, blocking. The limit is the first check, as in
     /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
     /// `InvalidInput`. Then, in Python's order: a process that runs task
     /// bodies refuses the wait; a kept read is returned; a runtime thread
     /// answers `AsyncContext`, which is not kept.
-    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
-        let _wait = checked_task_wait(self.handle.task_id(), limit)?;
+    pub fn get(&self, wait: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let _checked = checked_task_wait(self.handle.task_id(), wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "TaskHandle.get() for task {}",
@@ -286,9 +285,9 @@ where
             return kept;
         }
         block_read(
-            self.handle.get(limit),
+            self.handle.get(wait),
             &format!("TaskHandle::get() for task {}", self.handle.task_id()),
-            "handle.get(limit)",
+            "handle.get(wait)",
         )
     }
 
@@ -317,8 +316,8 @@ fn block_read<V>(
         Place::AsyncContext => Err(ReadError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(ReadError::Database {
-            code: BrokerErrorCode::TaskInfoQueryFailed,
+        Place::RuntimeStartFailed(failed) => Err(ReadError::DatabaseError {
+            database_code: DatabaseErrorCode::TaskInfoQueryFailed,
             message: format!("the read did not start: {failed}"),
             retryable: true,
         }),
@@ -333,17 +332,17 @@ fn block_read<V>(
 ///
 /// In a fork ([`place`]).
 fn block_health<V>(
-    read: impl Future<Output = Result<V, BrokerOperationError>>,
-    code: BrokerOperationFailedCode,
+    read: impl Future<Output = Result<V, DatabaseOperationError>>,
+    code: DatabaseOperationFailedCode,
     blocking_call: &str,
     async_call: &str,
-) -> Result<V, BrokerOperationError> {
+) -> Result<V, DatabaseOperationError> {
     match place(format_args!("blocking {blocking_call}")) {
         Place::Runs(runtime) => runtime.block_on(read),
-        Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
+        Place::AsyncContext => Err(DatabaseOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(BrokerOperationError::operation_failed(
+        Place::RuntimeStartFailed(failed) => Err(DatabaseOperationError::operation_failed(
             code,
             format!("the read did not start: {failed}"),
             BrokerOperationSource::Broker(BrokerError::ProcessRuntime(
@@ -373,16 +372,13 @@ impl HorsiesView<'_> {
     pub fn get_result<T, E>(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
-        self.app
-            .task_handle_of::<T, E>(task_id)
-            .blocking()
-            .get(limit)
+        self.app.task_handle::<T, E>(task_id).blocking().get(wait)
     }
 
     /// `Horsies::get_raw_result`, blocking. The limit is the first check,
@@ -390,18 +386,18 @@ impl HorsiesView<'_> {
     pub fn get_raw_result(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
-        let _wait = checked_task_wait(task_id, limit)?;
+        let _checked = checked_task_wait(task_id, wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
             )));
         }
         block_read(
-            self.app.get_raw_result(task_id, limit),
+            self.app.get_raw_result(task_id, wait),
             &format!("Horsies::get_raw_result() for task {task_id}"),
-            "app.get_raw_result(task_id, limit)",
+            "app.get_raw_result(task_id, wait)",
         )
     }
 
@@ -419,10 +415,10 @@ impl HorsiesView<'_> {
     }
 
     /// `Horsies::ping_database`, blocking.
-    pub fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
+    pub fn ping_database(&self) -> Result<DatabasePing, DatabaseOperationError> {
         block_health(
             self.app.ping_database(),
-            BrokerOperationFailedCode::DbPingFailed,
+            DatabaseOperationFailedCode::DatabasePingFailed,
             "Horsies::ping_database()",
             "app.ping_database()",
         )
@@ -432,22 +428,22 @@ impl HorsiesView<'_> {
     pub fn ping_workers(
         &self,
         target: PingTarget,
-        timeout: Duration,
-        min_responses: Option<NonZeroUsize>,
-    ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
+        wait: Duration,
+        min_responses: MinResponses,
+    ) -> Result<Vec<WorkerPong>, DatabaseOperationError> {
         block_health(
-            self.app.ping_workers(target, timeout, min_responses),
-            BrokerOperationFailedCode::WorkerPingFailed,
+            self.app.ping_workers(target, wait, min_responses),
+            DatabaseOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
-            "app.ping_workers(target, timeout, min_responses)",
+            "app.ping_workers(target, wait, min_responses)",
         )
     }
 
     /// `Horsies::list_worker_states`, blocking.
-    pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
+    pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.list_worker_states(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::list_worker_states()",
             "app.list_worker_states()",
         )
@@ -457,10 +453,10 @@ impl HorsiesView<'_> {
     pub fn get_worker_state(
         &self,
         worker_id: &str,
-    ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
+    ) -> Result<Option<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.get_worker_state(worker_id),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state()",
             "app.get_worker_state(worker_id)",
         )
@@ -471,39 +467,43 @@ impl HorsiesView<'_> {
         &self,
         worker_id: &str,
         limit: WorkerHistoryLimit,
-    ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
+    ) -> Result<Vec<WorkerStateSnapshot>, DatabaseOperationError> {
         block_health(
             self.app.get_worker_state_history(worker_id, limit),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state_history()",
             "app.get_worker_state_history(worker_id, limit)",
         )
     }
 
-    /// `Horsies::get_class_coverage`, blocking.
-    pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
+    /// `Horsies::get_execution_class_coverage`, blocking.
+    pub fn get_execution_class_coverage(
+        &self,
+    ) -> Result<ExecutionClassCoverage, DatabaseOperationError> {
         block_health(
-            self.app.get_class_coverage(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_coverage()",
-            "app.get_class_coverage()",
+            self.app.get_execution_class_coverage(),
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
+            "Horsies::get_execution_class_coverage()",
+            "app.get_execution_class_coverage()",
         )
     }
 
-    /// `Horsies::get_class_report`, blocking.
-    pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
+    /// `Horsies::get_execution_class_report`, blocking.
+    pub fn get_execution_class_report(
+        &self,
+    ) -> Result<ExecutionClassReport, DatabaseOperationError> {
         block_health(
-            self.app.get_class_report(),
-            BrokerOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_report()",
-            "app.get_class_report()",
+            self.app.get_execution_class_report(),
+            DatabaseOperationFailedCode::MonitoringQueryFailed,
+            "Horsies::get_execution_class_report()",
+            "app.get_execution_class_report()",
         )
     }
 
     /// `Horsies::check_live`, blocking. The static check runs anywhere; on
     /// a runtime thread the live phases do not run, and the report holds
     /// `HRS-217` (Python `CHECK_LIVE_ASYNC_CONTEXT`).
-    pub fn check_live(&self) -> Result<CheckPassed, CheckReport> {
+    pub fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let _static_passed = self.app.check()?;
         match place(format_args!("blocking Horsies::check_live()")) {
             Place::Runs(runtime) => runtime.block_on(self.app.check_live()),
@@ -517,13 +517,13 @@ impl HorsiesView<'_> {
 
 /// The report of a blocking live check on a runtime thread (Python
 /// `_check_broker_connectivity` in a running event loop). Pure.
-fn live_check_in_async_context() -> CheckReport {
-    CheckReport::of(
+fn live_check_in_async_context() -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new(
             "live broker check cannot run on a thread that runs a tokio runtime",
         )
-        .with_code(ErrorCode::CheckLiveAsyncContext)
+        .with_code(HorsiesErrorCode::CheckLiveAsyncContext)
         .with_note(
             "check_live was called on a thread that runs a tokio runtime; the connectivity \
              check did not run",
@@ -555,7 +555,7 @@ mod tests {
     }
 
     fn app() -> Horsies {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
@@ -570,7 +570,7 @@ mod tests {
 
     /// Python `TaskSendAsyncContext`: a blocking send on a runtime thread
     /// writes nothing and keeps the prepared task id and payload, which an
-    /// async retry accepts.
+    /// async resend accepts.
     #[tokio::test]
     async fn a_blocking_send_on_a_runtime_thread_keeps_its_prepared_send() {
         let app = app();
@@ -584,9 +584,9 @@ mod tests {
         };
         assert_eq!(payload.input_json, r#"{"id":7}"#);
         assert!(refused.message().contains("blocking send of task 'bill'"));
-        let (retried_id, _payload) = function.retry_target(&refused).unwrap();
-        assert_eq!(retried_id, *task_id);
-        let again = function.blocking().retry_send(&refused).unwrap_err();
+        let (resent_id, _payload) = function.checked_resend_target(&refused).unwrap();
+        assert_eq!(resent_id, *task_id);
+        let again = function.blocking().resend(&refused).unwrap_err();
         assert_eq!(again.task_id(), Some(*task_id));
         assert_eq!(again.code(), horsies_core::TaskSendErrorCode::AsyncContext);
     }
@@ -611,10 +611,10 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_read_on_a_runtime_thread_is_async_context_and_not_kept() {
         let app = app();
-        let handle = app.task_handle_of::<u32, Infallible>(Uuid::from_u128(5));
+        let handle = app.task_handle::<u32, Infallible>(Uuid::from_u128(5));
         let refused = handle.blocking().get(WaitLimit::NoLimit).unwrap_err();
         assert!(matches!(refused, ReadError::AsyncContext { .. }));
-        assert_eq!(refused.code().value(), "ASYNC_CONTEXT");
+        assert_eq!(refused.code().as_str(), "ASYNC_CONTEXT");
         assert!(handle.kept().is_none());
         let info = app
             .blocking()
@@ -633,7 +633,7 @@ mod tests {
         let app = app();
         let task_id = Uuid::from_u128(6);
         let above = WaitLimit::Within(Duration::from_millis(crate::MAX_WAIT_LIMIT_MS + 1));
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let refused = handle.blocking().get(above).unwrap_err();
         assert_eq!(
             refused,
@@ -655,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
-        assert_eq!(refused.code(), BrokerErrorCode::AsyncContext);
+        assert_eq!(refused.code(), DatabaseErrorCode::AsyncContext);
         assert!(!refused.retryable());
     }
 
@@ -663,8 +663,8 @@ mod tests {
     async fn a_blocking_live_check_on_a_runtime_thread_runs_the_static_check_only() {
         let report = app().blocking().check_live().unwrap_err();
         assert_eq!(
-            report.errors()[0].code,
-            Some(ErrorCode::CheckLiveAsyncContext)
+            report.refusals()[0].code,
+            Some(HorsiesErrorCode::CheckLiveAsyncContext)
         );
     }
 
@@ -707,9 +707,9 @@ mod tests {
     #[test]
     fn the_message_names_the_call_and_the_async_form() {
         assert_eq!(
-            async_context_message("TaskHandle::get()", "handle.get(limit)"),
+            async_context_message("TaskHandle::get()", "handle.get(wait)"),
             "blocking TaskHandle::get() was called on a thread that runs a tokio runtime; its \
-             wait would stall the runtime, so nothing ran. Use `handle.get(limit).await` \
+             wait would stall the runtime, so nothing ran. Use `handle.get(wait).await` \
              instead."
         );
     }

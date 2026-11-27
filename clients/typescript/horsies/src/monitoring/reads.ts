@@ -2,8 +2,8 @@
 // into the generated read types.
 //
 // - A read sends one statement and writes nothing. It does not install the schema.
-// - Expected failures are values: the core's `MonitoringQueryError` (`DB_OPERATION_FAILED`,
-//   `HISTORY_CONTRACT_VIOLATION`) or `QUERY_REFUSED` before any connect.
+// - Expected failures are values: the core's `MonitoringQueryError` (`DATABASE_OPERATION_FAILED`,
+//   `HISTORY_CONTRACT_VIOLATION`) or `invalidInput` (`INVALID_INPUT`) before any connect.
 // - A process-state refusal of the core throws (`CoreError`); a defect crashes loud (`CoreDefect`).
 
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
@@ -37,7 +37,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import {
-  type MonitoringCoreReadError,
+  type MonitoringQueryError,
   type MonitoringReadError,
   monitoringQueryError,
   queryRefused,
@@ -155,7 +155,7 @@ export async function listTasks(
 }
 
 /** The names of the workflows that have runs, at most 10,000. */
-export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringCoreReadError>> {
+export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringQueryError>> {
   return readCoreModel("workflowNames", () => target.addon.readWorkflowNames(target.handle), (text) => {
     const items = listItems("workflowNames", wireJsonOfCoreText("workflowNames", text));
 
@@ -182,7 +182,7 @@ export async function workflowRuns(
 /** The state of every schedule, at most 10,000. */
 export async function schedules(
   target: ReadTarget,
-): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>> {
+): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryError>> {
   return readCoreModel("schedules", () => target.addon.readSchedules(target.handle), (text) =>
     modelList("schedules", text, decodeScheduleStateInfo),
   );
@@ -192,7 +192,7 @@ export async function schedules(
 export async function workflowRun(
   target: ReadTarget,
   workflowId: WorkflowId,
-): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>> {
+): Promise<Result<WorkflowRunRead, MonitoringQueryError>> {
   return readCoreModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
     const value = wireJsonOfCoreText("workflowRun", text);
 
@@ -229,7 +229,7 @@ export async function workflowNode(
 export async function taskDetail(
   target: ReadTarget,
   taskId: TaskId,
-): Promise<Result<TaskDetailRead, MonitoringCoreReadError>> {
+): Promise<Result<TaskDetailRead, MonitoringQueryError>> {
   const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, taskId));
 
   switch (outcome.kind) {
@@ -291,7 +291,7 @@ async function readCoreModel<T>(
   read: string,
   answer: () => Promise<NativeEnvelope<MonitoringReadOutcome | SeatRelayFullOutcome>>,
   decode: (text: string) => T,
-): Promise<Result<T, MonitoringCoreReadError>> {
+): Promise<Result<T, MonitoringQueryError>> {
   const outcome = await nativeValueAsync(read, answer);
 
   switch (outcome.kind) {

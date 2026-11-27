@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerResult
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseResult
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS
 from horsies.core.types.result import Err, is_err
@@ -34,7 +34,7 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
-async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[str]:
+async def _enqueue(broker: PostgresBroker, task_options: str) -> DatabaseResult[str]:
     return await broker.enqueue_async(
         'retry.limit.task',
         task_id=uuid.uuid4(),
@@ -67,10 +67,10 @@ def _options(**fields: Any) -> str:
     """Task options with a valid exponential policy, `fields` replaced."""
     policy: dict[str, Any] = {
         'max_retries': 3,
-        'intervals': [5],
+        'intervals_seconds': [5],
         'backoff_strategy': 'exponential',
         'jitter': True,
-        'auto_retry_for': ['TRANSIENT'],
+        'retry_for': ['TRANSIENT'],
     }
     policy.update(fields)
     return json.dumps({'retry_policy': policy})
@@ -83,8 +83,8 @@ def _options(**fields: Any) -> str:
         _options(max_retries=MAX_RETRY_ATTEMPTS + 1),
         _options(max_retries=True),
         _options(max_retries='3'),
-        _options(intervals=[5, 10]),
-        _options(auto_retry_for=[]),
+        _options(intervals_seconds=[5, 10]),
+        _options(retry_for=[]),
         _options(surprise=1),
         '{"retry_policy": {"max_retries": 3}}',
         '{"retry_policy": [3]}',
@@ -113,7 +113,7 @@ async def test_a_malformed_policy_is_refused_without_a_row(
         await broker.close_async()
 
     assert isinstance(outcome, Err), outcome
-    assert outcome.err_value.code == BrokerErrorCode.INVALID_TASK_OPTIONS
+    assert outcome.err_value.code == DatabaseErrorCode.INVALID_TASK_OPTIONS
     assert outcome.err_value.retryable is False
     assert await _stored_limits(url) == []
 

@@ -10,7 +10,7 @@ import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
-import { runChildCase } from "./child-process.ts";
+import { runAbortingChildCase, runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -19,8 +19,14 @@ void requireDevAddon();
 /** The longest time a child case may take. */
 const CHILD_CASE_BOUND_MS = 30_000;
 
+/** The longest time a test that runs one child case may take: the child bound, and the time to read its end. */
+const CHILD_TEST_BOUND_MS = CHILD_CASE_BOUND_MS + 5_000;
+
 /** The longest time a process with an empty loop may take to exit. */
 const IDLE_EXIT_BOUND_MS = 10_000;
+
+/** The keys of a JSON log line, in order: the keys of Python's `JsonLogsFormatter`. */
+const JSON_LOG_KEYS = ["ts", "level", "logger", "message", "process", "task_id", "task_name", "attempt", "trace_id", "span_id", "exc"];
 
 /** The levels that the default threshold WARNING lets through. */
 const WARNING_AND_ABOVE: ReadonlySet<string> = new Set(["WARNING", "ERROR"]);
@@ -84,6 +90,25 @@ describe("the JavaScript log sink", () => {
     assert.match(child.stderr, / INFO horsies\.sql /u);
   });
 
+  test("a command of an app with jsonLogs writes each stderr record as one JSON line with the same keys", () => {
+    const child = runChildCase("logging-child.ts", "command-json-lines", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.stdout, "pinged done", child.stderr);
+
+    const objects = child.stderr
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line): Record<string, unknown> => JSON.parse(line));
+
+    const statement = objects.find((object) => object["logger"] === "horsies.sql");
+
+    assert.ok(statement !== undefined, child.stderr);
+    assert.equal(statement["level"], "INFO");
+    assert.ok(Number.isSafeInteger(statement["process"]), child.stderr);
+    assert.ok(objects.every((object) => Object.keys(object).join(",") === JSON_LOG_KEYS.join(",")), child.stderr);
+    assert.doesNotMatch(child.stderr, / INFO horsies\.sql /u);
+  });
+
   test("a process with a sink set and a started core exits when its loop is empty", () => {
     const child = runChildCase("logging-child.ts", "idle-exit-with-sink", IDLE_EXIT_BOUND_MS);
 
@@ -92,8 +117,8 @@ describe("the JavaScript log sink", () => {
     assert.equal(child.stdout, "probed answered");
   });
 
-  test("a defect in a worker process goes to stderr, then to the sink, then the process aborts", () => {
-    const child = runChildCase("logging-child.ts", "defect-record-to-sink", CHILD_CASE_BOUND_MS);
+  test("a defect in a worker process goes to stderr, then to the sink, then the process aborts", { timeout: CHILD_TEST_BOUND_MS }, () => {
+    const child = runAbortingChildCase("logging-child.ts", "defect-record-to-sink", CHILD_CASE_BOUND_MS);
 
     assert.equal(child.signal, "SIGABRT", child.stderr);
     assert.match(child.stderr, /horsies: worker process \d+ aborts: defect CLIENT_DEFECT of the horsies package/u);

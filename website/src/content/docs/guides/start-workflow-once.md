@@ -119,7 +119,7 @@ The start command does not hold:
 - The `workflow_id`.
 - The call time (`sent_at`).
 - The trace carrier.
-- `resend_on_transient_err`.
+- `resend_on_transient_error`.
 - The child workflows that the sub-workflow roots build at the start. Their ids are new on each start.
 
 ## Retention Ends the Protection

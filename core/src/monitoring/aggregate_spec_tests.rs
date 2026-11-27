@@ -16,7 +16,7 @@ use super::spec_support::{
 use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::history::reads::pages::MonitoringWindow;
-use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use crate::core::task::error::{ContractCode, OperationalCode, OutcomeCode, RetrievalCode};
 use crate::monitoring::{
     list_tasks, task_breakdown, task_facets, task_status_counts, Breakdown, BreakdownGroup,
     ErrorCategory, TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery,
@@ -39,14 +39,14 @@ const STATUS_ORDER: [&str; 7] = [
 /// The cap of the error-code facet list (Python `_ERROR_FACET_CAP`).
 const ERROR_FACET_CAP: usize = 30;
 
-/// One sample code per family, and a user code for DOMAIN (Python
+/// One sample code per family, and a custom code for CUSTOM (Python
 /// `_FAMILY_SAMPLES`).
 const FAMILY_SAMPLES: [(ErrorCategory, &str); 5] = [
     (ErrorCategory::Operational, "TASK_EXCEPTION"),
     (ErrorCategory::Contract, "RETURN_TYPE_MISMATCH"),
     (ErrorCategory::Retrieval, "WAIT_TIMEOUT"),
     (ErrorCategory::Outcome, "TASK_CANCELLED"),
-    (ErrorCategory::Domain, "PAYMENT_DECLINED"),
+    (ErrorCategory::Custom, "PAYMENT_DECLINED"),
 ];
 
 const BUILT_IN_FAMILIES: [ErrorCategory; 4] = [
@@ -272,7 +272,7 @@ async fn the_code_facets_stay_bounded_with_a_thousand_distinct_codes() {
     assert_eq!(facets.error_codes.len(), ERROR_FACET_CAP);
     assert_eq!(
         facets.error_category_totals,
-        category_totals(&[(ErrorCategory::Domain, 1_000)])
+        category_totals(&[(ErrorCategory::Custom, 1_000)])
     );
     database.drop().await;
 }
@@ -386,7 +386,7 @@ async fn each_code_facet_carries_its_category() {
     assert_eq!(
         categories,
         BTreeMap::from([
-            ("MY_DOMAIN_ERROR", "DOMAIN"),
+            ("MY_DOMAIN_ERROR", "CUSTOM"),
             ("TASK_CANCELLED", "OUTCOME"),
             ("TASK_EXCEPTION", "OPERATIONAL"),
         ])
@@ -396,14 +396,14 @@ async fn each_code_facet_carries_its_category() {
         category_totals(&[
             (ErrorCategory::Operational, 1),
             (ErrorCategory::Outcome, 1),
-            (ErrorCategory::Domain, 1),
+            (ErrorCategory::Custom, 1),
         ])
     );
     database.drop().await;
 }
 
 /// The codes `HISTORY_DOMAIN_000` to `HISTORY_DOMAIN_200`.
-fn two_hundred_and_one_domain_codes() -> Vec<String> {
+fn two_hundred_and_one_custom_codes() -> Vec<String> {
     (0..201)
         .map(|index| format!("HISTORY_DOMAIN_{index:03}"))
         .collect()
@@ -418,7 +418,7 @@ async fn a_selected_family_is_filtered_before_its_code_cap() {
     seed_failures(
         &database.pool,
         "history_domain_",
-        &two_hundred_and_one_domain_codes(),
+        &two_hundred_and_one_custom_codes(),
     )
     .await;
     seed_terminal(
@@ -450,7 +450,7 @@ async fn category_totals_count_codes_past_the_facet_cap() {
     seed_failures(
         &database.pool,
         "history_domain_",
-        &two_hundred_and_one_domain_codes(),
+        &two_hundred_and_one_custom_codes(),
     )
     .await;
 
@@ -459,7 +459,7 @@ async fn category_totals_count_codes_past_the_facet_cap() {
     assert_eq!(facets.error_codes.len(), ERROR_FACET_CAP);
     assert_eq!(
         facets.error_category_totals,
-        category_totals(&[(ErrorCategory::Domain, 201)])
+        category_totals(&[(ErrorCategory::Custom, 201)])
     );
     database.drop().await;
 }
@@ -645,7 +645,7 @@ async fn the_filters_scope_the_groups_and_the_total() {
 }
 
 /// Python `TestErrorCategoryFilter::test_a_family_selects_exactly_its_own_codes`
-/// (every family, also CONTRACT, RETRIEVAL and DOMAIN).
+/// (every family, also CONTRACT, RETRIEVAL and CUSTOM).
 #[tokio::test]
 async fn each_family_selects_exactly_its_own_codes() {
     let database = SpecDatabase::create().await;
@@ -661,9 +661,9 @@ async fn each_family_selects_exactly_its_own_codes() {
     database.drop().await;
 }
 
-/// Python `TestErrorCategoryFilter::test_a_user_defined_code_is_domain_and_no_family_claims_it`.
+/// Python `TestErrorCategoryFilter::test_a_user_defined_code_is_custom_and_no_family_claims_it`.
 #[tokio::test]
-async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
+async fn a_custom_code_is_custom_and_no_built_in_family_selects_it() {
     let database = SpecDatabase::create().await;
     seed_terminal(
         &database.pool,
@@ -673,12 +673,12 @@ async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
     .await;
     let broker = database.broker();
 
-    let domain =
-        rows_by_category(&broker, vec![ErrorCategory::Domain], Vec::new(), Vec::new()).await;
+    let custom =
+        rows_by_category(&broker, vec![ErrorCategory::Custom], Vec::new(), Vec::new()).await;
 
-    let codes: Vec<Option<&str>> = domain.iter().map(|row| row.error_code.as_deref()).collect();
+    let codes: Vec<Option<&str>> = custom.iter().map(|row| row.error_code.as_deref()).collect();
     assert_eq!(codes, [Some("PAYMENT_DECLINED")]);
-    assert_eq!(domain[0].error_category.as_deref(), Some("DOMAIN"));
+    assert_eq!(custom[0].error_category.as_deref(), Some("CUSTOM"));
     for family in BUILT_IN_FAMILIES {
         let rows = rows_by_category(&broker, vec![family], Vec::new(), Vec::new()).await;
         assert!(rows.is_empty(), "{family}: {rows:?}");
@@ -687,7 +687,7 @@ async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
 }
 
 /// Python `TestErrorCategoryFilter::test_absent_and_empty_codes_match_no_category`:
-/// DOMAIN means "carries a code the library does not define", not "no code".
+/// CUSTOM means "carries a code the library does not define", not "no code".
 #[tokio::test]
 async fn absent_and_empty_codes_match_no_category() {
     let database = SpecDatabase::create().await;
@@ -720,7 +720,7 @@ async fn two_categories_select_the_codes_of_either() {
 
     let rows = rows_by_category(
         &database.broker(),
-        vec![ErrorCategory::Contract, ErrorCategory::Domain],
+        vec![ErrorCategory::Contract, ErrorCategory::Custom],
         Vec::new(),
         Vec::new(),
     )
@@ -736,7 +736,7 @@ async fn two_categories_select_the_codes_of_either() {
 
 /// Every built-in code, family by family.
 fn built_in_codes() -> Vec<String> {
-    OperationalErrorCode::ALL
+    OperationalCode::ALL
         .iter()
         .map(ToString::to_string)
         .chain(ContractCode::ALL.iter().map(ToString::to_string))

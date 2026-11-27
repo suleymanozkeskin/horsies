@@ -221,6 +221,92 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
     database.drop().await;
 }
 
+/// An error raised in the leaf creation of one class is contained like a
+/// refusal. A trigger makes the catalog insert of `standard_10d` raise after
+/// its leaf table was created: that leaf's transaction rolls back (no
+/// relation, no catalog row), the pass fails and names the class, the
+/// heartbeat leaves still cover the present instant, a class that sorts
+/// after it gets every leaf it is owed, and the readers are current. With
+/// the trigger gone, the next pass creates the leaves of the class.
+#[tokio::test]
+async fn a_raised_error_in_one_class_rolls_back_its_leaf_and_the_other_classes_are_served() {
+    let database = TestDatabase::create_with_connections(4).await;
+    sql::query(
+        "CREATE FUNCTION test_refuse_catalog_row() RETURNS trigger LANGUAGE plpgsql AS $f$
+         BEGIN RAISE EXCEPTION 'test refuses the catalog row of %', NEW.leaf_name; END $f$",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("create the refusing trigger function");
+    // `standard_10d` sorts before `standard_7d`.
+    sql::query(&format!(
+        "CREATE TRIGGER test_refuse_catalog_row BEFORE INSERT ON {LEAF_CATALOG}
+         FOR EACH ROW WHEN (NEW.class_key = 'standard_10d')
+         EXECUTE FUNCTION test_refuse_catalog_row()"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("make the catalog insert of one class raise");
+    let horizon = 2_u32;
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
+        crate::broker::core_rows::StatementLog::Off,
+        horizon,
+        2,
+        &[period(10), period(7)],
+    )
+    .await
+    .expect("contained coverage pass");
+    let failure = failed(outcome);
+    assert_eq!(
+        failure.class_key.as_deref(),
+        Some("standard_10d"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.refusal.contains("standard_10d: database error"),
+        "a raised error, not a returned refusal: {failure:?}"
+    );
+    assert!(failure.heartbeat_covered_now);
+    let parent = finite_class_parent_name("standard_10d").expect("class parent");
+    let refused = history_leaf_name(&parent, database_today(&database.pool).await)
+        .expect("refused leaf name");
+    assert!(
+        !relation_exists(&database.pool, &refused).await,
+        "the leaf transaction rolled back its CREATE TABLE"
+    );
+    assert_eq!(class_leaf_count(&database.pool, "standard_10d").await, 0);
+    assert_eq!(
+        class_leaf_count(&database.pool, "standard_7d").await,
+        i64::from(horizon) + 1,
+        "a class after the failing one gets every leaf it is owed"
+    );
+    assert!(!needs_republication(&database.pool).await);
+
+    sql::query(&format!(
+        "DROP TRIGGER test_refuse_catalog_row ON {LEAF_CATALOG}"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("let the catalog insert pass");
+    let outcome = ensure_partition_coverage_in_pool(
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
+        crate::broker::core_rows::StatementLog::Off,
+        horizon,
+        2,
+        &[period(10), period(7)],
+    )
+    .await
+    .expect("next coverage pass");
+    let report = ensured(outcome);
+    assert_eq!(report.created_history_leaves, u64::from(horizon) + 1);
+    assert_eq!(
+        class_leaf_count(&database.pool, "standard_10d").await,
+        i64::from(horizon) + 1
+    );
+    database.drop().await;
+}
+
 /// `test_horizon_retune_is_a_success_not_a_failure`: a pass with a new
 /// heartbeat horizon is a coverage success and stores the new horizon.
 #[tokio::test]

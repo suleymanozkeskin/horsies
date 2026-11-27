@@ -49,12 +49,12 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='any',
@@ -84,11 +84,11 @@ class TestOrJoin:
 
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
-        node_a: TaskNode[int] = TaskNode(fn=fail_task)
-        node_b: TaskNode[int] = TaskNode(fn=fail_task)
+        node_a: TaskNode[int] = TaskNode(function=fail_task)
+        node_b: TaskNode[int] = TaskNode(function=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
@@ -108,14 +108,14 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (no dep succeeded)
@@ -131,11 +131,11 @@ class TestOrJoin:
 
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 5})
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 5})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
@@ -155,7 +155,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B might succeed)
@@ -180,11 +180,11 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_any_task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
@@ -223,10 +223,10 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
@@ -253,10 +253,10 @@ class TestOrJoin:
 
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
@@ -274,7 +274,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         status_agg = await get_task_status(session, str(handle.workflow_id), 1)
@@ -290,10 +290,10 @@ class TestOrJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
 
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
 
         node_b: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a],
             join='any',
@@ -301,7 +301,7 @@ class TestOrJoin:
 
         # C depends on B with join='all' (default)
         node_c: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_b],
         )
@@ -320,7 +320,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         status_b = await get_task_status(session, str(handle.workflow_id), 1)
@@ -337,11 +337,11 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
@@ -373,12 +373,12 @@ class TestOrJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='any',
@@ -408,11 +408,11 @@ class TestOrJoin:
         task = make_simple_ctx_task(app, 'ctx_any_fail')
         fail_task = make_failing_task(app, 'fail_ctx')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[str] = TaskNode(fn=fail_task)
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[str] = TaskNode(function=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
@@ -434,7 +434,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: join='any' satisfied + ctx dep is terminal (failed)
@@ -452,17 +452,17 @@ class TestOrJoin:
         fail_task = make_failing_task(app, 'fail_skip')
 
         # B depends on A (which will fail), so B gets SKIPPED via cascade
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
         node_b: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 1},
             waits_for=[node_a],
         )
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
 
         # Aggregator: join='any', ctx from B (which will be SKIPPED)
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_b, node_c],
             join='any',
@@ -483,7 +483,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         # B should be SKIPPED now (cascade from A failing, join='all' default)
         status_b = await get_task_status(session, str(handle.workflow_id), 1)
@@ -521,13 +521,13 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -559,13 +559,13 @@ class TestQuorumJoin:
 
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
+        node_b: TaskNode[str] = TaskNode(function=fail_task)
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -586,14 +586,14 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (max possible = 1, need 2)
@@ -609,13 +609,13 @@ class TestQuorumJoin:
 
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         # Aggregator needs 2 out of 3 to succeed
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -636,7 +636,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B and C can still succeed)
@@ -668,11 +668,11 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_quorum_task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='quorum',
@@ -712,12 +712,12 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -753,12 +753,12 @@ class TestQuorumJoin:
         session, broker, app = setup
 
         task = make_simple_task(app, 'task')
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 2})
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[int] = TaskNode(function=task, kwargs={'value': 2})
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -789,12 +789,12 @@ class TestQuorumJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
 
-        node_a: TaskNode[str] = TaskNode(fn=fail_task)
-        node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[str] = TaskNode(function=fail_task)
+        node_b: TaskNode[str] = TaskNode(function=fail_task)
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_d: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -803,7 +803,7 @@ class TestQuorumJoin:
 
         # E depends on D with join='all' (default)
         node_e: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_d],
         )
@@ -822,14 +822,14 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         status_d = await get_task_status(session, str(handle.workflow_id), 3)
@@ -848,11 +848,11 @@ class TestQuorumJoin:
         task = make_simple_ctx_task(app, 'ctx_quorum_fail')
         fail_task = make_failing_task(app, 'fail_ctx_q')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[str] = TaskNode(fn=fail_task)
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[str] = TaskNode(function=fail_task)
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='quorum',
@@ -875,7 +875,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: quorum satisfied + ctx dep terminal
@@ -892,12 +892,12 @@ class TestQuorumJoin:
         task = make_simple_task(app, 'task')
         fail_task = make_failing_task(app, 'fail_task')
 
-        node_a: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 1})
-        node_b: TaskNode[str] = TaskNode(fn=fail_task)
-        node_c: TaskNode[int] = TaskNode(fn=task, kwargs={'value': 3})
+        node_a: TaskNode[int] = TaskNode(function=task, kwargs={'value': 1})
+        node_b: TaskNode[str] = TaskNode(function=fail_task)
+        node_c: TaskNode[int] = TaskNode(function=task, kwargs={'value': 3})
 
         node_aggregator: TaskNode[int] = TaskNode(
-            fn=task,
+            function=task,
             kwargs={'value': 0},
             waits_for=[node_a, node_b, node_c],
             join='quorum',
@@ -923,7 +923,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
         status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'

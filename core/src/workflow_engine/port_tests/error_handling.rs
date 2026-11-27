@@ -1100,8 +1100,8 @@ async fn one_met_case_of_several_completes_the_workflow() {
 #[tokio::test]
 async fn the_promotion_refuses_a_negative_retry_limit_with_python_s_text() {
     let pool = shared_pool().await;
-    let options = r#"{"retry_policy": {"max_retries": -1, "intervals": [5],
-        "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["TRANSIENT"]}}"#;
+    let options = r#"{"retry_policy": {"max_retries": -1, "intervals_seconds": [5],
+        "backoff_strategy": "exponential", "jitter": true, "retry_for": ["TRANSIENT"]}}"#;
 
     let refusal: Option<String> =
         sql::query_scalar("SELECT horsies_workflow_task_options_refusal($1, 3)")

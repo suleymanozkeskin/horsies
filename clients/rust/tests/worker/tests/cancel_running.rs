@@ -17,7 +17,7 @@
 
 use std::time::{Duration, Instant};
 
-use horsies::{TaskHandle, TaskInfoParts, TaskStatus, UserErrorCode};
+use horsies::{CustomErrorCode, TaskHandle, TaskInfoParts, TaskStatus};
 use horsies_test_worker::harness::{succeeded, Suite};
 use horsies_test_worker::instance::{Instance, Profile};
 use horsies_test_worker::markers;
@@ -119,7 +119,7 @@ async fn assert_seen_in_time(suite: &Suite, token: &str, cancel_at: u128) {
 async fn assert_cancelled_with_one_attempt<T, E>(handle: &TaskHandle<T, E>)
 where
     T: DeserializeOwned + Clone + std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     let info = handle.info(ALL_PARTS).await.expect("read the info");
     assert_eq!(info.status, TaskStatus::Cancelled);

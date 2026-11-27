@@ -20,10 +20,10 @@ from sqlalchemy import text
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerIdempotencyKeyConflict,
-    BrokerPayloadMismatch,
-    BrokerResult,
+    DatabaseErrorCode,
+    DatabaseIdempotencyKeyConflict,
+    DatabasePayloadMismatch,
+    DatabaseResult,
 )
 from tests.task_ids import mint_task_id, uuid7_birth_at
 from horsies.core.types.result import is_err, is_ok
@@ -48,7 +48,7 @@ def make_send(input_json: str | None = '{"x":1}') -> Send:
     )
 
 
-async def enqueue(broker: PostgresBroker, send: Send) -> BrokerResult[str]:
+async def enqueue(broker: PostgresBroker, send: Send) -> DatabaseResult[str]:
     return await broker.enqueue_async(
         'cutover.enqueue',
         task_id=send.task_id,
@@ -132,12 +132,12 @@ class TestConvertedStatement:
         )
         conflicted = await enqueue(broker, tampered)
         assert is_err(conflicted)
-        assert conflicted.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
+        assert conflicted.err_value.code is DatabaseErrorCode.PAYLOAD_MISMATCH
 
 
 async def enqueue_keyed(
     broker: PostgresBroker, send: Send, key: str
-) -> BrokerResult[str]:
+) -> DatabaseResult[str]:
     return await broker.enqueue_async(
         'cutover.enqueue',
         task_id=send.task_id,
@@ -268,7 +268,7 @@ class TestKeyedEnqueue:
         # Same command, different key: the sent payload differs from the
         # original send, so this is a payload mismatch, not a key conflict.
         assert is_err(second_binding)
-        assert isinstance(second_binding.err_value, BrokerPayloadMismatch)
+        assert isinstance(second_binding.err_value, DatabasePayloadMismatch)
         async with current_resources(broker).session_factory() as session:
             reservations = int(
                 (
@@ -298,7 +298,7 @@ class TestKeyedEnqueue:
         binding = await enqueue_keyed(broker, tampered, key)
 
         assert is_err(binding)
-        assert binding.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
+        assert binding.err_value.code is DatabaseErrorCode.PAYLOAD_MISMATCH
         async with current_resources(broker).session_factory() as session:
             reservation_count, bound_digest = (
                 await session.execute(
@@ -327,7 +327,7 @@ class TestKeyedEnqueue:
         conflicted = await enqueue_keyed(broker, different, key)
         assert is_err(conflicted)
         match conflicted.err_value:
-            case BrokerIdempotencyKeyConflict(owner_task_id=owner_task_id):
+            case DatabaseIdempotencyKeyConflict(owner_task_id=owner_task_id):
                 assert owner_task_id == first.task_id
             case other:
                 raise AssertionError(f'expected a key conflict, got {other!r}')

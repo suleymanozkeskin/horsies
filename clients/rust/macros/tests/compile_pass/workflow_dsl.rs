@@ -27,9 +27,9 @@ async fn consume(total: TaskOutcome<f64, Infallible>) -> Result<String, TaskErro
     }
 }
 
-#[task("summarize", workflow_ctx)]
-async fn summarize(workflow_ctx: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
-    Ok(u32::try_from(workflow_ctx.node_index()).unwrap_or(0))
+#[task("summarize", workflow_context)]
+async fn summarize(workflow_context: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
+    Ok(u32::try_from(workflow_context.node_index()).unwrap_or(0))
 }
 
 struct Pipeline;
@@ -48,9 +48,9 @@ impl WorkflowDefinition for Pipeline {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let produced =
-            builder.task(produce::node().set(produce::params::order(), Order { order_id: 7 })?)?;
+            builder.task(produce::node().set(produce::fields::order(), Order { order_id: 7 })?)?;
         let consumed =
-            builder.task(consume::node().arg_from(consume::params::total(), produced))?;
+            builder.task(consume::node().arg_from(consume::fields::total(), produced))?;
         let _summary = builder.task(
             summarize::node()
                 .waits_for(consumed)
@@ -61,7 +61,7 @@ impl WorkflowDefinition for Pipeline {
 }
 
 fn main() {
-    let Ok(mut app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(mut app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;

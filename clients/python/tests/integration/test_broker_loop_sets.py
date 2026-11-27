@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.integration]
 
 POOL_TIMEOUT_SECONDS = 3
 THREAD_JOIN_BOUND_SECONDS = 15.0
-PING_WINDOW_SECONDS = 0.3
+PING_WAIT_MS = 300
 
 
 @pytest.fixture(scope='module')
@@ -52,7 +52,7 @@ def _one_connection_config() -> PostgresConfig:
         database_url=SecretStr(DB_URL),
         pool_size=1,
         max_overflow=0,
-        pool_timeout=POOL_TIMEOUT_SECONDS,
+        pool_timeout_seconds=POOL_TIMEOUT_SECONDS,
     )
 
 
@@ -66,7 +66,7 @@ class OneConnectionApp:
 @pytest.fixture
 def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, None]:
     """App whose broker pool holds exactly one connection, with one task."""
-    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, broker=_one_connection_config()))
+    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, database=_one_connection_config()))
 
     @app.task('loop_sets_echo')
     def loop_sets_echo(*, value: int) -> Result[int, TaskError]:
@@ -98,10 +98,10 @@ class TestListenerPerLoop:
         app = one_connection_app.app
 
         def sync_ping() -> Any:
-            return _run_on_thread(lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS))
+            return _run_on_thread(lambda: app.ping_workers(wait_ms=PING_WAIT_MS))
 
         def async_ping() -> Any:
-            return asyncio.run(app.ping_workers_async(timeout_seconds=PING_WINDOW_SECONDS))
+            return asyncio.run(app.ping_workers_async(wait_ms=PING_WAIT_MS))
 
         match async_first:
             case True:

@@ -209,9 +209,9 @@ mod tests {
     fn a_node_with_a_deadline_stores_the_text_of_its_vector() {
         let options = TaskOptions {
             task_name: "report".to_owned(),
-            queue_name: Some("default".to_owned()),
+            queue: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
             execution: Execution::Isolated,
@@ -229,9 +229,9 @@ mod tests {
     fn a_deadline_outside_the_instant_range_is_a_boundary_refusal() {
         let options = TaskOptions {
             task_name: "report".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: Execution::Isolated,

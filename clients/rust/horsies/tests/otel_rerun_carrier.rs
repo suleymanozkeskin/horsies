@@ -16,10 +16,11 @@
 
 use chrono::Utc;
 use horsies::rerun::{
-    rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, TokioPostgresCaller,
+    rerun_task_in, EnqueueRetention, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunOutcome, TokioPostgresCaller,
 };
 use horsies::{AppConfig, Horsies};
-use horsies_core::{OperationalErrorCode, TaskError, TaskResult};
+use horsies_core::{OperationalCode, TaskError, TaskResult};
 use opentelemetry::global;
 use opentelemetry::trace::{
     FutureExt, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
@@ -74,7 +75,8 @@ fn caller_context() -> Context {
 }
 
 fn policy() -> RerunEnqueuePolicy {
-    RerunEnqueuePolicy::new(CLASS, true, chrono::Duration::hours(24)).unwrap()
+    let retention = EnqueueRetention::from_class_key(CLASS).unwrap();
+    RerunEnqueuePolicy::new(retention, true, chrono::Duration::hours(24)).unwrap()
 }
 
 /// A FAILED plain task with a retained input, moved to history by the
@@ -106,7 +108,7 @@ async fn seed_failed_source(database: &TestDatabase) -> Uuid {
         .unwrap();
     assert_eq!(inserted, 1);
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "carrier source"),
+        TaskError::built_in(OperationalCode::TaskException, "carrier source"),
     ))
     .unwrap();
     let finished: i64 = client
@@ -166,7 +168,7 @@ async fn a_rerun_in_the_caller_transaction_stores_the_carrier_of_the_current_spa
     global::set_text_map_propagator(TraceContextPropagator::new());
     let database = TestDatabase::create().await;
     let source = seed_failed_source(&database).await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     let mut client = database.connect().await;
 
     let mut transaction = client.transaction().await.unwrap();
@@ -174,6 +176,7 @@ async fn a_rerun_in_the_caller_transaction_stores_the_carrier_of_the_current_spa
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .with_context(caller_context())
@@ -194,6 +197,7 @@ async fn a_rerun_in_the_caller_transaction_stores_the_carrier_of_the_current_spa
         &mut TokioPostgresCaller::new(&mut transaction),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         Utc::now(),
     )
     .await
@@ -213,10 +217,10 @@ async fn the_app_rerun_stores_the_carrier_of_the_current_span() {
     global::set_text_map_propagator(TraceContextPropagator::new());
     let database = TestDatabase::create().await;
     let source = seed_failed_source(&database).await;
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).unwrap();
 
     let outcome = app
-        .rerun_task(RerunTask::new(source, None, None), policy())
+        .rerun_task(RerunCommand::new(source, None, None), policy())
         .with_context(caller_context())
         .await
         .unwrap();

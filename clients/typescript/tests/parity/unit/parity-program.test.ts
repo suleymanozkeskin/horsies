@@ -156,7 +156,7 @@ describe("the configs", () => {
   test("the parity app: the pool, the kept rerun input, the profiles and every contract", () => {
     const config = parityConfig("postgresql://postgres@127.0.0.1:55432/parity");
 
-    assert.deepEqual(config.broker, {
+    assert.deepEqual(config.database, {
       databaseUrl: { kind: "value", value: "postgresql://postgres@127.0.0.1:55432/parity" },
       poolSize: 5,
       maxOverflow: 5,
@@ -165,6 +165,7 @@ describe("the configs", () => {
     assert.deepEqual(Object.keys(config.workerProfiles ?? {}), [ISOLATED, SHARED_ASYNC, SHARED_THREAD]);
     assert.equal(config.tasks, TASKS);
     assert.equal(config.workflows, WORKFLOWS);
+    assert.equal(config.schedule, SCHEDULE_SECTION);
   });
 
   test("each profile has one child of its class and the 5 s drain", () => {
@@ -185,14 +186,14 @@ describe("the configs", () => {
     assert.equal(PARITY_SCHEDULE.timezone, "UTC");
     assert.equal(PARITY_SCHEDULE.catchUpMissed, true);
     assert.equal(PARITY_SCHEDULE.maxCatchUpRuns, 2);
-    assert.deepEqual(SCHEDULE_SECTION, { checkIntervalSeconds: 1 });
+    assert.deepEqual(SCHEDULE_SECTION, { schedules: [PARITY_SCHEDULE], checkIntervalSeconds: 1 });
   });
 
   test("the refused broker app has the parity contracts on port 1 with the short checkout wait", () => {
     const config = refusedBrokerConfig();
 
-    assert.deepEqual(config.broker.databaseUrl, { kind: "value", value: REFUSED_BROKER_URL });
-    assert.equal(config.broker.poolTimeoutSeconds, REFUSED_BROKER_CHECKOUT_WAIT_S);
+    assert.deepEqual(config.database.databaseUrl, { kind: "value", value: REFUSED_BROKER_URL });
+    assert.equal(config.database.poolTimeoutSeconds, REFUSED_BROKER_CHECKOUT_WAIT_S);
     assert.match(REFUSED_BROKER_URL, /@127\.0\.0\.1:1\//);
     assert.equal(config.tasks, TASKS);
   });

@@ -31,7 +31,7 @@ const sendReceipt = defineTask({
 });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   queueMode: "custom",
   customQueues: [
     { name: "critical", priority: 1 },
@@ -60,8 +60,8 @@ const app = created.value;
 - `ValidationReport.refusals` is a non-empty list of `HorsiesError`. The order: the
   config (the TypeScript parse, then the core's check), then each listed
   contract in list order, then the workflows.
-- A `HorsiesError` has `code` (an `HRS-nnn` value of `ErrorCode`), `path` (the
-  config field, for example `customQueues[1].name`, or the contract, for
+- A `HorsiesError` has `code` (an `HRS-nnn` value of `HorsiesErrorCode`), `path`
+  (the config field, for example `customQueues[1].name`, or the contract, for
   example `tasks[2] charge_payment`), `message` and `helpText` (zero or more
   lines). The codes are on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/tasks/errors/` ("Config error
@@ -78,17 +78,19 @@ const app = created.value;
 
 ## `HorsiesConfig`
 
-`HorsiesConfig` is `AppConfigInput` plus the contract lists. Only
-`broker.databaseUrl` is required. A field that the config leaves out takes
+`HorsiesConfig` is `AppConfigInput` plus the contract lists and the
+`schedule` section. Only
+`database.databaseUrl` is required. A field that the config leaves out takes
 the core's default: the package holds no copy of a default.
 
 | Field | Type | Shared docs page |
 |---|---|---|
 | `tasks` | `readonly AnyTaskContract[]` | `tasks.md` |
 | `workflows` | `readonly AnyWorkflowContract[]` | `workflows.md` |
+| `schedule` | `ScheduleSection`: `enabled?`, `schedules: readonly TaskSchedule[]`, `checkIntervalSeconds?` (1 to 60, default 1) | `scheduling/schedule-config` |
 | `queueMode`, `customQueues` | `"default"`, or `"custom"` with a non-empty `CustomQueueInput[]` | `concepts/queue-modes` |
-| `broker` | `BrokerConfigInput` | `configuration/broker-config` |
-| `clusterWideCap` | `TaskCap`: `{ kind: "cap", tasks }` or `{ kind: "noCap" }` | `workers/concurrency` |
+| `database` | `DatabaseConfigInput` | `configuration/broker-config` |
+| `clusterWideCap` | `ClusterCapSetting`: `{ kind: "clusterCap", tasks }` or `{ kind: "noClusterCap" }` (the default) | `workers/concurrency` |
 | `claim` | `ClaimMode`: `{ kind: "hardCap", leaseMs? }` or `{ kind: "softCap", prefetchBuffer, leaseMs }` | `workers/concurrency` |
 | `maxClaimRenewAgeMs` | `number` | `workers/heartbeats-recovery` |
 | `payload` | `PayloadPolicyInput` (`warnBytes`, `rejectBytes`: `PayloadBound`) | `tasks.md` (sends) |
@@ -97,6 +99,8 @@ the core's default: the package holds no copy of a default.
 | `resilience` | `ResilienceConfigInput` | `workers/worker-architecture` |
 | `workerProfiles` | `Readonly<Record<string, WorkerProfileInput>>` | `workers/concurrency` |
 | `resendOnTransientError` | `boolean`, default `false` | `operations/atomic-enqueue-and-topology` |
+| `schemaMode` | `SchemaMode`: `"MIGRATE_AND_VALIDATE"` (the default), `"OBSERVE_ONLY"` or `"ASSUME_INITIALIZED"` | `configuration/broker-config` |
+| `logFormat` | `LogFormat`: `{ kind: "textLogs" }` (the default) or `{ kind: "jsonLogs" }` | `configuration/app-config` |
 
 The shared pages are under `https://suleymanozkeskin.github.io/horsies/`,
 for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-config/`.
@@ -107,13 +111,58 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
   does not compile.
 - `resendOnTransientError: true` sends again, up to 3 times, after a send
   fails with a transient database error.
+- `schemaMode` is the mode of the app's core handle: the producer, the
+  scheduler, `web` and the task sends of each worker child use it.
+  `"OBSERVE_ONLY"` runs no schema statement; `"ASSUME_INITIALIZED"` runs no
+  schema statement and uses no listener. The worker's own connection always
+  migrates and validates, and `check --live` reads through a connection of
+  its own with `"OBSERVE_ONLY"`.
 
-### `broker`
+### `schedule`
+
+Each entry of `schedules` comes from `taskSchedule`, which checks the input
+against the input type of the entry's task contract. A plain object is no
+entry: it does not compile.
+
+<!-- ts-check: alone -->
+```ts
+import { defineTask, h, Horsies, taskSchedule } from "horsies";
+
+const buildReport = defineTask({ name: "build_report", input: { format: h.string() }, output: h.null() });
+
+const created = Horsies.create({
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  tasks: [buildReport],
+  schedule: {
+    schedules: [
+      taskSchedule({
+        name: "daily-report",
+        task: buildReport,
+        input: { format: "pdf" },
+        pattern: { kind: "daily", time: Temporal.PlainTime.from("09:00") },
+        timezone: "Europe/Berlin",
+      }),
+    ],
+    checkIntervalSeconds: 5,
+  },
+});
+```
+
+- `Horsies.create` records the section once. A refusal of an entry (a
+  contract that the app does not list, a queue that it does not admit, an
+  input that does not fit or is over the payload bound, an unknown zone, a
+  pattern that breaks a rule, a repeated name) or of the check interval goes
+  to the report of `check` and of the scheduler start; the worker start
+  skips them, and the create is not refused.
+- `enabled: false` on the section stops the `scheduler` command at its start;
+  on an entry it keeps the entry's name known and sends nothing.
+
+### `database`
 
 | Field | Type |
 |---|---|
 | `databaseUrl` | `Secret`: `{ kind: "fromEnv", name }` (read at `Horsies.create`) or `{ kind: "value", value }` |
-| `connection` | `BrokerConnection`: `{ kind: "direct", sessionDatabase? }` or `{ kind: "pgbouncerTransaction", sessionDatabaseUrl: Secret }` |
+| `connection` | `DatabaseConnection`: `{ kind: "direct", sessionDatabase? }` or `{ kind: "pgbouncerTransaction", sessionDatabaseUrl: Secret }` |
 | `poolSize`, `maxOverflow` | `number` (defaults 5 and 10) |
 | `poolTimeoutSeconds` | `number` |
 | `poolRecycle` | `PoolRecycle`: `{ kind: "never" }` or `{ kind: "after", seconds }` (0: at every checkout) |
@@ -132,7 +181,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 - A `fromEnv` variable that is not set is refused with `HRS-203`. The
   message names the variable and never the value.
 - `poolSize` persistent connections and up to `maxOverflow` more under load
-  size the general broker pool. It serves producers, web processes and the
+  size the general pool. It serves producers, web processes and the
   app-level reads. It does not size the pools of a worker: the worker
   process opens the `pool` of its worker profile, and task code in a worker
   child opens the `taskSendPool` of its child kind.
@@ -148,7 +197,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 import type { AppConfigInput } from "horsies";
 
 export const highTrafficConfig: AppConfigInput = {
-  broker: {
+  database: {
     databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" },
     poolSize: 20,
     maxOverflow: 40,
@@ -167,9 +216,9 @@ export const highTrafficConfig: AppConfigInput = {
 | `retention.pausedWorkflowCancelAfter` with years or months, or not whole microseconds | `HRS-216` |
 
 The code of a section: queues `HRS-200`, `clusterWideCap` `HRS-201`,
-`claim` and `maxClaimRenewAgeMs` `HRS-202`, `broker` URLs `HRS-203`,
-`recovery` `HRS-204`, `resilience` `HRS-208`, `broker` pool fields
-`HRS-213`, `broker` socket fields `HRS-215`, `retention` `HRS-216`,
+`claim` and `maxClaimRenewAgeMs` `HRS-202`, `database` URLs `HRS-203`,
+`recovery` `HRS-204`, `resilience` `HRS-208`, `database` pool fields
+`HRS-213`, `database` socket fields `HRS-215`, `retention` `HRS-216`,
 `workerProfiles` `HRS-218`, `payload` `HRS-227`.
 
 ### Queues
@@ -213,7 +262,7 @@ const resizeImage = defineTask({
 });
 
 export const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   workerProfiles: {
     default: {
       isolated: {
@@ -232,7 +281,7 @@ export const created = Horsies.create({
 | `WorkerProfileInput` field | Type |
 |---|---|
 | `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `prePing`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
-| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
+| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `executor: ExecutorThreads`, `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
 | `pool` | `ParentPoolInput`: `maxSize: SharedPoolSize` |
 | `claim` | `ClaimLimitsInput`: `perQueuePerPass`, `claimedPerWorker` (`TaskLimit`) |
 | `drainTimeoutMs` | `number`: 1 to 86,400,000 ms; default 300,000 ms (300 s) |
@@ -243,6 +292,10 @@ export const created = Horsies.create({
   16,777,216) or `{ kind: "noMemoryLimit" }`. `PoolSize` is
   `{ kind: "connections", connections }` (1 to 1,000); `SharedPoolSize`
   adds `{ kind: "fromSeats" }`.
+- `ExecutorThreads` is `{ kind: "threads", threads }` (1 to 256) or
+  `{ kind: "fromSeats" }` (the default): the threads of the core's runtime in
+  each shared async child, which run its database writes, its connections and
+  its frames to the worker. Task code runs on the child's event loop.
 - A class that the profile leaves out has no children, as its
   `no...Children` setting gives. The default recycle is after 100 tasks (100
   tasks per seat for a shared child) and no memory limit.
@@ -348,6 +401,13 @@ configureLogging({
 - Each command of `cli.run` sets every logger to the threshold of its
   `--log-level`, so the thresholds that the entry set before `cli.run` do not
   stay. The sink stays.
+- The worker, the scheduler, `check` and each worker child write the stderr
+  lines in the app's `logFormat`. `{ kind: "jsonLogs" }` writes one JSON
+  object per line with the same keys in every record: `ts` (ISO 8601 in UTC,
+  in microseconds), `level`, `logger`, `message`, `process`, `task_id`,
+  `task_name`, `attempt`, `trace_id`, `span_id` (`null` when the record has no
+  field of that name) and `exc` (`null`). The output is ASCII. A sink
+  function gets the records, so the format does not apply to it.
 
 ## The Check
 
@@ -400,7 +460,7 @@ import { cli, defineTask, h, Horsies } from "horsies";
 const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h.string() });
 
 const created = Horsies.create({
-  broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
   workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [greet],
 });
@@ -503,14 +563,17 @@ after `cli.run`.** Each command sets every logger to its `--log-level`.
 ```ts
 import {
   // App
-  Horsies, ErrorCode, cli,
+  Horsies, HorsiesErrorCode, cli,
   type HorsiesConfig, type ValidationReport, type HorsiesError, type RefusalCode,
   // Config
-  type AppConfigInput, type BrokerConfigInput, type BrokerConnection, type SessionDatabase, type Secret,
-  type PoolRecycle, type TcpKeepalives, type TcpUserTimeout, type RerunInputDefault, type ClaimMode,
+  type AppConfigInput, type DatabaseConfigInput, type DatabaseConnection, type SessionDatabase, type Secret,
+  type PoolRecycle, type TcpKeepalives, type TcpUserTimeout, type RerunInputDefault, type ClaimMode, type ClusterCapSetting,
   type TaskCap, type CustomQueueInput, type QueueConfigInput, type PayloadPolicyInput, type PayloadBound,
   type RecoveryConfigInput, type RetentionConfigInput, type HoursRetention, type PausedWorkflowExpiry,
   type RetentionPeriod, type QueueRetention, type ResilienceConfigInput, type RetryAttempts,
+  type SchemaMode, type LogFormat,
+  // Schedules
+  taskSchedule, type ScheduleSection, type TaskSchedule, type TaskScheduleOptions, type SchedulePattern,
   // Worker profiles
   type WorkerProfileInput, type IsolatedChildren, type IsolatedRecycleInput, type IsolatedPoolInput,
   type SharedAsyncChildren, type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,

@@ -159,7 +159,7 @@ fn the_child_host_passes_each_envelope_as_stored() {
         assert_eq!(
             String::from_utf8(built).expect("the task input is UTF-8"),
             format!(
-                r#"{{"dep":{envelope},"workflow_ctx":{{"workflow_id":"{workflow_id}","task_index":1,"task_name":"consume","results_by_id":{{"source":{envelope}}},"summaries_by_id":{{}}}}}}"#
+                r#"{{"dep":{envelope},"workflow_context":{{"workflow_id":"{workflow_id}","task_index":1,"task_name":"consume","results_by_id":{{"source":{envelope}}},"summaries_by_id":{{}}}}}}"#
             ),
             "{}",
             vector.name

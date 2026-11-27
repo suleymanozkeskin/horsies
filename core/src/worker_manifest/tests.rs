@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::core::config::child_sizing::parent_pool_connections;
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 
 /// A profile with every setting of every kind of child.
 pub(crate) fn full_profile() -> Value {
@@ -19,7 +19,7 @@ pub(crate) fn full_profile() -> Value {
                 "after": {"kind": "TASKS", "tasks": 50},
                 "above": {"kind": "MEGABYTES", "mb": 512}
             },
-            "pool": {"min_size": 0, "max_size": 3, "check": true},
+            "pool": {"min_size": 0, "max_size": 3, "pre_ping": true},
             "task_send_pool": 2
         },
         "shared_async": {
@@ -30,7 +30,7 @@ pub(crate) fn full_profile() -> Value {
                 "after_per_seat": {"kind": "NO_LIMIT"},
                 "above": {"kind": "NO_LIMIT"}
             },
-            "pool": {"min_size": 1, "max_size": {"kind": "FROM_SEATS"}, "check": false},
+            "pool": {"min_size": 1, "max_size": {"kind": "FROM_SEATS"}, "pre_ping": false},
             "executor": {"kind": "THREADS", "threads": 4},
             "task_send_pool": 3
         },
@@ -68,7 +68,7 @@ pub(crate) fn manifest(profiles: &Value, request: &Value) -> Value {
             "pgbouncer_transaction_mode": false,
             "pool_pre_ping": true,
             "worker_pool_pre_ping": false,
-            "pool_timeout": 30,
+            "pool_timeout_seconds": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {
@@ -102,9 +102,9 @@ pub(crate) fn manifest(profiles: &Value, request: &Value) -> Value {
         "recovery": recovery_section(),
         "retention": retention_section(),
         "resilience": {
-            "db_retry_initial_ms": 250,
-            "db_retry_max_ms": 20_000,
-            "db_retry_max_attempts": {"kind": "ATTEMPTS", "attempts": 7},
+            "database_retry_initial_ms": 250,
+            "database_retry_max_ms": 20_000,
+            "database_retry_max_attempts": {"kind": "ATTEMPTS", "attempts": 7},
             "notify_poll_interval_ms": 4_000
         },
         "payload": {
@@ -149,14 +149,14 @@ pub(crate) fn manifest(profiles: &Value, request: &Value) -> Value {
 /// A recovery section with a value of its own in every field.
 fn recovery_section() -> Value {
     json!({
-        "auto_requeue_stale_claimed": true,
+        "requeue_stale_claimed": true,
         "claimed_stale_threshold_ms": 120_000,
-        "auto_terminate_orphaned_workflow_tasks": false,
-        "auto_fail_stale_running": true,
+        "terminate_orphaned_workflow_tasks": false,
+        "fail_stale_running": true,
         "running_stale_threshold_ms": 300_000,
         "finalizing_stale_threshold_ms": 400_000,
         "crashed_worker_recovery_grace_ms": 0,
-        "phase2_quarantine_after_attempts": 25,
+        "finalization_quarantine_after_attempts": 25,
         "workflow_recovery_failure_limit": 30,
         "check_interval_ms": 30_000,
         "orphan_task_audit_interval_ms": 60_000,
@@ -171,7 +171,7 @@ fn retention_section() -> Value {
     json!({
         "worker_state_retention": {"kind": "HOURS", "hours": 168},
         "terminal_record_retention": {"kind": "NO_PRUNING"},
-        "paused_workflow_auto_cancel_after": {"kind": "AFTER", "micros": 86_400_000_001_u64},
+        "paused_workflow_cancel_after": {"kind": "AFTER", "micros": 86_400_000_001_u64},
         "history_leaf_horizon_days": 3,
         "heartbeat_leaf_horizon_hours": 6,
         "retention_periods": [7, 90],
@@ -179,8 +179,8 @@ fn retention_section() -> Value {
             "high": {"kind": "DAYS", "days": 14},
             "low": {"kind": "FOREVER"}
         },
-        "partition_maintenance_interval_s": 900,
-        "retention_sweep_interval_s": 300,
+        "partition_maintenance_interval_seconds": 900,
+        "retention_sweep_interval_seconds": 300,
         "retention_delete_batch_size": 500
     })
 }
@@ -250,7 +250,7 @@ fn a_profile_maps_to_the_config_profile_field_by_field() {
             pool: IsolatedPool {
                 min_size: bounded(0),
                 max_size: PoolSize::new(bounded(3)),
-                check: true,
+                pre_ping: true,
             },
             task_send_pool: PoolSize::new(bounded(2)),
         }),
@@ -264,7 +264,7 @@ fn a_profile_maps_to_the_config_profile_field_by_field() {
             pool: SharedPool {
                 min_size: bounded(1),
                 max_size: PoolSizeSetting::PoolSizeFromSeats {},
-                check: false,
+                pre_ping: false,
             },
             executor: ExecutorThreadsSetting::ExecutorThreads {
                 threads: bounded(4),
@@ -546,19 +546,19 @@ fn the_handler_fields_are_required_and_closed() {
 #[test]
 fn the_declared_codes_of_a_task_give_its_error_code_labels() {
     use crate::core::task::{
-        error_code_label, ErrorCodeLabel, OperationalErrorCode, TaskErrorCode, UserCode,
+        error_code_label, CustomCode, ErrorCodeLabel, OperationalCode, TaskErrorCode,
     };
     let manifest = parsed(&manifest(
         &json!({"batch": full_profile()}),
         &named("batch"),
     ));
     let fetch = &manifest.tasks["app.tasks.fetch"].error_codes;
-    let declared = TaskErrorCode::User(UserCode::parse("RATE_LIMITED").expect("a user code"));
-    let other = TaskErrorCode::User(UserCode::parse("GONE").expect("a user code"));
-    let built_in = TaskErrorCode::from(OperationalErrorCode::BrokerError);
+    let declared = TaskErrorCode::Custom(CustomCode::parse("RATE_LIMITED").expect("a custom code"));
+    let other = TaskErrorCode::Custom(CustomCode::parse("GONE").expect("a custom code"));
+    let built_in = TaskErrorCode::from(OperationalCode::DatabaseError);
     assert_eq!(error_code_label(fetch, &declared).value(), "RATE_LIMITED");
     assert_eq!(error_code_label(fetch, &other), ErrorCodeLabel::Undeclared);
-    assert_eq!(error_code_label(fetch, &built_in).value(), "BROKER_ERROR");
+    assert_eq!(error_code_label(fetch, &built_in).value(), "DATABASE_ERROR");
 }
 
 #[test]
@@ -609,7 +609,7 @@ fn no_name_and_an_unknown_name_are_refused_with_the_defined_names() {
     assert_eq!(defined, &["batch", "small"]);
     let [error]: [HorsiesError; 1] = not_given.errors().try_into().expect("one error");
     assert_eq!(error.message, "--profile is required");
-    assert_eq!(error.code, Some(ErrorCode::CliInvalidArgs));
+    assert_eq!(error.code, Some(HorsiesErrorCode::CliInvalidArgs));
     assert_eq!(
         error.notes,
         [
@@ -711,7 +711,10 @@ fn the_worker_process_pool_is_the_resolved_pool_of_the_profile() {
     assert!(!config.pool_pre_ping);
     assert!(!config.worker_pool_pre_ping);
     assert!(config.retain_rerun_input_default);
-    assert_eq!(config.session_database_url, None);
+    assert_eq!(
+        config.session_database,
+        crate::core::SessionDatabase::SameAsDatabaseUrl
+    );
     assert_eq!(
         config.database_url,
         "postgresql://user:secret@localhost:5432/db"
@@ -810,14 +813,14 @@ fn the_recovery_section_maps_to_the_config_field_by_field() {
         &named("batch"),
     ));
     let config = manifest.recovery.to_config();
-    assert!(config.auto_requeue_stale_claimed);
+    assert!(config.requeue_stale_claimed);
     assert_eq!(config.claimed_stale_threshold_ms, 120_000);
-    assert!(!config.auto_terminate_orphaned_workflow_tasks);
-    assert!(config.auto_fail_stale_running);
+    assert!(!config.terminate_orphaned_workflow_tasks);
+    assert!(config.fail_stale_running);
     assert_eq!(config.running_stale_threshold_ms, 300_000);
     assert_eq!(config.finalizing_stale_threshold_ms, 400_000);
     assert_eq!(config.crashed_worker_recovery_grace_ms, 0);
-    assert_eq!(config.phase2_quarantine_after_attempts, 25);
+    assert_eq!(config.finalization_quarantine_after_attempts, 25);
     assert_eq!(config.workflow_recovery_failure_limit, 30);
     assert_eq!(config.check_interval_ms, 30_000);
     assert_eq!(config.orphan_task_audit_interval_ms, 60_000);
@@ -840,7 +843,7 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
     assert_eq!(config.terminal_record_retention_hours, None);
     assert_eq!(
         config
-            .paused_workflow_auto_cancel_after
+            .paused_workflow_cancel_after
             .map(crate::core::config::PausedWorkflowAge::micros),
         Some(86_400_000_001)
     );
@@ -856,8 +859,8 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
         Some(&Some(chrono::Duration::days(14)))
     );
     assert_eq!(config.queue_retention.get("low"), Some(&None));
-    assert_eq!(config.partition_maintenance_interval_s, 900);
-    assert_eq!(config.retention_sweep_interval_s, 300);
+    assert_eq!(config.partition_maintenance_interval_seconds, 900);
+    assert_eq!(config.retention_sweep_interval_seconds, 300);
     assert_eq!(config.retention_delete_batch_size, 500);
     assert!(config.validate().is_empty(), "{:?}", config.validate());
 }
@@ -868,11 +871,11 @@ fn a_retention_rule_that_is_off_maps_to_none() {
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["retention"]["worker_state_retention"] = json!({"kind": "NO_PRUNING"});
     document["retention"]["terminal_record_retention"] = json!({"kind": "HOURS", "hours": 43_800});
-    document["retention"]["paused_workflow_auto_cancel_after"] = json!({"kind": "NO_EXPIRY"});
+    document["retention"]["paused_workflow_cancel_after"] = json!({"kind": "NO_EXPIRY"});
     let config = parsed(&document).retention.to_config();
     assert_eq!(config.worker_state_retention_hours, None);
     assert_eq!(config.terminal_record_retention_hours, Some(43_800));
-    assert_eq!(config.paused_workflow_auto_cancel_after, None);
+    assert_eq!(config.paused_workflow_cancel_after, None);
 }
 
 /// A period outside 1 to 1825 days, a paused age of 0 and a paused age
@@ -892,20 +895,19 @@ fn a_retention_value_outside_its_bounds_is_refused() {
         );
     }
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
-    document["retention"]["paused_workflow_auto_cancel_after"] =
-        json!({"kind": "AFTER", "micros": 0});
-    assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
+    document["retention"]["paused_workflow_cancel_after"] = json!({"kind": "AFTER", "micros": 0});
+    assert!(refused_path(&document).starts_with("retention.paused_workflow_cancel_after"));
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
-    document["retention"]["paused_workflow_auto_cancel_after"] =
+    document["retention"]["paused_workflow_cancel_after"] =
         json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS + 1});
-    assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
+    assert!(refused_path(&document).starts_with("retention.paused_workflow_cancel_after"));
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
-    document["retention"]["paused_workflow_auto_cancel_after"] =
+    document["retention"]["paused_workflow_cancel_after"] =
         json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS});
     let config = parsed(&document).retention.to_config();
     assert_eq!(
         config
-            .paused_workflow_auto_cancel_after
+            .paused_workflow_cancel_after
             .map(crate::core::config::PausedWorkflowAge::micros),
         Some(crate::core::config::PausedWorkflowAge::MAX_MICROS)
     );
@@ -917,20 +919,21 @@ fn a_retention_value_outside_its_bounds_is_refused() {
 fn the_resilience_section_maps_to_the_config_and_no_limit_is_zero() {
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     let config = parsed(&document).resilience.to_config();
-    assert_eq!(config.db_retry_initial_ms, 250);
-    assert_eq!(config.db_retry_max_ms, 20_000);
-    assert_eq!(config.db_retry_max_attempts, 7);
+    assert_eq!(config.database_retry_initial_ms, 250);
+    assert_eq!(config.database_retry_max_ms, 20_000);
+    assert_eq!(config.database_retry_max_attempts, 7);
     assert_eq!(config.notify_poll_interval_ms, 4_000);
-    document["resilience"]["db_retry_max_attempts"] = json!({"kind": "NO_LIMIT"});
+    document["resilience"]["database_retry_max_attempts"] = json!({"kind": "NO_LIMIT"});
     assert_eq!(
         parsed(&document)
             .resilience
             .to_config()
-            .db_retry_max_attempts,
+            .database_retry_max_attempts,
         0
     );
-    document["resilience"]["db_retry_max_attempts"] = json!({"kind": "ATTEMPTS", "attempts": 0});
-    assert!(refused_path(&document).starts_with("resilience.db_retry_max_attempts"));
+    document["resilience"]["database_retry_max_attempts"] =
+        json!({"kind": "ATTEMPTS", "attempts": 0});
+    assert!(refused_path(&document).starts_with("resilience.database_retry_max_attempts"));
 }
 
 /// Each payload threshold maps to the config's `Option`; a threshold of 0

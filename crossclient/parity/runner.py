@@ -707,7 +707,7 @@ def _start_process(
     log_path = log_dir / f'{name}.log'
     with log_path.open('wb') as log:
         process = subprocess.Popen(
-            [*command, '--loglevel=info'],
+            [*command, '--log-level=info'],
             stdout=log,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

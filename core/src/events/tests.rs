@@ -16,7 +16,7 @@ use crate::broker::ClearableBootCause;
 use crate::core::boot_failure::ShortageErrno;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
-use crate::core::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskErrorCode, UserCode};
+use crate::core::{BuiltInTaskCode, CustomCode, OperationalCode, OutcomeCode, TaskErrorCode};
 use crate::worker::executor::protocol::{BoundedText, ProcessId, StopReason};
 use crate::worker::executor::slots::dispatch::NotRunCause;
 
@@ -546,7 +546,7 @@ fn far_future() -> DateTime<Utc> {
 #[test]
 fn a_duration_or_a_time_outside_the_wire_is_an_encode_refusal() {
     let mut ended = match vector_event("attempt_ended_not_known") {
-        Event::AttemptEnded(ended) => ended,
+        AnyEvent::AttemptEnded(ended) => ended,
         other => panic!("{other:?}"),
     };
     ended.run_duration = Duration::MAX;
@@ -563,7 +563,7 @@ fn a_duration_or_a_time_outside_the_wire_is_an_encode_refusal() {
         })
     );
     let mut recorded = match vector_event("attempt_recorded_retry") {
-        Event::AttemptRecorded(recorded) => recorded,
+        AnyEvent::AttemptRecorded(recorded) => recorded,
         other => panic!("{other:?}"),
     };
     recorded.record = AttemptRecord::RetryScheduled {
@@ -623,7 +623,7 @@ fn the_reasons_of_the_core_convert_one_to_one() {
 }
 
 #[test]
-fn a_task_error_code_converts_and_a_long_user_code_is_named() {
+fn a_task_error_code_converts_and_a_long_custom_code_is_named() {
     let built_in = TaskErrorCode::BuiltIn(OutcomeCode::TaskTimeout.into());
     assert_eq!(
         AttemptErrorCode::from(&built_in),
@@ -631,16 +631,17 @@ fn a_task_error_code_converts_and_a_long_user_code_is_named() {
             code: OutcomeCode::TaskTimeout.into()
         }
     );
-    let at_bound = "C".repeat(MAX_EVENT_USER_CODE_CHARS);
-    let user = TaskErrorCode::User(UserCode::parse(at_bound.clone()).unwrap());
+    let at_bound = "C".repeat(MAX_EVENT_CUSTOM_CODE_CHARS);
+    let custom = TaskErrorCode::Custom(CustomCode::parse(at_bound.clone()).unwrap());
     assert_eq!(
-        AttemptErrorCode::from(&user),
+        AttemptErrorCode::from(&custom),
         AttemptErrorCode::Custom {
-            code: UserCodeText::new(at_bound).unwrap()
+            code: CustomCodeText::new(at_bound).unwrap()
         }
     );
-    let over =
-        TaskErrorCode::User(UserCode::parse("C".repeat(MAX_EVENT_USER_CODE_CHARS + 1)).unwrap());
+    let over = TaskErrorCode::Custom(
+        CustomCode::parse("C".repeat(MAX_EVENT_CUSTOM_CODE_CHARS + 1)).unwrap(),
+    );
     assert_eq!(
         AttemptErrorCode::from(&over),
         AttemptErrorCode::CustomOverBound
@@ -656,15 +657,15 @@ fn a_worker_decision_names_the_code_of_its_attempt_row() {
         ),
         (
             WorkerDecision::TaskBlockedLoop,
-            OperationalErrorCode::TaskBlockedLoop.into(),
+            OperationalCode::TaskBlockedLoop.into(),
         ),
         (
             WorkerDecision::NeighbourBlockedLoop,
-            OperationalErrorCode::NeighbourBlockedLoop.into(),
+            OperationalCode::NeighbourBlockedLoop.into(),
         ),
         (
             WorkerDecision::ChildLost,
-            OperationalErrorCode::WorkerCrashed.into(),
+            OperationalCode::WorkerCrashed.into(),
         ),
         (
             WorkerDecision::KilledAfterCancel,
@@ -741,7 +742,7 @@ fn vector_task_id() -> Uuid {
 
 /// The event of each vector of `tests/fixtures/event_wire/vectors.json`, by
 /// the vector's name.
-fn vector_events() -> Vec<(&'static str, Event)> {
+fn vector_events() -> Vec<(&'static str, AnyEvent)> {
     let ended = |execution: Execution, attempt: u32, end: AttemptEnd, nanos: u64| AttemptEnded {
         at: time(VECTOR_AT),
         task_id: vector_task_id(),
@@ -796,7 +797,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 queue: text("default"),
                 execution: Execution::SharedAsync,
                 attempt: number(1),
-                child_kind: Execution::Isolated,
+                child_execution: Execution::Isolated,
                 child_pid: pid(4242),
                 slot_wait: Duration::from_nanos(250_000),
             }
@@ -856,7 +857,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 AttemptEnd::ReportedByChild {
                     result: ChildResult::Failed {
                         error_code: AttemptErrorCode::BuiltIn {
-                            code: OperationalErrorCode::TaskException.into(),
+                            code: OperationalCode::TaskException.into(),
                         },
                     },
                     start: AttemptStart::NotReported,
@@ -905,7 +906,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                         text: text(VECTOR_CARRIER),
                     },
                     placed_at: time(1_700_000_000_000_000_000),
-                    child_kind: Execution::SharedAsync,
+                    child_execution: Execution::SharedAsync,
                     worker_id: text(VECTOR_WORKER_ID),
                     workflow: WorkflowPlace::NotInWorkflow,
                 },
@@ -920,10 +921,10 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 1,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
-                    error_code: OperationalErrorCode::NeighbourBlockedLoop.into(),
+                    error_code: OperationalCode::NeighbourBlockedLoop.into(),
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
-                    child_kind: Execution::SharedAsync,
+                    child_execution: Execution::SharedAsync,
                     worker_id: text(VECTOR_WORKER_ID),
                     workflow: WorkflowPlace::NotInWorkflow,
                 },
@@ -938,12 +939,12 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 2,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::ChildLost,
-                    error_code: OperationalErrorCode::WorkerCrashed.into(),
+                    error_code: OperationalCode::WorkerCrashed.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
                     },
                     placed_at: time(1_700_000_000_000_000_000),
-                    child_kind: Execution::Isolated,
+                    child_execution: Execution::Isolated,
                     worker_id: text(VECTOR_WORKER_ID),
                     workflow: WorkflowPlace::WorkflowNotKnown,
                 },
@@ -994,7 +995,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             "child_started",
             ChildStarted {
                 at: time(VECTOR_AT),
-                child_kind: Execution::SharedThread,
+                child_execution: Execution::SharedThread,
                 slot: number(3),
                 child_pid: pid(4243),
                 boot_duration: Duration::from_nanos(850_000_000),
@@ -1005,7 +1006,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             "child_replaced",
             ChildReplaced {
                 at: time(VECTOR_AT),
-                child_kind: Execution::Isolated,
+                child_execution: Execution::Isolated,
                 slot: number(0),
                 child_pid: pid(4242),
                 reason: ReplaceReason::MemoryLimit,
@@ -1016,7 +1017,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             "slot_down",
             SlotDown {
                 at: time(VECTOR_AT),
-                child_kind: Execution::SharedAsync,
+                child_execution: Execution::SharedAsync,
                 slot: number(1),
                 cause: SlotDownCause::ResourceShortage {
                     errno: ShortageErrno::Emfile,
@@ -1028,7 +1029,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             "slot_recovered",
             SlotRecovered {
                 at: time(VECTOR_AT),
-                child_kind: Execution::SharedAsync,
+                child_execution: Execution::SharedAsync,
                 slot: number(1),
             }
             .into(),
@@ -1036,7 +1037,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
     ]
 }
 
-fn vector_event(name: &str) -> Event {
+fn vector_event(name: &str) -> AnyEvent {
     vector_events()
         .into_iter()
         .find(|(vector, _)| *vector == name)
@@ -1159,7 +1160,7 @@ fn the_contract_is_the_snapshot_of_its_version() {
 }
 
 /// Whether `event` is an event of type `E`, by [`UnionEvent::of_event`].
-fn is_of<E: UnionEvent>(event: &Event) -> bool {
+fn is_of<E: UnionEvent>(event: &AnyEvent) -> bool {
     E::of_event(event).is_some()
 }
 
@@ -1167,7 +1168,7 @@ fn is_of<E: UnionEvent>(event: &Event) -> bool {
 /// `None` for an event of every other type. The list has one entry per
 /// type of the union, so a new type fails here until it is added.
 /// An event type and the check that an event is of that type.
-type TypeCheck = (EventTypeName, fn(&Event) -> bool);
+type TypeCheck = (EventTypeName, fn(&AnyEvent) -> bool);
 
 #[test]
 fn of_event_gives_the_record_of_its_own_type_only() {
@@ -1204,5 +1205,5 @@ fn of_event_gives_the_record_of_its_own_type_only() {
     }
     let claimed = vector_event("task_claimed");
     let record = TaskClaimed::of_event(&claimed).expect("a TaskClaimed event");
-    assert_eq!(Event::from(record.clone()), claimed);
+    assert_eq!(AnyEvent::from(record.clone()), claimed);
 }

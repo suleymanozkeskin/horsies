@@ -29,27 +29,27 @@ from horsies.core.models.workflow import (
 from tests.e2e.tasks.instance_priority_binding import app
 
 
-@app.task(task_name='pb_ready', queue_name='ctrl')
+@app.task(name='pb_ready', queue='ctrl')
 def ready_task() -> Result[str, TaskError]:
     """Readiness probe on the control queue (never holds the serial slot)."""
     return Ok('ready')
 
 
-@app.task(task_name='pb_blocker', queue_name='serial')
+@app.task(name='pb_blocker', queue='serial')
 def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Occupies the single serial slot so scrape + direct queue behind it."""
     time.sleep(duration_ms / 1000)
     return Ok(f'blocked_{duration_ms}')
 
 
-@app.task(task_name='pb_scrape', queue_name='serial')
+@app.task(name='pb_scrape', queue='serial')
 def scrape_task() -> Result[int, TaskError]:
     """Subworkflow child task on the serial queue (priority 30 when bound)."""
     time.sleep(0.05)
     return Ok(1)
 
 
-@app.task(task_name='pb_direct', queue_name='serial')
+@app.task(name='pb_direct', queue='serial')
 def direct_task() -> Result[int, TaskError]:
     """Direct-send task on the serial queue; .send() resolves priority to 30."""
     time.sleep(0.05)
@@ -67,7 +67,7 @@ class PriorityChildWorkflow(WorkflowDefinition[int]):
         # Direct WorkflowSpec(...) — bypasses app.workflow() binding, exactly
         # like the documented parameterized-subworkflow pattern. The scrape node
         # carries queue=None, priority=None until the engine binds it.
-        scrape = TaskNode(fn=scrape_task, node_id='scrape')
+        scrape = TaskNode(function=scrape_task, node_id='scrape')
         return WorkflowSpec(
             name=cls.name,
             nodes=[scrape],

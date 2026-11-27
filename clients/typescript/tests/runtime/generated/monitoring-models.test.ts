@@ -5,25 +5,25 @@ import { readFileSync } from "node:fs";
 import {
   decodeBreakdown,
   decodeBreakdownCounts,
-  decodeBudgetLoadInfo,
-  decodeClassReportInfo,
-  decodeDownSlotInfo,
+  decodeBudgetLoad,
+  decodeDownSlot,
   decodeErrorFacet,
+  decodeExecutionClassReport,
   decodeFacetValue,
   decodeFacets,
   decodeGroupRow,
   decodeLeafTaskInfo,
   decodeLivenessReport,
-  decodePendingStreamInfo,
+  decodePendingStream,
   decodeScheduleStateInfo,
   decodeStatusCount,
   decodeTaskAttemptInfo,
   decodeTaskDetail,
   decodeTaskListPage,
   decodeTaskSummary,
-  decodeWorkerClassLoadInfo,
+  decodeWorkerExecutionClassLoad,
   decodeWorkerHistoryPoint,
-  decodeWorkerPingInfo,
+  decodeWorkerPong,
   decodeWorkerStateInfo,
   decodeWorkflowEdge,
   decodeWorkflowNodeInfo,
@@ -462,25 +462,25 @@ function timingExamples(kind: string): ReadonlyArray<WireJson> {
 const DECODERS: ReadonlyMap<string, ModelDecoder> = new Map<string, ModelDecoder>([
   ["Breakdown", decodeBreakdown],
   ["BreakdownCounts", decodeBreakdownCounts],
-  ["BudgetLoadInfo", decodeBudgetLoadInfo],
-  ["ClassReportInfo", decodeClassReportInfo],
-  ["DownSlotInfo", decodeDownSlotInfo],
+  ["BudgetLoad", decodeBudgetLoad],
+  ["DownSlot", decodeDownSlot],
   ["ErrorFacet", decodeErrorFacet],
+  ["ExecutionClassReport", decodeExecutionClassReport],
   ["FacetValue", decodeFacetValue],
   ["Facets", decodeFacets],
   ["GroupRow", decodeGroupRow],
   ["LeafTaskInfo", decodeLeafTaskInfo],
   ["LivenessReport", decodeLivenessReport],
-  ["PendingStreamInfo", decodePendingStreamInfo],
+  ["PendingStream", decodePendingStream],
   ["ScheduleStateInfo", decodeScheduleStateInfo],
   ["StatusCount", decodeStatusCount],
   ["TaskAttemptInfo", decodeTaskAttemptInfo],
   ["TaskDetail", decodeTaskDetail],
   ["TaskListPage", decodeTaskListPage],
   ["TaskSummary", decodeTaskSummary],
-  ["WorkerClassLoadInfo", decodeWorkerClassLoadInfo],
+  ["WorkerExecutionClassLoad", decodeWorkerExecutionClassLoad],
   ["WorkerHistoryPoint", decodeWorkerHistoryPoint],
-  ["WorkerPingInfo", decodeWorkerPingInfo],
+  ["WorkerPong", decodeWorkerPong],
   ["WorkerStateInfo", decodeWorkerStateInfo],
   ["WorkflowEdge", decodeWorkflowEdge],
   ["WorkflowNodeInfo", decodeWorkflowNodeInfo],
@@ -506,7 +506,8 @@ void describe("monitoring model decoders", () => {
 
     assert.equal(worker.workerId, "worker-a");
     assert.equal(worker.profile.kind, "notRecorded");
-    assert.equal(worker.slotHealth, "slots_down");
+    assert.equal(worker.slotHealth.kind, "slotsDown");
+    assert.equal(worker.childCount, 4);
     assert.equal(worker.clusterWideCap, null);
     assert.equal(worker.memoryUsageMb, 512.25);
     assert.equal(worker.uptimeS, 21_550);
@@ -515,27 +516,29 @@ void describe("monitoring model decoders", () => {
       ["emails", 4],
       ["reports", 2],
     ]);
-    assert.equal(worker.downSlots[0]?.failedBoots, 4);
-    assert.equal(worker.downSlots[0]?.cause, "BOOT_FAILED");
+    assert.equal(worker.slotHealth.kind === "slotsDown" ? worker.slotHealth.slots[0]?.failedBoots : null, 4);
+    assert.equal(worker.slotHealth.kind === "slotsDown" ? worker.slotHealth.slots[0]?.cause : null, "BOOT_FAILED");
   });
 
   void test("an integer is a number and a float keeps its fraction", () => {
-    const stream = decoded(decodeClassReportInfo(sample("ClassReportInfo"))).streams[0];
+    const report = decoded(decodeExecutionClassReport(sample("ExecutionClassReport")));
+    const stream = report.streams[0];
 
     assert.ok(stream !== undefined, "the report has a stream");
-    assert.equal(stream.wait.kind === "waiting" ? stream.wait.waitS : null, 30.310417);
+    assert.equal(report.liveWindowSeconds, 120);
+    assert.equal(stream.wait.kind === "due" ? stream.wait.waitSeconds : null, 30.310417);
     assert.equal(stream.coverage.kind === "served" ? stream.coverage.capacity : null, 4);
-    assert.equal(decoded(decodePendingStreamInfo(sample("PendingStreamInfo"))).execution, "ISOLATED");
+    assert.equal(decoded(decodePendingStream(sample("PendingStream"))).execution, "ISOLATED");
     assert.equal(decoded(decodeStatusCount(sample("StatusCount"))).count, 8);
   });
 
   void test("each union variant of the sample models decodes with its tag", () => {
-    const report = decoded(decodeClassReportInfo(sample("ClassReportInfo")));
+    const report = decoded(decodeExecutionClassReport(sample("ExecutionClassReport")));
     const breakdown = decoded(decodeBreakdown(sample("Breakdown")));
 
     assert.deepEqual(
       report.streams.map((stream) => `${stream.wait.kind} ${stream.coverage.kind}`),
-      ["waiting served", "noneDue noCapacity", "noneDue unserved"],
+      ["due served", "noneDue noCapacity", "noneDue unserved"],
     );
     assert.deepEqual(
       breakdown.groups.map((row) => (row.group.kind === "value" ? row.group.value : row.group.kind)),
@@ -589,7 +592,7 @@ void describe("date-time values", () => {
       at(decoded(decodeScheduleStateInfo(sample("ScheduleStateInfo"))).updatedAt),
       "2026-11-17T00:00:00.000001Z",
     );
-    assert.equal(at(decoded(decodeDownSlotInfo(sample("DownSlotInfo"))).downSince), "2026-11-17T13:50:00.00025Z");
+    assert.equal(at(decoded(decodeDownSlot(sample("DownSlot"))).downSince), "2026-11-17T13:50:00.00025Z");
   });
 
   void test("a date-time of whole seconds and a leap day decode", () => {
@@ -751,9 +754,9 @@ void describe("refusals", () => {
       path: "$",
       expected: "object",
     });
-    assert.deepEqual(refusal(decodeWorkerPingInfo(withMember(sample("WorkerPingInfo"), "round_trip_ms", 3n))), {
+    assert.deepEqual(refusal(decodeWorkerPong(withMember(sample("WorkerPong"), "round_trip_ms", 3n))), {
       kind: "kindMismatch",
-      model: "WorkerPingInfo",
+      model: "WorkerPong",
       path: "$.round_trip_ms",
       expected: "number",
     });
@@ -823,15 +826,15 @@ void describe("refusals", () => {
   });
 
   void test("a text that is not a value of the enum is enumValueUnknown; another kind is kindMismatch", () => {
-    assert.deepEqual(refusal(decodeBudgetLoadInfo(withMember(sample("BudgetLoadInfo"), "budget", "THREADED"))), {
+    assert.deepEqual(refusal(decodeBudgetLoad(withMember(sample("BudgetLoad"), "budget", "THREADED"))), {
       kind: "enumValueUnknown",
-      model: "BudgetLoadInfo",
+      model: "BudgetLoad",
       path: "$.budget",
       text: "THREADED",
     });
-    assert.deepEqual(refusal(decodeBudgetLoadInfo(withMember(sample("BudgetLoadInfo"), "serves", ["ISOLATED", 1n]))), {
+    assert.deepEqual(refusal(decodeBudgetLoad(withMember(sample("BudgetLoad"), "serves", ["ISOLATED", 1n]))), {
       kind: "kindMismatch",
-      model: "BudgetLoadInfo",
+      model: "BudgetLoad",
       path: "$.serves[1]",
       expected: "string",
     });

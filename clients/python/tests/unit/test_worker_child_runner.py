@@ -40,6 +40,7 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.log_format import TextLogs
 from horsies.core.models.tracing import NoTracing
 from horsies.core.models.tasks import (
@@ -47,7 +48,7 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
 )
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -196,7 +197,7 @@ def _parse_task_result(json_str: str) -> dict[str, Any]:
 
 
 _SERIALIZATION_ERROR: Final = {
-    '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+    '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
 }
 """The stored error code of ``WORKER_SERIALIZATION_ERROR``."""
 
@@ -446,7 +447,7 @@ class TestChildBoot:
         # Dropped, not closed: the boot calls no method of the import-time broker.
         assert inherited_broker.method_calls == []
         assert mocks['app']._broker is None
-        mocks['app'].set_role.assert_called_once_with('worker')
+        mocks['app'].set_role.assert_called_once_with(AppRole.WORKER)
 
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
@@ -468,7 +469,7 @@ class TestChildBoot:
         monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://u:p@localhost/db'),
                     pool_size=30,
                     max_overflow=30,
@@ -665,7 +666,7 @@ class TestDiscardInheritedBroker:
     built in the child."""
 
     def test_without_a_broker_does_nothing(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(
+        app = Horsies(AppConfig(database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         )))
         app._broker = None  # pyright: ignore[reportPrivateUsage]
@@ -851,7 +852,7 @@ def _make_run_task_patches(
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=task_fn())
-        mock_task._original_fn = task_fn
+        mock_task._original_function = task_fn
         mock_task._fn = task_fn
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
     else:
@@ -944,7 +945,7 @@ class _Linked(BaseModel):
 def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost:5432/db'),
         ),
     ))
@@ -968,7 +969,7 @@ def _registered_tasks() -> dict[str, Any]:
         value: list[Any] = []
         value.append(value)
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=value),
+            TaskError(code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('deep.returned')
@@ -984,13 +985,13 @@ def _registered_tasks() -> dict[str, Any]:
         for _ in range(299):
             value = [value]
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=value),
+            TaskError(code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('bytes.error_data')
     def error_data_is_not_utf8() -> Result[int, TaskError]:
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
+            TaskError(code='MY_ERROR', message='m', data=b'\xff'),
         )
 
     return {
@@ -1054,7 +1055,7 @@ class TestRunTaskEntryErrorPaths:
         assert 'KeyError' in _error_message(payload)
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.WORKER_RESOLUTION_ERROR.value}
+        assert err['error_code'] == {'__builtin_task_code__': OperationalCode.WORKER_RESOLUTION_ERROR.value}
 
     def test_input_json_invalid(
         self,
@@ -1171,7 +1172,7 @@ class TestRunTaskEntryErrorPaths:
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+            '__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value,
         }
         assert 'task wrapper' in err['message']
 
@@ -1192,7 +1193,7 @@ class TestRunTaskEntryErrorPaths:
 
         parsed = _parse_task_result(payload)
         err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value}
+        assert err['error_code'] == {'__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value}
         assert 'ValueError' in err['message']
         assert 'boom' in err['message']
 
@@ -1357,7 +1358,7 @@ class TestRunTaskEntryErrorPaths:
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
         }
         assert (
-            'Circular reference detected (depth exceeded)'
+            'Maximum serialization depth exceeded'
             in parsed['err']['message']
         )
 
@@ -1389,7 +1390,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _constant_surrogate_task
+        mock_task._original_function = _constant_surrogate_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({'x': {'name': 'plain'}})
 
@@ -1419,7 +1420,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task.task_ok_type = int
         mock_task.return_value = Err(
             TaskError(
-                error_code='MY_ERROR', message='m', data={frozenset({1}): 1},
+                code='MY_ERROR', message='m', data={frozenset({1}): 1},
             ),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1450,7 +1451,7 @@ class TestRunTaskEntryErrorPaths:
         _ = payload.encode('utf-8')
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+            '__builtin_task_code__': OperationalCode.TASK_EXCEPTION.value,
         }
 
     def test_unserializable_value_surfaces_as_serialization_error(
@@ -1493,7 +1494,7 @@ class TestRunTaskEntryErrorPaths:
         err = parsed.get('err') or parsed.get('error')
         assert err is not None
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_task_returns_task_result_ok(
@@ -1524,7 +1525,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Err(
-            TaskError(error_code='CUSTOM_ERR', message='failed'),
+            TaskError(code='CUSTOM_ERR', message='failed'),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1602,19 +1603,19 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         assert _error_code(payload) == _SERIALIZATION_ERROR
 
     # (test_workflow_ctx_results_by_id_bad_json removed: the strict-serde
-    # phase 5/6 rewrite of workflow_ctx kwarg decode no longer raises
+    # phase 5/6 rewrite of workflow_context kwarg decode no longer raises
     # SerializationError on per-node decode failure. Per-node failures
     # now fold into a sentinel Failed(TaskError(RESULT_DESERIALIZATION_ERROR))
-    # so the workflow_ctx stays typed. New contract is covered by
+    # so the workflow_context stays typed. New contract is covered by
     # test_workflow_handle_decode.py and the integration tests.)
 
     def test_workflow_ctx_summaries_by_id_bad_json(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """workflow_ctx with invalid summaries_by_id JSON → serde error."""
+        """workflow_context with invalid summaries_by_id JSON → serde error."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
@@ -1622,7 +1623,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['input_json'] = json.dumps({
@@ -1653,7 +1654,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         serialization error instead.
         """
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
@@ -1661,7 +1662,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['input_json'] = json.dumps({
@@ -1698,7 +1699,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('meta_ok')
         mock_task.task_ok_type = str
-        mock_task._original_fn = _task_with_meta
+        mock_task._original_function = _task_with_meta
         mock_task._fn = _task_with_meta
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -2079,7 +2080,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # own return-encoding too.
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _takes_upstream
+        mock_task._original_function = _takes_upstream
         mock_task.task_ok_type = str
         mock_task.return_value = Ok('processed')
 
@@ -2113,9 +2114,9 @@ class TestRunTaskEntryWorkflowHappyPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """workflow_ctx with valid results_by_id + summaries_by_id → injected."""
+        """workflow_context with valid results_by_id + summaries_by_id → injected."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches()
@@ -2124,7 +2125,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('ctx_ok')
         mock_task.task_ok_type = str
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         valid_tr = json.dumps({
@@ -2195,7 +2196,7 @@ class TestChildWritesNoRunnerHeartbeat:
         task = MagicMock(side_effect=call)
         task.task_body_kind = TaskBodyKind.DEF
         task.task_ok_type = str
-        task._original_fn = body
+        task._original_function = body
         app = MagicMock()
         app.tasks.__getitem__ = MagicMock(return_value=task)
         handle = MagicMock()
@@ -2258,7 +2259,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _typed_count_task
+        mock_task._original_function = _typed_count_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({'count': _INPUT_MARKER})
 
@@ -2354,7 +2355,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         source_task.task_ok_type = str
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _takes_upstream
+        mock_task._original_function = _takes_upstream
         mock_task.task_ok_type = str
 
         def _task_lookup(name: str) -> Any:
@@ -2379,7 +2380,7 @@ class TestRunTaskEntryStoredErrorRefusal:
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
         assert 'nope' in err['message']
         mock_task.assert_not_called()
@@ -2388,7 +2389,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches()
@@ -2397,7 +2398,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         mock_app.tasks.get = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({
@@ -2420,10 +2421,10 @@ class TestRunTaskEntryStoredErrorRefusal:
         with _apply_patches(patches):
             _ = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        injected = mock_task.call_args.kwargs['workflow_ctx']
+        injected = mock_task.call_args.kwargs['workflow_context']
         entry = injected._results_by_id['node_a']
         assert isinstance(entry, Failed)
-        assert entry.error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.error.code is OperationalCode.RESULT_DESERIALIZATION_ERROR
         assert 'nope' in entry.error.message
 
 
@@ -2490,7 +2491,7 @@ class TestRunTaskEntryStoredTimeout:
         app_lookup.assert_not_called()
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
         assert err['message'] == refusal.reason
         assert err['data']['field'] == field

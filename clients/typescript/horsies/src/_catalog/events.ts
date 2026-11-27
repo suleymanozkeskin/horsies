@@ -5,7 +5,7 @@ import type { BuiltInTaskCode } from "./task_code.ts";
 import type { DecodeResult, WireJson } from "./wire_json.ts";
 
 /** The version of the event contract that this module reads. */
-export const EVENT_CONTRACT_VERSION = 8;
+export const EVENT_CONTRACT_VERSION = 9;
 
 export type StopReason =
   | "CLAIM_LOST"
@@ -262,7 +262,7 @@ export interface AttemptPlaced {
   readonly queue: string;
   readonly execution: Execution;
   readonly attempt: number;
-  readonly childKind: Execution;
+  readonly childExecution: Execution;
   readonly childPid: number;
   readonly slotWait: Temporal.Duration;
 }
@@ -312,7 +312,7 @@ export interface TaskRecovered {
 export interface ChildStarted {
   readonly kind: "ChildStarted";
   readonly at: Temporal.Instant;
-  readonly childKind: Execution;
+  readonly childExecution: Execution;
   readonly slot: number;
   readonly childPid: number;
   readonly bootDuration: Temporal.Duration;
@@ -321,7 +321,7 @@ export interface ChildStarted {
 export interface ChildReplaced {
   readonly kind: "ChildReplaced";
   readonly at: Temporal.Instant;
-  readonly childKind: Execution;
+  readonly childExecution: Execution;
   readonly slot: number;
   readonly childPid: number;
   readonly reason: ReplaceReason;
@@ -330,7 +330,7 @@ export interface ChildReplaced {
 export interface SlotDown {
   readonly kind: "SlotDown";
   readonly at: Temporal.Instant;
-  readonly childKind: Execution;
+  readonly childExecution: Execution;
   readonly slot: number;
   readonly cause: SlotDownCause;
 }
@@ -338,7 +338,7 @@ export interface SlotDown {
 export interface SlotRecovered {
   readonly kind: "SlotRecovered";
   readonly at: Temporal.Instant;
-  readonly childKind: Execution;
+  readonly childExecution: Execution;
   readonly slot: number;
 }
 
@@ -702,7 +702,7 @@ const BUILT_IN_TASK_CODE_VALUES: ReadonlyArray<BuiltInTaskCode> = [
   "UNHANDLED_EXCEPTION",
   "TASK_EXCEPTION",
   "WORKER_CRASHED",
-  "BROKER_ERROR",
+  "DATABASE_ERROR",
   "WORKER_RESOLUTION_ERROR",
   "WORKER_SERIALIZATION_ERROR",
   "RESULT_DESERIALIZATION_ERROR",
@@ -714,7 +714,7 @@ const BUILT_IN_TASK_CODE_VALUES: ReadonlyArray<BuiltInTaskCode> = [
   "NEIGHBOUR_BLOCKED_LOOP",
   "WORKFLOW_START_INCOMPLETE",
   "RETURN_TYPE_MISMATCH",
-  "WORKFLOW_CTX_MISSING_ID",
+  "WORKFLOW_CONTEXT_MISSING_ID",
   "NO_TYPE_AVAILABLE",
   "WAIT_TIMEOUT",
   "TASK_NOT_FOUND",
@@ -724,6 +724,7 @@ const BUILT_IN_TASK_CODE_VALUES: ReadonlyArray<BuiltInTaskCode> = [
   "ASYNC_CONTEXT",
   "INVALID_INPUT",
   "WAIT_INSIDE_TASK",
+  "UNKNOWN_CUSTOM_CODE",
   "TASK_CANCELLED",
   "TASK_EXPIRED",
   "TASK_TIMEOUT",
@@ -732,7 +733,7 @@ const BUILT_IN_TASK_CODE_VALUES: ReadonlyArray<BuiltInTaskCode> = [
   "WORKFLOW_FAILED",
   "WORKFLOW_CANCELLED",
   "UPSTREAM_SKIPPED",
-  "SUBWORKFLOW_FAILED",
+  "SUB_WORKFLOW_FAILED",
   "WORKFLOW_SUCCESS_CASE_NOT_MET",
   "WORKFLOW_OUTPUT_SKIPPED",
 ];
@@ -1151,10 +1152,10 @@ function readAttemptEndDecidedByWorker(
     return refuseInside("placed_at", checkedPlacedAt.error);
   }
 
-  const checkedChildKind = readExecution(itemAt(fields, 4));
+  const checkedChildExecution = readExecution(itemAt(fields, 4));
 
-  if (!checkedChildKind.ok) {
-    return refuseInside("child_kind", checkedChildKind.error);
+  if (!checkedChildExecution.ok) {
+    return refuseInside("child_execution", checkedChildExecution.error);
   }
 
   const checkedWorkerId = readText(itemAt(fields, 5), 255);
@@ -1615,10 +1616,10 @@ function readAttemptPlaced(
     return refuseInside("attempt", decodedAttempt.error);
   }
 
-  const decodedChildKind = readExecution(itemAt(fields, 6));
+  const decodedChildExecution = readExecution(itemAt(fields, 6));
 
-  if (!decodedChildKind.ok) {
-    return refuseInside("child_kind", decodedChildKind.error);
+  if (!decodedChildExecution.ok) {
+    return refuseInside("child_execution", decodedChildExecution.error);
   }
 
   const decodedChildPid = readSafeWholeNumber(itemAt(fields, 7), 1n, 2_147_483_647n);
@@ -1642,7 +1643,7 @@ function readAttemptPlaced(
       queue: decodedQueue.value,
       execution: decodedExecution.value,
       attempt: decodedAttempt.value,
-      childKind: decodedChildKind.value,
+      childExecution: decodedChildExecution.value,
       childPid: decodedChildPid.value,
       slotWait: decodedSlotWait.value,
     }),
@@ -1900,10 +1901,10 @@ function readChildStarted(
     return refuseInside("at", decodedAt.error);
   }
 
-  const decodedChildKind = readExecution(itemAt(fields, 1));
+  const decodedChildExecution = readExecution(itemAt(fields, 1));
 
-  if (!decodedChildKind.ok) {
-    return refuseInside("child_kind", decodedChildKind.error);
+  if (!decodedChildExecution.ok) {
+    return refuseInside("child_execution", decodedChildExecution.error);
   }
 
   const decodedSlot = readSafeWholeNumber(itemAt(fields, 2), 0n, 3071n);
@@ -1928,7 +1929,7 @@ function readChildStarted(
     Object.freeze({
       kind: "ChildStarted",
       at: decodedAt.value,
-      childKind: decodedChildKind.value,
+      childExecution: decodedChildExecution.value,
       slot: decodedSlot.value,
       childPid: decodedChildPid.value,
       bootDuration: decodedBootDuration.value,
@@ -1949,10 +1950,10 @@ function readChildReplaced(
     return refuseInside("at", decodedAt.error);
   }
 
-  const decodedChildKind = readExecution(itemAt(fields, 1));
+  const decodedChildExecution = readExecution(itemAt(fields, 1));
 
-  if (!decodedChildKind.ok) {
-    return refuseInside("child_kind", decodedChildKind.error);
+  if (!decodedChildExecution.ok) {
+    return refuseInside("child_execution", decodedChildExecution.error);
   }
 
   const decodedSlot = readSafeWholeNumber(itemAt(fields, 2), 0n, 3071n);
@@ -1977,7 +1978,7 @@ function readChildReplaced(
     Object.freeze({
       kind: "ChildReplaced",
       at: decodedAt.value,
-      childKind: decodedChildKind.value,
+      childExecution: decodedChildExecution.value,
       slot: decodedSlot.value,
       childPid: decodedChildPid.value,
       reason: decodedReason.value,
@@ -1996,10 +1997,10 @@ function readSlotDown(fields: ReadonlyArray<WireJson>): DecodeResult<SlotDown, V
     return refuseInside("at", decodedAt.error);
   }
 
-  const decodedChildKind = readExecution(itemAt(fields, 1));
+  const decodedChildExecution = readExecution(itemAt(fields, 1));
 
-  if (!decodedChildKind.ok) {
-    return refuseInside("child_kind", decodedChildKind.error);
+  if (!decodedChildExecution.ok) {
+    return refuseInside("child_execution", decodedChildExecution.error);
   }
 
   const decodedSlot = readSafeWholeNumber(itemAt(fields, 2), 0n, 3071n);
@@ -2018,7 +2019,7 @@ function readSlotDown(fields: ReadonlyArray<WireJson>): DecodeResult<SlotDown, V
     Object.freeze({
       kind: "SlotDown",
       at: decodedAt.value,
-      childKind: decodedChildKind.value,
+      childExecution: decodedChildExecution.value,
       slot: decodedSlot.value,
       cause: decodedCause.value,
     }),
@@ -2038,10 +2039,10 @@ function readSlotRecovered(
     return refuseInside("at", decodedAt.error);
   }
 
-  const decodedChildKind = readExecution(itemAt(fields, 1));
+  const decodedChildExecution = readExecution(itemAt(fields, 1));
 
-  if (!decodedChildKind.ok) {
-    return refuseInside("child_kind", decodedChildKind.error);
+  if (!decodedChildExecution.ok) {
+    return refuseInside("child_execution", decodedChildExecution.error);
   }
 
   const decodedSlot = readSafeWholeNumber(itemAt(fields, 2), 0n, 3071n);
@@ -2054,7 +2055,7 @@ function readSlotRecovered(
     Object.freeze({
       kind: "SlotRecovered",
       at: decodedAt.value,
-      childKind: decodedChildKind.value,
+      childExecution: decodedChildExecution.value,
       slot: decodedSlot.value,
     }),
   );

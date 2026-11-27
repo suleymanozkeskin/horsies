@@ -1246,7 +1246,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .expect_err("the first broker call after the drop fails");
     assert_eq!(
         refused.code(),
-        crate::broker::BrokerErrorCode::TaskInfoQueryFailed,
+        crate::broker::DatabaseErrorCode::TaskInfoQueryFailed,
         "{refused:?}"
     );
     assert!(

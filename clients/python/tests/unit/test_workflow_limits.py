@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
@@ -42,7 +42,7 @@ LEVEL_WHERE_THE_NESTING_ENDS = 3
 def _app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
             queue_mode=QueueMode.CUSTOM,
@@ -52,14 +52,14 @@ def _app() -> Horsies:
 
 
 def _task_fn() -> Any:
-    return mock.MagicMock(task_name='leaf_task', task_queue_name=QUEUE)
+    return mock.MagicMock(task_name='leaf_task', queue=QUEUE)
 
 
 def _wide_spec(node_count: int) -> WorkflowSpec[Any]:
     fn = _task_fn()
     return WorkflowSpec(
         name='wide',
-        nodes=[TaskNode(fn=fn, node_id=f'node_{index}') for index in range(node_count)],
+        nodes=[TaskNode(function=fn, node_id=f'node_{index}') for index in range(node_count)],
     )
 
 
@@ -73,7 +73,7 @@ class TestNodeLimit:
         with pytest.raises(WorkflowValidationError) as caught:
             _wide_spec(MAX_WORKFLOW_NODES + 1)
 
-        assert caught.value.code == ErrorCode.WORKFLOW_TOO_MANY_NODES
+        assert caught.value.code == HorsiesErrorCode.WORKFLOW_TOO_MANY_NODES
 
 
 class TestNestingFindingsInCheck:
@@ -102,10 +102,10 @@ class TestNestingFindingsInCheck:
 
         app.check_workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
         ]
 
     def test_a_subworkflow_that_includes_itself_with_the_same_kwargs_is_reported(
@@ -133,10 +133,10 @@ class TestNestingFindingsInCheck:
 
         app.check_workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
         ]
 
     def test_a_nesting_that_ends_before_the_limit_passes(self) -> None:
@@ -151,7 +151,7 @@ class TestNestingFindingsInCheck:
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
                 if level >= LEVEL_WHERE_THE_NESTING_ENDS:
-                    leaf = TaskNode(fn=_task_fn(), node_id='leaf')
+                    leaf = TaskNode(function=_task_fn(), node_id='leaf')
                     return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
                 child = SubWorkflowNode(workflow_definition=Ends, kwargs={'level': level + 1})
                 return WorkflowSpec(name=cls.name, nodes=[child])
@@ -165,7 +165,7 @@ class TestNestingFindingsInCheck:
 
         app.check_workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 class TestNestingBehindADependency:
@@ -182,7 +182,7 @@ class TestNestingBehindADependency:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                gate = TaskNode(fn=_task_fn(), node_id='gate')
+                gate = TaskNode(function=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
                     workflow_definition=Gated, kwargs={'level': level}, waits_for=[gate],
                 )
@@ -197,7 +197,7 @@ class TestNestingBehindADependency:
 
         app.check_workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_nesting_past_the_limit_behind_dependencies_passes(self) -> None:
         app = _app()
@@ -210,7 +210,7 @@ class TestNestingBehindADependency:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                gate = TaskNode(fn=_task_fn(), node_id='gate')
+                gate = TaskNode(function=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
                     workflow_definition=GatedDeeper,
                     kwargs={'level': level + 1},
@@ -227,7 +227,7 @@ class TestNestingBehindADependency:
 
         app.check_workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
     def test_a_dependency_before_a_self_nesting_does_not_hide_it(self) -> None:
         """Once the definition starts, nothing between its two occurrences waits."""
@@ -245,7 +245,7 @@ class TestNestingBehindADependency:
                 return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
-            gate = TaskNode(fn=_task_fn(), node_id='gate')
+            gate = TaskNode(function=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
                 workflow_definition=Same, kwargs={'level': 0}, waits_for=[gate],
             )
@@ -257,10 +257,10 @@ class TestNestingBehindADependency:
 
         app.check_workflow_builder()(root)
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+            HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
         ]
 
     def test_a_dependency_before_a_nesting_past_the_limit_hides_it(self) -> None:
@@ -281,7 +281,7 @@ class TestNestingBehindADependency:
                 return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
-            gate = TaskNode(fn=_task_fn(), node_id='gate')
+            gate = TaskNode(function=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
                 workflow_definition=Deeper, kwargs={'level': 0}, waits_for=[gate],
             )
@@ -293,7 +293,7 @@ class TestNestingBehindADependency:
 
         app.check_workflow_builder()(root)
 
-        assert app.check(live=False) == []
+        assert app.check(live=False).refusals == []
 
 
 def _chain(length: int) -> NestingPath:
@@ -336,4 +336,4 @@ class TestNestingDecisionAtTheLimit:
         )
 
         assert isinstance(decision, StopWithFinding)
-        assert decision.finding.code == ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
+        assert decision.finding.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT

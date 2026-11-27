@@ -12,7 +12,7 @@
 //! write that does not fit its statement (`RowDecode`, `CallerRow`), and the
 //! three preparation variants that the core keeps in `RerunError`
 //! (`EnqueuePreparation`, `Fingerprint`, `Serialization`). The rerun steps
-//! turn a preparation refusal into `inputCorrupt` or `CALLER_KEY_REFUSED`
+//! turn a preparation refusal into `inputCorrupt` or `IDEMPOTENCY_KEY_REFUSED`
 //! (`horsies_core::prepare_rerun_write`), so the three reach no rerun of
 //! this core; the map keeps them total.
 
@@ -80,12 +80,12 @@ pub enum RerunOutcomeRecord {
     },
     /// The stored input or its options fail their checks.
     InputCorrupt { task_id: String, detail: String },
-    /// The caller key holds another command (the source's own included).
+    /// The idempotency key holds another command (the source's own included).
     KeyConflict {
         task_id: String,
-        reserved_by_task_id: String,
+        owner_task_id: String,
     },
-    /// The caller key holds this rerun command already.
+    /// The idempotency key holds this rerun command already.
     KeyReplay { existing_task_id: String },
 }
 
@@ -129,10 +129,10 @@ impl From<RerunOutcome> for RerunOutcomeRecord {
             },
             RerunOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             } => Self::KeyConflict {
                 task_id: text_of_uuid(task_id),
-                reserved_by_task_id: text_of_uuid(reserved_by_task_id),
+                owner_task_id: text_of_uuid(owner_task_id),
             },
             RerunOutcome::KeyReplay { existing_task_id } => Self::KeyReplay {
                 existing_task_id: text_of_uuid(existing_task_id),
@@ -233,8 +233,8 @@ pub enum AppRerunFailure {
     ClassNotRegistered { message: String, class_key: String },
     /// The core refused the policy. Nothing is written.
     InvalidPolicy { message: String },
-    /// The caller key is not a valid idempotency key. Nothing is written.
-    CallerKeyRefused { message: String },
+    /// The idempotency key is not valid. Nothing is written.
+    IdempotencyKeyRefused { message: String },
     /// The task id source refused to mint the new task's id. Nothing is
     /// written.
     IdMintRefused { message: String },
@@ -250,6 +250,16 @@ pub enum AppRerunFailure {
     /// The family check could not read the family row. Nothing is read or
     /// written.
     FamilyCheckFailed { message: String, cause: CauseRecord },
+    /// The stored retry list of the source names a custom code that the
+    /// task does not declare. Nothing is written.
+    RetryCodeNotDeclared {
+        message: String,
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the app
+    /// does not list the task. Nothing is written.
+    TaskNotRegistered { message: String, task_name: String },
     /// A row or stored data broke the rerun's contract. Nothing committed.
     ContractViolation { message: String },
 }
@@ -268,7 +278,7 @@ pub fn app_failure(error: RerunError) -> AppRerunFailure {
             AppRerunFailure::ClassNotRegistered { message, class_key }
         }
         RerunError::InvalidPolicy(_) => AppRerunFailure::InvalidPolicy { message },
-        RerunError::Idempotency(_) => AppRerunFailure::CallerKeyRefused { message },
+        RerunError::Idempotency(_) => AppRerunFailure::IdempotencyKeyRefused { message },
         RerunError::Identity(_) => AppRerunFailure::IdMintRefused { message },
         RerunError::ClientFamilyMismatch { stored, own: _ } => {
             AppRerunFailure::ClientFamilyMismatch {
@@ -281,6 +291,17 @@ pub fn app_failure(error: RerunError) -> AppRerunFailure {
             stored: unknown.stored,
         },
         RerunError::FamilyCheckFailed(failure) => family_check_failed(message, failure),
+        RerunError::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => AppRerunFailure::RetryCodeNotDeclared {
+            message,
+            task_name,
+            retry_code,
+        },
+        RerunError::TaskNotRegistered { task_name } => {
+            AppRerunFailure::TaskNotRegistered { message, task_name }
+        }
         RerunError::RowDecode(_)
         | RerunError::CallerRow(_)
         | RerunError::EnqueuePreparation(_)
@@ -354,7 +375,7 @@ pub enum CallerStepRefusal {
         message: String,
         class_key: String,
     },
-    CallerKeyRefused {
+    IdempotencyKeyRefused {
         message: String,
     },
     IdMintRefused {
@@ -367,6 +388,19 @@ pub enum CallerStepRefusal {
     UnknownStoredFamily {
         message: String,
         stored: String,
+    },
+    /// The stored retry list of the source names a custom code that the
+    /// task does not declare.
+    RetryCodeNotDeclared {
+        message: String,
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the app
+    /// does not list the task.
+    TaskNotRegistered {
+        message: String,
+        task_name: String,
     },
     /// A row that the caller's driver read does not fit its statement.
     ContractViolation {
@@ -476,11 +510,11 @@ mod tests {
             (
                 RerunOutcome::KeyConflict {
                     task_id: SOURCE,
-                    reserved_by_task_id: OTHER,
+                    owner_task_id: OTHER,
                 },
                 RerunOutcomeRecord::KeyConflict {
                     task_id: SOURCE_TEXT.to_owned(),
-                    reserved_by_task_id: OTHER_TEXT.to_owned(),
+                    owner_task_id: OTHER_TEXT.to_owned(),
                 },
             ),
             (
@@ -611,7 +645,7 @@ mod tests {
                 RerunError::Idempotency(IdempotencyKeyError::Empty {
                     label: "idempotency key",
                 }),
-                AppRerunFailure::CallerKeyRefused {
+                AppRerunFailure::IdempotencyKeyRefused {
                     message: "rerun idempotency key failed: idempotency key must be non-empty"
                         .to_owned(),
                 },
@@ -699,6 +733,38 @@ mod tests {
             app_failure(serialization),
             AppRerunFailure::ContractViolation { .. }
         ));
+    }
+
+    #[test]
+    fn an_undeclared_retry_code_names_the_task_and_the_code() {
+        let error = RerunError::RetryCodeNotDeclared {
+            task_name: "charge".to_owned(),
+            retry_code: "CARD_DECLINED".to_owned(),
+        };
+        let text = error.to_string();
+        assert_eq!(
+            app_failure(error),
+            AppRerunFailure::RetryCodeNotDeclared {
+                message: text,
+                task_name: "charge".to_owned(),
+                retry_code: "CARD_DECLINED".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unlisted_task_names_the_task() {
+        let error = RerunError::TaskNotRegistered {
+            task_name: "charge".to_owned(),
+        };
+        let text = error.to_string();
+        assert_eq!(
+            app_failure(error),
+            AppRerunFailure::TaskNotRegistered {
+                message: text,
+                task_name: "charge".to_owned(),
+            }
+        );
     }
 
     #[test]

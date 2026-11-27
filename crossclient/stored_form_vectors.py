@@ -62,8 +62,8 @@ from pydantic import BaseModel, ConfigDict
 from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
     BuiltInTaskCode,
-    FlattenedException,
-    SubWorkflowError,
+    ExceptionRecord,
+    SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow import SubWorkflowSummary, WorkflowStatus
@@ -260,11 +260,11 @@ def _error_code(notation: object) -> BuiltInTaskCode | str:
             raise AssertionError(f'unknown error code notation {other!r}')
 
 
-def _exception(notation: object) -> FlattenedException | None:
+def _exception(notation: object) -> ExceptionRecord | None:
     if notation is None:
         return None
     fields = _members(notation, 'exception')
-    return FlattenedException(
+    return ExceptionRecord(
         type=text_of(fields, 'type'),
         module=text_of(fields, 'module'),
         message=text_of(fields, 'message'),
@@ -299,7 +299,7 @@ def _summary(notation: object) -> SubWorkflowSummary[object]:
 
 
 def task_error_of(notation: object) -> TaskError:
-    """The ``TaskError`` (or ``SubWorkflowError``) of a task error notation."""
+    """The ``TaskError`` (or ``SubWorkflowFailure``) of a task error notation."""
     fields = _members(notation, 'error')
     code = _error_code(fields['error_code'])
     message = _optional_text(fields, 'message')
@@ -307,15 +307,15 @@ def task_error_of(notation: object) -> TaskError:
     match fields.get('sub_workflow'):
         case None:
             return TaskError(
-                error_code=code,
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,
             )
         case sub_workflow:
             sub = _members(sub_workflow, 'sub_workflow')
-            return SubWorkflowError(
-                error_code=code,
+            return SubWorkflowFailure(
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,

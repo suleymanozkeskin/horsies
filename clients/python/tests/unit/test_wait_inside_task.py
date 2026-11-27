@@ -24,20 +24,20 @@ from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerInvalidInput,
-    BrokerResult,
-    BrokerWaitInsideTask,
+    DatabaseErrorCode,
+    DatabaseInvalidInput,
+    DatabaseResult,
+    DatabaseWaitInsideTask,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
-    InvalidInput,
     ReadError,
+    ReadInvalidInput,
     ReadResult,
+    ReadTaskNotFound,
+    ReadWaitInsideTask,
     Succeeded,
-    TaskNotFound,
-    WaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.handle import WorkflowHandle
@@ -68,7 +68,7 @@ def app() -> Generator[Horsies, None, None]:
     """An app whose broker cannot connect, and whose core handle records each
     call it forwards."""
     app = Horsies(
-        AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
+        AppConfig(database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)))
     )
     broker = app.get_broker()
     broker._core_handle = MagicMock(wraps=broker._core_handle)
@@ -101,32 +101,32 @@ def _workflow_handle(app: Horsies) -> WorkflowHandle[Any]:
     return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=app.get_broker())
 
 
-def _task_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return _handle(app).get(timeout_ms=timeout_ms)
+def _task_get(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return _handle(app).get(wait_ms=wait_ms)
 
 
-def _task_get_async(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return asyncio.run(_handle(app).get_async(timeout_ms=timeout_ms))
+def _task_get_async(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return asyncio.run(_handle(app).get_async(wait_ms=wait_ms))
 
 
-def _app_get_result(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return app.get_result(uuid.UUID(TASK_ID), timeout_ms)
+def _app_get_result(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return app.get_result(uuid.UUID(TASK_ID), wait_ms)
 
 
 def _app_get_result_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> ReadResult[Any, TaskError]:
-    return asyncio.run(app.get_result_async(uuid.UUID(TASK_ID), timeout_ms))
+    return asyncio.run(app.get_result_async(uuid.UUID(TASK_ID), wait_ms))
 
 
-def _workflow_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
-    return _workflow_handle(app).get(timeout_ms=timeout_ms)
+def _workflow_get(app: Horsies, wait_ms: int | None) -> ReadResult[Any, TaskError]:
+    return _workflow_handle(app).get(wait_ms=wait_ms)
 
 
 def _workflow_get_async(
-    app: Horsies, timeout_ms: int | None,
+    app: Horsies, wait_ms: int | None,
 ) -> ReadResult[Any, TaskError]:
-    return asyncio.run(_workflow_handle(app).get_async(timeout_ms=timeout_ms))
+    return asyncio.run(_workflow_handle(app).get_async(wait_ms=wait_ms))
 
 
 WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = {
@@ -140,27 +140,27 @@ WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = 
 SYNC_WAITS = ('TaskHandle.get', 'app.get_result', 'WorkflowHandle.get')
 
 
-def _app_get_raw_result(app: Horsies, timeout_ms: int | None) -> BrokerResult[Any]:
-    return app.get_raw_result(TASK_ID, timeout_ms)
+def _app_get_raw_result(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
+    return app.get_raw_result(TASK_ID, wait_ms)
 
 
 def _app_get_raw_result_async(
-    app: Horsies, timeout_ms: int | None,
-) -> BrokerResult[Any]:
-    return asyncio.run(app.get_raw_result_async(TASK_ID, timeout_ms))
+    app: Horsies, wait_ms: int | None,
+) -> DatabaseResult[Any]:
+    return asyncio.run(app.get_raw_result_async(TASK_ID, wait_ms))
 
 
-def _broker_raw_record(app: Horsies, timeout_ms: int | None) -> BrokerResult[Any]:
-    return app.get_broker().get_raw_result_record(TASK_ID, timeout_ms)
+def _broker_raw_record(app: Horsies, wait_ms: int | None) -> DatabaseResult[Any]:
+    return app.get_broker().get_raw_result_record(TASK_ID, wait_ms)
 
 
 def _broker_raw_record_async(
-    app: Horsies, timeout_ms: int | None,
-) -> BrokerResult[Any]:
-    return asyncio.run(app.get_broker().get_raw_result_record_async(TASK_ID, timeout_ms))
+    app: Horsies, wait_ms: int | None,
+) -> DatabaseResult[Any]:
+    return asyncio.run(app.get_broker().get_raw_result_record_async(TASK_ID, wait_ms))
 
 
-RAW_WAITS: dict[str, Callable[[Horsies, int | None], BrokerResult[Any]]] = {
+RAW_WAITS: dict[str, Callable[[Horsies, int | None], DatabaseResult[Any]]] = {
     'app.get_raw_result': _app_get_raw_result,
     'app.get_raw_result_async': _app_get_raw_result_async,
     'PostgresBroker.get_raw_result_record': _broker_raw_record,
@@ -170,11 +170,11 @@ RAW_WAITS: dict[str, Callable[[Horsies, int | None], BrokerResult[Any]]] = {
 SYNC_RAW_WAITS = ('app.get_raw_result', 'PostgresBroker.get_raw_result_record')
 
 
-def _assert_broker_refusal(result: BrokerResult[Any], operation: str) -> None:
+def _assert_broker_refusal(result: DatabaseResult[Any], operation: str) -> None:
     assert isinstance(result, Err)
     error = result.err_value
-    assert isinstance(error, BrokerWaitInsideTask)
-    assert error.code is BrokerErrorCode.WAIT_INSIDE_TASK
+    assert isinstance(error, DatabaseWaitInsideTask)
+    assert error.code is DatabaseErrorCode.WAIT_INSIDE_TASK
     assert f'{operation}() for task {TASK_ID}' in error.message
     assert 'workflow' in error.message
 
@@ -202,7 +202,7 @@ def test_a_wait_in_a_task_process_returns_wait_inside_task_and_reads_nothing(
     result = WAITS[name](app, VALID_TIMEOUT_MS)
 
     error = _read_error(result)
-    assert isinstance(error, WaitInsideTask)
+    assert isinstance(error, ReadWaitInsideTask)
     assert 'workflow' in error.message
     _assert_nothing_ran(app.get_broker())
 
@@ -216,7 +216,7 @@ def test_a_refused_timeout_in_a_task_process_returns_invalid_input_first(
     """The wait limit is checked before the process role."""
     result = WAITS[name](app, REFUSED_TIMEOUT_MS)
 
-    assert isinstance(_read_error(result), InvalidInput)
+    assert isinstance(_read_error(result), ReadInvalidInput)
     _assert_nothing_ran(app.get_broker())
 
 
@@ -242,8 +242,8 @@ def test_a_refused_timeout_of_a_raw_wait_in_a_task_process_returns_invalid_input
     result = RAW_WAITS[name](app, REFUSED_TIMEOUT_MS)
 
     assert isinstance(result, Err)
-    assert isinstance(result.err_value, BrokerInvalidInput)
-    assert result.err_value.code is BrokerErrorCode.INVALID_INPUT
+    assert isinstance(result.err_value, DatabaseInvalidInput)
+    assert result.err_value.code is DatabaseErrorCode.INVALID_INPUT
     _assert_nothing_ran(app.get_broker())
 
 
@@ -258,7 +258,7 @@ def test_a_sync_wait_inside_a_running_loop_of_a_task_process_is_a_wait_inside_ta
 
     result = asyncio.run(inside())
 
-    assert isinstance(_read_error(result), WaitInsideTask)
+    assert isinstance(_read_error(result), ReadWaitInsideTask)
 
 
 @pytest.mark.parametrize('name', SYNC_RAW_WAITS)
@@ -267,7 +267,7 @@ def test_a_sync_raw_wait_inside_a_running_loop_of_a_task_process_is_refused(
     app: Horsies,
     name: str,
 ) -> None:
-    async def inside() -> BrokerResult[Any]:
+    async def inside() -> DatabaseResult[Any]:
         return RAW_WAITS[name](app, VALID_TIMEOUT_MS)
 
     result = asyncio.run(inside())
@@ -281,16 +281,16 @@ def test_the_refusal_is_not_cached_on_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handle = _handle(app)
-    assert isinstance(_read_error(handle.get(timeout_ms=0)), WaitInsideTask)
+    assert isinstance(_read_error(handle.get(wait_ms=0)), ReadWaitInsideTask)
 
     monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
     with patch.object(
         app.get_broker(), 'get_raw_result_record', return_value=Ok(None)
     ) as read:
-        outside = handle.get(timeout_ms=0)
+        outside = handle.get(wait_ms=0)
 
     read.assert_called_once()
-    assert isinstance(_read_error(outside), TaskNotFound)
+    assert isinstance(_read_error(outside), ReadTaskNotFound)
 
 
 @pytest.mark.usefixtures('task_process')
@@ -301,7 +301,7 @@ def test_a_handle_without_a_broker_returns_its_result_in_a_task_process(
     handle: TaskHandle[int] = TaskHandle(TASK_ID, app=app, broker_mode=False, ok_type=int)
     handle.set_immediate_result(Ok(7))
 
-    result = handle.get(timeout_ms=0)
+    result = handle.get(wait_ms=0)
 
     assert result == Ok(Succeeded(7))
     _assert_nothing_ran(app.get_broker())

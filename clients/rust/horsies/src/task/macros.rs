@@ -7,7 +7,7 @@
 //! `body_result`: the same adapters as the `#[horsies::task]` attribute.
 //! The task records `module_path!()` of the call site, the `module` of the
 //! exception record of a panic, and declares the codes of `E`
-//! (`UserErrorCode::CODES`), which the registration checks. Attach the
+//! (`CustomErrorCode::CODES`), which the registration checks. Attach the
 //! options (queue, retry, timeout, execution class) with
 //! `RegisteredTask::with_task_options`.
 
@@ -123,7 +123,7 @@ mod tests {
     use std::convert::Infallible;
 
     use horsies_core::core::task::fn_trait::TaskModule;
-    use horsies_core::{OperationalErrorCode, RegisteredTask, TaskErrorCode, TaskResult};
+    use horsies_core::{OperationalCode, RegisteredTask, TaskErrorCode, TaskResult};
     use serde::{Deserialize, Serialize};
 
     use crate::TaskError;
@@ -148,7 +148,7 @@ mod tests {
     }
 
     fn worker_serialization_error() -> TaskErrorCode {
-        TaskErrorCode::from(OperationalErrorCode::WorkerSerializationError)
+        TaskErrorCode::from(OperationalCode::WorkerSerializationError)
     }
 
     #[tokio::test]
@@ -202,10 +202,10 @@ mod tests {
         DivideByZero,
     }
 
-    impl crate::UserErrorCode for MathCode {
+    impl crate::CustomErrorCode for MathCode {
         const CODES: &'static [&'static str] = &["OVERFLOW", "DIVIDE_BY_ZERO"];
 
-        fn code(&self) -> &str {
+        fn as_str(&self) -> &str {
             match self {
                 Self::Overflow => "OVERFLOW",
                 Self::DivideByZero => "DIVIDE_BY_ZERO",
@@ -225,7 +225,7 @@ mod tests {
         input
             .a
             .checked_add(input.b)
-            .ok_or_else(|| TaskError::user(MathCode::Overflow, "the sum overflows"))
+            .ok_or_else(|| TaskError::custom(MathCode::Overflow, "the sum overflows"))
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -233,7 +233,7 @@ mod tests {
         input
             .a
             .checked_div(input.b)
-            .ok_or_else(|| TaskError::user(MathCode::DivideByZero, "the divisor is 0"))
+            .ok_or_else(|| TaskError::custom(MathCode::DivideByZero, "the divisor is 0"))
     }
 
     #[test]

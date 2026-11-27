@@ -22,34 +22,34 @@ config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     prefetch_buffer=3,
     claim_lease_ms=60_000,
-    broker=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
+    database=PostgresConfig(database_url=DB_URL, pool_size=5, max_overflow=5),
     worker_profiles={**E2E_WORKER_PROFILES, **preload_profiles()},
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.task(task_name='e2e_isolation_prefetch_healthcheck')
+@app.task(name='e2e_isolation_prefetch_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_isolation_prefetch_sleep')
+@app.task(name='e2e_isolation_prefetch_sleep')
 def sleep_task(*, seconds: float) -> Result[str, TaskError]:
     time.sleep(seconds)
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_isolation_prefetch_timeout_1s', timeout_ms=1_000)
+@app.task(name='e2e_isolation_prefetch_timeout_1s', timeout_ms=1_000)
 def timeout_1s(*, seconds: float) -> Result[str, TaskError]:
     time.sleep(seconds)
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_isolation_prefetch_timeout_2s', timeout_ms=2_000)
+@app.task(name='e2e_isolation_prefetch_timeout_2s', timeout_ms=2_000)
 def timeout_2s(*, seconds: float) -> Result[str, TaskError]:
     time.sleep(seconds)
     return Ok(str(os.getpid()))

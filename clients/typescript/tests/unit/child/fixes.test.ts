@@ -75,7 +75,7 @@ function runBodyPost(runKey: bigint): ChildPost {
 describe("a served child", () => {
   test("a send from a body is not suppressed once the child serves", async () => {
     const environment = fakeEnvironment({ start: { argumentAfterScript: "--horsies-child", seatIsolate: false } });
-    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping] }, environment);
+    const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping] }, environment);
     const app = created.ok ? created.value : assert.fail("the test app was refused");
     const sends: string[] = [];
 
@@ -122,7 +122,7 @@ describe("a served child", () => {
 });
 
 function createdApp(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping] }, fakeEnvironment());
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping] }, fakeEnvironment());
 
   return created.ok ? created.value : assert.fail("the test app was refused");
 }

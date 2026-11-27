@@ -7,7 +7,7 @@ Strict-serde phase 5/6 regression coverage. The decode routine must:
 2. Apply the disagreement check BEFORE the err-fast-path so a smuggled
    outputless flag on a typed payload can't slip through the err route.
 3. Use `decode_task_error` for polymorphic err decoding so a
-   SubWorkflowError emitted by a child workflow round-trips with its
+   SubWorkflowFailure emitted by a child workflow round-trips with its
    subclass fields intact.
 """
 
@@ -18,17 +18,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.codec.typed import Json
+from horsies.core.codec.typed import Json, encode_task_error
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
+    ReadResultDeserializationError,
     Succeeded,
 )
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
-    SubWorkflowError,
+    OperationalCode,
+    SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
@@ -41,12 +41,12 @@ from horsies.core.types.result import Err, Ok
 
 
 def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
-    """The message of a read that is ``Err(ResultDeserializationError)``."""
+    """The message of a read that is ``Err(ReadResultDeserializationError)``."""
     match result:
-        case Err(ResultDeserializationError(message=message)):
+        case Err(ReadResultDeserializationError(message=message)):
             return message
         case _:
-            pytest.fail(f'expected Err(ResultDeserializationError), got {result!r}')
+            pytest.fail(f'expected Err(ReadResultDeserializationError), got {result!r}')
 
 
 def _typed_envelope(ok: Any) -> dict[str, Any]:
@@ -129,7 +129,7 @@ class TestWorkflowEnvelopeOutputlessMismatch:
             '__h_outputless_terminals__': True,
             'ok': None,
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'sneak',
                 'data': None,
                 'exception': None,
@@ -159,7 +159,7 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_missing_marker_rejected(self) -> None:
         result = _decode_workflow_envelope(
@@ -169,17 +169,17 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeErrSlot:
-    """Err slot routes through `decode_task_error` so SubWorkflowError
+    """Err slot routes through `decode_task_error` so SubWorkflowFailure
     survives the round-trip."""
 
     def test_plain_task_error_decoded(self) -> None:
         err_payload = {
-            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'plain failure',
             'data': None,
             'exception': None,
@@ -194,16 +194,16 @@ class TestWorkflowEnvelopeErrSlot:
         match result:
             case Ok(Failed(task_error)):
                 assert isinstance(task_error, TaskError)
-                assert not isinstance(task_error, SubWorkflowError)
+                assert not isinstance(task_error, SubWorkflowFailure)
                 assert task_error.message == 'plain failure'
             case _:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
     def test_sub_workflow_error_preserved(self) -> None:
-        """SubWorkflowError dumped by the engine round-trips with the
+        """SubWorkflowFailure in its stored form round-trips with the
         ``sub_workflow_id`` / ``sub_workflow_summary`` fields intact."""
-        original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='nested failure',
             sub_workflow_id='wf-child',
             sub_workflow_summary=SubWorkflowSummary(
@@ -216,7 +216,7 @@ class TestWorkflowEnvelopeErrSlot:
                 error_summary='downstream',
             ),
         )
-        wire = _err_envelope(original.model_dump(mode='json'))
+        wire = _err_envelope(encode_task_error(original))
         result = _decode_workflow_envelope(
             cast(Json, wire),
             output_type=int,
@@ -224,11 +224,11 @@ class TestWorkflowEnvelopeErrSlot:
             workflow_id='wf-parent',
         )
         match result:
-            case Ok(Failed(SubWorkflowError() as decoded)):
+            case Ok(Failed(SubWorkflowFailure() as decoded)):
                 assert decoded.sub_workflow_id == 'wf-child'
                 assert decoded.sub_workflow_summary.failed_nodes == 2
             case _:
-                pytest.fail(f'expected Ok(Failed(SubWorkflowError)), got {result!r}')
+                pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
 
 @pytest.mark.unit
@@ -287,6 +287,6 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         match result:
             case Ok(Succeeded({'node-0': Failed(task_error)})):
-                assert task_error.error_code == ContractCode.NO_TYPE_AVAILABLE
+                assert task_error.code == ContractCode.NO_TYPE_AVAILABLE
             case _:
                 pytest.fail(f'expected a NO_TYPE_AVAILABLE node entry, got {result!r}')

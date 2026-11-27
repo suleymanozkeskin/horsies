@@ -8,7 +8,7 @@ import {
   ClientDefect,
   CoreError,
   CorePanic,
-  CoreStartFailed,
+  RuntimeStartFailed,
   CoreStopped,
   ForkedAfterCoreStart,
   ManifestRefused,
@@ -28,7 +28,7 @@ export type NativeThrown =
       readonly cause: string;
       readonly stateAfter: StateAfter;
     }
-  | { readonly code: "CORE_START_FAILED"; readonly cause: string }
+  | { readonly code: "RUNTIME_START_FAILED"; readonly cause: string }
   | { readonly code: "TOO_MANY_PENDING_CALLS"; readonly subject: string; readonly bound: number }
   | { readonly code: "FORKED_AFTER_CORE_START"; readonly corePid: number; readonly thisPid: number }
   | { readonly code: "MANIFEST_REFUSED"; readonly fieldPath: string; readonly cause: string }
@@ -46,8 +46,8 @@ export function thrownError(thrown: NativeThrown): CoreError | CoreDefect {
   switch (thrown.code) {
     case "CORE_STOPPED":
       return new CoreStopped(thrown);
-    case "CORE_START_FAILED":
-      return new CoreStartFailed(thrown);
+    case "RUNTIME_START_FAILED":
+      return new RuntimeStartFailed(thrown);
     case "TOO_MANY_PENDING_CALLS":
       return new TooManyPendingCalls(thrown);
     case "FORKED_AFTER_CORE_START":

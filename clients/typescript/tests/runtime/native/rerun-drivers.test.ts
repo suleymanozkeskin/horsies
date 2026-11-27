@@ -163,7 +163,7 @@ describe("app.rerunTaskIn with a database", () => {
     const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
 
     assert.equal((await handle.installSchema()).kind, "installed");
-    area = createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER });
+    area = createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => ({ tasks: [] }) });
   });
 
   for (const driver of DRIVERS) {
@@ -223,6 +223,10 @@ describe("app.rerunTaskIn with a database", () => {
     try {
       await client.query("BEGIN");
       await assert.rejects(client.query("SELECT 1 / 0"));
+      // pg rejects a query at its ErrorResponse and sets the transaction status at the ReadyForQuery after it, which
+      // can arrive in a later read. pg sends the next query only after that ReadyForQuery, so when this second query
+      // is rejected, the status is the failed transaction.
+      await assert.rejects(client.query("SELECT 1"));
 
       const answer = await area.rerunTaskIn(pgTransaction(client), unsentCommand(), POLICY);
 

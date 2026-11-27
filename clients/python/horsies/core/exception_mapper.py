@@ -1,6 +1,6 @@
 """Exact-class exception-to-error-code mapper.
 
-Resolves unhandled exceptions to user-defined error codes by exact class
+Resolves unhandled exceptions to custom error codes by exact class
 match (`type(exc) in mapper`). Supports per-task and global mappers.
 """
 

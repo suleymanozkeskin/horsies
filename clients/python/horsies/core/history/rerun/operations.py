@@ -13,28 +13,37 @@ verified before parse; every non-INLINE disposition is typed
 unavailable.
 
 The new row is written strictly by the provenance table: replayed
-fields from the source row or its carried envelope, the deadline as the
-caller's explicit choice, policy resolved at enqueue, identity and
-lifecycle state fresh, the lineage pair atomic. The write is one call of
-``horsies_enqueue_task`` (0004_lifecycle_functions.sql) with the lineage
-``RERUN``, in the caller's transaction: a keyed rerun claims its key inside
-that call. Because the fingerprint covers rerun lineage, a key still
-reserved by the source request conflicts by contract rather than aliasing
-its rerun.
+fields from the source row or its carried envelope, the latest start time
+(``good_until``) as the caller's explicit choice, policy resolved at
+enqueue, identity and lifecycle state fresh, the lineage pair atomic. The
+write is one call of ``horsies_enqueue_task`` (0004_lifecycle_functions.sql)
+with the lineage ``RERUN``, in the caller's transaction: a keyed rerun claims
+its key inside that call. Because the fingerprint covers rerun lineage, a
+key still reserved by the source request conflicts by contract rather than
+aliasing its rerun.
 
-``rerun_task`` runs in the core: the core builds the read and the write
+``rerun_task_in_async`` runs in the core: the core builds the read and the write
 and decides the outcome (``horsies._core.rerun_read``,
 ``prepare_rerun_write``, ``decode_rerun_write``), and the caller's
 connection runs both statements.
 
-The new task stores the trace that the request carries. ``rerun_task``
-passes none. ``Horsies.rerun_task`` and ``Horsies.rerun_task_async`` pass
+The rerun checks the stored retry list of the source against the declared
+custom codes of the calling app (``registered_task_codes``: each registered
+task by name, with its ``error_codes``). A built-in code passes. A
+custom code passes when the app registers the task and the task declares
+the code. Otherwise the rerun raises ``CorePreconditionFailed`` and writes
+nothing: ``RETRY_CODE_NOT_DECLARED`` for a code that the task does not
+declare, ``TASK_NOT_REGISTERED`` for a task that the app does not register.
+
+The new task stores the trace that the request carries. ``rerun_task_in_async``
+passes none. ``Horsies.rerun_task_in`` and ``Horsies.rerun_task_in_async`` pass
 the carrier of the caller's current context when the app traces
 (``rerun_with_trace``, ``rerun_with_trace_async``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -48,20 +57,22 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies._core import (
     IdMintRefused,
     PreparedStatement,
-    RerunCallerKeyRefused,
     RerunClassNotRegistered,
     RerunClientFamilyMismatch,
     RerunCommandRecord,
     RerunEnqueuedRecord,
+    RerunIdempotencyKeyRefused,
     RerunInputCorruptRecord,
     RerunInputUnavailableRecord,
     RerunKeyConflictRecord,
     RerunKeyReplayRecord,
     RerunNotEligibleRecord,
     RerunPolicyRecord,
+    RerunRetryCodeNotDeclared,
     RerunSourceAbsentRecord,
     RerunSourceCorruptRecord,
     RerunSourceLiveRecord,
+    RerunTaskNotRegistered,
     RerunUnknownStoredFamily,
     RerunWriteRecord,
     decode_rerun_write,
@@ -71,7 +82,6 @@ from horsies._core import rerun_read as core_rerun_read
 from horsies.core.telemetry.send_telemetry import NO_TRACE_CARRIER, TraceArgument
 
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..errors import HistoryContractError
 from ..periods import parse_retention_period, period_class_key
 from horsies.core.types.result import Err, Ok
 from ..identity.keys import validate_reservation_window
@@ -79,13 +89,14 @@ from horsies._catalog.history import TaskAbsenceReason
 
 
 @dataclass(frozen=True, slots=True)
-class RerunTask:
-    """One rerun request. The deadline is explicit: a value or the
-    explicit no-deadline choice, never a silent default."""
+class RerunCommand:
+    """One rerun command. ``good_until``, the latest start time of the new
+    task, is explicit: a value or the explicit no-limit choice, never a
+    silent default."""
 
     source_task_id: UUID
-    deadline: datetime | None
-    caller_key: str | None = None
+    good_until: datetime | None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,14 +164,14 @@ class RerunSourceAbsent:
 class RerunSourceCorrupt:
     """The source history row does not decode; fail closed.
 
-    ``exception`` is the ``HistoryContractError`` of the source read: a
-    stored status that is not a ``TaskStatus`` member, an attempt snapshot
-    that does not decode, or a location that the staged read does not
-    define. Nothing is written. A repeat gives the same result until the
-    stored row or the server changes."""
+    ``detail`` names why the source read does not decode: a stored status
+    that is not a ``TaskStatus`` member, an attempt snapshot that does not
+    decode, or a location that the staged read does not define. Nothing is
+    written. A repeat gives the same result until the stored row or the
+    server changes."""
 
     task_id: UUID
-    exception: HistoryContractError
+    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,12 +200,13 @@ class RerunInputCorrupt:
 
 @dataclass(frozen=True, slots=True)
 class RerunKeyConflict:
-    """The caller key is reserved by a different canonical command —
+    """The idempotency key is reserved by a different canonical command —
     including the source request itself, whose fingerprint differs
-    from its rerun's by lineage. The contract working, not a defect."""
+    from its rerun's by lineage. ``owner_task_id`` is the task that holds
+    the key. The contract working, not a defect."""
 
     task_id: UUID
-    reserved_by_task_id: UUID
+    owner_task_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,8 +274,8 @@ def _write_outcome(
             )
         case RerunKeyReplayRecord(existing_task_id=existing_task_id):
             return RerunKeyReplay(existing_task_id=existing_task_id)
-        case RerunKeyConflictRecord(task_id=task_id, reserved_by_task_id=reserved_by):
-            return RerunKeyConflict(task_id=task_id, reserved_by_task_id=reserved_by)
+        case RerunKeyConflictRecord(task_id=task_id, owner_task_id=owner_task_id):
+            return RerunKeyConflict(task_id=task_id, owner_task_id=owner_task_id)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -283,23 +295,28 @@ def _class_not_registered(class_key: str) -> ValueError:
 
 @dataclass(frozen=True, slots=True)
 class _CoreRequest:
-    """The request and the policy of one rerun, as the core takes them."""
+    """The request, the policy and the declared custom codes of the calling
+    app's tasks of one rerun, as the core takes them."""
 
     command: RerunCommandRecord
     policy: RerunPolicyRecord
+    registered_task_codes: dict[str, tuple[str, ...]]
 
 
 def _core_request(
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> _CoreRequest:
-    """The core's records of ``command``, ``policy`` and ``trace``. Pure."""
+    """The core's records of ``command``, ``policy``, ``trace`` and
+    ``registered_task_codes``. Pure."""
     return _CoreRequest(
+        registered_task_codes=dict(registered_task_codes),
         command=RerunCommandRecord(
             source_task_id=command.source_task_id,
-            deadline=command.deadline,
-            caller_key=command.caller_key,
+            good_until=command.good_until,
+            idempotency_key=command.idempotency_key,
             trace=trace,
         ),
         policy=RerunPolicyRecord(
@@ -320,13 +337,14 @@ def _write_or_outcome(
 
     Raises:
         ValueError, CorePreconditionFailed, CoreContractViolation: as
-            ``rerun_task`` lists them. Nothing is written.
+            ``rerun_task_in_async`` lists them. Nothing is written.
     """
     prepared = prepare_rerun_write(
         read,
         read_row,
         request.command,
         request.policy,
+        registered_task_codes=request.registered_task_codes,
         sent_at=datetime.now(timezone.utc),
     )
     match prepared:
@@ -337,7 +355,7 @@ def _write_or_outcome(
         case RerunSourceAbsentRecord(task_id=task_id, reason=reason):
             return RerunSourceAbsent(task_id=task_id, reason=TaskAbsenceReason(reason))
         case RerunSourceCorruptRecord(task_id=task_id, detail=detail):
-            return RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError(detail))
+            return RerunSourceCorrupt(task_id=task_id, detail=detail)
         case RerunNotEligibleRecord(task_id=task_id, reason=reason):
             return RerunNotEligible(task_id=task_id, reason=NotEligibleReason(reason))
         case RerunInputUnavailableRecord(task_id=task_id, disposition=disposition):
@@ -350,18 +368,24 @@ def _write_or_outcome(
             raise exception
         case RerunUnknownStoredFamily(exception=exception):
             raise exception
-        case RerunCallerKeyRefused(cause=cause):
+        case RerunIdempotencyKeyRefused(cause=cause):
             raise ValueError(cause)
+        case RerunRetryCodeNotDeclared(exception=exception):
+            raise exception
+        case RerunTaskNotRegistered(exception=exception):
+            raise exception
         case IdMintRefused(cause=cause):
             raise ValueError(cause)
         case _ as unreachable:
             assert_never(unreachable)
 
 
-async def rerun_task(
+async def rerun_task_in_async(
     connection: AsyncConnection,
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
     """Execute one rerun inside the caller-owned transaction.
 
@@ -373,41 +397,60 @@ async def rerun_task(
     commits or rolls back with the caller's own writes. Every outcome but
     ``RerunEnqueued`` writes nothing.
 
+    ``registered_task_codes`` maps the name of each task that the calling
+    app registers to the custom codes that it declares
+    (``Horsies.registered_task_codes()``). The stored retry list of the
+    source is checked against it before the write.
+
     The new task stores no trace carrier, so each of its attempts is the
-    root of a new trace. ``Horsies.rerun_task_async`` (and the blocking
-    ``Horsies.rerun_task``) is the same rerun with the tracing setting of
+    root of a new trace. ``Horsies.rerun_task_in_async`` (and the blocking
+    ``Horsies.rerun_task_in``) is the same rerun with the tracing setting of
     the app: with ``OtelTracing`` the new task stores the carrier of the
     caller's current context.
 
     Raises:
         ValueError: the new request's retention class is not registered, the
-            caller key is not a valid idempotency key, or the task id source
-            refused to mint. Nothing is written.
+            idempotency key is not valid, the task id source refused to
+            mint, or a code set of ``registered_task_codes`` is
+            not a declared code set (a code text outside the rule, the name
+            of a built-in code, or a repeated code). Nothing is written.
         CorePreconditionFailed: the database was installed by the other
-            client family, or records none (subject ``rerun_task``, not
-            retryable). Nothing is written.
+            client family, or records none; or the stored retry list of the
+            source names a custom code that the task does not declare
+            (``RETRY_CODE_NOT_DECLARED``), or of a task that the app does
+            not register (``TASK_NOT_REGISTERED``). The subject is
+            ``rerun_task_in``, not retryable; the message names the task and
+            the code. Nothing is written.
         CoreContractViolation: the family row of the database holds a value
             that is not a client family: corrupt stored data (subject
-            ``rerun_task``; the message names the stored value). Nothing is
+            ``rerun_task_in``; the message names the stored value). Nothing is
             written.
         CoreError: the core of this process cannot run (forked after the
             core started, or stopped).
         A database error of a statement raises from the caller's driver.
     """
-    return await rerun_with_trace_async(connection, command, policy, NO_TRACE_CARRIER)
+    return await rerun_with_trace_async(
+        connection,
+        command,
+        policy,
+        NO_TRACE_CARRIER,
+        registered_task_codes=registered_task_codes,
+    )
 
 
 async def rerun_with_trace_async(
     connection: AsyncConnection,
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
-    """``rerun_task`` whose new task stores ``trace``: ``NO_TRACE_CARRIER``,
+    """``rerun_task_in_async`` whose new task stores ``trace``: ``NO_TRACE_CARRIER``,
     or the ``TraceCarrier`` of the caller's current context. The core checks
     the bounds of the carrier: a carrier that breaks one is not stored and
-    never refuses the rerun. Raises as ``rerun_task``."""
-    request = _core_request(command, policy, trace)
+    never refuses the rerun. Raises as ``rerun_task_in_async``."""
+    request = _core_request(command, policy, trace, registered_task_codes)
     read = core_rerun_read(request.command, request.policy)
     read_row = await _run_prepared(connection, read)
     match _write_or_outcome(request, read, read_row):
@@ -420,13 +463,15 @@ async def rerun_with_trace_async(
 
 def rerun_with_trace(
     connection: Connection,
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
     """``rerun_with_trace_async`` on a blocking connection of the caller:
     the same statements, outcomes and errors."""
-    request = _core_request(command, policy, trace)
+    request = _core_request(command, policy, trace, registered_task_codes)
     read = core_rerun_read(request.command, request.policy)
     read_row = _run_prepared_blocking(connection, read)
     match _write_or_outcome(request, read, read_row):

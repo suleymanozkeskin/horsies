@@ -40,7 +40,7 @@ fn child_of(parent: Uuid, name: &str) -> RunSeed {
 /// A stored node result that failed with `message`.
 fn failed_result(message: &str) -> String {
     let result: TaskResult<serde_json::Value> =
-        TaskResult::Err(TaskError::builtin(OutcomeCode::UpstreamSkipped, message));
+        TaskResult::Err(TaskError::built_in(OutcomeCode::UpstreamSkipped, message));
     serde_json::to_string(&result).expect("encode the stored node result")
 }
 

@@ -68,7 +68,7 @@ def public_call_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
     ``app_telemetry``. No I/O."""
     match app_telemetry:
         case AppTelemetry.NONE:
-            return Horsies(AppConfig(broker=public_call_broker(dsn)))
+            return Horsies(AppConfig(database=public_call_broker(dsn)))
         case (
             AppTelemetry.TRACING
             | AppTelemetry.TRACING_AND_HANDLER
@@ -134,7 +134,7 @@ class WorkflowStartCall:
             return Ok(text)
 
         node = TaskNode(
-            fn=perf_public_workflow_node,
+            function=perf_public_workflow_node,
             kwargs={'text': 'x' * INPUT_TEXT_BYTES},
         )
         self._broker = app.get_broker()

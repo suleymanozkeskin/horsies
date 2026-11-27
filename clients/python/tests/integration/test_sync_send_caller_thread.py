@@ -59,7 +59,7 @@ def _echo_app() -> EchoApp:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(DB_URL)),
+            database=PostgresConfig(database_url=SecretStr(DB_URL)),
         ),
     )
 

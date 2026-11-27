@@ -1,8 +1,9 @@
 // The checks of `Horsies.create` that the core makes, through the addon's pure check functions (main thread only),
 // and the facts that they take. One source per rule: the core's.
 
-import type { ErrorCode } from "../_catalog/error_codes.ts";
-import { ErrorCode as ErrorCodes } from "../_catalog/error_codes.ts";
+import type { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import type { SchemaMode } from "../_catalog/manifest.ts";
+import { HorsiesErrorCode as ErrorCodes } from "../_catalog/error_codes.ts";
 import type { ContractRecord, MillisecondsSetting, RetrySetting } from "../contract/definition.ts";
 import type { InstallCoverageArg } from "../native/handle/addon.ts";
 import type {
@@ -22,7 +23,7 @@ import { refusal, type HorsiesError } from "./refusal.ts";
 
 /** The core's pure check functions. On a main thread the addon gives them; a test gives a fake. */
 export interface CoreChecks {
-  checkAppConfig(appConfigJson: string): AppConfigCheck;
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck;
   parseDeclaredErrorCodes(codes: readonly string[]): DeclaredCodesCheck;
   checkTaskOptions(facts: TaskOptionsFacts): TaskOptionsCheck;
 }
@@ -39,9 +40,9 @@ export type CoreChecked<T> = { readonly kind: "accepted"; readonly value: T } | 
 
 const CATALOG_CODES: ReadonlySet<string> = new Set(Object.values(ErrorCodes));
 
-/** The core check of the config text. Refusals have the path `config`. */
-export function checkConfigWithCore(checks: CoreChecks, appConfigJson: string): CoreChecked<AcceptedConfig> {
-  const checked = checks.checkAppConfig(appConfigJson);
+/** The core check of the config text; the manifest of an accepted config has `schemaMode`. Refusals have the path `config`. */
+export function checkConfigWithCore(checks: CoreChecks, appConfigJson: string, schemaMode: SchemaMode): CoreChecked<AcceptedConfig> {
+  const checked = checks.checkAppConfig(appConfigJson, schemaMode);
 
   switch (checked.kind) {
     case "accepted":
@@ -104,7 +105,7 @@ function codeRefusals(checks: CoreChecks, record: ContractRecord, path: string):
 export function taskOptionsFacts(record: ContractRecord, route: QueueRoute): TaskOptionsFacts {
   return {
     taskName: record.name,
-    queueName: route.queueName,
+    queue: route.queueName,
     execution: record.execution,
     timeout: millisecondsFact(record.timeout),
     cancelGrace: millisecondsFact(record.cancelGrace),
@@ -126,7 +127,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         kind: "fixed",
         intervalsSeconds: [...retry.intervalsSeconds],
         jitter: retry.jitter,
-        autoRetryFor: [...retry.retryFor],
+        retryFor: [...retry.retryFor],
       };
     case "exponential":
       return {
@@ -135,7 +136,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         maxRetries: retry.maxRetries,
         jitter: retry.jitter,
         maxDelay: retry.maxDelay.kind === "seconds" ? { kind: "seconds", seconds: retry.maxDelay.seconds } : { kind: "noCap" },
-        autoRetryFor: [...retry.retryFor],
+        retryFor: [...retry.retryFor],
       };
     default: {
       const unexpected: never = retry;
@@ -165,11 +166,11 @@ function helpLines(help: RefusalHelp): readonly string[] {
   }
 }
 
-function catalogCode(code: string): ErrorCode {
+function catalogCode(code: string): HorsiesErrorCode {
   if (!CATALOG_CODES.has(code)) {
     throw new TypeError(`refusalOfCore: the core gave the code ${code}, which the generated catalog does not hold`);
   }
 
   // SAFETY: the set of the generated catalog holds the code, checked on the line above.
-  return code as ErrorCode;
+  return code as HorsiesErrorCode;
 }

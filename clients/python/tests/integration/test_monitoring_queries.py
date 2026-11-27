@@ -7,12 +7,12 @@ broker applies the migrations. Coverage:
 2. task_facets — scoping, NULL/empty exclusion, caps, uncapped category rollup
 3. task_breakdown — rollup row, 'unknown' key, limit vs group_count
 4. list_tasks — filters, sorting, NULLS LAST, pagination envelope
-5. error-category filter — family expansion, DOMAIN as the registry complement
+5. error-category filter — family expansion, CUSTOM as the registry complement
 6. get_task_detail — attempt ordering, empty-text normalization, absence
 7. duration semantics (spec 5.3) — which spans count up and which stay None
 8. workflow names / runs / run detail / node detail
 9. list_schedules — NULLS LAST ordering
-10. database failure — Err(DB_OPERATION_FAILED) rather than a raised exception
+10. database failure — Err(DATABASE_OPERATION_FAILED) rather than a raised exception
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
@@ -86,7 +87,7 @@ from horsies.monitoring import (
     TaskPage,
     WorkflowRunsLimit,
     ErrorCategory,
-    MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation,
     TaskAbsenceReason,
     TaskDetail,
@@ -495,14 +496,14 @@ class TestTaskStats:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert 'NOT_KNOWN' in error.message
         # Python's texts: the message names the read and holds the error's
         # text, and the exception is a HistoryContractError with that text.
-        assert type(error.exception) is HistoryContractError
-        cause_text = str(error.exception)
+        assert type(error.cause) is HistoryContractError
+        cause_text = str(error.cause)
         assert 'NOT_KNOWN' in cause_text
-        assert error.exception.args == (cause_text,)
+        assert error.cause.args == (cause_text,)
         assert error.message.endswith(f' failed: {cause_text}')
 
 
@@ -644,7 +645,7 @@ class TestTaskFacets:
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
         assert result.ok_value.error_category_totals == {
-            ErrorCategory.DOMAIN.value: distinct_codes,
+            ErrorCategory.CUSTOM.value: distinct_codes,
         }
 
     async def test_a_live_and_a_history_row_sum_before_the_rank(
@@ -744,11 +745,11 @@ class TestTaskFacets:
         categories = {f.value: f.category for f in result.ok_value.error_codes}
         assert categories['TASK_EXCEPTION'] == ErrorCategory.OPERATIONAL.value
         assert categories['TASK_CANCELLED'] == ErrorCategory.OUTCOME.value
-        assert categories['MY_DOMAIN_ERROR'] == ErrorCategory.DOMAIN.value
+        assert categories['MY_DOMAIN_ERROR'] == ErrorCategory.CUSTOM.value
         assert result.ok_value.error_category_totals == {
             ErrorCategory.OPERATIONAL.value: 1,
             ErrorCategory.OUTCOME.value: 1,
-            ErrorCategory.DOMAIN.value: 1,
+            ErrorCategory.CUSTOM.value: 1,
         }
 
     async def test_scoped_by_status_and_retried_only(
@@ -882,7 +883,7 @@ class TestTaskFacets:
 
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
-        assert result.ok_value.error_category_totals == {ErrorCategory.DOMAIN.value: 35}
+        assert result.ok_value.error_category_totals == {ErrorCategory.CUSTOM.value: 35}
 
     async def test_history_category_totals_exceed_the_history_facet_cap(
         self, app: Horsies, session: AsyncSession
@@ -909,7 +910,7 @@ class TestTaskFacets:
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
         assert result.ok_value.error_category_totals == {
-            ErrorCategory.DOMAIN.value: 201
+            ErrorCategory.CUSTOM.value: 201
         }
 
 
@@ -1126,7 +1127,7 @@ class TestTaskBreakdown:
 def _stored_error(message: str) -> str:
     """The stored result text of a failed node whose error has ``message``."""
     failed: Result[None, TaskError] = Err(
-        TaskError(error_code='ORDER_REJECTED', message=message),
+        TaskError(code='ORDER_REJECTED', message=message),
     )
     match dumps_json(encode_task_result(failed, type(None))):
         case Ok(text_value):
@@ -1775,13 +1776,13 @@ async def rows_by_category(
     return result.ok_value.rows
 
 
-# One representative code per family, plus a user-defined one for DOMAIN.
+# One representative code per family, plus a custom one for CUSTOM.
 _FAMILY_SAMPLES: dict[ErrorCategory, str] = {
     ErrorCategory.OPERATIONAL: 'TASK_EXCEPTION',
     ErrorCategory.CONTRACT: 'RETURN_TYPE_MISMATCH',
     ErrorCategory.RETRIEVAL: 'WAIT_TIMEOUT',
     ErrorCategory.OUTCOME: 'TASK_CANCELLED',
-    ErrorCategory.DOMAIN: 'PAYMENT_DECLINED',
+    ErrorCategory.CUSTOM: 'PAYMENT_DECLINED',
 }
 
 _BUILT_IN_FAMILIES = [
@@ -1794,7 +1795,7 @@ _BUILT_IN_FAMILIES = [
 
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestErrorCategoryFilter:
-    """Families expand to codes in SQL; DOMAIN is the complement of the registry."""
+    """Families expand to codes in SQL; CUSTOM is the complement of the registry."""
 
     async def seed_one_per_family(self, session: AsyncSession) -> None:
         """One failed task per family, each carrying that family's sample code."""
@@ -1819,7 +1820,7 @@ class TestErrorCategoryFilter:
 
         assert [row.error_code for row in rows] == [_FAMILY_SAMPLES[category]]
 
-    async def test_a_user_defined_code_is_domain_and_no_family_claims_it(
+    async def test_a_user_defined_code_is_custom_and_no_family_claims_it(
         self, app: Horsies, session: AsyncSession
     ) -> None:
         await insert_rows(
@@ -1827,17 +1828,17 @@ class TestErrorCategoryFilter:
             make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
         )
 
-        domain = await rows_by_category(app, [ErrorCategory.DOMAIN])
+        custom = await rows_by_category(app, [ErrorCategory.CUSTOM])
 
-        assert [row.error_code for row in domain] == ['PAYMENT_DECLINED']
-        assert domain[0].error_category == ErrorCategory.DOMAIN.value
+        assert [row.error_code for row in custom] == ['PAYMENT_DECLINED']
+        assert custom[0].error_category == ErrorCategory.CUSTOM.value
         for family in _BUILT_IN_FAMILIES:
             assert await rows_by_category(app, [family]) == []
 
     async def test_absent_and_empty_codes_match_no_category(
         self, app: Horsies, session: AsyncSession
     ) -> None:
-        """DOMAIN means "carries a code the library does not define", not "no code"."""
+        """CUSTOM means "carries a code the library does not define", not "no code"."""
         await insert_rows(
             session,
             make_task(status=TaskStatus.COMPLETED, error_code=None),
@@ -1853,7 +1854,7 @@ class TestErrorCategoryFilter:
         await self.seed_one_per_family(session)
 
         rows = await rows_by_category(
-            app, [ErrorCategory.CONTRACT, ErrorCategory.DOMAIN]
+            app, [ErrorCategory.CONTRACT, ErrorCategory.CUSTOM]
         )
 
         assert {row.error_code for row in rows} == {
@@ -1874,7 +1875,7 @@ class TestErrorCategoryFilter:
             make_task(
                 queue_name='slow',
                 status=TaskStatus.FAILED,
-                error_code='BROKER_ERROR',
+                error_code='DATABASE_ERROR',
             ),
         )
 
@@ -1905,7 +1906,7 @@ class TestErrorCategoryFilter:
         """The label and the filter must stay one mapping.
 
         A code core registers but the taxonomy map has not been taught would be
-        labelled DOMAIN while the DOMAIN filter — the complement of that same
+        labelled CUSTOM while the CUSTOM filter — the complement of that same
         registry — excludes it, leaving the row unreachable from the chip that
         describes it.
         """
@@ -2075,7 +2076,7 @@ class TestGetTaskDetail:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
@@ -2748,7 +2749,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_subworkflow_node_has_no_leaf_or_attempts(
@@ -2854,7 +2855,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
 
 
 # --------------------------------------------------------------------------- #
@@ -3056,7 +3057,7 @@ class TestDatabaseFailure:
                     'postgresql://postgres:none@127.0.0.1:1/none'
                 )
             ),
-            assume_initialized=True,
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
         yield _app_on(broken)
         await broken.close_async()
@@ -3081,13 +3082,13 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, MonitoringQueryDbOperationFailed)
+        assert isinstance(error, MonitoringQueryDatabaseOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
         # The driver error of Python's read, or the core's class of the cause
         # of the read on the core: no answer from the server.
-        assert isinstance(error.exception, SQLAlchemyError | CoreConnectionError)
-        match error.exception:
+        assert isinstance(error.cause, SQLAlchemyError | CoreConnectionError)
+        match error.cause:
             case CoreConnectionError():
                 # Python's texts: the message names the read and holds the
                 # cause's text; the exception is that text with the read as
@@ -3095,9 +3096,9 @@ class TestDatabaseFailure:
                 assert error.message.startswith('task list query failed: ')
                 cause_text = error.message.removeprefix('task list query failed: ')
                 assert cause_text != ''
-                assert error.exception.subject == 'task list query'
-                assert error.exception.message == cause_text
-                assert str(error.exception) == f'task list query: {cause_text}'
+                assert error.cause.subject == 'task list query'
+                assert error.cause.message == cause_text
+                assert str(error.cause) == f'task list query: {cause_text}'
             case _:
                 pass
 
@@ -3107,7 +3108,7 @@ class TestDatabaseFailure:
         result = await get_task_detail(unreachable_app, uuid.uuid4())
 
         assert is_err(result)
-        assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)
+        assert isinstance(result.err_value, MonitoringQueryDatabaseOperationFailed)
 
     async def test_aggregate_failure_is_reported(
         self, unreachable_app: Horsies

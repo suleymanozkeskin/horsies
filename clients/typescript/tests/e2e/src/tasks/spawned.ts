@@ -1,7 +1,7 @@
 // `ISOLATED` tasks of the run rules of the TypeScript child: work that a body started with `runtime.spawn` and left
 // when it returned, and the deadline of an isolated run, which sends no signal (the worker kills the child).
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import { appendLine, markerErrorText, unixMillis } from "../markers.ts";
 import { STOP_TIMEOUT_MS } from "./shared.ts";
 import { PAST_THE_DEADLINE_MS, sleepFor } from "./waits.ts";

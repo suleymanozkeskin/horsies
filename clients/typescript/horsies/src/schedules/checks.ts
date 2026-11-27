@@ -1,5 +1,5 @@
-// The checks of one schedule at `app.schedules`, in the order of the Python client; the first failing check of a
-// schedule wins:
+// The checks of one schedule of the `schedule` section, in the order of the Python client; the first failing check of
+// a schedule wins:
 //
 // 1. Every schedule, the checks of its fields (Python's `TaskSchedule` and `ScheduleConfig`): the pattern has a
 //    stored text and, on a main thread, keeps the core's rules; `maxCatchUpRuns` is a whole number inside its bound;
@@ -12,7 +12,7 @@
 // The core's manifest parser checks the whole declaration again on a main thread. A check that needs the core does
 // not run in a worker thread: no scheduler and no `check` runs there.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN } from "../_catalog/scheduler_manifest.ts";
 import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
@@ -179,7 +179,7 @@ function checkedActivation(
     const taskName = contractRecord(entry.task).name;
 
     return err(
-      refusal(ErrorCode.TASK_NOT_REGISTERED, path, `the task ${taskName} is not in the tasks list of this app`, [
+      refusal(HorsiesErrorCode.TASK_NOT_REGISTERED, path, `the task ${taskName} is not in the tasks list of this app`, [
         "add its contract to Horsies.create({ tasks })",
       ]),
     );
@@ -288,5 +288,5 @@ function withinRejectBound(text: string, bound: RejectBound, path: string): Resu
 
 /** A refusal of a schedule (`HRS-205`) at `path`, with one help line. Pure. */
 export function scheduleRefusal(path: string, message: string, help: string): HorsiesError {
-  return refusal(ErrorCode.CONFIG_INVALID_SCHEDULE, path, message, [help]);
+  return refusal(HorsiesErrorCode.CONFIG_INVALID_SCHEDULE, path, message, [help]);
 }

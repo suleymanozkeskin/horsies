@@ -109,7 +109,7 @@ class WorkflowStatus(str, Enum):
     """User cancelled via WorkflowHandle.cancel()."""
 
     EXPIRED = 'EXPIRED'
-    """A paused workflow exceeded `paused_workflow_auto_cancel_after`."""
+    """A paused workflow exceeded `paused_workflow_cancel_after`."""
 
     @property
     def is_terminal(self) -> bool:

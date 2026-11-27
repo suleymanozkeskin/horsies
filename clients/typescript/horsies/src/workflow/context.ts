@@ -1,6 +1,6 @@
 // The workflow context of a task that takes it (`defineTask({ ..., workflowContext: true })`): the results and the
 // sub-workflow summaries of the dependencies that its node names in `workflowContextFrom`, by node id. The core writes
-// it into the input member `workflow_ctx` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
+// it into the input member `workflow_context` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
 // `results_by_id`, `summaries_by_id`); the Node child takes that member out of the input, reads it with
 // `workflowContextOfTree` and gives the value as `runtime.workflowContext` (`RuntimeWorkflowContext`). The reads are
 // those of the Rust and Python clients: `resultFor`, `hasResult`, `summaryFor`, `outputFor`, `hasSummary`.
@@ -14,6 +14,8 @@ import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { ContextUse, TaskContract } from "../contract/define-task.ts";
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
+import { RetrievalCode } from "../_catalog/task_codes.ts";
+import type { ReadErrorTag } from "../read/errors.ts";
 import { type ReadForm, readFormOf } from "../read/handle.ts";
 import type { Recorded } from "../read/info.ts";
 import { readSubWorkflowSummary } from "../codec/sub-workflow.ts";
@@ -22,7 +24,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import type { SubWorkflowSummary, TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { WorkflowContract } from "./define.ts";
-import type { BuildReturn, WorkflowOutput } from "./node.ts";
+import type { BuildReturn, SubWorkflowOutput } from "./node.ts";
 import { declaredOutputForm } from "./registry.ts";
 
 /** Why a context read gave no value. */
@@ -34,8 +36,8 @@ export type ContextReadError =
   | { readonly kind: "notInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
-  /** The stored error has a custom code that the contract does not list. */
-  | { readonly kind: "unknownCustomCode"; readonly nodeId: string; readonly code: string };
+  /** The stored error has a custom code that the contract does not list; `storedCode` holds it. */
+  | (ReadErrorTag<"unknownCustomCode"> & { readonly nodeId: string; readonly storedCode: string });
 
 /** The workflow context of one task run. */
 export interface WorkflowContext {
@@ -61,12 +63,12 @@ export interface WorkflowContext {
   summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
   /**
    * The output of the context sub-workflow node `nodeId`, read with the declared output of `workflow`, its child:
-   * `notRecorded` when the child stored no output (it did not complete with an ok value).
+   * `notRecorded` when the child stored no output (it did not complete with an ok value, or it has no output node).
    */
   outputFor<P extends ParameterSchemas, R extends BuildReturn>(
     nodeId: string,
     workflow: WorkflowContract<P, R>,
-  ): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
+  ): Result<Recorded<SubWorkflowOutput<R>>, ContextReadError>;
   /** Whether the context holds the summary of the node `nodeId`. */
   hasSummary(nodeId: string): boolean;
 }
@@ -74,7 +76,7 @@ export interface WorkflowContext {
 /**
  * The `workflowContext` member of the runtime of a task with `workflowContext: true`: the context that the core wrote
  * into the run's input, or `noContext`. The core writes it only for a workflow node that names `workflowContextFrom`;
- * a direct send and a node with no `workflowContextFrom` give `noContext`, as Python gives `workflow_ctx = None`.
+ * a direct send and a node with no `workflowContextFrom` give `noContext`, as Python gives `workflow_context = None`.
  */
 export type RuntimeWorkflowContext =
   | { readonly kind: "context"; readonly context: WorkflowContext }
@@ -86,17 +88,17 @@ export const NO_WORKFLOW_CONTEXT: RuntimeWorkflowContext = Object.freeze({ kind:
 /** One stored sub-workflow summary of the context: the summary, and its stored output for a typed read. */
 type StoredSummary = { readonly summary: SubWorkflowSummary; readonly output: TreeValue };
 
-/** Why a `workflow_ctx` text is not a workflow context: the member and the rule. */
+/** Why a `workflow_context` text is not a workflow context: the member and the rule. */
 export type ContextRefused = { readonly kind: "ContextRefused"; readonly member: string; readonly detail: string };
 
 const INDEX_MIN = 0;
 
-/** The workflow context of a `workflow_ctx` text that passed the core's strict check. Pure. */
+/** The workflow context of a `workflow_context` text that passed the core's strict check. Pure. */
 export function workflowContextOf(text: JsonText): Result<WorkflowContext, ContextRefused> {
   return workflowContextOfTree(readTree(text));
 }
 
-/** The workflow context of the tree of a `workflow_ctx` member, read from a text that passed the strict check. Pure. */
+/** The workflow context of the tree of a `workflow_context` member, read from a text that passed the strict check. Pure. */
 export function workflowContextOfTree(tree: TreeValue): Result<WorkflowContext, ContextRefused> {
   if (!isTreeObject(tree)) {
     return refused("$", "the context is not an object");
@@ -195,7 +197,7 @@ function contextValue(
     resultFor: resultFor as WorkflowContext["resultFor"],
     hasResult: (nodeId: string) => Object.hasOwn(results, nodeId),
     summaryFor,
-    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `WorkflowOutput<R>`.
+    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `SubWorkflowOutput<R>`.
     outputFor: outputFor as WorkflowContext["outputFor"],
     hasSummary: (nodeId: string) => summaries.has(nodeId),
   });
@@ -256,7 +258,14 @@ function contextOutcome(
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownCustomCode", nodeId, code: outcome.error.code }));
+        : err(
+            Object.freeze({
+              kind: "unknownCustomCode",
+              code: RetrievalCode.UNKNOWN_CUSTOM_CODE,
+              nodeId,
+              storedCode: outcome.error.code,
+            }),
+          );
     }
 
     default:

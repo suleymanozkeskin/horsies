@@ -30,7 +30,7 @@ pub enum SendRetention {
     Period(RetentionDays),
 }
 
-/// Options of one send (Python's `send` keyword arguments).
+/// Options of one send (Python's `with_options` keyword arguments).
 ///
 /// ```ignore
 /// let options = TaskSendOptions::new()

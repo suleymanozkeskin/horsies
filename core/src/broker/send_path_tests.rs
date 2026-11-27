@@ -142,9 +142,9 @@ async fn remove_task_name(pool: &TestPool, task_name: &str) {
 /// `max_retries` (any JSON value), Python's `_options(max_retries=...)`.
 fn options_with_max_retries(max_retries: &str) -> String {
     policy_options(&format!(
-        "\"max_retries\": {max_retries}, \"intervals\": [5], \
+        "\"max_retries\": {max_retries}, \"intervals_seconds\": [5], \
          \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-         \"auto_retry_for\": [\"TRANSIENT\"]"
+         \"retry_for\": [\"TRANSIENT\"]"
     ))
 }
 
@@ -156,8 +156,8 @@ fn policy_options(fields: &str) -> String {
 /// The policies that Python refuses with `INVALID_TASK_OPTIONS`, with the
 /// ids of its parametrization.
 fn malformed_policies() -> Vec<(&'static str, String)> {
-    let valid_rest = "\"intervals\": [5], \"backoff_strategy\": \"exponential\", \
-                      \"jitter\": true, \"auto_retry_for\": [\"TRANSIENT\"]";
+    let valid_rest = "\"intervals_seconds\": [5], \"backoff_strategy\": \"exponential\", \
+                      \"jitter\": true, \"retry_for\": [\"TRANSIENT\"]";
     vec![
         ("negative", options_with_max_retries("-1")),
         (
@@ -169,17 +169,17 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
         (
             "exponential_with_two_intervals",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5, 10], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5, 10], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": [\"TRANSIENT\"]",
+                 \"retry_for\": [\"TRANSIENT\"]",
             ),
         ),
         (
             "no_retry_codes",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": []",
+                 \"retry_for\": []",
             ),
         ),
         (
@@ -402,12 +402,11 @@ async fn a_shared_task_with_a_timeout_is_enqueued() {
 }
 
 /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-/// test_conflict_names_the_owner_and_retry_is_accepted`: a key that another
-/// command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the owner task. The
-/// resend methods accept it; a resend while the reservation is active meets
-/// the same conflict with the same owner. Nothing more is written.
+/// A key that another command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the
+/// owner task. The send error is not retryable and the resend methods refuse
+/// it, so nothing more is written.
 #[tokio::test]
-async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
+async fn a_key_held_by_another_command_names_its_owner_and_is_refused_for_a_resend() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("key_owner");
@@ -442,18 +441,8 @@ async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_sa
         }
         other => panic!("expected a key conflict send error, got {other:?}"),
     }
-    let resend = send_error
-        .resend_target()
-        .expect("the resend methods accept a key conflict");
-
-    let resent = enqueue_payload(&broker, resend.task_id, resend.payload)
-        .await
-        .expect_err("the reservation is still active");
-
-    match resent {
-        BrokerError::IdempotencyKeyConflict { task_id, .. } => assert_eq!(task_id, owner),
-        other => panic!("expected the same key conflict, got {other:?}"),
-    }
+    assert!(!send_error.retryable());
+    assert!(send_error.resend_target().is_none());
     assert_eq!(rows_of_task_name(&pool, &task_name).await, 1);
     remove_task_name(&pool, &task_name).await;
 }
@@ -585,7 +574,7 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
     let application_name = format!("dead_send_{}", Uuid::new_v4().simple());
-    let mut config = PostgresConfig::from_url(with_query_parameter(
+    let mut config = PostgresConfig::from_database_url(with_query_parameter(
         &url,
         &format!("application_name={application_name}"),
     ));

@@ -14,11 +14,11 @@ from dataclasses import dataclass
 import pytest
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions
 from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     TaskNode,
@@ -41,7 +41,7 @@ class MockFn(TaskFunction[Any, Any]):
     """Minimal TaskFunction mock for unit tests."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -54,44 +54,32 @@ class MockFn(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
-        return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
+        return NodeFactory(function=self, **kwargs)  # type: ignore[arg-type]
 
 
 @dataclass
 class MockFnWithCtx(TaskFunction[Any, Any]):
-    """MockFn that accepts workflow_ctx (passes HRS-010 validator)."""
+    """MockFn that accepts workflow_context (passes HRS-010 validator)."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
         *args: Any,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         **kwargs: Any,
     ) -> Result[Any, TaskError]:
         return Ok(None)
@@ -102,29 +90,17 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
-        return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
+        return NodeFactory(function=self, **kwargs)  # type: ignore[arg-type]
 
 
 def _target_a(
@@ -146,17 +122,17 @@ def _target_b(
 def _target_c(
     *,
     data: TaskOutcome[Any, TaskError] | None = None,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[Any, TaskError]:
     return Ok(None)
 
 
 fn_a = MockFn(task_name='task_a')
-fn_a._original_fn = _target_a  # type: ignore[attr-defined]
+fn_a._original_function = _target_a  # type: ignore[attr-defined]
 fn_b = MockFn(task_name='task_b')
-fn_b._original_fn = _target_b  # type: ignore[attr-defined]
+fn_b._original_function = _target_b  # type: ignore[attr-defined]
 fn_c = MockFnWithCtx(task_name='task_c')
-fn_c._original_fn = _target_c  # type: ignore[attr-defined]
+fn_c._original_function = _target_c  # type: ignore[attr-defined]
 
 
 def _jsonvalue_payload_task(payload: JsonValue) -> Result[None, TaskError]:
@@ -173,7 +149,7 @@ def _jsonvalue_payload_task(payload: JsonValue) -> Result[None, TaskError]:
 
 def _typed_jsonvalue_fn(task_name: str) -> MockFn:
     fn = MockFn(task_name=task_name)
-    fn._original_fn = _jsonvalue_payload_task  # type: ignore[attr-defined]
+    fn._original_function = _jsonvalue_payload_task  # type: ignore[attr-defined]
     return fn
 
 
@@ -200,7 +176,7 @@ def _make_spec(
     with_workflow_ctx: bool = False,
 ) -> WorkflowSpec[Any]:
     """Build a WorkflowSpec with configurable complexity."""
-    a = TaskNode(fn=fn_a, kwargs={'url': 'https://example.com'} if with_kwargs else {})
+    a = TaskNode(function=fn_a, kwargs={'url': 'https://example.com'} if with_kwargs else {})
     deps: list[TaskNode[Any] | SubWorkflowNode[Any]] = [a] if with_deps else []
     args_from_map: dict[str, TaskNode[Any] | SubWorkflowNode[Any]] = (
         {'data': a} if with_deps else {}
@@ -209,7 +185,7 @@ def _make_spec(
 
     b_fn: TaskFunction[Any, Any] = fn_c if with_workflow_ctx else fn_b
     b = TaskNode(
-        fn=b_fn,
+        function=b_fn,
         waits_for=deps,
         args_from=args_from_map,
         workflow_context_from=ctx_from,
@@ -412,13 +388,13 @@ class TestOriginalsNotMutated:
     """Caller-supplied nodes are not mutated by _freeze_graph()."""
 
     def test_original_kwargs_stays_dict(self) -> None:
-        a = TaskNode(fn=fn_a, kwargs={'url': 'https://example.com'})
+        a = TaskNode(function=fn_a, kwargs={'url': 'https://example.com'})
         _ = WorkflowSpec(name='wf', nodes=[a])
         # Original should still be a plain dict, not MappingProxyType
         assert type(a.kwargs) is dict
 
     def test_original_not_frozen(self) -> None:
-        a = TaskNode(fn=fn_a)
+        a = TaskNode(function=fn_a)
         _ = WorkflowSpec(name='wf', nodes=[a])
         # Original node should still be mutable
         a.queue = 'new_queue'
@@ -434,14 +410,14 @@ class TestPreConstructionMutability:
     """Nodes are mutable before being passed to WorkflowSpec."""
 
     def test_can_set_waits_for_before_construction(self) -> None:
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b)
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b)
         b.waits_for = [a]
         spec = WorkflowSpec(name='wf', nodes=[a, b])
         assert spec.nodes[1].waits_for[0] is spec.nodes[0]
 
     def test_can_set_kwargs_before_construction(self) -> None:
-        a = TaskNode(fn=fn_a)
+        a = TaskNode(function=fn_a)
         a.kwargs = {'url': 'val'}
         spec = WorkflowSpec(name='wf', nodes=[a])
         assert spec.nodes[0].kwargs['url'] == 'val'
@@ -457,7 +433,7 @@ class TestKwargsSnapshotAndFreeze:
 
     def test_nested_mutable_value_is_snapshotted_and_frozen(self) -> None:
         inner_list: list[int] = [1, 2, 3]
-        a = TaskNode(fn=fn_a, kwargs={'data': {'nums': inner_list}})
+        a = TaskNode(function=fn_a, kwargs={'data': {'nums': inner_list}})
         spec = WorkflowSpec(name='wf', nodes=[a])
 
         data = spec.nodes[0].kwargs['data']
@@ -473,7 +449,7 @@ class TestKwargsSnapshotAndFreeze:
 
     def test_dataclass_payload_is_isolated_from_caller(self) -> None:
         payload = SnapshotPayload(items=[1, 2, 3])
-        a = TaskNode(fn=fn_a, kwargs={'payload': payload})
+        a = TaskNode(function=fn_a, kwargs={'payload': payload})
         spec = WorkflowSpec(name='wf', nodes=[a])
 
         snap_payload = spec.nodes[0].kwargs['payload']
@@ -487,32 +463,32 @@ class TestKwargsSnapshotAndFreeze:
     def test_non_serializable_kwargs_value_fails_construction(self) -> None:
         """object() doesn't satisfy JsonValue — strict snapshot rejects it."""
         a = TaskNode(
-            fn=_typed_jsonvalue_fn('wf_bad'),
+            function=_typed_jsonvalue_fn('wf_bad'),
             kwargs={'payload': object()},
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_bad', nodes=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_nan_kwargs_value_fails_construction(self) -> None:
         """NaN is not RFC 8259; JsonValue's wire scan rejects it."""
         a = TaskNode(
-            fn=_typed_jsonvalue_fn('wf_nan'),
+            function=_typed_jsonvalue_fn('wf_nan'),
             kwargs={'payload': float('nan')},
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_nan', nodes=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_colliding_mapping_keys_fail_construction(self) -> None:
         """Non-string mapping keys violate the JsonValue dict[str, ...] shape."""
         a = TaskNode(
-            fn=_typed_jsonvalue_fn('wf_key_collision'),
+            function=_typed_jsonvalue_fn('wf_key_collision'),
             kwargs={'payload': {1: 'a', '1': 'b'}},
         )
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='wf_key_collision', nodes=[a])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
 
 # ===========================================================================
@@ -525,8 +501,8 @@ class TestFrozenNodeReuse:
 
     def test_spec_from_frozen_tasks(self) -> None:
         """tasks=list(old_spec.tasks) must not raise AttributeError."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b, waits_for=[a])
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b, waits_for=[a])
         old_spec = WorkflowSpec(name='wf_old', nodes=[a, b])
         assert all(getattr(t, '_frozen', False) for t in old_spec.nodes)
 
@@ -538,7 +514,7 @@ class TestFrozenNodeReuse:
 
     def test_frozen_originals_not_mutated_by_new_spec(self) -> None:
         """Back-propagation must skip frozen originals."""
-        a = TaskNode(fn=fn_a, node_id='original_id')
+        a = TaskNode(function=fn_a, node_id='original_id')
         old_spec = WorkflowSpec(name='wf_old', nodes=[a])
         frozen_a = old_spec.nodes[0]
         old_node_id = frozen_a.node_id
@@ -559,13 +535,13 @@ class TestCachedSpecRejection:
 
     def test_cached_spec_rejected(self) -> None:
         """Prebuilt spec returned from build_with() raises WorkflowValidationError."""
-        prebuilt = WorkflowSpec(name='cached', nodes=[TaskNode(fn=fn_a)])
+        prebuilt = WorkflowSpec(name='cached', nodes=[TaskNode(function=fn_a)])
         assert prebuilt.definition_key is None
 
         class CachedWorkflow(WorkflowDefinition[Any]):
             name = 'cached'
             definition_key = _definition_key('cached')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             @classmethod
             def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
@@ -577,12 +553,12 @@ class TestCachedSpecRejection:
 
     def test_shared_cached_spec_rejected_for_both_classes(self) -> None:
         """Shared cached spec is rejected regardless of which class returns it."""
-        shared = WorkflowSpec(name='shared', nodes=[TaskNode(fn=fn_a)])
+        shared = WorkflowSpec(name='shared', nodes=[TaskNode(function=fn_a)])
 
         class WorkflowA(WorkflowDefinition[Any]):
             name = 'a'
             definition_key = _definition_key('workflow_a')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             @classmethod
             def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
@@ -592,7 +568,7 @@ class TestCachedSpecRejection:
         class WorkflowB(WorkflowDefinition[Any]):
             name = 'b'
             definition_key = _definition_key('workflow_b')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             @classmethod
             def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
@@ -618,7 +594,7 @@ class TestCachedSpecRejection:
         class SelfCachingWorkflow(WorkflowDefinition[Any]):
             name = 'self_caching'
             definition_key = _definition_key('self_caching')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             @classmethod
             def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:

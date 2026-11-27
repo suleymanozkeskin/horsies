@@ -57,7 +57,7 @@ def _make_ready_check() -> Any:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -104,7 +104,7 @@ def _assert_cancelled_attempt(detail: TaskDetail) -> None:
 
 
 async def _result_is_cancelled(handle: TaskHandle[Any]) -> None:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
     assert_failed(result, expected_code=OutcomeCode.TASK_CANCELLED)
 
 

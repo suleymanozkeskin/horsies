@@ -36,7 +36,7 @@ const FULL_INPUT: AppConfigInput = {
     { name: "bulk", priority: 90, maxConcurrency: { kind: "noCap" } },
     { name: "standard", priority: 50 },
   ],
-  broker: {
+  database: {
     databaseUrl: { kind: "value", value: DATABASE_URL },
     connection: { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "fromEnv", name: "SESSION_URL" } },
     poolPrePing: false,
@@ -50,7 +50,7 @@ const FULL_INPUT: AppConfigInput = {
     tcpKeepalives: { kind: "on", idleSeconds: 60, intervalSeconds: 5, probes: 4 },
     tcpUserTimeout: { kind: "after", milliseconds: 20_000 },
   },
-  clusterWideCap: { kind: "cap", tasks: 200 },
+  clusterWideCap: { kind: "clusterCap", tasks: 200 },
   claim: { kind: "softCap", prefetchBuffer: 4, leaseMs: 30_000 },
   maxClaimRenewAgeMs: 600_000,
   payload: { warnBytes: { kind: "noBound" }, rejectBytes: { kind: "bytes", bytes: 4_194_304 } },
@@ -100,36 +100,36 @@ const FULL_CORE_OBJECT = {
     { name: "bulk", priority: 90, max_concurrency: null },
     { name: "standard", priority: 50 },
   ],
-  broker: {
+  database: {
     database_url: DATABASE_URL,
-    session_database_url: SESSION_URL,
+    session_database: { kind: "SEPARATE", url: SESSION_URL },
     pgbouncer_transaction_mode: true,
     pool_pre_ping: false,
     worker_pool_pre_ping: true,
     pool_size: 8,
     max_overflow: 2,
     retain_rerun_input_default: true,
-    pool_timeout: 15,
+    pool_timeout_seconds: 15,
     pool_recycle: { kind: "AFTER_SECONDS", seconds: 600 },
     echo: true,
     tcp_keepalives: { kind: "ON", idle_seconds: 60, interval_seconds: 5, probes: 4 },
     tcp_user_timeout: { kind: "AFTER", milliseconds: 20_000 },
   },
-  cluster_wide_cap: 200,
+  cluster_wide_cap: { kind: "cluster_cap", tasks: 200 },
   prefetch_buffer: 4,
   claim_lease_ms: 30_000,
   max_claim_renew_age_ms: 600_000,
   payload: { warn_bytes: null, reject_bytes: 4_194_304 },
   recovery: {
-    auto_requeue_stale_claimed: false,
+    requeue_stale_claimed: false,
     claimed_stale_threshold_ms: 120_000,
-    auto_fail_stale_running: true,
-    auto_terminate_orphaned_workflow_tasks: false,
+    fail_stale_running: true,
+    terminate_orphaned_workflow_tasks: false,
     orphan_task_audit_interval_ms: 3_600_000,
     running_stale_threshold_ms: 300_000,
     finalizing_stale_threshold_ms: 300_000,
     crashed_worker_recovery_grace_ms: 10_000,
-    phase2_quarantine_after_attempts: 5,
+    finalization_quarantine_after_attempts: 5,
     workflow_recovery_failure_limit: 20,
     check_interval_ms: 30_000,
     runner_heartbeat_interval_ms: 15_000,
@@ -139,7 +139,7 @@ const FULL_CORE_OBJECT = {
   retention: {
     worker_state_retention_hours: 48,
     terminal_record_retention_hours: null,
-    paused_workflow_auto_cancel_after: [172_800, 1_500_000],
+    paused_workflow_cancel_after: [172_800, 1_500_000],
     history_leaf_horizon_days: 4,
     heartbeat_leaf_horizon_hours: 12,
     retention_periods: [
@@ -147,18 +147,18 @@ const FULL_CORE_OBJECT = {
       [7_776_000, 0],
     ],
     queue_retention: { urgent: null, bulk: [1_209_600, 0] },
-    partition_maintenance_interval_s: 600,
-    retention_sweep_interval_s: 120,
+    partition_maintenance_interval_seconds: 600,
+    retention_sweep_interval_seconds: 120,
     retention_delete_batch_size: 1000,
   },
   resilience: {
-    db_retry_initial_ms: 200,
-    db_retry_max_ms: 10_000,
-    db_retry_max_attempts: 0,
+    database_retry_initial_ms: 200,
+    database_retry_max_ms: 10_000,
+    database_retry_max_attempts: 0,
     notify_poll_interval_ms: 2000,
   },
   worker_profiles: { default: { isolated: { kind: "isolated_children", count: 2 } } },
-  resend_on_transient_err: true,
+  resend_on_transient_error: true,
 };
 
 describe("coreAppConfigJson", () => {
@@ -167,64 +167,74 @@ describe("coreAppConfigJson", () => {
   });
 
   test("a config with only a database URL gives the URL and the resend flag; the core fills every other default", () => {
-    const config = parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } } });
+    const config = parsed({ database: { databaseUrl: { kind: "value", value: DATABASE_URL } } });
 
     assert.equal(
       coreAppConfigJson(config),
-      `{"broker":{"database_url":"${DATABASE_URL}"},"resend_on_transient_err":false}`,
+      `{"database":{"database_url":"${DATABASE_URL}"},"resend_on_transient_error":false}`,
     );
   });
 
-  test("a direct connection whose session uses the database URL leaves the session URL out", () => {
+  test("no cluster-wide cap writes the core's no_cluster_cap tag", () => {
     const config = parsed({
-      broker: {
+      database: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      clusterWideCap: { kind: "noClusterCap" },
+    });
+
+    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).cluster_wide_cap, { kind: "no_cluster_cap" });
+  });
+
+  test("a direct connection whose session uses the database URL writes the core's SAME_AS_DATABASE_URL tag", () => {
+    const config = parsed({
+      database: {
         databaseUrl: { kind: "value", value: DATABASE_URL },
         connection: { kind: "direct", sessionDatabase: { kind: "sameAsDatabaseUrl" } },
       },
     });
 
-    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).broker, {
+    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).database, {
       database_url: DATABASE_URL,
+      session_database: { kind: "SAME_AS_DATABASE_URL" },
       pgbouncer_transaction_mode: false,
     });
   });
 
   test("a direct connection with a separate session database gives the session URL and no PgBouncer mode", () => {
     const config = parsed({
-      broker: {
+      database: {
         databaseUrl: { kind: "value", value: DATABASE_URL },
         connection: { kind: "direct", sessionDatabase: { kind: "separate", url: { kind: "fromEnv", name: "SESSION_URL" } } },
       },
     });
 
-    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).broker, {
+    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).database, {
       database_url: DATABASE_URL,
-      session_database_url: SESSION_URL,
+      session_database: { kind: "SEPARATE", url: SESSION_URL },
       pgbouncer_transaction_mode: false,
     });
   });
 
   test("the hard cap mode gives a prefetch buffer of 0, and its lease only when the config gives one", () => {
-    const withoutLease = parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } }, claim: { kind: "hardCap" } });
+    const withoutLease = parsed({ database: { databaseUrl: { kind: "value", value: DATABASE_URL } }, claim: { kind: "hardCap" } });
 
     const withLease = parsed({
-      broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: DATABASE_URL } },
       claim: { kind: "hardCap", leaseMs: 90_000 },
     });
 
     assert.equal(
       coreAppConfigJson(withoutLease),
-      `{"broker":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"resend_on_transient_err":false}`,
+      `{"database":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"resend_on_transient_error":false}`,
     );
     assert.equal(
       coreAppConfigJson(withLease),
-      `{"broker":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"claim_lease_ms":90000,"resend_on_transient_err":false}`,
+      `{"database":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"claim_lease_ms":90000,"resend_on_transient_error":false}`,
     );
   });
 
   test("a custom queue that names no priority has no priority member: the core's default applies", () => {
     const config = parsed({
-      broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: DATABASE_URL } },
       queueMode: "custom",
       customQueues: [{ name: "bulk" }],
     });
@@ -234,7 +244,7 @@ describe("coreAppConfigJson", () => {
 
   test("a queue named __proto__ in the queue retention is a member of the text", () => {
     const config = parsed({
-      broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: DATABASE_URL } },
       retention: { queueRetention: { ["__proto__"]: { kind: "forever" } } },
     });
 
@@ -244,7 +254,7 @@ describe("coreAppConfigJson", () => {
 
 describe("queueSetup", () => {
   test("a config with no queue mode has the default queue", () => {
-    assert.deepEqual(queueSetup(parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), {
+    assert.deepEqual(queueSetup(parsed({ database: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), {
       kind: "default",
     });
   });
@@ -270,6 +280,6 @@ describe("queueSetup", () => {
 describe("resendOnTransientError", () => {
   test("the flag is the config's, and off when the config leaves it out", () => {
     assert.equal(resendOnTransientError(parsed(FULL_INPUT)), true);
-    assert.equal(resendOnTransientError(parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), false);
+    assert.equal(resendOnTransientError(parsed({ database: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), false);
   });
 });

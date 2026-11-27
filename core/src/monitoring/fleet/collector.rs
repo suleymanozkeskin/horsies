@@ -24,7 +24,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::task::Execution;
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues, Folded, QueueName, ScheduleName};
 use crate::telemetry::exposition::render;
@@ -33,7 +33,7 @@ use crate::telemetry::registry::{
     Counter, Gauge, HandleRefused, Histogram, ProcessFacts, Recorded, Registry, RegistryLabels,
     Replaced,
 };
-use crate::{AppConfig, ClassCoverage, PostgresBroker, QueueMode};
+use crate::{AppConfig, ExecutionClassCoverage, PostgresBroker, QueueMode};
 
 use super::gauges::{
     oldest_pending_series, queue_task_series, schedule_series, schema_version_series,
@@ -326,7 +326,11 @@ impl FleetCollector {
         recorded.replaced(self.gauges.seats_in_use.replace_all(series.seats_in_use));
     }
 
-    fn record_class_coverage(&self, part: &FleetPart<ClassCoverage>, recorded: &mut FleetRecorded) {
+    fn record_class_coverage(
+        &self,
+        part: &FleetPart<ExecutionClassCoverage>,
+        recorded: &mut FleetRecorded,
+    ) {
         self.note_part(FleetQuery::ClassCoverage, part, recorded);
         let series = match &part.outcome {
             Ok(coverage) => unserved_series(coverage, self.queues()),
@@ -386,7 +390,7 @@ pub async fn collect_fleet_state(
 /// a read in which every part failed.
 pub async fn collect_fleet_state_through(
     collector: &FleetCollector,
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     stop: &CancellationToken,
 ) {
     collect_with(collector, || read_fleet_state_through(handle), stop).await;

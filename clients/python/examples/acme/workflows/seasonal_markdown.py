@@ -50,14 +50,14 @@ class SeasonalMarkdown(WorkflowDefinition[SalesRollup]):
         """Build a fresh spec with one repricing node per SKU."""
         repricings: list[TaskNode[Any] | SubWorkflowNode[Any]] = [
             TaskNode(
-                fn=update_price,
+                function=update_price,
                 kwargs={'sku': sku, 'campaign_id': campaign_id},
                 node_id=f'update_price_{index:02d}',
             )
             for index, sku in enumerate(skus)
         ]
         rollup = TaskNode(
-            fn=sales_rollup,
+            function=sales_rollup,
             kwargs={'window': f'markdown-{campaign_id}'},
             waits_for=repricings,
             node_id='sales_rollup',

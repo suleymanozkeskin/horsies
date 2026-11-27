@@ -18,7 +18,7 @@ use crate::core::python_text::pydantic_json_utc;
 const MICROSECONDS_PER_SECOND: i32 = 1_000_000;
 
 /// Serialize `time` as pydantic writes it.
-pub(super) fn utc<S: Serializer>(time: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn utc<S: Serializer>(time: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&pydantic_json_utc(*time))
 }
 
@@ -45,7 +45,7 @@ impl Serialize for PydanticTime {
 
 /// Serialize `duration` as a JSON number of seconds, as [`seconds_number`]
 /// gives it.
-pub(super) fn seconds<S: Serializer>(
+pub(crate) fn seconds<S: Serializer>(
     duration: &TimeDelta,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {

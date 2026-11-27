@@ -93,20 +93,20 @@ def _poll_for_cancel(runtime: TaskRuntime, marker_dir: str) -> Result[str, TaskE
     return Ok('never cancelled')
 
 
-@app.task(task_name='e2e_cancel_isolated_async')
+@app.task(name='e2e_cancel_isolated_async')
 async def cancel_isolated_async(
     runtime: TaskRuntime, *, marker_dir: str
 ) -> Result[str, TaskError]:
     return await _wait_for_cancel(runtime, marker_dir)
 
 
-@app.task(task_name='e2e_cancel_isolated_def')
+@app.task(name='e2e_cancel_isolated_def')
 def cancel_isolated_def(runtime: TaskRuntime, *, marker_dir: str) -> Result[str, TaskError]:
     return _poll_for_cancel(runtime, marker_dir)
 
 
 @app.task(
-    task_name='e2e_cancel_shared_async',
+    name='e2e_cancel_shared_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -117,7 +117,7 @@ async def cancel_shared_async(
 
 
 @app.task(
-    task_name='e2e_cancel_shared_thread',
+    name='e2e_cancel_shared_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -125,7 +125,7 @@ def cancel_shared_thread(runtime: TaskRuntime, *, marker_dir: str) -> Result[str
     return _poll_for_cancel(runtime, marker_dir)
 
 
-@app.task(task_name='e2e_cancel_isolated_hard_stop', cancel_grace_ms=HARD_STOP_GRACE_MS)
+@app.task(name='e2e_cancel_isolated_hard_stop', cancel_grace_ms=HARD_STOP_GRACE_MS)
 def cancel_isolated_hard_stop(*, marker_dir: str) -> Result[str, TaskError]:
     """Ignores its cancel: the worker kills its child after the grace."""
     _started(marker_dir)
@@ -134,7 +134,7 @@ def cancel_isolated_hard_stop(*, marker_dir: str) -> Result[str, TaskError]:
     return Ok('ran to the end')
 
 
-@app.task(task_name='e2e_cancel_isolated_no_grace')
+@app.task(name='e2e_cancel_isolated_no_grace')
 def cancel_isolated_no_grace(*, marker_dir: str) -> Result[str, TaskError]:
     """Ignores its cancel and returns later: with no grace, nothing is
     killed."""

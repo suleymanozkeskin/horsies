@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use acme_showcase::app::{build_app, WORKER_PROFILE};
 use acme_showcase::scenarios;
 use clap::{Args, Parser, Subcommand};
-use horsies::{AppRole, ChildArgs, ChildHostExit, ChildMode, SchemaMode, WorkerStart};
+use horsies::{AppRole, ChildArgs, ChildHostExit, ChildMode, SchemaMode, WorkerRunOptions};
 
 #[derive(Debug, Parser)]
 #[command(name = "acme", about = "Acme Clothing showcase")]
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         ChildMode::Child(args) => serve_child(args),
         ChildMode::BadArguments(error) => {
             eprintln!("acme: child mode cannot start: {error}");
-            exit_code(ChildHostExit::BadArguments.code())
+            exit_code(ChildHostExit::BadArguments.exit_code())
         }
         ChildMode::Worker => run_command(Cli::parse().command),
     }
@@ -163,7 +163,7 @@ async fn run_worker(options: WorkerOptions) -> Result<(), String> {
     let showcase = build_app(SchemaMode::MigrateAndValidate).map_err(|error| error.to_string())?;
     showcase
         .app
-        .run_worker(WorkerStart::profile(options.profile))
+        .run_worker(WorkerRunOptions::profile(options.profile))
         .await
         .map(|_stopped| ())
         .map_err(|error| error.to_string())

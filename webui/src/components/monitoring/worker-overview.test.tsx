@@ -15,7 +15,7 @@ import {
   workerState,
 } from '@/test/worker-fixtures';
 import type {
-  ClassReport,
+  ExecutionClassReport,
   LivenessReport,
   ScheduleState,
   WorkerState,
@@ -42,7 +42,7 @@ const unavailable = (): Response =>
 
 interface Answers {
   workers: WorkerState[];
-  classes: ClassReport | 'failed';
+  classes: ExecutionClassReport | 'failed';
   schedules?: ScheduleState[];
 }
 
@@ -50,8 +50,7 @@ interface Answers {
  * not stale answers the ping. */
 function stubApi(answers: Answers): void {
   const liveness: LivenessReport = {
-    db_latency_ms: 0.4,
-    db_reachable: true,
+    database: { kind: 'ping', latency_ms: 0.4 },
     workers: answers.workers
       .filter(worker => !worker.stale)
       .map(worker => ({

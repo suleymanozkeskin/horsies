@@ -51,7 +51,7 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
     ) -> WorkflowSpec[RestockDecision]:
         """Build a fresh spec for one return."""
         receive = TaskNode(
-            fn=receive_return,
+            function=receive_return,
             kwargs={
                 'return_id': return_id,
                 'order_id': order_id,
@@ -61,13 +61,13 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
             node_id='receive_return',
         )
         inspect = TaskNode(
-            fn=inspect_item,
+            function=inspect_item,
             kwargs={'return_id': return_id},
             waits_for=[receive],
             node_id='inspect_item',
         )
         settle = TaskNode(
-            fn=restock_or_writeoff,
+            function=restock_or_writeoff,
             kwargs={'return_id': return_id},
             waits_for=[inspect],
             args_from={'inspection': inspect},

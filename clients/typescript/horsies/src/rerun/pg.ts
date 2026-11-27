@@ -59,7 +59,7 @@ export interface PgTextResult {
 }
 
 /**
- * The part of a `pg` client that the adapter calls: a `pg.Client` or a `pg.PoolClient` of `pg` 8.21.0
+ * The part of a `pg` client that the adapter calls: a `pg.Client` or a `pg.PoolClient` of `pg` 8.23.1
  * or later, on which the caller ran `BEGIN`. A `pg.Pool` has no `getTransactionStatus`, so this type
  * refuses it: each query of a pool can run on another connection, outside the caller's transaction.
  */
@@ -97,7 +97,10 @@ const TEXT_PARSERS: PgTextParsers = {
 /**
  * The caller's transaction on `client`. Each statement runs on `client` and gives its one row; a
  * statement runs only when the client's status is an open transaction. Nothing here commits or rolls
- * back: after the rerun, the caller commits, or rolls back after an error.
+ * back: after the rerun, the caller commits, or rolls back after an error. After a statement of the
+ * caller's transaction fails, `pg` reports the failed state only after its next ready message, so a
+ * rerun started in that window gives `DRIVER_FAILED` instead of `NO_OPEN_TRANSACTION`; both leave
+ * nothing written.
  */
 export function pgTransaction(client: PgClient): CallerTransaction {
   return {

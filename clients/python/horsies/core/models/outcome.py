@@ -10,8 +10,8 @@ task ended:
   recorded it (``TASK_CANCELLED``, ``TASK_TIMEOUT``, ``WORKER_CRASHED``, ...).
 - ``Err(read_error)``: the read gave no outcome. ``read_error`` is one class
   of ``ReadError``, named after its catalog code. A later read can give an
-  outcome for some of them (``WaitTimeout``, ``TaskNotFound``,
-  ``BrokerError``).
+  outcome for some of them (``ReadWaitTimeout``, ``ReadTaskNotFound``,
+  ``ReadDatabaseError``).
 
 A workflow node input that takes an upstream result (``args_from``) is a
 ``TaskOutcome``, and so is the result of ``WorkflowContext.result_for``.
@@ -19,7 +19,7 @@ A workflow node input that takes an upstream result (``args_from``) is a
 ``ReadError`` is a closed union of frozen classes, so a ``match`` on it is
 exhaustive under a type checker. Every class has ``code`` (its catalog
 member) and ``message`` (the subject and the cause, as text).
-``BrokerError`` also has ``retryable`` and ``exception``.
+``ReadDatabaseError`` also has ``retryable`` and ``cause``.
 """
 
 from __future__ import annotations
@@ -29,31 +29,31 @@ from typing import ClassVar, Literal
 
 from horsies._catalog.task_codes import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     RetrievalCode,
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 
 __all__ = [
-    'AsyncContext',
-    'BrokerError',
     'Failed',
-    'InvalidInput',
-    'NoTypeAvailable',
+    'ReadAsyncContext',
+    'ReadDatabaseError',
     'ReadError',
+    'ReadInvalidInput',
+    'ReadNoTypeAvailable',
     'ReadResult',
-    'ResultDeserializationError',
-    'ResultNotAvailable',
-    'ResultNotReady',
+    'ReadResultDeserializationError',
+    'ReadResultNotAvailable',
+    'ReadResultNotReady',
+    'ReadTaskNotFound',
+    'ReadUnknownCustomCode',
+    'ReadWaitInsideTask',
+    'ReadWaitTimeout',
+    'ReadWorkflowContextMissingId',
+    'ReadWorkflowNotFound',
     'Succeeded',
-    'TaskNotFound',
     'TaskOutcome',
-    'UnknownCustomCode',
-    'WaitInsideTask',
-    'WaitTimeout',
-    'WorkflowCtxMissingId',
-    'WorkflowNotFound',
 ]
 
 
@@ -76,7 +76,7 @@ type TaskOutcome[T, E] = Succeeded[T] | Failed[E]
 
 
 @dataclass(slots=True, frozen=True)
-class WaitTimeout:
+class ReadWaitTimeout:
     """The task or the workflow had not ended when the wait limit passed.
 
     It may still run. A later read may find it ended. Not kept by the handle.
@@ -87,7 +87,7 @@ class WaitTimeout:
 
 
 @dataclass(slots=True, frozen=True)
-class TaskNotFound:
+class ReadTaskNotFound:
     """Neither the live table nor the task history holds the task.
 
     A handle built by id can race the commit of its send, so a later read
@@ -99,7 +99,7 @@ class TaskNotFound:
 
 
 @dataclass(slots=True, frozen=True)
-class WorkflowNotFound:
+class ReadWorkflowNotFound:
     """No workflow has the id of the handle."""
 
     code: ClassVar[Literal[RetrievalCode.WORKFLOW_NOT_FOUND]] = (
@@ -109,7 +109,7 @@ class WorkflowNotFound:
 
 
 @dataclass(slots=True, frozen=True)
-class ResultNotAvailable:
+class ReadResultNotAvailable:
     """The task reached a terminal status and stored no result, or a handle
     with no broker holds no result. Kept by the handle."""
 
@@ -120,7 +120,7 @@ class ResultNotAvailable:
 
 
 @dataclass(slots=True, frozen=True)
-class ResultNotReady:
+class ReadResultNotReady:
     """The workflow node stores no result yet. A later read may find one."""
 
     code: ClassVar[Literal[RetrievalCode.RESULT_NOT_READY]] = (
@@ -130,7 +130,7 @@ class ResultNotReady:
 
 
 @dataclass(slots=True, frozen=True)
-class WaitInsideTask:
+class ReadWaitInsideTask:
     """A result wait in a process that runs task bodies. Nothing was read.
 
     Compose the tasks with a workflow there. Not kept by the handle.
@@ -143,7 +143,7 @@ class WaitInsideTask:
 
 
 @dataclass(slots=True, frozen=True)
-class AsyncContext:
+class ReadAsyncContext:
     """A sync read on a thread that runs an event loop. Nothing was read.
 
     Its wait would stall that loop. Call the ``*_async`` form there. Not kept
@@ -155,7 +155,7 @@ class AsyncContext:
 
 
 @dataclass(slots=True, frozen=True)
-class InvalidInput:
+class ReadInvalidInput:
     """The wait limit is not ``None`` or an int from 0 to
     ``MAX_TASK_TIMEOUT_MS``. Nothing was read. Not kept by the handle."""
 
@@ -164,59 +164,57 @@ class InvalidInput:
 
 
 @dataclass(slots=True, frozen=True)
-class ResultDeserializationError:
+class ReadResultDeserializationError:
     """The stored result does not read as the result of the declared types.
 
     The same read gives the same error until the stored value changes. Kept
     by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
-        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    code: ClassVar[Literal[OperationalCode.RESULT_DESERIALIZATION_ERROR]] = (
+        OperationalCode.RESULT_DESERIALIZATION_ERROR
     )
     message: str
 
 
 @dataclass(slots=True, frozen=True)
-class UnknownCustomCode:
+class ReadUnknownCustomCode:
     """The stored error has a custom code that the declared ``Enum`` of the
     task does not name: a row of another version of the task, or of a task
     with another code type. ``custom_code`` is the stored text.
 
-    Its code is ``RESULT_DESERIALIZATION_ERROR``, as for
-    ``ResultDeserializationError``: the stored value does not read as the
-    result of the declared types. It has its own class because it names the
-    code. The same read gives the same error until the stored value or the
-    ``Enum`` changes. Kept by the handle.
+    An ``Enum`` that names the code reads the row. The same read gives the
+    same error until the stored value or the ``Enum`` changes. Kept by the
+    handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
-        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    code: ClassVar[Literal[RetrievalCode.UNKNOWN_CUSTOM_CODE]] = (
+        RetrievalCode.UNKNOWN_CUSTOM_CODE
     )
     message: str
     custom_code: str
 
 
 @dataclass(slots=True, frozen=True)
-class BrokerError:
+class ReadDatabaseError:
     """The database, the connection or the core call failed.
 
     ``message`` names the code of the failed operation and its cause.
     ``retryable`` is the classification of the cause: ``True`` when the
-    condition may clear, so that a later read may succeed. ``exception`` is
-    the cause, or ``NoCause()``. Not kept by the handle.
+    condition may clear, so that a later read may succeed. ``cause`` is
+    the exception of the cause, or ``NoCause()``. Not kept by the handle.
     """
 
-    code: ClassVar[Literal[OperationalErrorCode.BROKER_ERROR]] = (
-        OperationalErrorCode.BROKER_ERROR
+    code: ClassVar[Literal[OperationalCode.DATABASE_ERROR]] = (
+        OperationalCode.DATABASE_ERROR
     )
     message: str
     retryable: bool
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
 
 
 @dataclass(slots=True, frozen=True)
-class NoTypeAvailable:
+class ReadNoTypeAvailable:
     """The stored value succeeded, and this process has no declared type to
     read it with: the handle was built by id, or the task or workflow is not
     registered here. Read the raw result, or register the task. Kept by the
@@ -227,33 +225,31 @@ class NoTypeAvailable:
 
 
 @dataclass(slots=True, frozen=True)
-class WorkflowCtxMissingId:
+class ReadWorkflowContextMissingId:
     """``result_for`` got a node with no ``node_id``. Nothing was read."""
 
-    code: ClassVar[Literal[ContractCode.WORKFLOW_CTX_MISSING_ID]] = (
-        ContractCode.WORKFLOW_CTX_MISSING_ID
+    code: ClassVar[Literal[ContractCode.WORKFLOW_CONTEXT_MISSING_ID]] = (
+        ContractCode.WORKFLOW_CONTEXT_MISSING_ID
     )
     message: str
 
 
 type ReadError = (
-    WaitTimeout
-    | TaskNotFound
-    | WorkflowNotFound
-    | ResultNotAvailable
-    | ResultNotReady
-    | WaitInsideTask
-    | AsyncContext
-    | InvalidInput
-    | ResultDeserializationError
-    | UnknownCustomCode
-    | BrokerError
-    | NoTypeAvailable
-    | WorkflowCtxMissingId
+    ReadWaitTimeout
+    | ReadTaskNotFound
+    | ReadWorkflowNotFound
+    | ReadResultNotAvailable
+    | ReadResultNotReady
+    | ReadWaitInsideTask
+    | ReadAsyncContext
+    | ReadInvalidInput
+    | ReadResultDeserializationError
+    | ReadUnknownCustomCode
+    | ReadDatabaseError
+    | ReadNoTypeAvailable
+    | ReadWorkflowContextMissingId
 )
-"""Why a read gave no outcome: one class per catalog code, and
-``UnknownCustomCode``, which shares the code of
-``ResultDeserializationError`` and names the custom code."""
+"""Why a read gave no outcome: one class per catalog code."""
 
 
 type ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]

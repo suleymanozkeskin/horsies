@@ -35,7 +35,7 @@ from tests.workflow_recovery_support import workflow_recovery_pass
 
 pytestmark = [pytest.mark.integration]
 
-_FAILED: Result[int, TaskError] = Err(TaskError(error_code='FAIL', message='dependency failed'))
+_FAILED: Result[int, TaskError] = Err(TaskError(code='FAIL', message='dependency failed'))
 
 
 async def _node(session: AsyncSession, workflow_id: str, index: int) -> tuple[str, object]:
@@ -84,9 +84,9 @@ class TestSkipSetsCompletedAt:
         session, broker, app = setup
         failing = make_failing_task(app, 'skip_completed_any_fail')
         task = make_simple_task(app, 'skip_completed_any_task')
-        first = TaskNode(fn=failing)
-        second = TaskNode(fn=failing)
-        joined = TaskNode(fn=task, kwargs={'value': 0}, waits_for=[first, second], join='any')
+        first = TaskNode(function=failing)
+        second = TaskNode(function=failing)
+        joined = TaskNode(function=task, kwargs={'value': 0}, waits_for=[first, second], join='any')
         handle = await start_ok(
             make_workflow_spec(
                 broker=broker, name='skip_completed_any', tasks=[first, second, joined],
@@ -107,8 +107,8 @@ class TestSkipSetsCompletedAt:
         session, broker, app = setup
         failing = make_failing_task(app, 'skip_completed_all_fail')
         task = make_simple_task(app, 'skip_completed_all_task')
-        first = TaskNode(fn=failing)
-        dependent = TaskNode(fn=task, kwargs={'value': 0}, waits_for=[first])
+        first = TaskNode(function=failing)
+        dependent = TaskNode(function=task, kwargs={'value': 0}, waits_for=[first])
         handle = await start_ok(
             make_workflow_spec(broker=broker, name='skip_completed_all', tasks=[first, dependent]),
             broker,
@@ -125,9 +125,9 @@ class TestSkipSetsCompletedAt:
     ) -> None:
         session, broker, app = setup
         task = make_simple_task(app, 'skip_completed_reeval_any')
-        first = TaskNode(fn=task, kwargs={'value': 1})
-        second = TaskNode(fn=task, kwargs={'value': 2})
-        joined = TaskNode(fn=task, kwargs={'value': 0}, waits_for=[first, second], join='any')
+        first = TaskNode(function=task, kwargs={'value': 1})
+        second = TaskNode(function=task, kwargs={'value': 2})
+        joined = TaskNode(function=task, kwargs={'value': 0}, waits_for=[first, second], join='any')
         handle = await start_ok(
             make_workflow_spec(
                 broker=broker, name='skip_completed_reeval_any', tasks=[first, second, joined],
@@ -147,8 +147,8 @@ class TestSkipSetsCompletedAt:
     ) -> None:
         session, broker, app = setup
         task = make_simple_task(app, 'skip_completed_reeval_all')
-        first = TaskNode(fn=task, kwargs={'value': 1})
-        dependent = TaskNode(fn=task, kwargs={'value': 0}, waits_for=[first])
+        first = TaskNode(function=task, kwargs={'value': 1})
+        dependent = TaskNode(function=task, kwargs={'value': 0}, waits_for=[first])
         handle = await start_ok(
             make_workflow_spec(
                 broker=broker, name='skip_completed_reeval_all', tasks=[first, dependent],

@@ -121,9 +121,11 @@ describe("checkWorkflowsAtCreate", () => {
   });
 
   test("params with a key and no check cases: HRS-027", () => {
-    // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
-    const noCases = defineWorkflow(
-      { name: "c", definitionKey: "tests.c.v1", outputType: h.int(), parameters: { n: h.int() } } as never,
+    const int = h.int();
+
+    const noCases = defineWorkflow<{ readonly n: typeof int }, typeof int>(
+      // SAFETY: the types require check cases for params with a key; the create check refuses them at run time too.
+      { name: "c", definitionKey: "tests.c.v1", outputType: int, parameters: { n: int } } as never,
       (w) => ({
         output: w.task(ping, {}, { nodeId: "a" }),
       }),
@@ -146,8 +148,8 @@ describe("checkWorkflowsAtCreate", () => {
         name: "e",
         definitionKey: "tests.e.v1",
         outputType: h.int(),
-        parameters: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
       (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
@@ -162,8 +164,8 @@ describe("checkWorkflowsAtCreate", () => {
         name: "params",
         definitionKey: "tests.params.v1",
         outputType: h.int(),
-        parameters: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
       (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
@@ -177,7 +179,7 @@ describe("checkWorkflowsAtCreate", () => {
     const [params] = checkedAtCreate([badParams]).refusals;
     const [output] = checkedAtCreate([badOutput]).refusals;
 
-    assert.match(params?.message ?? "", /^workflows\[0\] params: parameters\.workflow_ctx: /u);
+    assert.match(params?.message ?? "", /^workflows\[0\] params: parameters\.workflow_context: /u);
     assert.match(output?.message ?? "", /^workflows\[0\] out: outputType: .*\[WireKind\]$/u);
   });
 

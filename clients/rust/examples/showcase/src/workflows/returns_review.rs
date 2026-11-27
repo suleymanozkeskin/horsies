@@ -48,24 +48,24 @@ impl WorkflowDefinition for ReturnsReview {
             receive_return::node()
                 .node_id("receive_return")
                 .set(
-                    receive_return::params::return_id(),
+                    receive_return::fields::return_id(),
                     params.return_id.clone(),
                 )?
-                .set(receive_return::params::order_id(), params.order_id)?
-                .set(receive_return::params::sku(), params.sku)?
-                .set(receive_return::params::quantity(), params.quantity)?,
+                .set(receive_return::fields::order_id(), params.order_id)?
+                .set(receive_return::fields::sku(), params.sku)?
+                .set(receive_return::fields::quantity(), params.quantity)?,
         )?;
         let inspect = builder.task(
             inspect_item::node()
                 .node_id("inspect_item")
-                .set(inspect_item::params::return_id(), params.return_id.clone())?
+                .set(inspect_item::fields::return_id(), params.return_id.clone())?
                 .waits_for(receive),
         )?;
         let settle = builder.task(
             restock_or_writeoff::node()
                 .node_id("restock_or_writeoff")
-                .set(restock_or_writeoff::params::return_id(), params.return_id)?
-                .arg_from(restock_or_writeoff::params::inspection(), inspect)
+                .set(restock_or_writeoff::fields::return_id(), params.return_id)?
+                .arg_from(restock_or_writeoff::fields::inspection(), inspect)
                 .allow_failed_dependencies(true),
         )?;
         builder.output(settle);

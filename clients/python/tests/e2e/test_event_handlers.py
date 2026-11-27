@@ -43,7 +43,7 @@ def _ready_check(healthcheck: TaskFunction[[], str]) -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return check
 
@@ -87,7 +87,7 @@ async def test_a_handler_gets_the_attempt_ended_event_of_a_task(
         ready_check=_ready_check(instance.healthcheck),
     ):
         handle = unwrap_send(await instance.add.send_async(left=2, right=3))
-        assert_succeeded(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS), 5)
+        assert_succeeded(await handle.get_async(wait_ms=RESULT_TIMEOUT_MS), 5)
         lines = await _wait_for_line(out, str(handle.task_id))
 
     started = [line for line in lines if line.startswith('started ')]

@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, OperationalErrorCode, ReadError, TaskError, TaskRuntime, UserErrorCode,
+    blocking_task, task, CustomErrorCode, OperationalCode, ReadError, TaskError, TaskRuntime,
     WaitLimit,
 };
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::markers;
 
 /// The codes of the basic tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum BasicCode {
     /// `e2e_error`.
     DeliberateError,
@@ -61,7 +61,7 @@ pub async fn kwargs(
 #[task("e2e_error")]
 pub async fn error() -> Result<i64, TaskError<BasicCode>> {
     Err(
-        TaskError::user(BasicCode::DeliberateError, "This is intentional")
+        TaskError::custom(BasicCode::DeliberateError, "This is intentional")
             .with_data(serde_json::json!({ "key": "value" })),
     )
 }
@@ -69,16 +69,13 @@ pub async fn error() -> Result<i64, TaskError<BasicCode>> {
 /// Python `e2e_no_retry`: a code that no retry policy names.
 #[task("e2e_no_retry")]
 pub async fn no_retry() -> Result<String, TaskError<BasicCode>> {
-    Err(TaskError::user(BasicCode::Permanent, "not retryable"))
+    Err(TaskError::custom(BasicCode::Permanent, "not retryable"))
 }
 
-/// Python `e2e_error_code`: a task body that returns a library code.
+/// Python `e2e_error_code`: a task body that returns a built-in code.
 #[task("e2e_error_code")]
 pub async fn error_code() -> Result<String, TaskError<Infallible>> {
-    Err(TaskError::library(
-        OperationalErrorCode::TaskException,
-        "boom",
-    ))
+    Err(TaskError::built_in(OperationalCode::TaskException, "boom"))
 }
 
 /// The output of `e2e_complex_result` (Python `OutputModel`).
@@ -128,7 +125,7 @@ pub async fn async_timeout_sleeper(duration_ms: u64) -> Result<String, TaskError
     "e2e_timeout_retry_sleeper",
     timeout_ms = 1_000,
     retry_policy = horsies::RetryPolicy::fixed(vec![1], false).expect("a valid policy"),
-    auto_retry_for = ["TASK_TIMEOUT"]
+    retry_for = ["TASK_TIMEOUT"]
 )]
 pub async fn timeout_retry_sleeper(duration_ms: u64) -> Result<String, TaskError<Infallible>> {
     tokio::time::sleep(Duration::from_millis(duration_ms)).await;
@@ -162,11 +159,14 @@ pub fn abort() -> Result<String, TaskError<Infallible>> {
 pub async fn idempotent(token: String) -> Result<String, TaskError<BasicCode>> {
     match markers::create_once(&format!("idempotent-{token}"), "executed") {
         Ok(true) => Ok(format!("executed:{token}")),
-        Ok(false) => Err(TaskError::user(
+        Ok(false) => Err(TaskError::custom(
             BasicCode::DoubleExecution,
             format!("Token {token} already executed"),
         )),
-        Err(cause) => Err(TaskError::user(BasicCode::MarkerFailed, cause.to_string())),
+        Err(cause) => Err(TaskError::custom(
+            BasicCode::MarkerFailed,
+            cause.to_string(),
+        )),
     }
 }
 
@@ -175,12 +175,12 @@ pub async fn idempotent(token: String) -> Result<String, TaskError<BasicCode>> {
 /// refused with `WAIT_INSIDE_TASK`.
 #[task("e2e_wait_inside_task")]
 pub async fn wait_inside_task(rt: TaskRuntime) -> Result<bool, TaskError<BasicCode>> {
-    let function = simple::handle(&rt)
-        .map_err(|missing| TaskError::user(BasicCode::SendFailed, missing.to_string()))?;
+    let function = simple::function(&rt)
+        .map_err(|missing| TaskError::custom(BasicCode::SendFailed, missing.to_string()))?;
     let handle = function
         .send(simple::Input { x: 1 })
         .await
-        .map_err(|error| TaskError::user(BasicCode::SendFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(BasicCode::SendFailed, error.to_string()))?;
     Ok(matches!(
         handle.get(WaitLimit::Within(INSIDE_WAIT)).await,
         Err(ReadError::WaitInsideTask { .. })
@@ -191,12 +191,12 @@ pub async fn wait_inside_task(rt: TaskRuntime) -> Result<bool, TaskError<BasicCo
 /// the typed function of its runtime. The output is the sent task id.
 #[task("e2e_async_sends")]
 pub async fn async_sends(rt: TaskRuntime, x: i64) -> Result<String, TaskError<BasicCode>> {
-    let function = simple::handle(&rt)
-        .map_err(|missing| TaskError::user(BasicCode::SendFailed, missing.to_string()))?;
+    let function = simple::function(&rt)
+        .map_err(|missing| TaskError::custom(BasicCode::SendFailed, missing.to_string()))?;
     let handle = function
         .send(simple::Input { x })
         .await
-        .map_err(|error| TaskError::user(BasicCode::SendFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(BasicCode::SendFailed, error.to_string()))?;
     Ok(handle.task_id().to_string())
 }
 
@@ -225,10 +225,13 @@ pub async fn slow_idempotent(
             tokio::time::sleep(Duration::from_millis(duration_ms)).await;
             Ok(format!("executed:{token}"))
         }
-        Ok(false) => Err(TaskError::user(
+        Ok(false) => Err(TaskError::custom(
             BasicCode::DoubleExecution,
             format!("Token {token} already executed"),
         )),
-        Err(cause) => Err(TaskError::user(BasicCode::MarkerFailed, cause.to_string())),
+        Err(cause) => Err(TaskError::custom(
+            BasicCode::MarkerFailed,
+            cause.to_string(),
+        )),
     }
 }

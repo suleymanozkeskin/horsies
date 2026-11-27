@@ -46,12 +46,12 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
     ) -> WorkflowSpec[MarketingBlast]:
         """Build a fresh spec for one winback campaign."""
         sweep = TaskNode(
-            fn=abandoned_cart_sweep,
+            function=abandoned_cart_sweep,
             kwargs={'older_than_minutes': older_than_minutes},
             node_id='abandoned_cart_sweep',
         )
         blast = TaskNode(
-            fn=winback_blast,
+            function=winback_blast,
             kwargs={'segment': segment},
             waits_for=[sweep],
             args_from={'sweep': sweep},

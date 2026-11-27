@@ -82,7 +82,7 @@ def main() -> int:
         worker_cmd = os.environ.get('HORSIES_WORKER_CMD', 'uv run horsies').split()
         worker = subprocess.Popen(
             [*worker_cmd, 'worker', LOCATOR,
-             f'--profile={REPRO_PROFILE}', '--loglevel=warning'],
+             f'--profile={REPRO_PROFILE}', '--log-level=warning'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,

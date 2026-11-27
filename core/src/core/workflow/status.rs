@@ -41,7 +41,7 @@ pub enum WorkflowStatus {
     /// User cancelled via WorkflowHandle.cancel().
     #[code_catalog(terminal)]
     Cancelled,
-    /// A paused workflow exceeded `paused_workflow_auto_cancel_after`.
+    /// A paused workflow exceeded `paused_workflow_cancel_after`.
     #[code_catalog(terminal)]
     Expired,
 }

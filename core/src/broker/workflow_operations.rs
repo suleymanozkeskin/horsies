@@ -78,7 +78,7 @@ impl PostgresBroker {
     /// - `Ok(false)`: the workflow exists and is not RUNNING; nothing was
     ///   written.
     /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-    /// - `DB_OPERATION_FAILED`: the client family check refused the handle, or
+    /// - `DATABASE_OPERATION_FAILED`: the client family check refused the handle, or
     ///   the statement failed; retryable by the core's rule. A lost reply may
     ///   have committed.
     ///
@@ -97,7 +97,7 @@ impl PostgresBroker {
     ///   history as cancelled, and the nodes that did not start are SKIPPED.
     /// - `Ok(false)`: the workflow is COMPLETED, FAILED, CANCELLED or EXPIRED;
     ///   nothing was written.
-    /// - `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`: as
+    /// - `WORKFLOW_NOT_FOUND`, `DATABASE_OPERATION_FAILED`: as
     ///   [`PostgresBroker::pause_workflow`].
     ///
     /// Panics: a row outside the function's contract (a defect).
@@ -116,7 +116,7 @@ impl PostgresBroker {
     /// - `Ok(false)`: the workflow exists and is not PAUSED; nothing was
     ///   written.
     /// - `WORKFLOW_NOT_FOUND`: no workflow has this id; nothing was written.
-    /// - `DB_OPERATION_FAILED`: the client family check, a statement, or a
+    /// - `DATABASE_OPERATION_FAILED`: the client family check, a statement, or a
     ///   child build that `source` did not run; nothing committed, or the
     ///   `COMMIT` reply was lost.
     /// - `STORED_DATA_INVALID`: an owed child met a value that does not

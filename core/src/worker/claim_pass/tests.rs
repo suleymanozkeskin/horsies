@@ -363,13 +363,13 @@ async fn rows_that_fit_or_are_unknown_are_dispatched() {
 // ---------------------------------------------------------------------------
 
 /// The type of each claim event and its task, in order.
-fn claim_events(events: &[crate::events::Event]) -> Vec<(String, Uuid)> {
-    use crate::events::Event;
+fn claim_events(events: &[crate::events::AnyEvent]) -> Vec<(String, Uuid)> {
+    use crate::events::AnyEvent;
     events
         .iter()
         .map(|event| match event {
-            Event::TaskClaimed(claimed) => ("claimed".to_owned(), claimed.task_id),
-            Event::ClaimReleased(released) => {
+            AnyEvent::TaskClaimed(claimed) => ("claimed".to_owned(), claimed.task_id),
+            AnyEvent::ClaimReleased(released) => {
                 (format!("released {:?}", released.reason), released.task_id)
             }
             other => panic!("the claim pass emits no {other:?}"),
@@ -436,7 +436,7 @@ async fn each_claimed_row_is_claimed_once_and_each_returned_row_released_once() 
         ]
     );
     match &events[1] {
-        crate::events::Event::TaskClaimed(claimed) => {
+        crate::events::AnyEvent::TaskClaimed(claimed) => {
             assert_eq!(claimed.attempt.get(), 1);
             assert_eq!(claimed.priority.get(), 100);
             assert_eq!(claimed.queue_wait, std::time::Duration::ZERO);

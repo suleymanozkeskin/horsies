@@ -22,12 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
 
+use crate::broker::{
+    BudgetLoad, DownSlot, ExecutionClassReport, PendingStream, WorkerExecutionClassLoad, WorkerPong,
+};
 use crate::monitoring::models::{
-    Breakdown, BreakdownCounts, BudgetLoadInfo, ClassReportInfo, DownSlotInfo, ErrorFacet,
-    FacetValue, Facets, GroupRow, LivenessReport, PendingStreamInfo, ScheduleStateInfo,
-    StatusCount, TaskAttemptDetail, TaskDetail, TaskListPage, TaskRowInfo, TaskSummary,
-    WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
-    WorkflowNodeDetail, WorkflowNodeSummary, WorkflowRunDetail, WorkflowRunSummary,
+    Breakdown, BreakdownCounts, ErrorFacet, FacetValue, Facets, GroupRow, LivenessReport,
+    ScheduleStateInfo, StatusCount, TaskAttemptDetail, TaskDetail, TaskListPage, TaskRowInfo,
+    TaskSummary, WorkerHistoryPoint, WorkerStateInfo, WorkflowEdge, WorkflowNodeDetail,
+    WorkflowNodeSummary, WorkflowRunDetail, WorkflowRunSummary,
 };
 
 /// The contract of the Pydantic models, by model name.
@@ -68,40 +70,29 @@ const COMPATIBLE_DIFFERENCES: &[(&str, CompatibleDifference)] = &[
         "ScheduleStateInfo.next_run_at",
         CompatibleDifference::RequiredIntoOptional,
     ),
+    ("DownSlot.slot", CompatibleDifference::UnsignedIntoInteger),
     (
-        "DownSlotInfo.slot",
+        "DownSlot.failed_boots",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
-        "DownSlotInfo.failed_boots",
+        "BudgetLoad.capacity",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
-        "BudgetLoadInfo.capacity",
+        "BudgetLoad.in_flight",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
-        "BudgetLoadInfo.in_flight",
+        "StreamCoverageState::served.workers",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
-        "BudgetLoadInfo.free",
+        "StreamCoverageState::served.capacity",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
-        "StreamCoverageInfo::served.workers",
-        CompatibleDifference::UnsignedIntoInteger,
-    ),
-    (
-        "StreamCoverageInfo::served.capacity",
-        CompatibleDifference::UnsignedIntoInteger,
-    ),
-    (
-        "StreamCoverageInfo::no_capacity.workers",
-        CompatibleDifference::UnsignedIntoInteger,
-    ),
-    (
-        "ClassReportInfo.live_window_s",
+        "StreamCoverageState::no_capacity.workers",
         CompatibleDifference::UnsignedIntoInteger,
     ),
     (
@@ -617,13 +608,16 @@ const CHECKS: [(&str, Check); 27] = [
     ("WorkflowEdge", compare::<WorkflowEdge>),
     ("WorkflowRunDetail", compare::<WorkflowRunDetail>),
     ("WorkflowNodeDetail", compare::<WorkflowNodeDetail>),
-    ("DownSlotInfo", compare::<DownSlotInfo>),
+    ("DownSlot", compare::<DownSlot>),
     ("WorkerStateInfo", compare::<WorkerStateInfo>),
-    ("BudgetLoadInfo", compare::<BudgetLoadInfo>),
-    ("WorkerClassLoadInfo", compare::<WorkerClassLoadInfo>),
-    ("PendingStreamInfo", compare::<PendingStreamInfo>),
-    ("ClassReportInfo", compare::<ClassReportInfo>),
-    ("WorkerPingInfo", compare::<WorkerPingInfo>),
+    ("BudgetLoad", compare::<BudgetLoad>),
+    (
+        "WorkerExecutionClassLoad",
+        compare::<WorkerExecutionClassLoad>,
+    ),
+    ("PendingStream", compare::<PendingStream>),
+    ("ExecutionClassReport", compare::<ExecutionClassReport>),
+    ("WorkerPong", compare::<WorkerPong>),
     ("LivenessReport", compare::<LivenessReport>),
     ("WorkerHistoryPoint", compare::<WorkerHistoryPoint>),
     ("ScheduleStateInfo", compare::<ScheduleStateInfo>),
@@ -695,19 +689,16 @@ fn the_comparison_sees_an_extra_field_and_an_unnamed_difference() {
 #[test]
 fn the_comparison_sees_a_name_that_is_not_the_rust_name() {
     let mut contract = contract();
-    let mut budget_load = contract["BudgetLoadInfo"].clone();
+    let mut budget_load = contract["BudgetLoad"].clone();
     *budget_load
         .pointer_mut("/budget/enum/name")
         .expect("the enum of budget has a name") = Value::String("Budget".to_owned());
-    let _ = contract.insert("BudgetLoadInfo".to_owned(), budget_load);
+    let _ = contract.insert("BudgetLoad".to_owned(), budget_load);
 
-    let load = compare::<BudgetLoadInfo>("BudgetLoadInfo", &contract);
+    let load = compare::<BudgetLoad>("BudgetLoad", &contract);
 
     assert_eq!(
         load.mismatches,
-        vec![
-            "BudgetLoadInfo.budget: type Execution in Rust, Some(\"Budget\") in Pydantic"
-                .to_owned()
-        ]
+        vec!["BudgetLoad.budget: type Execution in Rust, Some(\"Budget\") in Pydantic".to_owned()]
     );
 }

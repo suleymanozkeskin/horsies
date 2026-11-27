@@ -7,13 +7,13 @@
 
 import type {
   AppConfigInput,
-  BrokerConfigInput,
+  DatabaseConfigInput,
   CustomQueueInput,
   RecoveryConfigInput,
   SharedAsyncSetting,
   SharedThreadSetting,
   WorkerProfileInput,
-} from "../../../horsies/src/index.ts";
+} from "#horsies";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 
@@ -92,6 +92,10 @@ export const INSTANCES = [
   // The default tasks with an `AttemptEnded` handler and a handler child start hook (Python
   // `instance_event_handlers.py`).
   "handlers",
+  // The handlers instance with an `onHandlerChildStart` hook that throws, before the one that records its start.
+  "handler_hook_throws",
+  // The handlers instance with an `onHandlerChildStart` hook that holds its child past the 10 s bound.
+  "handler_hook_past_bound",
   // The default tasks with OpenTelemetry tracing, a span SDK in each child and in each seat isolate, and the thread
   // profiles (Python `instance_worker_ended_spans.py`).
   "worker_ended_spans",
@@ -171,7 +175,7 @@ export function readyQueue(instance: Instance): string {
 
 /** The config of `instance` on `connection`, without its task list. Pure. */
 export function instanceConfig(instance: Instance, connection: Connection): AppConfigInput {
-  const base = { broker: brokerOf(connection), workerProfiles: workerProfiles(instance) };
+  const base = { database: brokerOf(connection), workerProfiles: workerProfiles(instance) };
 
   switch (instance) {
     case "default":
@@ -183,15 +187,18 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
       return base;
     case "worker_ended_spans":
-      return { ...base, tracing: { kind: "otelTracing" } };
+      // The rerun case keeps the input of each send, so a failed task can be rerun.
+      return { ...base, database: { ...base.database, retainRerunInputDefault: "keep" }, tracing: { kind: "otelTracing" } };
     case "custom_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues(CUSTOM_QUEUES) };
     case "recovery_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues(RECOVERY_QUEUES), recovery: fastRecovery() };
     case "cluster_cap":
-      return { ...base, clusterWideCap: { kind: "cap", tasks: CLUSTER_WIDE_CAP } };
+      return { ...base, clusterWideCap: { kind: "clusterCap", tasks: CLUSTER_WIDE_CAP } };
     case "recovery":
       return { ...base, recovery: fastRecovery() };
     case "soft_cap":
@@ -223,7 +230,7 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
   }
 }
 
-function brokerOf(connection: Connection): BrokerConfigInput {
+function brokerOf(connection: Connection): DatabaseConfigInput {
   const pool = { poolSize: POOL_SIZE, maxOverflow: POOL_OVERFLOW };
 
   switch (connection.kind) {

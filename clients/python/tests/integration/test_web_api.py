@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.tasks import TaskError
@@ -383,7 +384,7 @@ class TestTaskReads:
         # The code list follows the selection; the strip's own totals do not,
         # so the categories it does not have selected stay offerable.
         assert [f['value'] for f in facets['error_codes']] == ['TASK_EXCEPTION']
-        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'DOMAIN': 1}
+        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'CUSTOM': 1}
 
     async def test_repeated_error_category_params_are_or_combined(
         self, api: AsyncClient, session: AsyncSession
@@ -396,7 +397,7 @@ class TestTaskReads:
         )
 
         body = (
-            await api.get('/api/tasks?error_category=OUTCOME&error_category=DOMAIN')
+            await api.get('/api/tasks?error_category=OUTCOME&error_category=CUSTOM')
         ).json()
 
         assert {row['error_code'] for row in body['rows']} == {
@@ -543,16 +544,19 @@ class TestWorkerReads:
             await session.commit()
 
         (worker,) = [entry for entry in body if entry['worker_id'] == worker_id]
-        assert worker['slot_health'] == 'slots_down'
-        assert worker['down_slots'] == [
-            {
-                'slot': 1,
-                'cause': 'the OS ran short of a resource (EMFILE)',
-                'detail': 'OSError: [Errno 24] Too many open files',
-                'down_since': '2026-11-10T12:00:00Z',
-                'failed_boots': 2,
-            },
-        ]
+        assert worker['slot_health'] == {
+            'kind': 'slots_down',
+            'slots': [
+                {
+                    'slot': 1,
+                    'cause': 'the OS ran short of a resource (EMFILE)',
+                    'detail': 'OSError: [Errno 24] Too many open files',
+                    'down_since': '2026-11-10T12:00:00Z',
+                    'failed_boots': 2,
+                },
+            ],
+        }
+        assert 'down_slots' not in worker
 
     async def test_class_report_answers_with_streams_and_budgets(
         self,
@@ -587,10 +591,11 @@ class TestWorkerReads:
         assert response.status_code == 200
         body = response.json()
         (stream,) = body['streams']
-        assert stream['queue_name'] == 'default'
+        assert stream['queue'] == 'default'
         assert stream['execution'] == 'ISOLATED'
         assert stream['coverage'] == {'kind': 'unserved'}
-        assert stream['wait']['kind'] == 'waiting'
+        assert stream['wait']['kind'] == 'due'
+        assert body['live_window_seconds'] == 120.0
         assert 'not_recorded' not in body
         assert body['workers'] == [
             {
@@ -602,7 +607,6 @@ class TestWorkerReads:
                         'capacity': 8,
                         'serves': ['SHARED_ASYNC'],
                         'in_flight': 0,
-                        'free': 8,
                     },
                 ],
             },
@@ -620,8 +624,8 @@ class TestWorkerReads:
         """An unreachable database would be data here, not an error."""
         body = (await api.get('/api/workers/ping?timeout_seconds=0.1')).json()
 
-        assert body['db_reachable'] is True
-        assert body['db_latency_ms'] is not None
+        assert body['database']['kind'] == 'ping'
+        assert body['database']['latency_ms'] >= 0.0
         assert body['workers'] == []
 
     async def test_unknown_worker_history_is_empty_not_missing(
@@ -892,7 +896,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     key."""
     suffix = uuid.uuid4().hex[:8]
 
-    @app.task(task_name=f'web_corrupt_root_{suffix}')
+    @app.task(name=f'web_corrupt_root_{suffix}')
     def corrupt_root(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -906,7 +910,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
             _ = (args, params)
             node = WorkflowTaskNode(
-                fn=corrupt_root,
+                function=corrupt_root,
                 kwargs={'value': 1},
                 good_until=datetime.now(timezone.utc) + timedelta(hours=1),
             )
@@ -1081,7 +1085,7 @@ def web_args(**overrides: Any) -> Any:
     import argparse
 
     values: dict[str, Any] = {
-        'app_path': None,
+        'module': None,
         'database_url': None,
         'session_database_url': None,
         'pgbouncer_transaction_mode': False,
@@ -1090,7 +1094,7 @@ def web_args(**overrides: Any) -> Any:
         'authorization': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
-        'loglevel': 'INFO',
+        'log_level': 'INFO',
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1152,7 +1156,7 @@ class TestTheToolNeverRunsDdl:
         call simply never reached the migration seam.
         """
         enabled = cli.resolve_web_app(web_args(database_url=fresh_database))
-        enabled.run_schema_migrations = True
+        enabled.schema_mode = SchemaMode.MIGRATE_AND_VALIDATE
 
         initialized = await enabled.get_broker().ensure_schema_initialized()
 

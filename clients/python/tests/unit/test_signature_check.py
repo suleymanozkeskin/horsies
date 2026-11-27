@@ -36,7 +36,7 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.codec.signature_check import (
@@ -444,6 +444,32 @@ class TestRejectedBareContainers:
         def f(*, t: tuple) -> Result[int, TaskError]: ...  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]
         with pytest.raises(SignatureValidationError, match='bare tuple'):
             _check(f)  # pyright: ignore[reportUnknownArgumentType]
+
+    def test_tuple_rest_item_rejected(self) -> None:
+        def f(*, t: tuple[int, *tuple[bool, ...]]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item') as info:
+            _check(f, task_name='rest_task')
+        message = str(info.value)
+        assert 'rest_task' in message
+        assert 't' in info.value.detail.headline
+        assert 'tuple[T, ...]' in info.value.detail.fix
+
+    def test_tuple_rest_item_in_head_rejected(self) -> None:
+        def f(*, t: tuple[*tuple[bool, ...], int]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item'):
+            _check(f)
+
+    def test_tuple_rest_item_nested_in_list_rejected(self) -> None:
+        def f(*, t: list[tuple[int, *tuple[bool, ...]]]) -> Result[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='unpacked item'):
+            _check(f)
+
+    def test_pydantic_stores_rest_item_nested(self) -> None:
+        """The reason for the refusal: pydantic reads this annotation as a nested tuple."""
+        adapter = TypeAdapter(tuple[int, *tuple[bool, ...]])
+        assert adapter.dump_python((1, (True, False)), mode='json') == [1, [True, False]]  # pyright: ignore[reportArgumentType]  # the nested value is the form this test pins
+        with pytest.raises(ValidationError):
+            adapter.validate_python([1, True, False])
 
     def test_dict_nonstr_key_rejected(self) -> None:
         def f(*, d: dict[int, str]) -> Result[int, TaskError]: ...

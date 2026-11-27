@@ -29,7 +29,7 @@ config = AppConfig(
         CustomQueueConfig(name='default', priority=1, max_concurrency=5),
         CustomQueueConfig(name='recovery', priority=1, max_concurrency=1),
     ],
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -37,7 +37,7 @@ config = AppConfig(
     recovery=RecoveryConfig(
         runner_heartbeat_interval_ms=1_000,
         claimer_heartbeat_interval_ms=1_000,
-        # The smallest threshold with auto_fail_stale_running on:
+        # The smallest threshold with fail_stale_running on:
         # 2 x (runner_heartbeat_interval_ms + 2 s).
         running_stale_threshold_ms=6_000,
         claimed_stale_threshold_ms=2_000,
@@ -50,7 +50,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
@@ -64,12 +64,12 @@ def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
     )
 
 
-@app.task(task_name='e2e_recovery_healthcheck', queue_name='default')
+@app.task(name='e2e_recovery_healthcheck', queue='default')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_recovery_slow', queue_name='default')
+@app.task(name='e2e_recovery_slow', queue='default')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Long-running task for crash-while-RUNNING tests."""
     import time
@@ -78,7 +78,7 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     return Ok(f'slept_{duration_ms}')
 
 
-@app.task(task_name='e2e_recovery_wf_step', queue_name='default')
+@app.task(name='e2e_recovery_wf_step', queue='default')
 def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
     """Workflow step with configurable delay for crash-recovery tests."""
     import time
@@ -100,19 +100,19 @@ def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
 # F depends on E, also on "recovery" queue — runs sequentially after E.
 # ---------------------------------------------------------------------------
 
-_node_a = TaskNode(fn=recovery_wf_step, kwargs={'step': 'A', 'delay_ms': 50})
-_node_b = TaskNode(fn=recovery_wf_step, kwargs={'step': 'B', 'delay_ms': 50}, waits_for=[_node_a])
-_node_c = TaskNode(fn=recovery_wf_step, kwargs={'step': 'C', 'delay_ms': 60_000}, waits_for=[_node_b])
-_node_d = TaskNode(fn=recovery_wf_step, kwargs={'step': 'D', 'delay_ms': 60_000}, waits_for=[_node_b])
+_node_a = TaskNode(function=recovery_wf_step, kwargs={'step': 'A', 'delay_ms': 50})
+_node_b = TaskNode(function=recovery_wf_step, kwargs={'step': 'B', 'delay_ms': 50}, waits_for=[_node_a])
+_node_c = TaskNode(function=recovery_wf_step, kwargs={'step': 'C', 'delay_ms': 60_000}, waits_for=[_node_b])
+_node_d = TaskNode(function=recovery_wf_step, kwargs={'step': 'D', 'delay_ms': 60_000}, waits_for=[_node_b])
 _node_e = TaskNode(
-    fn=recovery_wf_step,
+    function=recovery_wf_step,
     kwargs={'step': 'E', 'delay_ms': 50},
     waits_for=[_node_c, _node_d],
     allow_failed_dependencies=True,
     queue='recovery',
 )
 _node_f = TaskNode(
-    fn=recovery_wf_step,
+    function=recovery_wf_step,
     kwargs={'step': 'F', 'delay_ms': 50},
     waits_for=[_node_e],
     queue='recovery',

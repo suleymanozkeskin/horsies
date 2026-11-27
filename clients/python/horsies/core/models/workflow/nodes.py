@@ -13,7 +13,7 @@ from typing import (
     assert_never,
 )
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
 from .enums import (
     CodeT_co,
@@ -60,9 +60,9 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
 
     Example:
         ```python
-        fetch = TaskNode(fn=fetch_data, kwargs={"url": "https://example.com"})
+        fetch = TaskNode(function=fetch_data, kwargs={"url": "https://example.com"})
         process = TaskNode(
-            fn=process_data,
+            function=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
             args_from={"raw": fetch},     # inject fetch's TaskOutcome as 'raw' kwarg
             allow_failed_dependencies=True,  # run even if fetch failed
@@ -70,7 +70,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
         ```
     """
 
-    fn: (
+    function: (
         TaskFunction[Any, OkT_co, CodeT_co]
         | AsyncTaskFunction[Any, OkT_co, CodeT_co]
         | RuntimeTaskFunction[Any, OkT_co, CodeT_co]
@@ -112,7 +112,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
-    - Only injected if task declares `workflow_ctx: WorkflowContext | None` parameter
+    - Only injected if task declares `workflow_context: WorkflowContext | None` parameter
 
     """
     # Queue/priority overrides (if None, use task decorator defaults)
@@ -208,7 +208,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     @property
     def task_name(self) -> str:
         """The task name of the wrapped function."""
-        return self.fn.task_name
+        return self.function.task_name
 
     def key(self) -> NodeKey[OkT_co, CodeT_co]:
         """Return a typed NodeKey for this task node."""
@@ -216,7 +216,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
             raise WorkflowValidationError(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)
@@ -237,7 +237,7 @@ class SubWorkflowNode(Generic[OkT_co]):
 
     When the child workflow completes:
     - COMPLETED: parent node receives Succeeded(output), a TaskOutcome[OkT, TaskError]
-    - FAILED: parent node receives Failed(SubWorkflowError) with its SubWorkflowSummary
+    - FAILED: parent node receives Failed(SubWorkflowFailure) with its SubWorkflowSummary
 
     Example:
         class DataPipeline(WorkflowDefinition[ProcessedData]):
@@ -378,7 +378,7 @@ class SubWorkflowNode(Generic[OkT_co]):
             raise WorkflowValidationError(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
-                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)

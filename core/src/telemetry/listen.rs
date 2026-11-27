@@ -1,5 +1,5 @@
-//! The address that a metrics endpoint binds, as a `--listen HOST:PORT` or
-//! `--metrics-listen HOST:PORT` argument gives it. A metrics endpoint has no
+//! The address that a metrics endpoint binds, as a `--metrics-listen HOST:PORT`
+//! argument gives it. A metrics endpoint has no
 //! default address: the argument turns it on and names where it listens.
 //!
 //! The worker manifest carries the address as its two parts, [`ListenHost`]

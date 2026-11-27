@@ -11,7 +11,7 @@ Run every process from the repository root:
 
 from __future__ import annotations
 
-from datetime import time
+from datetime import time, timedelta
 from typing import Final
 
 from pydantic import SecretStr
@@ -86,7 +86,9 @@ def _supplier_feeds() -> list[TaskSchedule]:
             name=f'supplier-feed-{supplier}',
             task_name='sync_supplier_feed',
             pattern=IntervalSchedule(
-                seconds=tuning.SUPPLIER_FEED_INTERVAL_SECONDS + index * 30,
+                every=timedelta(
+                    seconds=tuning.SUPPLIER_FEED_INTERVAL_SECONDS + index * 30,
+                ),
             ),
             kwargs={'supplier': supplier},
             catch_up_missed=False,
@@ -116,7 +118,7 @@ def _cache_warms() -> list[TaskSchedule]:
             name=f'cache-warm-{region}',
             task_name='warm_cache_edge',
             pattern=IntervalSchedule(
-                minutes=tuning.CACHE_WARM_INTERVAL_MINUTES + index,
+                every=timedelta(minutes=tuning.CACHE_WARM_INTERVAL_MINUTES + index),
             ),
             kwargs={'campaign_id': f'steady-{region}'},
             catch_up_missed=False,
@@ -138,7 +140,7 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
             name='search-prewarm',
             task_name='prewarm_search',
             pattern=IntervalSchedule(
-                minutes=tuning.SEARCH_PREWARM_INTERVAL_MINUTES,
+                every=timedelta(minutes=tuning.SEARCH_PREWARM_INTERVAL_MINUTES),
             ),
             kwargs={'campaign_id': 'steady-state'},
             catch_up_missed=False,
@@ -205,7 +207,7 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
         TaskSchedule(
             name='weekly-sales-review',
             task_name='sales_rollup',
-            pattern=WeeklySchedule(days=[Weekday.MONDAY], time=time(6, 0)),
+            pattern=WeeklySchedule(weekdays=[Weekday.MONDAY], time=time(6, 0)),
             kwargs={'window': 'weekly'},
             catch_up_missed=False,
         ),
@@ -213,7 +215,7 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
             name='weekly-supplier-audit',
             task_name='sync_supplier_feed',
             pattern=WeeklySchedule(
-                days=[Weekday.WEDNESDAY], time=time(7, 0),
+                weekdays=[Weekday.WEDNESDAY], time=time(7, 0),
             ),
             kwargs={'supplier': tuning.SUPPLIERS[0]},
             catch_up_missed=False,
@@ -222,7 +224,7 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
             name='weekend-flash-prep',
             task_name='prewarm_search',
             pattern=WeeklySchedule(
-                days=[Weekday.FRIDAY, Weekday.SATURDAY], time=time(12, 0),
+                weekdays=[Weekday.FRIDAY, Weekday.SATURDAY], time=time(12, 0),
             ),
             kwargs={'campaign_id': 'weekend'},
             catch_up_missed=False,
@@ -231,7 +233,7 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
         TaskSchedule(
             name='weekly-retention-audit',
             task_name='retention_audit',
-            pattern=WeeklySchedule(days=[Weekday.SUNDAY], time=time(2, 0)),
+            pattern=WeeklySchedule(weekdays=[Weekday.SUNDAY], time=time(2, 0)),
             kwargs={'older_than_days': 180},
             enabled=False,
             catch_up_missed=False,
@@ -239,21 +241,21 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
         TaskSchedule(
             name='monthly-close',
             task_name='reconcile_payments',
-            pattern=MonthlySchedule(day=1, time=time(5, 0)),
+            pattern=MonthlySchedule(day_of_month=1, time=time(5, 0)),
             kwargs={'window': 'monthly'},
             catch_up_missed=False,
         ),
         TaskSchedule(
             name='monthly-catalog-audit',
             task_name='retention_audit',
-            pattern=MonthlySchedule(day=15, time=time(8, 0)),
+            pattern=MonthlySchedule(day_of_month=15, time=time(8, 0)),
             kwargs={'older_than_days': 365},
             catch_up_missed=False,
         ),
         TaskSchedule(
             name='monthly-markdown-review',
             task_name='sales_rollup',
-            pattern=MonthlySchedule(day=28, time=time(11, 0)),
+            pattern=MonthlySchedule(day_of_month=28, time=time(11, 0)),
             kwargs={'window': 'monthly'},
             catch_up_missed=False,
         ),
@@ -346,7 +348,7 @@ app = Horsies(
     config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
         custom_queues=QUEUES,
-        broker=PostgresConfig(database_url=SecretStr(DATABASE.url)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE.url)),
         recovery=RECOVERY,
         retention=RETENTION,
         schedule=SCHEDULES,
@@ -357,7 +359,7 @@ app = Horsies(
         exception_mapper={KeyError: domain.DATA_CORRUPTION},
         # Infra retry for the send/start path only — execution retries are a
         # per-task RetryPolicy concern.
-        resend_on_transient_err=True,
+        resend_on_transient_error=True,
     ),
 )
 

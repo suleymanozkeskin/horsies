@@ -33,7 +33,7 @@ config = AppConfig(
     prefetch_buffer=2,
     claim_lease_ms=2_000,           # 2s lease — expires fast after renewal stops
     max_claim_renew_age_ms=5_000,   # 5s — stop renewing after 5s of CLAIMED
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=2,
         max_overflow=2,
@@ -43,14 +43,14 @@ config = AppConfig(
         check_interval_ms=2_000,              # 2s reaper cycle
         # Disable auto-requeue so the test relies purely on lease expiry +
         # CLAIM_SQL reclaim branch, not the reaper's stale-claim logic.
-        auto_requeue_stale_claimed=False,
+        requeue_stale_claimed=False,
         claimed_stale_threshold_ms=120_000,   # high, won't trigger
     ),
     worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
@@ -59,12 +59,12 @@ app.discover_tasks([
 ])
 
 
-@app.task(task_name='e2e_requeue_guard_healthcheck')
+@app.task(name='e2e_requeue_guard_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_requeue_guard_task')
+@app.task(name='e2e_requeue_guard_task')
 def requeue_guard_task(*, token: str) -> Result[str, TaskError]:
     """Return the token. Appends a marker line so executions are countable."""
     from pathlib import Path

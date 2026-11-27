@@ -37,7 +37,7 @@ app_engine: Engine = create_engine(
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -46,17 +46,17 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 
 
-@app.task(task_name='e2e_hook_unfixed_healthcheck')
+@app.task(name='e2e_hook_unfixed_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_hook_unfixed_db_task')
+@app.task(name='e2e_hook_unfixed_db_task')
 def db_task(*, sleep_ms: int) -> Result[str, TaskError]:
     """Check out the app-owned engine and hold a connection across a slow query."""
     with app_engine.connect() as conn:

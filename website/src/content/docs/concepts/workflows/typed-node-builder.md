@@ -19,10 +19,10 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
-@app.task(task_name='compute_score')
+@app.task(name='compute_score')
 def compute_score(
     *,
     user_id: str,
@@ -98,11 +98,11 @@ Use `from_node()` to wire upstream results into downstream task arguments. It au
 ```python
 from horsies import TaskOutcome, from_node
 
-@app.task(task_name='fetch_user')
+@app.task(name='fetch_user')
 def fetch_user(*, user_id: str) -> Result[UserData, TaskError]:
     ...
 
-@app.task(task_name='process_user')
+@app.task(name='process_user')
 def process_user(
     *,
     user_data: TaskOutcome[UserData, TaskError],
@@ -118,7 +118,7 @@ process_node = process_user.node(node_id='process')(
     threshold=70,
 )
 # Equivalent to:
-# TaskNode(fn=process_user, args_from={'user_data': fetch_node},
+# TaskNode(function=process_user, args_from={'user_data': fetch_node},
 #          waits_for=[fetch_node], kwargs={'threshold': 70})
 ```
 
@@ -135,7 +135,7 @@ from horsies import TaskNode
 fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
 
 process_node = TaskNode(
-    fn=process_user,
+    function=process_user,
     waits_for=[fetch_node],
     args_from={'user_data': fetch_node},
     kwargs={'threshold': 70},

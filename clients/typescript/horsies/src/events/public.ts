@@ -61,4 +61,4 @@ export type {
   WorkflowPlace,
 } from "../_catalog/events.ts";
 
-export type { ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode } from "../_catalog/task_codes.ts";
+export type { ContractCode, OperationalCode, OutcomeCode, RetrievalCode } from "../_catalog/task_codes.ts";

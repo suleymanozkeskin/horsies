@@ -9,7 +9,7 @@
 //! - The class rules are the facts [`Execution::timeout_use`] and
 //!   [`Execution::grace_use`], which the checks of stored options at a send
 //!   (`check_shared_timeout`, `stored_execution`) read too. The bounds are
-//!   [`MIN_TASK_TIMEOUT_MS`], [`CancelGraceMs::new`] and the constructors of
+//!   [`MIN_TASK_TIMEOUT_MS`], [`check_cancel_grace_ms`] and the constructors of
 //!   [`RetryPolicy`]. A `u32` holds each timeout up to
 //!   [`MAX_TASK_TIMEOUT_MS`](crate::MAX_TASK_TIMEOUT_MS), which is
 //!   `u32::MAX`.
@@ -18,12 +18,14 @@
 //! - Pure: does no I/O and logs nothing.
 
 use super::error::{
-    check_error_code_text, BuiltInTaskCode, CodeTextRefusal, TaskErrorCode, UserCode,
-    UserCodeRefused,
+    check_error_code_text, BuiltInTaskCode, CodeTextRefusal, CustomCode, CustomCodeRefused,
+    TaskErrorCode,
 };
 use super::execution::{Execution, GraceUse, TimeoutUse};
-use super::options::{CancelGraceMs, RetryPolicy, RetryPolicyError, TaskOptions};
-use crate::core::error::ErrorCode;
+use super::options::{
+    check_cancel_grace_ms, RetryPolicy, RetryPolicyError, TaskOptions, DEFAULT_CANCEL_GRACE_MS,
+};
+use crate::core::error::HorsiesErrorCode;
 use crate::worker::retry::MIN_TASK_TIMEOUT_MS;
 
 /// A duration in milliseconds that a task declares, or none.
@@ -54,7 +56,7 @@ pub enum DeclaredRetry {
     Fixed {
         intervals_seconds: Vec<u32>,
         jitter: bool,
-        auto_retry_for: Vec<String>,
+        retry_for: Vec<String>,
     },
     /// A base wait that doubles with each retry.
     Exponential {
@@ -62,15 +64,15 @@ pub enum DeclaredRetry {
         max_retries: u32,
         jitter: bool,
         max_delay: DeclaredMaxDelay,
-        auto_retry_for: Vec<String>,
+        retry_for: Vec<String>,
     },
 }
 
-/// The user codes that may retry a task.
+/// The custom codes that may retry a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetryCodeScope {
-    /// Any user code: the task declares no list of its codes.
-    AnyUserCode,
+    /// Any custom code: the task declares no list of its codes.
+    AnyCustomCode,
     /// Only a code of the task's declared list.
     Declared(Vec<String>),
 }
@@ -79,7 +81,7 @@ pub enum RetryCodeScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredTaskOptions {
     pub task_name: String,
-    pub queue_name: String,
+    pub queue: String,
     pub execution: Execution,
     pub timeout_ms: DeclaredMilliseconds,
     pub cancel_grace_ms: DeclaredMilliseconds,
@@ -100,9 +102,9 @@ pub enum DeclaredOptionRefusal {
         code: String,
         refusal: CodeTextRefusal,
     },
-    /// A retry code is neither a built-in code nor a user code (`HRS-102`).
-    RetryCodeNotUserCode { refused: UserCodeRefused },
-    /// A user retry code that the task's declared list does not hold
+    /// A retry code is neither a built-in code nor a custom code (`HRS-102`).
+    RetryCodeNotCustomCode { refused: CustomCodeRefused },
+    /// A custom retry code that the task's declared list does not hold
     /// (`HRS-102`).
     RetryCodeNotDeclared { code: String },
     /// A timeout below [`MIN_TASK_TIMEOUT_MS`] (`HRS-102`).
@@ -111,23 +113,25 @@ pub enum DeclaredOptionRefusal {
     SharedClassWithoutTimeout { execution: Execution },
     /// A grace on a class that takes none, `SHARED_THREAD` (`HRS-110`).
     GraceNotTaken { execution: Execution },
-    /// A grace outside the bounds of [`CancelGraceMs`] (`HRS-111`).
+    /// A grace outside the bounds of [`check_cancel_grace_ms`] (`HRS-111`).
     GraceOutOfRange { execution: Execution },
 }
 
 impl DeclaredOptionRefusal {
     /// The catalog code of the refusal.
-    pub fn error_code(&self) -> ErrorCode {
+    pub fn error_code(&self) -> HorsiesErrorCode {
         match self {
             Self::RetryPolicy(_)
             | Self::NoRetryCode
             | Self::RetryCodeText { .. }
-            | Self::RetryCodeNotUserCode { .. }
+            | Self::RetryCodeNotCustomCode { .. }
             | Self::RetryCodeNotDeclared { .. }
-            | Self::TimeoutBelowMinimum => ErrorCode::TaskInvalidOptions,
-            Self::SharedClassWithoutTimeout { .. } => ErrorCode::TaskSharedExecutionRequiresTimeout,
-            Self::GraceNotTaken { .. } => ErrorCode::TaskCancelGraceRequiresSharedAsync,
-            Self::GraceOutOfRange { .. } => ErrorCode::TaskCancelGraceOutOfRange,
+            | Self::TimeoutBelowMinimum => HorsiesErrorCode::TaskInvalidOptions,
+            Self::SharedClassWithoutTimeout { .. } => {
+                HorsiesErrorCode::TaskSharedExecutionRequiresTimeout
+            }
+            Self::GraceNotTaken { .. } => HorsiesErrorCode::TaskCancelGraceRequiresSharedAsync,
+            Self::GraceOutOfRange { .. } => HorsiesErrorCode::TaskCancelGraceOutOfRange,
         }
     }
 }
@@ -147,7 +151,7 @@ enum CheckedRetry {
 /// Order of the refusals: the retry policy, the codes that retry the task
 /// (in their order), the timeout (below the minimum, or none for a class
 /// that needs one), the cancel grace. A `SHARED_ASYNC` task that declares no
-/// grace takes [`CancelGraceMs::DEFAULT`]. The options have no deadline
+/// grace takes [`DEFAULT_CANCEL_GRACE_MS`]. The options have no deadline
 /// (`good_until`): a send adds its own. Pure.
 pub fn check_declared_options(
     declared: DeclaredTaskOptions,
@@ -157,15 +161,15 @@ pub fn check_declared_options(
     let grace = checked_grace(declared.execution, declared.cancel_grace_ms);
     match (retry, timeout, grace) {
         (Ok(retry), Ok(timeout_ms), Ok(cancel_grace_ms)) => {
-            let (retry_policy, auto_retry_for) = match retry {
+            let (retry_policy, retry_for) = match retry {
                 CheckedRetry::NoRetry => (None, None),
                 CheckedRetry::Policy { policy, codes } => (Some(policy), Some(codes)),
             };
             Ok(TaskOptions {
                 task_name: declared.task_name,
-                queue_name: Some(declared.queue_name),
+                queue: Some(declared.queue),
                 good_until: None,
-                auto_retry_for,
+                retry_for,
                 retry_policy,
                 timeout_ms,
                 execution: declared.execution,
@@ -192,20 +196,20 @@ fn checked_retry(
         DeclaredRetry::Fixed {
             intervals_seconds,
             jitter,
-            auto_retry_for,
+            retry_for,
         } => (
             RetryPolicy::fixed(intervals_seconds.clone(), *jitter),
-            auto_retry_for,
+            retry_for,
         ),
         DeclaredRetry::Exponential {
             base_seconds,
             max_retries,
             jitter,
             max_delay,
-            auto_retry_for,
+            retry_for,
         } => (
             exponential_policy(*base_seconds, *max_retries, *jitter, *max_delay),
-            auto_retry_for,
+            retry_for,
         ),
     };
     let codes = retry_codes(codes, scope);
@@ -238,7 +242,7 @@ fn exponential_policy(
 
 /// The codes that retry a task, or the refusal of each code that breaks a
 /// rule: at least one code; the text rule of retry matching; a code that is
-/// not built in is a user code; with a declared list, a user code is one of
+/// not built in is a custom code; with a declared list, a custom code is one of
 /// the list. Pure.
 fn retry_codes(
     codes: &[String],
@@ -265,13 +269,13 @@ fn retry_code(code: &str, scope: &RetryCodeScope) -> Result<TaskErrorCode, Decla
     })?;
     let user = match BuiltInTaskCode::parse(code) {
         Some(built_in) => return Ok(TaskErrorCode::BuiltIn(built_in)),
-        None => UserCode::parse(code)
-            .map_err(|refused| DeclaredOptionRefusal::RetryCodeNotUserCode { refused })?,
+        None => CustomCode::parse(code)
+            .map_err(|refused| DeclaredOptionRefusal::RetryCodeNotCustomCode { refused })?,
     };
     match scope {
-        RetryCodeScope::AnyUserCode => Ok(TaskErrorCode::User(user)),
+        RetryCodeScope::AnyCustomCode => Ok(TaskErrorCode::Custom(user)),
         RetryCodeScope::Declared(declared) => match declared.iter().any(|known| known == code) {
-            true => Ok(TaskErrorCode::User(user)),
+            true => Ok(TaskErrorCode::Custom(user)),
             false => Err(DeclaredOptionRefusal::RetryCodeNotDeclared {
                 code: code.to_owned(),
             }),
@@ -305,15 +309,15 @@ fn checked_timeout(
 fn checked_grace(
     execution: Execution,
     grace: DeclaredMilliseconds,
-) -> Result<Option<CancelGraceMs>, DeclaredOptionRefusal> {
+) -> Result<Option<u32>, DeclaredOptionRefusal> {
     match (execution.grace_use(), grace) {
-        (GraceUse::Needed, DeclaredMilliseconds::NotSet) => Ok(Some(CancelGraceMs::DEFAULT)),
+        (GraceUse::Needed, DeclaredMilliseconds::NotSet) => Ok(Some(DEFAULT_CANCEL_GRACE_MS)),
         (GraceUse::Optional | GraceUse::NotTaken, DeclaredMilliseconds::NotSet) => Ok(None),
         (GraceUse::NotTaken, DeclaredMilliseconds::Set(_)) => {
             Err(DeclaredOptionRefusal::GraceNotTaken { execution })
         }
         (GraceUse::Needed | GraceUse::Optional, DeclaredMilliseconds::Set(milliseconds)) => {
-            CancelGraceMs::new(milliseconds)
+            check_cancel_grace_ms(milliseconds)
                 .map(Some)
                 .map_err(|_out_of_range| DeclaredOptionRefusal::GraceOutOfRange { execution })
         }
@@ -329,12 +333,12 @@ mod tests {
     fn declared() -> DeclaredTaskOptions {
         DeclaredTaskOptions {
             task_name: "charge_payment".to_owned(),
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             execution: Execution::Isolated,
             timeout_ms: DeclaredMilliseconds::NotSet,
             cancel_grace_ms: DeclaredMilliseconds::NotSet,
             retry: DeclaredRetry::NoRetry,
-            retry_codes: RetryCodeScope::AnyUserCode,
+            retry_codes: RetryCodeScope::AnyCustomCode,
         }
     }
 
@@ -361,14 +365,14 @@ mod tests {
         DeclaredRetry::Fixed {
             intervals_seconds: vec![60],
             jitter: true,
-            auto_retry_for: codes.iter().map(|code| (*code).to_owned()).collect(),
+            retry_for: codes.iter().map(|code| (*code).to_owned()).collect(),
         }
     }
 
     #[test]
     fn an_isolated_task_with_no_options_stores_the_text_with_nulls() {
         let options = accepted(declared());
-        assert_eq!(options.queue_name.as_deref(), Some("default"));
+        assert_eq!(options.queue.as_deref(), Some("default"));
         assert_eq!(
             options.stored_options_text(),
             r#"{"retry_policy":null,"good_until":null,"timeout_ms":null,"execution":"ISOLATED","cancel_grace_ms":null}"#
@@ -381,13 +385,13 @@ mod tests {
             retry: DeclaredRetry::Fixed {
                 intervals_seconds: vec![60, 300, 900],
                 jitter: true,
-                auto_retry_for: vec!["TASK_TIMEOUT".to_owned(), "CARD_DECLINED".to_owned()],
+                retry_for: vec!["TASK_TIMEOUT".to_owned(), "CARD_DECLINED".to_owned()],
             },
             ..declared()
         });
         assert!(
             options.stored_options_text().starts_with(
-                r#"{"retry_policy":{"max_retries":3,"intervals":[60,300,900],"backoff_strategy":"fixed","jitter":true,"auto_retry_for":["TASK_TIMEOUT","CARD_DECLINED"]}"#
+                r#"{"retry_policy":{"max_retries":3,"intervals_seconds":[60,300,900],"backoff_strategy":"fixed","jitter":true,"retry_for":["TASK_TIMEOUT","CARD_DECLINED"]}"#
             ),
             "{}",
             options.stored_options_text()
@@ -402,7 +406,7 @@ mod tests {
                 max_retries: 5,
                 jitter: false,
                 max_delay: DeclaredMaxDelay::Seconds(600),
-                auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                retry_for: vec!["WORKER_CRASHED".to_owned()],
             },
             ..declared()
         });
@@ -421,7 +425,7 @@ mod tests {
             timeout_ms: DeclaredMilliseconds::Set(10_000),
             ..declared()
         });
-        assert_eq!(options.cancel_grace_ms, Some(CancelGraceMs::DEFAULT));
+        assert_eq!(options.cancel_grace_ms, Some(DEFAULT_CANCEL_GRACE_MS));
         assert_eq!(options.timeout_ms, Some(10_000));
     }
 
@@ -431,7 +435,7 @@ mod tests {
             cancel_grace_ms: DeclaredMilliseconds::Set(500),
             ..declared()
         });
-        assert_eq!(options.cancel_grace_ms.map(CancelGraceMs::get), Some(500));
+        assert_eq!(options.cancel_grace_ms, Some(500));
     }
 
     #[test]
@@ -442,7 +446,7 @@ mod tests {
                 max_retries: 21,
                 jitter: true,
                 max_delay: DeclaredMaxDelay::NoCap,
-                auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                retry_for: vec!["WORKER_CRASHED".to_owned()],
             },
             ..declared()
         });
@@ -452,7 +456,10 @@ mod tests {
                 RetryPolicyError::MaxRetriesOutOfRange(21)
             )]
         ));
-        assert_eq!(refusals[0].error_code(), ErrorCode::TaskInvalidOptions);
+        assert_eq!(
+            refusals[0].error_code(),
+            HorsiesErrorCode::TaskInvalidOptions
+        );
     }
 
     #[test]
@@ -463,7 +470,7 @@ mod tests {
                 max_retries: 3,
                 jitter: true,
                 max_delay: DeclaredMaxDelay::Seconds(0),
-                auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                retry_for: vec!["WORKER_CRASHED".to_owned()],
             },
             ..declared()
         });
@@ -525,7 +532,7 @@ mod tests {
             retry_codes: RetryCodeScope::Declared(vec!["PROVIDER_DOWN".to_owned()]),
             ..declared()
         });
-        assert_eq!(options.auto_retry_for.map(|codes| codes.len()), Some(2));
+        assert_eq!(options.retry_for.map(|codes| codes.len()), Some(2));
     }
 
     #[test]
@@ -612,7 +619,7 @@ mod tests {
                 retry: DeclaredRetry::Fixed {
                     intervals_seconds: vec![0],
                     jitter: true,
-                    auto_retry_for: vec!["lower_case".to_owned()],
+                    retry_for: vec!["lower_case".to_owned()],
                 },
                 ..declared()
             }),

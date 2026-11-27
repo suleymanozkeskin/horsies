@@ -3,7 +3,7 @@
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
 import type { Execution } from "./_catalog/monitoring_models.ts";
-import type { AnyTaskContract, ContextUse, TaskContract } from "./contract/define-task.ts";
+import type { ContextUse, TaskContract } from "./contract/define-task.ts";
 import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
@@ -30,8 +30,6 @@ import type { StartOptions } from "./workflow/start.ts";
 import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
-import { declareSchedules, scheduleCoreAccess } from "./schedules/app-member.ts";
-import { declaredEntries, type ScheduleEntries, type ScheduleSection } from "./schedules/entry.ts";
 import type { EventTypeName } from "./_catalog/worker_manifest.ts";
 import { onEventFor, onHandlerChildStartFor } from "./events/register.ts";
 import { tracingPartsOfApp } from "./telemetry/create-hook.ts";
@@ -41,6 +39,7 @@ import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
 import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
+import { registeredCodesOf } from "./rerun/registered-codes.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
 import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
 
@@ -54,7 +53,11 @@ export class Horsies {
   readonly #monitoringArea: MonitoringArea;
   readonly #rerunArea: RerunArea;
 
-  /** The monitoring reads, the health reads and the operator cancel. Each read writes nothing but a schema install. */
+  /**
+   * The monitoring reads, the health reads and the operator cancel. A monitoring read installs no schema and writes
+   * nothing. A health read installs the schema once per handle, as a send does; then it reads only. The cancel writes
+   * the cancellation.
+   */
   readonly monitoring: Monitoring;
 
   static {
@@ -72,7 +75,11 @@ export class Horsies {
     });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
-    this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
+    this.#rerunArea = rerunAreaOfCore(
+      context.core,
+      () => context.observer.activeCarrier(),
+      () => registeredCodesOf(context.listed),
+    );
     recordAppContext(this, context);
   }
 
@@ -129,17 +136,6 @@ export class Horsies {
   }
 
   /**
-   * Declare the schedules of the app, in one call. Each slot of a schedule's pattern sends its task with its input;
-   * the `scheduler` command runs them. Calls no I/O and never throws: each refusal (a contract that the app does not
-   * list, a queue that it does not admit, an input that does not fit the task or is over the payload bound, a zone
-   * that the runtime does not know, a pattern that breaks a rule, a repeated name, a second call) reaches the check
-   * of `check` and of the scheduler start; the worker start skips them.
-   */
-  schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section: ScheduleSection = {}): void {
-    declareSchedules(this.#context, declaredEntries(entries), section, scheduleCoreAccess(this.#context));
-  }
-
-  /**
    * Run `handler` for each event of `eventType` in the handler child of a worker, never in the worker parent. Several
    * handlers may take one type; each has its own queue of 10,000 events, and a full queue drops the event for that
    * handler and counts it. A throw or a rejection is counted and logged with `name`; the handler takes its next event.
@@ -172,7 +168,7 @@ export class Horsies {
   }
 
   /**
-   * Send again the payload of `ENQUEUE_FAILED` or `IDEMPOTENCY_KEY_CONFLICT`, under the same task id. Takes an error
+   * Send again the payload of `ENQUEUE_FAILED`, under the same task id. Takes an error
    * of another app instance too, when this app lists its task.
    */
   async resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
@@ -215,7 +211,7 @@ export class Horsies {
     return taskHandleOf(this.#context.core, readFormOf(contract), taskId);
   }
 
-  /** A timed `SELECT 1` round trip: the latency of the database, or `DB_PING_FAILED`. */
+  /** A timed `SELECT 1` round trip: the latency of the database, or `DATABASE_PING_FAILED`. */
   async pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>> {
     return this.#monitoringArea.pingDatabase();
   }

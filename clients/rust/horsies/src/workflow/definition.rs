@@ -34,8 +34,8 @@ use crate::HorsiesError;
 ///     fn definition_key() -> &'static str { "shop.checkout.v1" }
 ///
 ///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
-///         let charged = builder.task(charge::node().set(charge::params::order_id(), 7)?)?;
-///         let receipt = builder.task(receipt::node().arg_from(receipt::params::charge(), charged))?;
+///         let charged = builder.task(charge::node().set(charge::fields::order_id(), 7)?)?;
+///         let receipt = builder.task(receipt::node().arg_from(receipt::fields::charge(), charged))?;
 ///         Ok(WorkflowDefinitionConfig::new().output(receipt))
 ///     }
 /// }
@@ -162,7 +162,7 @@ mod tests {
     use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
     use crate::workflow::spec::{SpecOutput, SpecSuccessPolicy, SuccessCase};
     use crate::workflow::OutputlessResults;
-    use crate::ErrorCode;
+    use crate::HorsiesErrorCode;
 
     fn charge_node() -> crate::TaskNode<f64, ChargeInput> {
         task_node::<f64, ChargeInput>("charge")
@@ -252,7 +252,7 @@ mod tests {
             WrongOutput::build(test_builder(WrongOutput::name()))
                 .unwrap_err()
                 .code,
-            Some(ErrorCode::WorkflowOutputTypeMismatch)
+            Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
         );
     }
 

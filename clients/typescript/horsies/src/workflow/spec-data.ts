@@ -9,6 +9,7 @@ import {
   type SpecJoin,
   type SpecNode,
   type SpecNodeBody,
+  type SpecOutput,
   type SpecSuccessPolicy,
   SPEC_DATA_VERSION_MAX,
   type WorkflowSpecData,
@@ -20,6 +21,7 @@ import type {
   CheckedBody,
   CheckedJoin,
   CheckedNode,
+  CheckedOutput,
   CheckedPolicy,
   CheckedSpec,
   NodeDeadline,
@@ -44,7 +46,7 @@ export function specDataDocument(spec: CheckedSpec, facts: ConversionFacts): Wor
     name: spec.name,
     definition_key: { kind: "KEYED", key: spec.definitionKey },
     on_error: spec.onError,
-    output: { kind: "NODE", index: spec.output },
+    output: specOutput(spec.output),
     success_policy: successPolicy(spec.successPolicy),
     queue_classes: queueClasses(spec.nodes, facts),
     nodes: spec.nodes.map((node) => specNode(node, facts)),
@@ -54,6 +56,18 @@ export function specDataDocument(spec: CheckedSpec, facts: ConversionFacts): Wor
 /** The spec data text of a checked spec, or the refusal of a string that has no text. Pure apart from the facts. */
 export function specDataTextOf(spec: CheckedSpec, facts: ConversionFacts): Result<string, SpecTextRefused> {
   return specDataText(workflowSpecDataToWire(specDataDocument(spec, facts)));
+}
+
+/** The output of the spec data: the output node's index, or `NO_OUTPUT`. Pure. */
+function specOutput(output: CheckedOutput): SpecOutput {
+  switch (output.kind) {
+    case "node":
+      return { kind: "NODE", index: output.index };
+    case "noOutput":
+      return { kind: "NO_OUTPUT" };
+    default:
+      return unreachable(output, "specOutput");
+  }
 }
 
 function successPolicy(policy: CheckedPolicy): SpecSuccessPolicy {

@@ -37,7 +37,7 @@ use super::node::{
 use super::sub_workflow::{NodeParams, SubWorkflowNode};
 use crate::send::TaskFunctions;
 use crate::task::body::DecodeFailure;
-use crate::{ErrorCode, HorsiesError, TaskFunctionNotFound, ValidationReport};
+use crate::{HorsiesError, HorsiesErrorCode, TaskFunctionNotFound, ValidationReport};
 
 /// The longest node id (Python `NODE_ID_MAX_LENGTH`).
 const MAX_NODE_ID_LENGTH: usize = 128;
@@ -46,8 +46,8 @@ const MAX_NODE_ID_LENGTH: usize = 128;
 const PRIORITY_RANGE: std::ops::RangeInclusive<u32> = 1..=100;
 
 /// The input member that takes the workflow context (the task attribute's
-/// `workflow_ctx`).
-const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
+/// `workflow_context`).
+const WORKFLOW_CONTEXT_FIELD: &str = "workflow_context";
 
 // ---------------------------------------------------------------------------
 // Success policy
@@ -243,7 +243,7 @@ impl WorkflowSpec {
                 self.name,
                 declared.name()
             ))
-            .with_code(ErrorCode::WorkflowOutputTypeMismatch)
+            .with_code(HorsiesErrorCode::WorkflowOutputTypeMismatch)
             .with_help(
                 "declare the output node's type, or OutputlessResults for a workflow with no \
                  output node",
@@ -263,7 +263,7 @@ enum BuilderBody {
         queue: String,
         priority: NodePriority,
         task_options: Option<String>,
-        accepts_workflow_ctx: bool,
+        accepts_workflow_context: bool,
         deadline: NodeDeadline,
         input_check: InputCheck,
     },
@@ -289,7 +289,7 @@ struct BuilderNode {
 /// let mut builder = app.workflow_builder("checkout");
 /// builder.definition_key("shop.checkout.v1");
 /// let charge = builder.task(charge::node().set_input(order)?)?;
-/// let notify = builder.task(notify::node().arg_from(notify::params::charged(), charge))?;
+/// let notify = builder.task(notify::node().arg_from(notify::fields::charged(), charge))?;
 /// builder.output(notify);
 /// let spec = builder.build()?;
 /// ```
@@ -361,7 +361,7 @@ impl WorkflowSpecBuilder {
         registration: NodeRegistration,
     ) -> TypedNodeRef<T> {
         let queue = match node.queue {
-            NodeQueue::OfTask => registration.queue_name,
+            NodeQueue::OfTask => registration.queue,
             NodeQueue::Given(queue) => queue,
         };
         self.push(BuilderNode {
@@ -372,7 +372,7 @@ impl WorkflowSpecBuilder {
                 queue,
                 priority: node.priority,
                 task_options: registration.task_options,
-                accepts_workflow_ctx: registration.accepts_workflow_ctx,
+                accepts_workflow_context: registration.accepts_workflow_context,
                 deadline: node.deadline,
                 input_check: node.input_check,
             },
@@ -451,13 +451,13 @@ impl WorkflowSpecBuilder {
         if self.name.trim().is_empty() {
             report.add(
                 HorsiesError::new("workflow name must not be empty")
-                    .with_code(ErrorCode::WorkflowNoName),
+                    .with_code(HorsiesErrorCode::WorkflowNoName),
             );
         }
         if self.nodes.is_empty() {
             report.add(
                 HorsiesError::new(format!("workflow '{}' has no node", self.name))
-                    .with_code(ErrorCode::WorkflowNoNodes),
+                    .with_code(HorsiesErrorCode::WorkflowNoNodes),
             );
             return Vec::new();
         }
@@ -467,7 +467,7 @@ impl WorkflowSpecBuilder {
                     "WorkflowSpec has {} nodes, more than the limit of {MAX_WORKFLOW_NODES}",
                     self.nodes.len()
                 ))
-                .with_code(ErrorCode::WorkflowTooManyNodes)
+                .with_code(HorsiesErrorCode::WorkflowTooManyNodes)
                 .with_help(
                     "split the nodes into sub-workflow nodes; each child workflow has its own \
                      limit",
@@ -490,7 +490,7 @@ impl WorkflowSpecBuilder {
             if !is_valid_node_id(id) {
                 report.add(
                     HorsiesError::new(format!("invalid node_id {id:?} at index {index}"))
-                        .with_code(ErrorCode::WorkflowInvalidNodeId)
+                        .with_code(HorsiesErrorCode::WorkflowInvalidNodeId)
                         .with_help(format!(
                             "a node_id matches [A-Za-z0-9_\\-:.]+ and has at most \
                              {MAX_NODE_ID_LENGTH} characters"
@@ -503,7 +503,7 @@ impl WorkflowSpecBuilder {
                     HorsiesError::new(format!(
                         "duplicate node_id '{id}' at indices {earlier} and {index}"
                     ))
-                    .with_code(ErrorCode::WorkflowDuplicateNodeId),
+                    .with_code(HorsiesErrorCode::WorkflowDuplicateNodeId),
                 ),
             }
         }
@@ -527,7 +527,7 @@ impl WorkflowSpecBuilder {
                         "node '{}' at index {index} references a node of another workflow builder",
                         node.name
                     ))
-                    .with_code(ErrorCode::WorkflowInvalidDependency)
+                    .with_code(HorsiesErrorCode::WorkflowInvalidDependency)
                     .with_help("use the references that this builder returned"),
                 );
             }
@@ -536,7 +536,7 @@ impl WorkflowSpecBuilder {
             if output.builder() != self.id {
                 report.add(
                     HorsiesError::new("the output references a node of another workflow builder")
-                        .with_code(ErrorCode::WorkflowInvalidOutput),
+                        .with_code(HorsiesErrorCode::WorkflowInvalidOutput),
                 );
             }
         }
@@ -549,7 +549,7 @@ impl WorkflowSpecBuilder {
                     HorsiesError::new(
                         "the success policy references a node of another workflow builder",
                     )
-                    .with_code(ErrorCode::WorkflowInvalidSuccessPolicy),
+                    .with_code(HorsiesErrorCode::WorkflowInvalidSuccessPolicy),
                 );
             }
         }
@@ -570,7 +570,7 @@ impl WorkflowSpecBuilder {
             if !node.links.dependencies.contains(source) {
                 report.add(
                     HorsiesError::new("workflow_context_from references a node not in waits_for")
-                        .with_code(ErrorCode::WorkflowInvalidCtxFrom)
+                        .with_code(HorsiesErrorCode::WorkflowInvalidContextFrom)
                         .with_note(format!(
                             "node {owner} references '{}'",
                             node_ids[source.index()]
@@ -583,19 +583,19 @@ impl WorkflowSpecBuilder {
             BuilderBody::Task {
                 input,
                 priority,
-                accepts_workflow_ctx,
+                accepts_workflow_context,
                 input_check,
                 ..
             } => {
-                if !node.links.workflow_context_from.is_empty() && !accepts_workflow_ctx {
+                if !node.links.workflow_context_from.is_empty() && !accepts_workflow_context {
                     report.add(
                         HorsiesError::new(
                             "workflow_context_from declared but the task takes no workflow context",
                         )
-                        .with_code(ErrorCode::WorkflowCtxParamMissing)
+                        .with_code(HorsiesErrorCode::WorkflowContextParameterMissing)
                         .with_note(format!("node {owner} declares workflow_context_from"))
                         .with_help(
-                            "add `workflow_ctx` to the task attribute and a `workflow_ctx: \
+                            "add `workflow_context` to the task attribute and a `workflow_context: \
                              WorkflowContext` parameter, or remove workflow_context_from",
                         ),
                     );
@@ -606,12 +606,12 @@ impl WorkflowSpecBuilder {
                             HorsiesError::new(format!(
                                 "node {owner} has priority {given}; a priority is 1 to 100"
                             ))
-                            .with_code(ErrorCode::WorkflowInvalidPriority),
+                            .with_code(HorsiesErrorCode::WorkflowInvalidPriority),
                         );
                     }
                 }
                 let takes_context =
-                    *accepts_workflow_ctx && !node.links.workflow_context_from.is_empty();
+                    *accepts_workflow_context && !node.links.workflow_context_from.is_empty();
                 check_input(
                     &owner,
                     input,
@@ -641,7 +641,7 @@ impl WorkflowSpecBuilder {
         if policy.cases.is_empty() {
             report.add(
                 HorsiesError::new("SuccessPolicy must have at least one SuccessCase")
-                    .with_code(ErrorCode::WorkflowInvalidSuccessPolicy)
+                    .with_code(HorsiesErrorCode::WorkflowInvalidSuccessPolicy)
                     .with_help("add at least one SuccessCase"),
             );
         }
@@ -649,7 +649,7 @@ impl WorkflowSpecBuilder {
             if case.required.is_empty() {
                 report.add(
                     HorsiesError::new(format!("SuccessCase[{position}] has no required node"))
-                        .with_code(ErrorCode::WorkflowInvalidSuccessPolicy)
+                        .with_code(HorsiesErrorCode::WorkflowInvalidSuccessPolicy)
                         .with_help("add at least one node to the required list"),
                 );
             }
@@ -747,7 +747,7 @@ fn unregistered_task(workflow_name: &str, not_found: &TaskFunctionNotFound) -> H
     HorsiesError::new(format!(
         "a node of workflow '{workflow_name}' was not added: {not_found}"
     ))
-    .with_code(ErrorCode::WorkflowUnregisteredTask)
+    .with_code(HorsiesErrorCode::WorkflowUnregisteredTask)
     .with_help(
         "register the task on the app of this workflow builder before the node is added, with \
          the types of the node",
@@ -766,14 +766,14 @@ fn check_join(owner: &str, links: &NodeLinks, report: &mut ValidationReport) {
             HorsiesError::new(format!(
                 "node {owner} has min_success {min_success}; it must be 1 or more"
             ))
-            .with_code(ErrorCode::WorkflowInvalidJoin),
+            .with_code(HorsiesErrorCode::WorkflowInvalidJoin),
         );
     } else if usize::try_from(min_success).map_or(true, |needed| needed > dependencies) {
         report.add(
             HorsiesError::new(format!(
                 "node {owner} has min_success {min_success} and {dependencies} dependencies"
             ))
-            .with_code(ErrorCode::WorkflowInvalidJoin)
+            .with_code(HorsiesErrorCode::WorkflowInvalidJoin)
             .with_help("add nodes to waits_for, or set min_success to at most their number"),
         );
     }
@@ -804,7 +804,7 @@ fn check_input(
     if !overlap.is_empty() {
         report.add(
             HorsiesError::new("kwargs and args_from keys must be disjoint")
-                .with_code(ErrorCode::WorkflowKwargsArgsFromOverlap)
+                .with_code(HorsiesErrorCode::WorkflowKwargsArgsFromOverlap)
                 .with_note(format!("node {owner} has overlapping key(s): {overlap:?}"))
                 .with_help("remove the overlapping key from either the input or args_from"),
         );
@@ -818,7 +818,7 @@ fn check_input(
         .map(|member| (member.as_str(), result.as_str()))
         .collect();
     if takes_context {
-        members.push((WORKFLOW_CTX_FIELD, context.as_str()));
+        members.push((WORKFLOW_CONTEXT_FIELD, context.as_str()));
     }
     let static_members: Vec<&str> = input.names().collect();
     if let Err(failure) = input_check(input.text_with(&members).as_bytes(), &static_members) {
@@ -846,7 +846,7 @@ fn check_input(
                         "node {owner} joins on any or a quorum and takes args_from['{member}'], \
                          but its field '{member}' has no default"
                     ))
-                    .with_code(ErrorCode::WorkflowInvalidJoin)
+                    .with_code(HorsiesErrorCode::WorkflowInvalidJoin)
                     .with_help(format!(
                         "give '{member}' a default (an Option field), or join on all"
                     )),
@@ -886,11 +886,11 @@ fn decode_refusal(owner: &str, failure: &DecodeFailure) -> HorsiesError {
         failure.depth,
         missing_field(failure),
     ) {
-        (true, 0 | 1, _) => ErrorCode::WorkflowInvalidKwargKey,
-        (true, _, _) => ErrorCode::WorkflowKwargsNotSerializable,
-        (false, 0, Some(_)) => ErrorCode::WorkflowMissingRequiredParams,
-        (false, _, Some(_)) => ErrorCode::WorkflowKwargsNotSerializable,
-        (false, _, None) => ErrorCode::WorkflowKwargsNotSerializable,
+        (true, 0 | 1, _) => HorsiesErrorCode::WorkflowInvalidKwargKey,
+        (true, _, _) => HorsiesErrorCode::WorkflowKwargsNotSerializable,
+        (false, 0, Some(_)) => HorsiesErrorCode::WorkflowMissingRequiredParams,
+        (false, _, Some(_)) => HorsiesErrorCode::WorkflowKwargsNotSerializable,
+        (false, _, None) => HorsiesErrorCode::WorkflowKwargsNotSerializable,
     };
     HorsiesError::new(format!(
         "the input of node {owner} does not decode as its input type: {failure}"

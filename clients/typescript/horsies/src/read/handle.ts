@@ -4,7 +4,7 @@
 import { threadId } from "node:worker_threads";
 
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
-import { OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
+import { OperationalCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { CoreAccess } from "../app/core-access.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { decodeEnvelope } from "../codec/reader.ts";
@@ -18,8 +18,8 @@ import { AddonOutsideMainThread } from "../thrown-errors.ts";
 import type { Kind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
-import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
-import { brokerReadError, type ReadError, seatRelayFullRead } from "./errors.ts";
+import { MAX_WAIT_LIMIT_MS } from "../_catalog/send_bounds.ts";
+import { databaseReadError, type ReadError, seatRelayFullRead } from "./errors.ts";
 import { type TaskInfo, taskInfoOf } from "./info.ts";
 
 /** The options of a result read. */
@@ -128,7 +128,7 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
       case "absent":
         return err(taskNotFound(read.reason));
       case "failed":
-        return err(brokerReadError(read.error));
+        return err(databaseReadError(read.error));
       case "seatRelayFull":
         return err(seatRelayFullRead(read.error));
       default: {
@@ -187,7 +187,7 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
     case "absent":
       return err(taskNotFound(read.reason));
     case "failed":
-      return err(brokerReadError(read.error));
+      return err(databaseReadError(read.error));
     default: {
       const unexpected: never = read;
 
@@ -244,12 +244,20 @@ function cancelledOutcome(taskId: string): TaskOutcome<unknown, string> {
 function decodedOutcome(text: string, form: ReadForm): Outcome {
   switch (form.kind) {
     case "unreadable":
-      return err(unreadable(form.cause));
+      return err(
+        Object.freeze({ kind: "storedResultUnreadable", code: OperationalCode.RESULT_DESERIALIZATION_ERROR, cause: form.cause }),
+      );
     case "readable": {
       const decoded = decodeEnvelope(form.output, jsonTextCheckedByCore(text), "worker");
 
       if (!decoded.ok) {
-        return err(unreadable(refusalText(decoded.error)));
+        return err(
+          Object.freeze({
+            kind: "storedResultUnreadable",
+            code: OperationalCode.RESULT_DESERIALIZATION_ERROR,
+            cause: refusalText(decoded.error),
+          }),
+        );
       }
 
       return checkedCustomCode(decoded.value, form.codes);
@@ -263,11 +271,6 @@ function decodedOutcome(text: string, form: ReadForm): Outcome {
   }
 }
 
-/** The read error of a stored result that does not read with the contract's types. Pure. */
-function unreadable(cause: string): ReadError {
-  return Object.freeze({ kind: "resultDeserializationError", code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, cause });
-}
-
 /** The outcome, or `unknownCustomCode` for a custom code that a declared list does not hold. Pure. */
 function checkedCustomCode(outcome: TaskOutcome<unknown, string>, codes: DeclaredCodes): Outcome {
   if (outcome.kind === "succeeded" || outcome.error.kind === "builtIn" || codes.kind === "open") {
@@ -276,7 +279,9 @@ function checkedCustomCode(outcome: TaskOutcome<unknown, string>, codes: Declare
 
   return codes.codes.includes(outcome.error.code)
     ? ok(outcome)
-    : err(Object.freeze({ kind: "unknownCustomCode", code: outcome.error.code }));
+    : err(
+        Object.freeze({ kind: "unknownCustomCode", code: RetrievalCode.UNKNOWN_CUSTOM_CODE, storedCode: outcome.error.code }),
+      );
 }
 
 /** Whether a read is final, so the handle keeps it: an outcome, or a stored result that never reads. Pure. */
@@ -287,13 +292,13 @@ function isFinal(read: Outcome): boolean {
 
   switch (read.error.kind) {
     case "resultNotAvailable":
-    case "resultDeserializationError":
+    case "storedResultUnreadable":
     case "unknownCustomCode":
       return true;
     case "waitTimeout":
     case "taskNotFound":
     case "waitInsideTask":
-    case "database":
+    case "databaseError":
     case "invalidInput":
     case "seatRelayFull":
       return false;

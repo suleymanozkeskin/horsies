@@ -103,11 +103,11 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
     ) -> Any:
         raw_value = _extract_outcome_value(value)
 
-        @app.task(task_name='param_child_task')
+        @app.task(name='param_child_task')
         def child_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
-        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
             nodes=[node],
@@ -130,11 +130,11 @@ class ConstrainedChildWorkflow(WorkflowDefinition[int]):
     ) -> Any:
         raw_value = _extract_outcome_value(value)
 
-        @app.task(task_name='constrained_child_task')
+        @app.task(name='constrained_child_task')
         def child_task(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
 
-        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        node = TaskNode(function=child_task, kwargs={'value': raw_value})
         return app.workflow(
             name=cls.name,
             nodes=[node],
@@ -149,11 +149,11 @@ class StartChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='sub_child_task')
+        @app.task(name='sub_child_task')
         def child_task() -> Result[int, TaskError]:
             return Ok(1)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
             nodes=[node],
@@ -175,11 +175,11 @@ class CollisionChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='collision_child_inner_task')
+        @app.task(name='collision_child_inner_task')
         def child_task() -> Result[int, TaskError]:
             return Ok(42)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
             nodes=[node],
@@ -286,7 +286,7 @@ class TestSubworkflowIntegration:
         session, broker, app = setup
 
         # Register a task whose name collides with the child workflow's name.
-        @app.task(task_name='collision_shared_name')
+        @app.task(name='collision_shared_name')
         def colliding_task() -> Result[str, TaskError]:
             return Ok('i-am-a-string-task')
 
@@ -338,7 +338,7 @@ class TestSubworkflowIntegration:
 
         producer_task = make_simple_task(app, 'sub_constrained_producer')
 
-        node_a: TaskNode[int] = TaskNode(fn=producer_task, kwargs={'value': 7})
+        node_a: TaskNode[int] = TaskNode(function=producer_task, kwargs={'value': 7})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_definition=ConstrainedChildWorkflow,
             waits_for=[node_a],
@@ -550,7 +550,7 @@ class TestSubworkflowValidation:
         """args_from referencing a node not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
         task_a_fn = make_simple_task(app, 'args_from_no_dep_a')
 
-        node_a: TaskNode[int] = TaskNode(fn=task_a_fn, kwargs={'value': 1})
+        node_a: TaskNode[int] = TaskNode(function=task_a_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_definition=ParamChildWorkflow,
             # waits_for is empty, but args_from references node_a
@@ -610,11 +610,11 @@ class TypedKwargsChildWorkflow(WorkflowDefinition[int]):
     ) -> Any:
         cls.received_payload = payload
 
-        @app.task(task_name='typed_kwargs_child_task')
+        @app.task(name='typed_kwargs_child_task')
         def child_task() -> Result[int, TaskError]:
             return Ok(payload.count)
 
-        node = TaskNode(fn=child_task)
+        node = TaskNode(function=child_task)
         return app.workflow(
             name=cls.name,
             nodes=[node],

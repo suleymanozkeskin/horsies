@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerInvalidTaskOptions
+from horsies.core.brokers.result_types import DatabaseInvalidTaskOptions
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     Execution,
@@ -130,7 +130,7 @@ class TestSendPaths:
         def delayed(*, n: int) -> Result[int, TaskError]:
             return Ok(n)
 
-        task_id = _sent_id(await delayed.schedule_async(600, n=1))
+        task_id = _sent_id(await delayed.with_options(delay_seconds=600).send_async(n=1))
 
         assert await _stored_class(session, task_id) == 'SHARED_THREAD'
 
@@ -173,7 +173,7 @@ class TestSendPaths:
         )
 
         assert isinstance(outcome, Err)
-        assert isinstance(outcome.err_value, BrokerInvalidTaskOptions)
+        assert isinstance(outcome.err_value, DatabaseInvalidTaskOptions)
         count = (
             await session.execute(
                 text('SELECT count(*) FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
@@ -273,7 +273,7 @@ class TestWorkflowPaths:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = args, params
-                node = TaskNode(fn=child_task, kwargs={'value': 1})
+                node = TaskNode(function=child_task, kwargs={'value': 1})
                 return app.workflow(name=cls.name, nodes=[node], output=node)
 
         parent = app.workflow(

@@ -386,7 +386,7 @@ async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
 async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
     let pool = shared_pool().await;
     let first_error =
-        serde_json::to_string(&TaskError::new("FIRST", "first failure").expect("a user code"))
+        serde_json::to_string(&TaskError::custom("FIRST", "first failure").expect("a custom code"))
             .expect("encode the error");
     let workflow_id =
         seed_workflow(&pool, &WorkflowSeed::running().error(first_error.clone())).await;

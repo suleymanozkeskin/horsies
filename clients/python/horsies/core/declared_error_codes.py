@@ -1,7 +1,7 @@
-"""The user error codes that a task declares: `@app.task(..., error_codes=...)`.
+"""The custom error codes that a task declares: `@app.task(..., error_codes=...)`.
 
 The `error_code` metric label of one task has every built-in code by its
-value, each code that the task declares, and `undeclared`. A user code that
+value, each code that the task declares, and `undeclared`. A custom code that
 the task does not declare counts as `undeclared` in that label only; events,
 traces, logs and the history row keep the exact code. Declaring is
 optional, and no count limits a set.
@@ -21,6 +21,11 @@ A value that is neither an `Enum` class nor a tuple is `HRS-102`.
 The declared set of a task also holds the codes that its exception mappers
 can produce, with no second declaration (`with_mapper_codes`): the values of
 the task's `exception_mapper` and of `AppConfig.exception_mapper`.
+
+The `retry_for` entries of a task are code members
+(`check_retry_codes`): members of the built-in code enums, or members of the
+`Enum` class of `error_codes=`. A task that retries on a code of its own
+declares that code in an `Enum` class.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from horsies.core.exception_mapper import (
     RESERVED_NON_TASK_CODES,
     validate_error_code_string,
 )
-from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY, BUILTIN_FAMILIES
 from horsies.core.types.result import Err, Ok, Result
 
 NO_ERROR_CODES: Final[tuple[str, ...]] = ()
@@ -133,12 +138,12 @@ def with_mapper_codes(
 ) -> tuple[str, ...]:
     """The declared set of a task: the codes that `error_codes=` declares
     (`declared`, as `parse_declared_error_codes` accepted them), then the
-    user codes that the task's exception mapper `task_mapper` can produce,
+    custom codes that the task's exception mapper `task_mapper` can produce,
     then those of the app's mapper `app_mapper`. Each code comes once, in
     the order of its first place: the declaration, then each mapper in the
     order of its entries. Pure.
 
-    A mapper value that is not a user code is not added: a built-in code
+    A mapper value that is not a custom code is not added: a built-in code
     (every built-in code is a value of the `error_code` label already), a
     reserved name, or a text outside the code-text rule. The mapper checks
     refuse such a value: `HRS-209` when the task or the app config is
@@ -150,7 +155,7 @@ def with_mapper_codes(
     )
     codes: list[str] = list(declared)
     for code in (*task_codes, *app_mapper.values()):
-        match _is_user_code(code) and code not in codes:
+        match _is_custom_code(code) and code not in codes:
             case True:
                 codes.append(code)
             case False:
@@ -158,7 +163,7 @@ def with_mapper_codes(
     return tuple(codes)
 
 
-def _is_user_code(code: object) -> bool:
+def _is_custom_code(code: object) -> bool:
     """Whether `code` is a text that a task may declare: it passes the
     code-text rule, it is not a reserved name, and it is not the name of a
     built-in code. Pure."""
@@ -228,3 +233,95 @@ def _checked_entry(
         case False:
             return Ok(text)
 
+
+
+@dataclass(frozen=True, slots=True)
+class RetryEntryNotAMember:
+    """A `retry_for` entry is not a member of an `Enum` class: a plain
+    `str`, or a value of another type. `index` is its place in the list,
+    `entry` its `repr`, and `given` the name of its type."""
+
+    index: int
+    entry: str
+    given: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetryMemberNotDeclared:
+    """A `retry_for` entry is a member of an `Enum` class that is not
+    a built-in code enum and not the `Enum` class of the task's
+    `error_codes=`. `member` names it as `Class.NAME`."""
+
+    index: int
+    member: str
+
+
+type RetryEntryRefusal = RetryEntryNotAMember | RetryMemberNotDeclared
+"""Why one `retry_for` entry is refused."""
+
+
+@dataclass(frozen=True, slots=True)
+class RetryEntriesRefused:
+    """Every refused `retry_for` entry, in list order; at least one."""
+
+    refusals: tuple[RetryEntryRefusal, ...]
+
+
+def check_retry_codes(
+    entries: Sequence[object],
+    code_enum: type[Enum] | None,
+) -> Result[None, RetryEntriesRefused]:
+    """Check that each `retry_for` entry of a task is a code member of
+    the task. Pure.
+
+    An entry is accepted when it is a member of a built-in code enum
+    (`OperationalCode`, `ContractCode`, `RetrievalCode`,
+    `OutcomeCode`), or a member of `code_enum`: the `Enum` class of the
+    task's `error_codes=`, or None for a tuple or no declaration. The stored
+    text of an accepted entry is its value: a built-in value, or a value
+    that `parse_declared_error_codes` accepted.
+
+    Ok(None): every entry is accepted. Err: one refusal per refused entry,
+    in list order.
+    """
+    refusals: list[RetryEntryRefusal] = []
+    for index, entry in enumerate(entries):
+        match _retry_entry_refusal(index, entry, code_enum):
+            case Ok():
+                pass
+            case Err(refusal):
+                refusals.append(refusal)
+    match refusals:
+        case []:
+            return Ok(None)
+        case _:
+            return Err(RetryEntriesRefused(refusals=tuple(refusals)))
+
+
+def _retry_entry_refusal(
+    index: int,
+    entry: object,
+    code_enum: type[Enum] | None,
+) -> Result[None, RetryEntryRefusal]:
+    """Ok when `entry` is a built-in code member or a member of `code_enum`;
+    otherwise why the entry at `index` is refused. Pure."""
+    match entry, code_enum:
+        case (Enum() as member, _) if isinstance(member, BUILTIN_FAMILIES):
+            return Ok(None)
+        case (Enum() as member, type() as declared) if isinstance(member, declared):
+            return Ok(None)
+        case (Enum() as member, _):
+            return Err(
+                RetryMemberNotDeclared(
+                    index=index,
+                    member=f'{type(member).__name__}.{member.name}',
+                ),
+            )
+        case _:
+            return Err(
+                RetryEntryNotAMember(
+                    index=index,
+                    entry=repr(entry),
+                    given=type(entry).__name__,
+                ),
+            )

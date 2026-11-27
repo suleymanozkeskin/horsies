@@ -10,7 +10,7 @@ use axum::routing::get;
 use axum::Router;
 use tokio_util::sync::CancellationToken;
 
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::telemetry::endpoint::{metrics_response, serve_endpoint, BoundEndpoint};
 
 use super::{collect_fleet_state_through, FleetCollector, FleetLabels};
@@ -42,7 +42,7 @@ async fn serve_metrics(State(collector): State<Arc<FleetCollector>>) -> Response
 /// ([`EndpointBounds::PROVISIONAL`](crate::telemetry::endpoint::EndpointBounds::PROVISIONAL)).
 pub async fn serve_fleet_metrics<S>(
     endpoint: BoundEndpoint,
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     labels: FleetLabels,
     stop: S,
 ) where
@@ -122,7 +122,7 @@ mod tests {
     }
 
     /// A handle of a server that refuses every connection.
-    fn unreachable_database_handle() -> CoreHandle {
+    fn unreachable_database_handle() -> CoreConnection {
         let manifest = json!({
             "manifest_version": 1,
             "database": {
@@ -132,7 +132,7 @@ mod tests {
                 "pool_pre_ping": true,
                 "pool_size": 1,
                 "max_overflow": 0,
-                "pool_timeout": 1,
+                "pool_timeout_seconds": 1,
                 "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
                 "echo": false,
                 "tcp_keepalives": {"kind": "OFF"},
@@ -146,7 +146,7 @@ mod tests {
         });
         let manifest =
             parse_producer_manifest(&manifest.to_string()).expect("the manifest is complete");
-        CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Rust)
+        CoreConnection::new(manifest, PoolProfile::Producer, ClientFamily::Rust)
     }
 
     #[tokio::test]

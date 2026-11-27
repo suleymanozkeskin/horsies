@@ -18,8 +18,8 @@ const MIN_CANCEL_GRACE_MS: u32 = 100;
 /// The largest `cancel_grace_ms` (Python `MAX_CANCEL_GRACE_MS`).
 const MAX_CANCEL_GRACE_MS: u32 = 10_000;
 
-const KNOWN_ATTRIBUTES: &str = "queue, retry_policy, auto_retry_for, timeout_ms, execution, \
-                                cancel_grace_ms, workflow_ctx";
+const KNOWN_ATTRIBUTES: &str = "queue, retry_policy, retry_for, timeout_ms, execution, \
+                                cancel_grace_ms, workflow_context";
 
 /// How a worker runs the task (Python `Execution`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub struct Milliseconds {
     pub span: Span,
 }
 
-/// One `auto_retry_for` entry.
+/// One `retry_for` entry.
 #[derive(Debug, Clone)]
 pub struct RetryCode {
     pub code: LitStr,
@@ -88,7 +88,7 @@ pub struct TaskAttrs {
     /// From [`MIN_CANCEL_GRACE_MS`] to [`MAX_CANCEL_GRACE_MS`], on a
     /// `shared_async` task only.
     pub cancel_grace_ms: Option<Milliseconds>,
-    pub workflow_ctx: bool,
+    pub workflow_context: bool,
 }
 
 /// The attributes as written, before the rules between them.
@@ -96,11 +96,11 @@ pub struct TaskAttrs {
 struct WrittenAttrs {
     queue: Option<LitStr>,
     retry_policy: Option<(Ident, Expr)>,
-    auto_retry_for: Option<(Ident, Vec<RetryCode>)>,
+    retry_for: Option<(Ident, Vec<RetryCode>)>,
     timeout_ms: Option<Milliseconds>,
     execution: Option<ExecutionAttr>,
     cancel_grace_ms: Option<Milliseconds>,
-    workflow_ctx: bool,
+    workflow_context: bool,
 }
 
 impl Parse for TaskAttrs {
@@ -129,9 +129,9 @@ impl Parse for TaskAttrs {
 /// unknown key and `good_until`.
 fn parse_one(input: ParseStream, key: &Ident, written: &mut WrittenAttrs) -> syn::Result<()> {
     let key_text = key.to_string();
-    if key_text == "workflow_ctx" {
-        refuse_repeat(written.workflow_ctx, key)?;
-        written.workflow_ctx = true;
+    if key_text == "workflow_context" {
+        refuse_repeat(written.workflow_context, key)?;
+        written.workflow_context = true;
         return Ok(());
     }
     input.parse::<Token![=]>()?;
@@ -144,10 +144,10 @@ fn parse_one(input: ParseStream, key: &Ident, written: &mut WrittenAttrs) -> syn
             refuse_repeat(written.retry_policy.is_some(), key)?;
             written.retry_policy = Some((key.clone(), input.parse::<Expr>()?));
         }
-        "auto_retry_for" => {
-            refuse_repeat(written.auto_retry_for.is_some(), key)?;
+        "retry_for" => {
+            refuse_repeat(written.retry_for.is_some(), key)?;
             let codes = retry_codes(&input.parse::<ExprArray>()?)?;
-            written.auto_retry_for = Some((key.clone(), codes));
+            written.retry_for = Some((key.clone(), codes));
         }
         "timeout_ms" => {
             refuse_repeat(written.timeout_ms.is_some(), key)?;
@@ -200,7 +200,7 @@ fn refuse_repeat(already: bool, key: &Ident) -> syn::Result<()> {
     }
 }
 
-/// Each entry of `auto_retry_for` is a string literal. Whether it names a
+/// Each entry of `retry_for` is a string literal. Whether it names a
 /// built-in code or a code of the task's code type is checked at compile
 /// time by a `const` assertion in the expansion: this crate has no copy of
 /// the built-in codes.
@@ -213,12 +213,12 @@ fn retry_codes(array: &ExprArray) -> syn::Result<Vec<RetryCode>> {
                 Lit::Str(code) => Ok(RetryCode { code: code.clone() }),
                 other => Err(syn::Error::new_spanned(
                     other,
-                    "an `auto_retry_for` entry is a code name in a string literal",
+                    "a `retry_for` entry is a code name in a string literal",
                 )),
             },
             other => Err(syn::Error::new_spanned(
                 other,
-                "an `auto_retry_for` entry is a code name in a string literal",
+                "a `retry_for` entry is a code name in a string literal",
             )),
         })
         .collect()
@@ -269,7 +269,7 @@ fn execution_class(value: &Ident) -> syn::Result<ExecutionAttr> {
 /// - a shared class needs `timeout_ms`;
 /// - `cancel_grace_ms` is for `shared_async` and `isolated` only: a thread
 ///   cannot be stopped;
-/// - `retry_policy` and `auto_retry_for` go together, with at least one
+/// - `retry_policy` and `retry_for` go together, with at least one
 ///   code.
 fn resolve(name: LitStr, written: WrittenAttrs) -> syn::Result<TaskAttrs> {
     let execution = written.execution.unwrap_or(ExecutionAttr {
@@ -306,11 +306,11 @@ fn resolve(name: LitStr, written: WrittenAttrs) -> syn::Result<TaskAttrs> {
     Ok(TaskAttrs {
         name,
         queue: written.queue,
-        retry: retry(written.retry_policy, written.auto_retry_for)?,
+        retry: retry(written.retry_policy, written.retry_for)?,
         timeout_ms: written.timeout_ms,
         execution,
         cancel_grace_ms: written.cancel_grace_ms,
-        workflow_ctx: written.workflow_ctx,
+        workflow_context: written.workflow_context,
     })
 }
 
@@ -322,15 +322,15 @@ fn retry(
         (None, None) => Ok(Retry::NoRetry),
         (Some((key, _policy)), None) => Err(syn::Error::new(
             key.span(),
-            "`retry_policy` needs `auto_retry_for`: the codes whose failures retry",
+            "`retry_policy` needs `retry_for`: the codes whose failures retry",
         )),
         (None, Some((key, _codes))) => Err(syn::Error::new(
             key.span(),
-            "`auto_retry_for` needs `retry_policy`: without a policy a task does not retry",
+            "`retry_for` needs `retry_policy`: without a policy a task does not retry",
         )),
         (Some(_), Some((key, codes))) if codes.is_empty() => Err(syn::Error::new(
             key.span(),
-            "`auto_retry_for` needs at least one code",
+            "`retry_for` needs at least one code",
         )),
         (Some((_, policy)), Some((_, codes))) => Ok(Retry::Policy {
             policy: Box::new(policy),

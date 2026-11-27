@@ -2,7 +2,7 @@
 // `CustomQueueConfig`, `core/src/core/config/queue.rs`). A refusal of a queue field has the code of the queue mode
 // (`HRS-200`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   accepted,
@@ -59,7 +59,7 @@ export type QueueSetup =
   | { readonly kind: "custom"; readonly queues: ReadonlyMap<string, CustomQueue> };
 
 /** A `u32` field of a custom queue. */
-const QUEUE_U32 = u32Field(ErrorCode.CONFIG_INVALID_QUEUE_MODE);
+const QUEUE_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE);
 
 /** The core's members `queue_mode` and `custom_queues` of `input`. Pure. */
 export function queueEntries(input: QueueConfigInput): Checked<readonly JsonEntry[]> {
@@ -88,7 +88,7 @@ function customEntries(queues: readonly CustomQueueInput[]): Checked<readonly Js
 
 function customQueueJson(queue: CustomQueueInput, path: string): Checked<ConfigJson> {
   return checkedObject([
-    entry("name", checkedText(queue.name, ErrorCode.CONFIG_INVALID_QUEUE_MODE, memberPath(path, "name"))),
+    entry("name", checkedText(queue.name, HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE, memberPath(path, "name"))),
     optionalEntry("priority", queue.priority, (priority) =>
       checkedInteger(priority, QUEUE_U32, memberPath(path, "priority")),
     ),

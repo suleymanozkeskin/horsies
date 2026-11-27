@@ -34,9 +34,11 @@ pub async fn validate(
         .get_order(order_id)
         .await
         .map_err(|error| store_failure("get_order", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::OrderNotFound, format!("no order {order_id}")))?;
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::OrderNotFound, format!("no order {order_id}"))
+        })?;
     if order.lines.is_empty() {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::OrderNotFound,
             format!("order {order_id} has no lines"),
         ));
@@ -69,21 +71,21 @@ pub async fn reserve(
         .await
         .map_err(|error| store_failure("reserve_line", error))?;
     if !outcome.order_open {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::OrderClosed,
             format!("order {order_id} no longer accepts reservations"),
         ));
     }
     if !outcome.known_sku {
         compensate_failed_order(store, order_id).await;
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::UnknownSku,
             format!("{sku} is not in the catalog"),
         ));
     }
     if !outcome.reserved {
         compensate_failed_order(store, order_id).await;
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::InsufficientStock,
             format!(
                 "{sku} has {} available, needs {quantity}",
@@ -122,7 +124,7 @@ pub async fn release(
         .await
         .map_err(|error| store_failure("release_line", error))?
         .ok_or_else(|| {
-            TaskError::user(AcmeCode::UnknownSku, format!("{sku} is not in the catalog"))
+            TaskError::custom(AcmeCode::UnknownSku, format!("{sku} is not in the catalog"))
         })?;
     Ok(StockRelease {
         sku: sku.to_owned(),
@@ -165,7 +167,9 @@ pub async fn authorize(
         .count_authorization_attempt(order_id)
         .await
         .map_err(|error| store_failure("count_authorization_attempt", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::OrderNotFound, format!("no order {order_id}")))?;
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::OrderNotFound, format!("no order {order_id}"))
+        })?;
     if let Some(payment) = store
         .find_payment(order_id, &AUTHORIZATION.to_owned())
         .await
@@ -182,7 +186,7 @@ pub async fn authorize(
     }
     if simulate::draw(tuning::CARD_DECLINE_RATE, &[order_id, "card"]) {
         compensate_failed_order(store, order_id).await;
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::CardDeclined,
             "issuer declined the card",
         ));
@@ -190,7 +194,7 @@ pub async fn authorize(
     if simulate::draw(tuning::PSP_UNAVAILABLE_RATE, &[order_id, "psp"])
         && attempt <= tuning::PSP_FAILING_ATTEMPTS
     {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::PspUnavailable,
             format!("provider unavailable on attempt {attempt}"),
         ));
@@ -206,7 +210,7 @@ pub async fn authorize(
         .await
         .map_err(|error| store_failure("record_payment", error))?
         .ok_or_else(|| {
-            TaskError::user(
+            TaskError::custom(
                 AcmeCode::PspUnavailable,
                 "another attempt recorded the authorization first",
             )
@@ -241,7 +245,7 @@ pub async fn capture(
         .await
         .map_err(|error| store_failure("record_payment", error))?
         .ok_or_else(|| {
-            TaskError::user(
+            TaskError::custom(
                 AcmeCode::PaymentAlreadyCaptured,
                 format!("order {order_id} is already captured"),
             )
@@ -267,7 +271,9 @@ pub async fn pick_and_pack(store: &Store, order_id: &str) -> Result<PickPack, Ta
         .get_order(order_id)
         .await
         .map_err(|error| store_failure("get_order", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::OrderNotFound, format!("no order {order_id}")))?;
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::OrderNotFound, format!("no order {order_id}"))
+        })?;
     for line in &order.lines {
         let _consumed = store
             .consume_line(order_id, line.line_no, &line.sku, line.quantity)
@@ -295,7 +301,9 @@ pub async fn invoice(store: &Store, order_id: &str) -> Result<Invoice, TaskError
         .get_order(order_id)
         .await
         .map_err(|error| store_failure("get_order", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::OrderNotFound, format!("no order {order_id}")))?;
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::OrderNotFound, format!("no order {order_id}"))
+        })?;
     Ok(Invoice {
         order_id: order_id.to_owned(),
         invoice_number: format!("INV-{}", order.order_id),
@@ -333,7 +341,7 @@ pub async fn book(
     if simulate::draw(tuning::COURIER_FLAKE_RATE, &[order_id, "courier"])
         && attempt.attempt <= tuning::COURIER_FAILING_ATTEMPTS
     {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::CourierUnavailable,
             format!("{courier} refused attempt {}", attempt.attempt),
         ));
@@ -346,7 +354,7 @@ pub async fn book(
         .await
         .map_err(|error| store_failure("set_booking_reference", error))?;
     if !stored {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::ShipmentNotFound,
             format!("order {order_id} has no shipment row"),
         ));
@@ -371,13 +379,13 @@ pub async fn label(store: &Store, order_id: &str) -> Result<ShippingLabel, TaskE
         .await
         .map_err(|error| store_failure("get_shipment", error))?
         .ok_or_else(|| {
-            TaskError::user(
+            TaskError::custom(
                 AcmeCode::ShipmentNotFound,
                 format!("order {order_id} has no shipment row"),
             )
         })?;
     let reference = shipment.booking_reference.ok_or_else(|| {
-        TaskError::user(
+        TaskError::custom(
             AcmeCode::ShipmentNotFound,
             format!("the shipment of order {order_id} has no booking"),
         )
@@ -408,7 +416,7 @@ pub async fn track(store: &Store, order_id: &str) -> Result<TrackingSeed, TaskEr
         .await
         .map_err(|error| store_failure("get_shipment", error))?
         .ok_or_else(|| {
-            TaskError::user(
+            TaskError::custom(
                 AcmeCode::ShipmentNotFound,
                 format!("order {order_id} has no shipment row"),
             )

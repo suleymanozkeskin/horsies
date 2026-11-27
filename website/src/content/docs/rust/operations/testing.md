@@ -19,9 +19,9 @@ tags: [rust, testing, unit test, TaskRuntime, WorkflowContext, suppress_sends, c
 ## Call a Task Directly
 
 ```rust
-use horsies::{task, TaskError, TaskErrorCode, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskErrorCode};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum OrderCode {
     LimitExceeded,
 }
@@ -29,7 +29,7 @@ enum OrderCode {
 #[task("validate_order")]
 async fn validate_order(total_cents: u64) -> Result<u64, TaskError<OrderCode>> {
     match total_cents > 1_000_000 {
-        true => Err(TaskError::user(OrderCode::LimitExceeded, "order over the limit")),
+        true => Err(TaskError::custom(OrderCode::LimitExceeded, "order over the limit")),
         false => Ok(total_cents),
     }
 }
@@ -37,7 +37,7 @@ async fn validate_order(total_cents: u64) -> Result<u64, TaskError<OrderCode>> {
 #[tokio::test]
 async fn an_order_over_the_limit_is_refused() {
     let refused = validate_order(2_000_000).await.unwrap_err();
-    assert_eq!(refused.code(), &TaskErrorCode::User(OrderCode::LimitExceeded));
+    assert_eq!(refused.code(), &TaskErrorCode::Custom(OrderCode::LimitExceeded));
 }
 ```
 
@@ -48,13 +48,13 @@ A `#[horsies::blocking_task]` function is a plain `fn`: call it with no `.await`
 A body whose first parameter is `TaskRuntime` takes the runtime of an app built in the test: `app.task_runtime()`.
 
 ```rust
-use horsies::{task, AppConfig, Horsies, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, AppConfig, CustomErrorCode, Horsies, TaskError, TaskRuntime};
 
 struct Greeter {
     greeting: String,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum WelcomeCode {
     NotConfigured,
 }
@@ -63,13 +63,13 @@ enum WelcomeCode {
 async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<WelcomeCode>> {
     let greeter = rt
         .state::<Greeter>()
-        .map_err(|missing| TaskError::user(WelcomeCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WelcomeCode::NotConfigured, missing.to_string()))?;
     Ok(format!("{}, {user}", greeter.greeting))
 }
 
 #[tokio::test]
 async fn welcome_reads_the_greeter() {
-    let mut app = Horsies::new(AppConfig::for_database_url("postgresql://localhost/horsies_test"))
+    let mut app = Horsies::new(AppConfig::from_database_url("postgresql://localhost/horsies_test"))
         .unwrap();
     app.provide(Greeter { greeting: "welcome".to_owned() }).unwrap();
     let message = welcome(app.task_runtime(), "ada".to_owned()).await.unwrap();
@@ -96,13 +96,13 @@ async fn send_receipt(
 ) -> Result<String, TaskError<Infallible>> {
     match charged {
         TaskOutcome::Succeeded(cents) => Ok(format!("{order_id}: charged {cents}")),
-        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().text())),
+        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().as_str())),
     }
 }
 
 #[tokio::test]
 async fn a_skipped_charge_is_reported() {
-    let skipped = TaskOutcome::Failed(TaskError::library(OutcomeCode::UpstreamSkipped, "skipped"));
+    let skipped = TaskOutcome::Failed(TaskError::built_in(OutcomeCode::UpstreamSkipped, "skipped"));
     let receipt = send_receipt("order-1".to_owned(), skipped).await.unwrap();
     assert_eq!(receipt, "order-1: UPSTREAM_SKIPPED");
 }
@@ -110,7 +110,7 @@ async fn a_skipped_charge_is_reported() {
 
 ## Build a Workflow Context
 
-A task with the `workflow_ctx` attribute takes a `WorkflowContext`. A test builds one from its stored form: `workflow_id`, `task_index`, `task_name`, and `results_by_id`, the stored result of each node by node id. `serde_json::to_value` of a `TaskOutcome` writes a stored result.
+A task with the `workflow_context` attribute takes a `WorkflowContext`. A test builds one from its stored form: `workflow_id`, `task_index`, `task_name`, and `results_by_id`, the stored result of each node by node id. `serde_json::to_value` of a `TaskOutcome` writes a stored result.
 
 ```rust
 use std::convert::Infallible;
@@ -118,9 +118,9 @@ use std::convert::Infallible;
 use horsies::{task, NodeKey, TaskError, TaskOutcome, WorkflowContext};
 use serde_json::json;
 
-#[task("audit_checkout", workflow_ctx)]
-async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
-    let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
+#[task("audit_checkout", workflow_context)]
+async fn audit_checkout(workflow_context: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
+    let charged = workflow_context.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
 }
 
@@ -173,7 +173,7 @@ fn the_app_passes_its_check() {
 }
 ```
 
-`build_app` is the function that `main` calls to build the app. `CheckReport` holds the refusals of the first phase that refused; `errors()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
+`build_app` is the function that `main` calls to build the app. `ValidationReport` holds the refusals of the first phase that refused; `refusals()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
 
 ## Suppress Sends
 
@@ -185,7 +185,7 @@ A test that runs code which sends can suppress the sends of the process:
 | `HORSIES_SUPPRESS_SENDS=1` (`horsies::SUPPRESS_SENDS_ENV`) | Suppresses the sends of every app in the process. The variable is read at each send |
 | `app.are_sends_suppressed()` | `true` when either is set |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing. The check runs before any I/O of the send, so the test needs no database. A generated send (`task_name::send(&app, ...)`) is suppressed by the app that it names.
+A suppressed send returns `TaskSendError::Suppressed` and writes nothing. The check runs before any I/O of the send, so the test needs no database. A generated send (`task_name::send(&app, ...)`) is suppressed by the app that it names.
 
 ## Things to Avoid
 

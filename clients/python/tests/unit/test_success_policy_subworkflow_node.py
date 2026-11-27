@@ -14,7 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError
@@ -45,7 +45,7 @@ def _key(label: str) -> str:
 
 def _app_with_tasks() -> tuple[Horsies, TaskFunction[..., int]]:
     app = Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
     @app.task('success_policy_sub.work')
@@ -59,7 +59,7 @@ def _child_definition(work: TaskFunction[..., int]) -> type[WorkflowDefinition[i
     class Child(WorkflowDefinition[int]):
         name = 'success_policy_sub_child'
         definition_key = _key('child')
-        step = TaskNode(fn=work)
+        step = TaskNode(function=work)
 
         config = WorkflowDefinitionConfig(output=step)
 
@@ -70,7 +70,7 @@ class TestSpecValidation:
     def test_a_subworkflow_node_in_required_and_optional_is_accepted(self) -> None:
         app, work = _app_with_tasks()
         child = SubWorkflowNode(workflow_definition=_child_definition(work))
-        other = TaskNode(fn=work)
+        other = TaskNode(function=work)
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[child])],
             optional=[other],
@@ -87,7 +87,7 @@ class TestSpecValidation:
 
     def test_a_subworkflow_node_outside_the_workflow_is_refused(self) -> None:
         app, work = _app_with_tasks()
-        inside = TaskNode(fn=work)
+        inside = TaskNode(function=work)
         outside = SubWorkflowNode(workflow_definition=_child_definition(work))
         policy = SuccessPolicy(cases=[SuccessCase(required=[outside])])
 
@@ -99,7 +99,7 @@ class TestSpecValidation:
                 definition_key=_key('refuse'),
             )
 
-        assert raised.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert raised.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 class TestSpecCopy:
@@ -133,7 +133,7 @@ class TestDefinitionCopy:
             name = 'success_policy_sub_parent'
             definition_key = _key('parent')
             child = SubWorkflowNode(workflow_definition=child_definition)
-            extra = TaskNode(fn=work)
+            extra = TaskNode(function=work)
 
             config = WorkflowDefinitionConfig(
                 success_policy=SuccessPolicy(

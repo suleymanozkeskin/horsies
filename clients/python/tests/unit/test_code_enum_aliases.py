@@ -26,16 +26,16 @@ from typing import Final
 import pytest
 
 import horsies
-from horsies.core.brokers.result_types import BrokerErrorCode
-from horsies.core.errors import ErrorCode
+from horsies.core.brokers.result_types import DatabaseErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.task_send_types import TaskSendErrorCode
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetrievalCode,
 )
-from horsies.core.models.workflow.handle_types import HandleErrorCode
+from horsies.core.models.workflow.handle_types import WorkflowHandleErrorCode
 from horsies.core.workflows.start_types import WorkflowStartErrorCode
 from horsies.monitoring.errors import MonitoringQueryErrorCode
 from horsies.monitoring.task_actions import TaskActionErrorCode
@@ -49,15 +49,15 @@ WEB_PACKAGE: Final = 'horsies.web'
 # misses a subpackage, fails here instead of passing with nothing checked.
 REQUIRED_CODE_ENUMS: Final[frozenset[type[enum.Enum]]] = frozenset(
     {
-        ErrorCode,
+        HorsiesErrorCode,
         ContractCode,
-        OperationalErrorCode,
+        OperationalCode,
         RetrievalCode,
         OutcomeCode,
-        BrokerErrorCode,
+        DatabaseErrorCode,
         TaskSendErrorCode,
         WorkflowStartErrorCode,
-        HandleErrorCode,
+        WorkflowHandleErrorCode,
         MonitoringQueryErrorCode,
         TaskActionErrorCode,
     },

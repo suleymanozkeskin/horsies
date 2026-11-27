@@ -21,7 +21,7 @@ import pytest
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     TaskCancelledRecord,
     TooManyPendingCalls,
 )
@@ -31,7 +31,7 @@ from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
     CancelPolicy,
     TaskActionCoreError,
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
     TaskActionIsWorkflowTask,
@@ -61,10 +61,10 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
         TaskActionIsWorkflowTask(
             message=message, task_id=TASK_ID, current_status=TaskStatus.FAILED,
         ),
-        TaskActionDbOperationFailed(
-            message=message, retryable=True, task_id=TASK_ID, exception=cause,
+        TaskActionDatabaseOperationFailed(
+            message=message, retryable=True, task_id=TASK_ID, cause=cause,
         ),
-        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, exception=cause),
+        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, cause=cause),
     ]
 
 
@@ -120,7 +120,7 @@ class TestVariantCatalog:
         self, error: TaskActionError,
     ) -> None:
         match error:
-            case TaskActionDbOperationFailed():
+            case TaskActionDatabaseOperationFailed():
                 assert error.retryable is True
             case _:
                 assert error.retryable is False
@@ -179,11 +179,11 @@ def _core_errors() -> list[TaskActionError]:
             task_id=TASK_ID,
             current_status=TaskStatus.PENDING,
         ),
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=f'Task cancel failed: connection failed: {CAUSE_MARKER}',
             retryable=True,
             task_id=TASK_ID,
-            exception=CoreConnectionError(
+            cause=CoreConnectionError(
                 'cancel_task', f'connection failed: {CAUSE_MARKER}', True,
             ),
         ),
@@ -193,7 +193,7 @@ def _core_errors() -> list[TaskActionError]:
                 f'terminalization outcome decode failed: {CAUSE_MARKER}'
             ),
             task_id=TASK_ID,
-            exception=OutcomeDecodeError(
+            cause=OutcomeDecodeError(
                 f'terminalization outcome decode failed: {CAUSE_MARKER}',
             ),
         ),
@@ -246,7 +246,7 @@ class TestCancelFailures:
         ('error', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.cancel_task_async', 65_536), True),
-            (CoreStartFailed('the core runtime could not start'), False),
+            (RuntimeStartFailed('the core runtime could not start'), False),
         ],
         ids=['too-many-calls', 'core-start-failed'],
     )
@@ -258,8 +258,8 @@ class TestCancelFailures:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, TaskActionDbOperationFailed)
-        assert failed.exception is error
+        assert isinstance(failed, TaskActionDatabaseOperationFailed)
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 

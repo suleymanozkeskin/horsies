@@ -48,7 +48,7 @@ pub struct SharedPoolConfig {
     pub init: InitFrame,
     pub worker_id: String,
     /// The orphan self-heal that each run frame carries (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a seat, at most.
     pub pending_limit: NonZeroUsize,

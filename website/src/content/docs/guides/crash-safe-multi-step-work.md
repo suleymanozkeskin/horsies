@@ -20,10 +20,15 @@ A checkout in one task body:
 ```python
 @app.task(
     "checkout",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
-        auto_retry_for=["PAYMENTS_UNAVAILABLE", "MAIL_UNAVAILABLE", "WORKER_CRASHED"],
+        retry_for=[
+            CheckoutCode.PAYMENTS_UNAVAILABLE,
+            CheckoutCode.MAIL_UNAVAILABLE,
+            OperationalCode.WORKER_CRASHED,
+        ],
     ),
 )
 def checkout(*, order: Order) -> Result[str, TaskError]:
@@ -34,9 +39,9 @@ def checkout(*, order: Order) -> Result[str, TaskError]:
 
 What a failure does to this task:
 
-- An error code in `auto_retry_for` starts a retry. The retry runs the body from the first line. A transient failure in step 3 charges the card again in step 1.
-- A worker crash while the body runs ends the attempt with `WORKER_CRASHED`. When `auto_retry_for` does not name `WORKER_CRASHED`, the task is `FAILED`. This is the default. The steps before the crash have run, and the stored error does not tell which steps ran.
-- When `auto_retry_for` names `WORKER_CRASHED`, the retry runs the body from the first line. Steps 1 and 2 run again.
+- An error code in `retry_for` starts a retry. The retry runs the body from the first line. A transient failure in step 3 charges the card again in step 1.
+- A worker crash while the body runs ends the attempt with `WORKER_CRASHED`. When `retry_for` does not name `WORKER_CRASHED`, the task is `FAILED`. This is the default. The steps before the crash have run, and the stored error does not tell which steps ran.
+- When `retry_for` names `WORKER_CRASHED`, the retry runs the body from the first line. Steps 1 and 2 run again.
 
 The rules are on [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) and [Auto-Retry Triggers](/horsies/tasks/retry-policy/#auto-retry-triggers).
 
@@ -47,6 +52,8 @@ The rules are on [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#
 Each step is a task with its own retry policy. A step takes the outcome of the step before it as a parameter of type `TaskOutcome[T, TaskError]`.
 
 ```python
+from enum import Enum
+
 import httpx
 from pydantic import BaseModel
 
@@ -55,6 +62,7 @@ from horsies import (
     Failed,
     JsonValue,
     Ok,
+    OperationalCode,
     Result,
     RetryPolicy,
     Succeeded,
@@ -67,6 +75,17 @@ PAYMENTS_URL = "https://payments.example.com/v1/charges"
 INVOICES_URL = "https://billing.example.com/v1/invoices"
 MESSAGES_URL = "https://mail.example.com/v1/messages"
 HTTP_TIMEOUT_SECONDS = 10.0
+
+
+class CheckoutCode(str, Enum):
+    """The codes of the steps. Each step declares them with `error_codes=`."""
+
+    PAYMENTS_UNAVAILABLE = "PAYMENTS_UNAVAILABLE"
+    CHARGE_REFUSED = "CHARGE_REFUSED"
+    BILLING_UNAVAILABLE = "BILLING_UNAVAILABLE"
+    INVOICE_REFUSED = "INVOICE_REFUSED"
+    MAIL_UNAVAILABLE = "MAIL_UNAVAILABLE"
+    MAIL_REFUSED = "MAIL_REFUSED"
 
 
 class Charge(BaseModel):
@@ -100,28 +119,29 @@ def post_with_key(
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except httpx.TransportError as error:
-        return Err(TaskError(error_code=unavailable_code, message=f"POST {url}: {error!r}"))
+        return Err(TaskError(code=unavailable_code, message=f"POST {url}: {error!r}"))
     match response.status_code // 100:
         case 2:
             return Ok(response.json())
         case 5:
             return Err(TaskError(
-                error_code=unavailable_code,
+                code=unavailable_code,
                 message=f"POST {url}: HTTP {response.status_code}",
             ))
         case _:
             return Err(TaskError(
-                error_code=refused_code,
+                code=refused_code,
                 message=f"POST {url}: HTTP {response.status_code}",
             ))
 
 
 @app.task(
     "charge_card",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=5,
-        auto_retry_for=["PAYMENTS_UNAVAILABLE", "WORKER_CRASHED"],
+        retry_for=[CheckoutCode.PAYMENTS_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def charge_card(
@@ -145,10 +165,11 @@ def charge_card(
 
 @app.task(
     "write_invoice",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=10,
         max_retries=5,
-        auto_retry_for=["BILLING_UNAVAILABLE", "WORKER_CRASHED"],
+        retry_for=[CheckoutCode.BILLING_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def write_invoice(
@@ -179,9 +200,10 @@ def write_invoice(
 
 @app.task(
     "send_receipt",
+    error_codes=CheckoutCode,
     retry_policy=RetryPolicy.fixed(
         [60, 300, 900],
-        auto_retry_for=["MAIL_UNAVAILABLE", "WORKER_CRASHED"],
+        retry_for=[CheckoutCode.MAIL_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_receipt(
@@ -212,7 +234,7 @@ def send_receipt(
             return Err(error)
 ```
 
-- The `auto_retry_for` of each step names `WORKER_CRASHED` and the code that the step returns when its provider is not available. Another code, for example `CHARGE_REFUSED`, ends the step as `FAILED` at once.
+- The `retry_for` of each step names `WORKER_CRASHED` and the code that the step returns when its provider is not available. Another code, for example `CHARGE_REFUSED`, ends the step as `FAILED` at once.
 - Each call sends an idempotency key made from the order id and the step name. The key makes a repeated run of the step safe. See [External Effects Need Idempotency](#external-effects-need-idempotency).
 - With the default dependency rules, a step runs only when the step before it is `COMPLETED`. The `Failed` arm receives a stored result that does not decode (`RESULT_DESERIALIZATION_ERROR`). See [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-semantics/#upstream-failure-and-args_from).
 
@@ -282,9 +304,9 @@ def start_checkout(order: Order) -> WorkflowStartResult[WorkflowHandle[str]]:
 
 | Event | One task with three steps | One node per step |
 |---|---|---|
-| Step 3 returns a code in `auto_retry_for` | The retry runs steps 1, 2 and 3 | The retry runs step 3 |
-| The worker crashes during step 3, and `auto_retry_for` names `WORKER_CRASHED` | The retry runs steps 1, 2 and 3 | The retry runs step 3 |
-| The worker crashes during step 3, and `auto_retry_for` does not name `WORKER_CRASHED` | The task is `FAILED` with `WORKER_CRASHED`. The error does not tell which steps ran | Step 3 is `FAILED` with `WORKER_CRASHED`. Steps 1 and 2 are `COMPLETED` and keep their results |
+| Step 3 returns a code in `retry_for` | The retry runs steps 1, 2 and 3 | The retry runs step 3 |
+| The worker crashes during step 3, and `retry_for` names `WORKER_CRASHED` | The retry runs steps 1, 2 and 3 | The retry runs step 3 |
+| The worker crashes during step 3, and `retry_for` does not name `WORKER_CRASHED` | The task is `FAILED` with `WORKER_CRASHED`. The error does not tell which steps ran | Step 3 is `FAILED` with `WORKER_CRASHED`. Steps 1 and 2 are `COMPLETED` and keep their results |
 | Step 3 fails after its last retry | The task is `FAILED` | Step 3 is `FAILED`, and the workflow is `FAILED`. Steps 1 and 2 keep their results |
 
 The rules of the table:
@@ -319,8 +341,8 @@ Group the steps by effect: one node for each external effect, with the short ste
 
 A node runs at least once. Its body can run more than once:
 
-- The worker crashes after the effect and before the result is stored. With `WORKER_CRASHED` in `auto_retry_for`, the retry does the effect again.
-- The answer is lost. The provider did the effect, but the call timed out. The step returns a code in `auto_retry_for`, and the retry calls the provider again.
+- The worker crashes after the effect and before the result is stored. With `WORKER_CRASHED` in `retry_for`, the retry does the effect again.
+- The answer is lost. The provider did the effect, but the call timed out. The step returns a code in `retry_for`, and the retry calls the provider again.
 - The workflow starts again. A new start runs every node again.
 
 A cancel does not undo an effect. An operator cancel of a running step (`cancel_task` with `policy=CancelPolicy.INCLUDE_RUNNING`, or the web UI) makes the step `CANCELLED` at once. The body gets the cancel: an `async def` body at its next `await`, a `def` body when it reads `runtime.cancel_state()`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
@@ -338,6 +360,6 @@ Rules:
 
 **Don't make an idempotency key from a random value or from the task id.** A random value changes on each run. A task id changes on each new start of the workflow, and when a resume after a pause starts the node again. In both cases the provider gets a new key and does the effect again.
 
-**Don't add `WORKER_CRASHED` to `auto_retry_for` of a step whose effect has no idempotency key.** The retry does the effect again.
+**Don't add `WORKER_CRASHED` to `retry_for` of a step whose effect has no idempotency key.** The retry does the effect again.
 
 **Don't use the `idempotency_key` of a task send for this.** A repeat of the same send returns the first task. The key does not stop a retry of the task body. See [Make a Send Repeatable](/horsies/tasks/sending-tasks/#make-a-send-repeatable).

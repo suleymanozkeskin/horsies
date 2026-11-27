@@ -10,7 +10,7 @@ use tokio_postgres::Row;
 use uuid::Uuid;
 
 use super::*;
-use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 
@@ -280,7 +280,7 @@ async fn each_cancel_outcome_reads_into_its_variant() {
 #[test]
 #[should_panic(expected = "returned the outcome \"SUSPENDED\", which is outside its contract")]
 fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
-    let _error = crate::workflow_engine::lifecycle::handle_operation_error(
+    let _error = crate::workflow_engine::lifecycle::workflow_handle_error(
         &crate::core::workflow::handle_types::HandleOperation::Pause,
         WorkflowError::StepContract(StepContractError::UnknownOutcome {
             function: "horsies_workflow_pause",
@@ -347,7 +347,7 @@ async fn pause_answers_not_running_and_missing_workflows() {
     let error = pause_workflow(&broker, missing)
         .await
         .expect_err("pause of a missing workflow");
-    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::WorkflowNotFound);
     assert_eq!(error.workflow_id(), missing);
 }
 
@@ -401,7 +401,7 @@ async fn cancel_answers_terminal_and_missing_workflows() {
     let error = cancel_workflow(&broker, missing)
         .await
         .expect_err("cancel of a missing workflow");
-    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::WorkflowNotFound);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,5 +853,5 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     )
     .await
     .expect_err("resume of a missing workflow");
-    assert_eq!(missing.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(missing.code(), WorkflowHandleErrorCode::WorkflowNotFound);
 }

@@ -8,7 +8,7 @@ tags: [monitoring, broker, api]
 
 `PostgresBroker` exposes async methods for querying task and worker health directly from the database. These are useful for building custom monitoring, alerting, or cleanup scripts.
 
-All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the core classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
+All broker methods return `DatabaseResult[T]` — either `Ok(value)` on success or `Err(DatabaseOperationError)` on failure. `DatabaseOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the core classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
 from uuid import UUID
@@ -17,7 +17,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
 ))
@@ -32,7 +32,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 ## Methods
 
-### `get_raw_result_record_async(task_id: UUID, timeout_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
+### `get_raw_result_record_async(task_id: UUID, wait_ms: int | None = None) -> DatabaseResult[StoredResult | None]`
 
 Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `ReadResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
@@ -41,17 +41,17 @@ Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 se
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_id` | `UUID` | — | Task ID to retrieve result for |
-| `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(BrokerInvalidInput)` (`INVALID_INPUT`) before any read |
+| `wait_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(DatabaseInvalidInput)` (`INVALID_INPUT`) before any read |
 
-In a worker child, where task bodies run, it returns `Err(BrokerWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
+In a worker child, where task bodies run, it returns `Err(DatabaseWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
-**Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
+**Returns:** `DatabaseResult[StoredResult | None]` — `Ok(None)` if no task row exists for that ID; `Err(DatabaseOperationError)` on infrastructure failure. The `StoredResult` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
-Sync variant: `get_raw_result_record(task_id, timeout_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
+Sync variant: `get_raw_result_record(task_id, wait_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(DatabaseAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 # Async — broker-level raw fetch (no typed decode)
-result = await broker.get_raw_result_record_async(task_id, timeout_ms=5000)
+result = await broker.get_raw_result_record_async(task_id, wait_ms=5000)
 if is_ok(result):
     record = result.ok_value
     if record is None:
@@ -67,59 +67,59 @@ elif is_err(result):
 
 ### App-level typed result APIs
 
-For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ResultDeserializationError` for a stored value that does not decode, `NoTypeAvailable` for a task that is not registered in this process, or `BrokerError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
+For most callers, prefer `app.get_result_async(task_id, wait_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ReadResultDeserializationError` for a stored value that does not decode, `ReadNoTypeAvailable` for a task that is not registered in this process, or `ReadDatabaseError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
 
 ```python
 from horsies import Err, Failed, Ok, Succeeded
 
 # Async — typed decode at the app layer
-match await app.get_result_async(task_id, timeout_ms=5000):
+match await app.get_result_async(task_id, wait_ms=5000):
     case Ok(Succeeded(value)):
         print(f"Result: {value}")
     case Ok(Failed(task_error)):
-        print(f"Task error: {task_error.error_code}")
+        print(f"Task error: {task_error.code}")
     case Err(read_error):
         print(f"Read error: {read_error.code} - {read_error.message}")
 
 # Sync
-read = app.get_result(task_id, timeout_ms=5000)
+read = app.get_result(task_id, wait_ms=5000)
 ```
 
-### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`
+### `get_stale_tasks(threshold_minutes: int = 2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]]`
 
-Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
+Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker. The app has the same read: `app.get_stale_tasks(threshold_minutes)` and `app.get_stale_tasks_async(threshold_minutes)` ([Health Reads](/horsies/monitoring/health-reads/)).
 
-**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`. `last_heartbeat` is the latest runner heartbeat since `started_at`, and `None` when the task has none: the start writes no heartbeat, and a heartbeat of an earlier attempt of a retried task does not count. Rows are ordered by `last_heartbeat` (rows with no heartbeat first), then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+**Returns:** `Ok(BoundedTaskListComplete(rows))`, or `Ok(BoundedTaskListTruncated(rows, bound))` when more than 10,000 rows (`TASK_LIST_ROW_BOUND`) match: the first 10,000 come back. Each row is a `StaleTaskRow` with `task_id` (a `uuid.UUID`), `task_name`, `worker_hostname`, `worker_pid`, `worker_process_name`, `started_at`, `last_heartbeat_at`. `last_heartbeat_at` is the latest runner heartbeat since `started_at`, and `None` when the task has none: the start writes no heartbeat, and a heartbeat of an earlier attempt of a retried task does not count. Rows are ordered by `last_heartbeat_at` (rows with no heartbeat first), then by `task_id`.
 
-**Errors:** `INVALID_INPUT` when `stale_threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
+**Errors:** `INVALID_INPUT` when `threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
 
 ```python
-result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+result = await broker.get_stale_tasks(threshold_minutes=5)
 if is_ok(result):
-    for task in result.ok_value:
-        print(f"Task {task['id']} on {task['worker_hostname']} — last heartbeat: {task['last_heartbeat']}")
+    for task in result.ok_value.rows:
+        print(f"Task {task.task_id} on {task.worker_hostname} — last heartbeat: {task.last_heartbeat_at}")
 ```
 
 ### Worker health and load
 
 For per-worker load, configuration, and liveness, use the typed [Health Reads](/horsies/monitoring/health-reads/) (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
-### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
+### `get_expired_tasks() -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]]`
 
-Find PENDING tasks that exceeded their `good_until` deadline before being picked up.
+Find PENDING tasks that exceeded their `good_until` deadline before being picked up. The app has the same read: `app.get_expired_tasks()` and `app.get_expired_tasks_async()`.
 
-**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for`. Rows are ordered by `good_until`, oldest first, then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+**Returns:** `Ok(BoundedTaskListComplete(rows))`, or `Ok(BoundedTaskListTruncated(rows, bound))` when more than 10,000 rows (`TASK_LIST_ROW_BOUND`) match: the first 10,000 come back. Each row is an `ExpiredTaskRow` with `task_id` (a `uuid.UUID`), `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for` (a `timedelta`, on the database clock). Rows are ordered by `good_until`, oldest first, then by `task_id`.
 
 ```python
 result = await broker.get_expired_tasks()
 if is_ok(result):
-    for task in result.ok_value:
-        print(f"Task {task['id']} ({task['task_name']}) expired {task['expired_for']} ago")
+    for task in result.ok_value.rows:
+        print(f"Task {task.task_id} ({task.task_name}) expired {task.expired_for} ago")
 ```
 
-### `get_task_info(task_id: UUID, include_result: bool = False, include_failed_reason: bool = False) -> BrokerResult[TaskInfo | None]`
+### `get_task_info(task_id: UUID, include_result: bool = False, include_failed_reason: bool = False) -> DatabaseResult[TaskInfo | None]`
 
-Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not exist, `Err(BrokerOperationError)` on infrastructure failure.
+Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not exist, `Err(DatabaseOperationError)` on infrastructure failure.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -127,7 +127,7 @@ Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not 
 | `include_result` | `bool` | `False` | Include the raw stored result envelope for terminal tasks |
 | `include_failed_reason` | `bool` | `False` | Include worker-level `failed_reason` |
 
-**Returns:** `BrokerResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
+**Returns:** `DatabaseResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
 Sync wrapper: `broker.get_task_info(...)`.
 
 ```python
@@ -145,11 +145,11 @@ elif result.ok_value is not None:
         print(f"Next retry at: {info.next_retry_at}")
 ```
 
-### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
+### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> DatabaseResult[int]`
 
-Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.auto_fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
+Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
 
-The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `auto_retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
+The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -166,15 +166,15 @@ if is_ok(result):
     print(f"Retried or failed {result.ok_value} crashed tasks")
 ```
 
-### `terminate_orphaned_workflow_tasks() -> BrokerResult[int]`
+### `terminate_orphaned_workflow_tasks() -> DatabaseResult[int]`
 
-Run one page of the orphan workflow-task pass. The reaper of each worker runs one page every `orphan_task_audit_interval_ms` when `RecoveryConfig.auto_terminate_orphaned_workflow_tasks` is on. Use this method to run a page when that setting is off.
+Run one page of the orphan workflow-task pass. The reaper of each worker runs one page every `orphan_task_audit_interval_ms` when `RecoveryConfig.terminate_orphaned_workflow_tasks` is on. Use this method to run a page when that setting is off.
 
 A page scans at most 500 PENDING and CLAIMED workflow tasks, from where the previous page stopped. Each scanned task that no runnable workflow node links moves to history as CANCELLED. The page is one transaction. `audit_orphaned_workflow_tasks()` runs the same page and returns its scan counts.
 
 **Returns:** `Ok(int)`: the number of tasks cancelled.
 
-**Errors:** `CLEANUP_FAILED` when the page fails. Nothing is committed; after a lost `COMMIT` reply, the outcome is unknown. When another sweep holds the scan cursor, the page is refused at once: the `exception` is `CoreServerError` with `sqlstate` `'55P03'`, and the error is retryable.
+**Errors:** `CLEANUP_FAILED` when the page fails. Nothing is committed; after a lost `COMMIT` reply, the outcome is unknown. When another sweep holds the scan cursor, the page is refused at once: the `cause` is `CoreServerError` with `sqlstate` `'55P03'`, and the error is retryable.
 
 ```python
 result = await broker.terminate_orphaned_workflow_tasks()
@@ -182,7 +182,7 @@ if is_ok(result):
     print(f"Cancelled {result.ok_value} orphaned workflow tasks")
 ```
 
-### `requeue_stale_claimed(stale_threshold_ms: int = 120_000) -> BrokerResult[int]`
+### `requeue_stale_claimed(stale_threshold_ms: int = 120_000) -> DatabaseResult[int]`
 
 Requeue tasks stuck in CLAIMED status when the claiming worker has stopped sending heartbeats.
 

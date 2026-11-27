@@ -3,7 +3,8 @@
 //
 // Steps:
 // 1. The core reads the arguments. Bad arguments print the cause and end the process with 73.
-// 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts.
+// 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts. The
+//    stderr lines of the core log records take the app's `logFormat`.
 // 3. The process events: no-op `SIGINT` and `SIGTERM`; the detached throws and rejections (`process-events.ts`).
 // 4. The plan: each implementation by its task name and body form; the start hooks (the child's own, the providers,
 //    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound. The
@@ -51,6 +52,10 @@ import type {
   StartHookCall,
 } from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
+import type { SchemaMode } from "../_catalog/manifest.ts";
+import type { LogFormat } from "../config/process-settings.ts";
+import { applyLogFormat } from "../logging.ts";
+import { seatBodyObserverOf } from "../seats/body-observer.ts";
 import { processSeatHost } from "../seats/node-isolates.ts";
 import { serveSeatOperation } from "../seats/operations.ts";
 import type { SeatHost } from "../seats/pool.ts";
@@ -96,7 +101,9 @@ export interface ChildNative extends ServeNative, LoopNative, HandlerChildNative
     hook: (callId: bigint, call: StartHookCall) => void,
   ): Promise<ChildServeEnd>;
   setPanicRule(rule: PanicRule): void;
-  checkAppConfig(appConfigJson: string): AppConfigCheck;
+  /** Write the stderr lines of later core log records in `format`. */
+  applyLogFormat(format: LogFormat): void;
+  checkAppConfig(appConfigJson: string, schemaMode: SchemaMode): AppConfigCheck;
 }
 
 /** What child mode does that has effects. */
@@ -241,6 +248,7 @@ async function servedChild(
   ending: ChildEnding,
 ): Promise<ChildModeEnd> {
   deps.native.setPanicRule("ABORT_PROCESS");
+  deps.native.applyLogFormat(context.config.logFormat);
   installProcessEvents({
     hooks: deps.events,
     writeLine: deps.writeLine,
@@ -304,6 +312,9 @@ function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDep
     settle: (runKey, taskName, outcome) => {
       settleRun(serve, runKey, taskName, outcome);
     },
+    isolateEnded: (run) => {
+      seatBodyObserverOf(context).isolateEnded(run);
+    },
     serve: async (request) => serveSeatOperation(context.core, request),
     endChild: (code) => {
       void ending.childEnd.end(code);
@@ -332,14 +343,17 @@ export function bodyFactsMode(tracing: TracingSetting): BodyFactsMode {
   }
 }
 
-/** The plan of the child of `context`. A config that the core refuses again is a defect: `ClientDefect`. */
+/**
+ * The plan of the child of `context`. The producer manifest of the task sends has the app's schema mode, as the task
+ * sends of a Python child do (`Horsies.get_broker`). A config that the core refuses again is a defect: `ClientDefect`.
+ */
 export function childPlan(
   context: AppContext,
   members: ChildMembersView,
   processArguments: readonly string[],
   deps: Pick<ChildModeDeps, "native" | "hostname">,
 ): ChildHostPlan {
-  const checked = deps.native.checkAppConfig(context.config.coreConfigJson);
+  const checked = deps.native.checkAppConfig(context.config.coreConfigJson, context.config.schemaMode);
 
   if (checked.kind === "refused") {
     throw new ClientDefect({ subject: "childPlan", rule: "the config check refuses the config that Horsies.create accepted" });
@@ -375,6 +389,7 @@ export function processChildNative(): ChildNative {
     loopRelease,
     buildTaskError,
     setPanicRule,
+    applyLogFormat,
     checkAppConfig,
     fillHandlerChild,
   };

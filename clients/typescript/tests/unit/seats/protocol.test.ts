@@ -112,7 +112,7 @@ describe("the messages of the main thread", () => {
       reply: { area: "facades", reply: { envelope: { kind: "value", value: { kind: "json", text: "[]" } } } },
     }),
     replyMessage(1, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }),
-    replyMessage(2, { kind: "refused", refusal: { code: "CORE_START_FAILED", cause: "no addon file" } }),
+    replyMessage(2, { kind: "refused", refusal: { code: "RUNTIME_START_FAILED", cause: "no addon file" } }),
     { kind: "flush", protocol: SEAT_PROTOCOL_VERSION },
   ];
 

@@ -63,6 +63,7 @@ horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500 \
 
 The 0.7.0 profile and command:
 
+<!-- check: skip elided -- the 0.7 names; a later release renames them -->
 ```python
 from datetime import timedelta
 
@@ -132,6 +133,7 @@ error[HRS-213]: worker_child_pool_max_size was removed in 0.7.0
 
 A 0.6.x config with `worker_child_pool_max_size=1` and `worker_child_pool_check=False`, and the 0.7.0 profile. Both values are the 0.7.0 defaults of `IsolatedPool`; the profile states them:
 
+<!-- check: skip elided -- the 0.7 names; a later release renames them -->
 ```python
 from horsies import IsolatedPool, PoolSize
 

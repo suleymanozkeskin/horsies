@@ -27,17 +27,17 @@ fn compute_config_hash_changes_on_different_config() {
 
 #[test]
 fn compute_config_hash_is_stable_sha256() {
-    // The config hash is SHA-256 of Python's digest text, not a
-    // toolchain-dependent hasher; the golden value is the digest that
-    // Python's `_compute_config_hash` stores for the same schedule.
+    // The config hash is SHA-256 of the digest text, not a
+    // toolchain-dependent hasher. The digest text keeps the four parts of an
+    // interval, the largest unit first: 60 seconds is one minute.
     let schedule = interval_schedule_secs("test", 60);
     let hash = compute_config_hash(&enabled(&schedule));
     // SHA-256 of
-    // {"pattern":{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null},"timezone":"UTC"}.
+    // {"pattern":{"type":"interval","seconds":null,"minutes":1,"hours":null,"days":null},"timezone":"UTC"}.
     let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(
         hex,
-        "a7bba31d521252fd1fb6e910224d2c9a13daa9d45b4c3a1c4569f7b76a2e92e1",
+        "1f162e96bb6355c05fd230c95c9fbf49456d0e4bcf213efffffb792be5cb0180",
     );
 }
 
@@ -52,7 +52,7 @@ fn compute_config_hash_covers_pattern_and_timezone_only() {
     let mut other_settings = base.clone();
     other_settings.task_name = "another_task".to_owned();
     other_settings.input_json = json!({"changed": true}).to_string();
-    other_settings.queue_name = "bulk".to_owned();
+    other_settings.queue = "bulk".to_owned();
     other_settings.priority = 7;
     other_settings.task_options = ScheduleTaskOptions::Encoded {
         json: "{\"task_name\":\"another_task\",\"timeout_ms\":5000}".to_owned(),
@@ -300,7 +300,7 @@ struct TestSchedule {
     timezone: String,
     catch_up_missed: bool,
     max_catch_up_runs: u32,
-    queue_name: String,
+    queue: String,
     priority: u32,
     input_json: String,
     task_options: ScheduleTaskOptions,
@@ -316,8 +316,10 @@ impl TestSchedule {
             ScheduleTaskOptions::NoOptions => json!({"kind": "NO_OPTIONS"}),
         };
         let pattern_json = format!(
-            "{{\"type\":\"interval\",\"seconds\":{},\"minutes\":null,\"hours\":null,\"days\":null}}",
-            self.interval_seconds
+            "{{\"kind\":\"interval\",\"every\":\"{}\"}}",
+            crate::core::config::schedule::interval_text(std::time::Duration::from_secs(
+                u64::from(self.interval_seconds)
+            ))
         );
         json!({
             "name": self.name,
@@ -329,7 +331,7 @@ impl TestSchedule {
                 "max_catch_up_runs": self.max_catch_up_runs,
                 "send": {
                     "task_name": self.task_name,
-                    "queue_name": self.queue_name,
+                    "queue": self.queue,
                     "priority": self.priority,
                     "input_json": self.input_json,
                     "task_options": task_options,
@@ -352,7 +354,7 @@ fn interval_schedule_secs(name: &str, seconds: u32) -> TestSchedule {
         timezone: "UTC".to_owned(),
         catch_up_missed: false,
         max_catch_up_runs: 100,
-        queue_name: "default".to_owned(),
+        queue: "default".to_owned(),
         priority: 100,
         input_json: "null".to_owned(),
         task_options: ScheduleTaskOptions::NoOptions,
@@ -434,7 +436,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     let task_name = "p6_scheduled_facts";
     let mut schedule = interval_schedule_secs("p6-scheduled-facts", 60);
     schedule.task_name = task_name.to_owned();
-    schedule.queue_name = "bulk".to_owned();
+    schedule.queue = "bulk".to_owned();
     schedule.retention_class_key = "standard_2d".to_owned();
     let input = json!({"value": 1, "named": true});
     schedule.input_json = input.to_string();
@@ -484,10 +486,10 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     schedule.task_name = name.clone();
     let options = crate::core::TaskOptions {
         task_name: name.clone(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: Some(vec![crate::core::TaskErrorCode::from(
-            crate::core::OperationalErrorCode::TaskException,
+        retry_for: Some(vec![crate::core::TaskErrorCode::from(
+            crate::core::OperationalCode::TaskException,
         )]),
         retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
         timeout_ms: Some(5_000),
@@ -527,7 +529,7 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
     for (execution, cancel_grace_ms, stored_execution) in [
         (
             crate::core::task::Execution::SharedAsync,
-            Some(crate::core::CancelGraceMs::new(2_000).expect("2000 ms is a grace")),
+            Some(2_000),
             "SHARED_ASYNC",
         ),
         (
@@ -541,9 +543,9 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
         schedule.task_name = name.clone();
         let options = crate::core::TaskOptions {
             task_name: name.clone(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
             execution,
@@ -904,9 +906,9 @@ fn the_start_write_holds_the_changed_digests_and_not_the_unchanged_ones() {
 fn the_command_of_a_schedule_is_the_send_command_of_its_texts() {
     let options_text = crate::core::TaskOptions {
         task_name: "my_task".to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: None,
+        retry_for: None,
         retry_policy: None,
         timeout_ms: Some(30_000),
         execution: crate::core::task::Execution::Isolated,

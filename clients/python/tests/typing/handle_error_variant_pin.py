@@ -16,13 +16,13 @@ from __future__ import annotations
 import uuid
 
 from horsies import (
-    HandleAsyncContext,
-    HandleDbOperationFailed,
-    HandleInvalidWorkflowId,
-    HandleOperationError,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
-    HandleWorkflowNotFound,
+    WorkflowHandleAsyncContext,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleInvalidWorkflowId,
+    WorkflowHandleError,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
+    WorkflowHandleNotFound,
     Horsies,
     NoCause,
     WorkflowHandle,
@@ -32,47 +32,47 @@ from horsies.core.types.result import Err, Ok, is_err
 
 
 def causes_are_exceptions() -> None:
-    _ = HandleDbOperationFailed(
+    _ = WorkflowHandleDatabaseOperationFailed(
         message='read failed',
         retryable=True,
         workflow_id='id',
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
-    _ = HandleDbOperationFailed(
+    _ = WorkflowHandleDatabaseOperationFailed(
         message='read failed',
         retryable=True,
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
-    _ = HandleStoredDataInvalid(
+    _ = WorkflowHandleStoredDataInvalid(
         message='stored data invalid',
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
-    _ = HandleResumeRecoveryFailed(
+    _ = WorkflowHandleResumeRecoveryFailed(
         message='recovery failed',
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 
 
-def chain_the_database_cause(failed: HandleDbOperationFailed) -> None:
-    raise RuntimeError('read failed') from failed.exception
+def chain_the_database_cause(failed: WorkflowHandleDatabaseOperationFailed) -> None:
+    raise RuntimeError('read failed') from failed.cause
 
 
-def chain_a_cause_without_a_match(error: HandleOperationError) -> None:
+def chain_a_cause_without_a_match(error: WorkflowHandleError) -> None:
     raise RuntimeError('failed') from error.exception  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
 
-def chain_the_matched_cause(error: HandleOperationError) -> None:
+def chain_the_matched_cause(error: WorkflowHandleError) -> None:
     match error:
-        case HandleDbOperationFailed(exception=cause):
+        case WorkflowHandleDatabaseOperationFailed(cause=cause):
             raise RuntimeError(error.message) from cause
-        case HandleStoredDataInvalid(exception=cause):
+        case WorkflowHandleStoredDataInvalid(cause=cause):
             raise RuntimeError(error.message) from cause
-        case HandleResumeRecoveryFailed(exception=cause):
+        case WorkflowHandleResumeRecoveryFailed(cause=cause):
             raise RuntimeError(error.message) from cause
-        case HandleWorkflowNotFound() | HandleAsyncContext():
+        case WorkflowHandleNotFound() | WorkflowHandleAsyncContext():
             raise RuntimeError(error.message)
 
 
@@ -82,7 +82,7 @@ async def async_status_read_has_no_async_context(
     result = await handle._status()
     if is_err(result):
         match result.err_value:
-            case HandleAsyncContext():  # pyright: ignore[reportUnnecessaryComparison]
+            case WorkflowHandleAsyncContext():  # pyright: ignore[reportUnnecessaryComparison]
                 pass
             case _:
                 pass
@@ -100,13 +100,13 @@ def a_workflow_id_text_goes_through_the_app(app: Horsies) -> uuid.UUID:
     match app.workflow_handle('3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f'):
         case Ok(ok_value=handle):
             return handle.workflow_id
-        case Err(err_value=HandleInvalidWorkflowId(exception=cause) as refused):
+        case Err(err_value=WorkflowHandleInvalidWorkflowId(cause=cause) as refused):
             raise RuntimeError(refused.message) from cause
 
 
-def an_invalid_id_is_not_a_handle_operation_failure(error: HandleOperationError) -> None:
+def an_invalid_id_is_not_a_handle_operation_failure(error: WorkflowHandleError) -> None:
     match error:
-        case HandleInvalidWorkflowId():  # pyright: ignore[reportUnnecessaryComparison]
+        case WorkflowHandleInvalidWorkflowId():  # pyright: ignore[reportUnnecessaryComparison]
             pass
         case _:
             pass

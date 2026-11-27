@@ -33,8 +33,8 @@ describe("envelopeValue", () => {
 
   test("throws the class of the code of a thrown envelope", () => {
     assert.throws(
-      () => envelopeValue({ kind: "thrown", thrown: { code: "CORE_START_FAILED", cause: "no threads" } }),
-      { name: "CoreStartFailed", code: "CORE_START_FAILED", cause: "no threads" },
+      () => envelopeValue({ kind: "thrown", thrown: { code: "RUNTIME_START_FAILED", cause: "no threads" } }),
+      { name: "RuntimeStartFailed", code: "RUNTIME_START_FAILED", cause: "no threads" },
     );
   });
 });
@@ -57,11 +57,11 @@ describe("thrownError", () => {
     );
   });
 
-  test("CORE_START_FAILED is CoreStartFailed with the cause", () => {
-    assert.deepEqual(errorFacts({ code: "CORE_START_FAILED", cause: "no threads" }), {
+  test("RUNTIME_START_FAILED is RuntimeStartFailed with the cause", () => {
+    assert.deepEqual(errorFacts({ code: "RUNTIME_START_FAILED", cause: "no threads" }), {
       own: {
-        name: "CoreStartFailed",
-        code: "CORE_START_FAILED",
+        name: "RuntimeStartFailed",
+        code: "RUNTIME_START_FAILED",
         cause: "no threads",
       },
       message: "the core could not start: no threads",

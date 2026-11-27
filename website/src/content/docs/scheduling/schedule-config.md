@@ -15,7 +15,7 @@ Top-level scheduler configuration added to `AppConfig`.
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    database=PostgresConfig(...),
     schedule=ScheduleConfig(
         enabled=True,
         check_interval_seconds=1,
@@ -45,7 +45,7 @@ TaskSchedule(
     task_name="generate_report",
     pattern=DailySchedule(time=time(9, 0, 0)),
     kwargs={"format": "pdf"},
-    queue_name=None,  # Use task's default queue
+    queue=None,  # Use task's default queue
     enabled=True,
     timezone="UTC",
     catch_up_missed=False,
@@ -60,7 +60,7 @@ TaskSchedule(
 | `task_name` | `str` | required | Registered task name |
 | `pattern` | `SchedulePattern` | required | When to run |
 | `kwargs` | `dict` | `{}` | Keyword arguments passed to the task. Schedules are kwargs-only; `TaskSchedule` rejects any other field (including `args`) at construction. |
-| `queue_name` | `str` | `None` | Queue override (CUSTOM mode) |
+| `queue` | `str` | `None` | Queue override (CUSTOM mode); `None` uses the task's queue |
 | `enabled` | `bool` | `True` | Enable/disable this schedule |
 | `timezone` | `str` | `"UTC"` | Timezone for schedule evaluation |
 | `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
@@ -105,7 +105,7 @@ def process_region(*, region: str, full_sync: bool) -> Result[None, TaskError]:
 TaskSchedule(
     name="sync-us-east",
     task_name="process_region",
-    pattern=IntervalSchedule(hours=1),
+    pattern=IntervalSchedule(every=timedelta(hours=1)),
     kwargs={"region": "us-east", "full_sync": True},
 )
 ```
@@ -116,7 +116,7 @@ The kwargs are encoded once per scheduler start (see [Validation](/horsies/sched
 
 `TaskSchedule` has no task options. A scheduled run stores the options that the task declares on `@app.task()` (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` of the task does. See [Task Options](/horsies/scheduling/scheduler-overview/#task-options).
 
-`@app.task()` encodes the options once, when the task is defined. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_EXEC_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
+`@app.task()` encodes the options once, when the task is defined. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_IMPORT_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
 
 ### Queue Override
 
@@ -124,7 +124,7 @@ In CUSTOM mode, override the task's default queue:
 
 <!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
-@app.task("background_job", queue_name="normal")
+@app.task("background_job", queue="normal")
 def background_job() -> Result[None, TaskError]:
     ...
 
@@ -132,7 +132,7 @@ TaskSchedule(
     name="priority-job",
     task_name="background_job",
     pattern=...,
-    queue_name="critical",  # Override to higher priority queue
+    queue="critical",  # Override to higher priority queue
 )
 ```
 
@@ -166,7 +166,7 @@ When `catch_up_missed=True`, missed runs are executed:
 TaskSchedule(
     name="hourly-sync",
     task_name="sync_data",
-    pattern=IntervalSchedule(hours=1),
+    pattern=IntervalSchedule(every=timedelta(hours=1)),
     catch_up_missed=True,
 )
 ```

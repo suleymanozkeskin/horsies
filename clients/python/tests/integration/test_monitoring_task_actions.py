@@ -28,6 +28,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies._core import CoreConnectionError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
@@ -35,7 +36,7 @@ from horsies.core.utils.url import to_psycopg_url
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.monitoring import (
     CancelPolicy,
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionErrorCode,
     TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
@@ -90,7 +91,7 @@ async def unreachable_app() -> AsyncGenerator[Horsies, None]:
                 'postgresql://postgres:none@127.0.0.1:1/none'
             )
         ),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     app = Horsies(AppConfig(broker=broken.config))
     app._broker = broken  # pyright: ignore[reportPrivateUsage]
@@ -542,17 +543,17 @@ class TestCancelTaskRefuses:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
-        assert isinstance(error.exception, OutcomeDecodeError)
-        assert type(error.exception) is OutcomeDecodeError
+        assert isinstance(error.cause, OutcomeDecodeError)
+        assert type(error.cause) is OutcomeDecodeError
         assert error.task_id == uuid.UUID(task.id)
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
         # Python's texts: the message holds the decode error's text, and the
         # exception's text is that text.
-        decode_text = str(error.exception)
+        decode_text = str(error.cause)
         assert decode_text.startswith('terminalization outcome decode failed: ')
         assert "'NOT_KNOWN'" in decode_text
-        assert error.exception.args == (decode_text,)
+        assert error.cause.args == (decode_text,)
         assert error.message == f'Task cancel failed: stored data does not parse: {decode_text}'
         assert (await read_task(session, task.id)).status == 'FAILED'
 
@@ -624,16 +625,16 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert type(error) is TaskActionDbOperationFailed
+        assert type(error) is TaskActionDatabaseOperationFailed
         assert error.retryable is True
         assert error.task_id == task_id
-        assert isinstance(error.exception, CoreConnectionError)
-        assert error.exception.retryable is True
+        assert isinstance(error.cause, CoreConnectionError)
+        assert error.cause.retryable is True
         # Python's texts: the message holds the cause's text, and the
         # exception is that text with the subject of the cancel.
         assert error.message.startswith('Task cancel failed: ')
         cause_text = error.message.removeprefix('Task cancel failed: ')
         assert cause_text != ''
-        assert error.exception.subject == 'cancel_task'
-        assert error.exception.message == cause_text
-        assert str(error.exception) == f'cancel_task: {cause_text}'
+        assert error.cause.subject == 'cancel_task'
+        assert error.cause.message == cause_text
+        assert str(error.cause) == f'cancel_task: {cause_text}'

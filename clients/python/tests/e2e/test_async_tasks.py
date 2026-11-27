@@ -47,13 +47,13 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
 
 async def _result_of(handle: TaskHandle[str]) -> str:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
     return succeeded_value(result)
 
 
@@ -106,7 +106,7 @@ async def test_an_async_task_sends_with_send_async(
             result = await asyncio.to_thread(
                 app.get_result,
                 UUID(sent_id),
-                timeout_ms=RESULT_TIMEOUT_MS,
+                wait_ms=RESULT_TIMEOUT_MS,
             )
             assert succeeded_value(result) == x * 2
 
@@ -129,7 +129,7 @@ async def test_an_async_task_runs_as_a_workflow_node(broker: PostgresBroker) -> 
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         assert succeeded_value(result) == 12
 
 
@@ -248,7 +248,7 @@ async def test_a_workflow_successor_starts_after_the_work_its_upstream_left(
             str(handle.workflow_id),
             timeout_s=30.0,
         )
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
     assert status == 'COMPLETED'
     assert succeeded_value(result) == 'ended'

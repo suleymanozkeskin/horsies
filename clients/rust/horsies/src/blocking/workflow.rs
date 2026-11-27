@@ -11,7 +11,7 @@
 //!   `WorkflowStartError::AsyncContext` with the workflow id of the
 //!   start, nothing written (Python `WorkflowStartAsyncContext`); `status`,
 //!   `results`, `nodes`, `cancel`, `pause` and `resume` answer
-//!   `HandleOperationError::AsyncContext` (Python `HandleAsyncContext`); `get`
+//!   `WorkflowHandleError::AsyncContext` (Python `WorkflowHandleAsyncContext`); `get`
 //!   and `result_for` answer `WorkflowReadError::AsyncContext` (Python's
 //!   `RetrievalCode.ASYNC_CONTEXT`).
 //! - The thread check comes first, as in Python's `WorkflowSpec.start`: a
@@ -22,7 +22,7 @@
 //!   refuses a wait in a process that runs task bodies (`WaitInsideTask`).
 //! - When the OS refused the threads of the process runtime, a start
 //!   answers `ENQUEUE_FAILED` with the workflow id, a handle method
-//!   `DB_OPERATION_FAILED`, and `get` and `result_for` `Database`, each
+//!   `DATABASE_OPERATION_FAILED`, and `get` and `result_for` `DatabaseError`, each
 //!   retryable; nothing ran.
 //! - In a process that was forked without `exec` after the process runtime
 //!   started, every call panics before it runs anything.
@@ -33,8 +33,8 @@ use std::future::Future;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, wait_inside_task_message, BrokerError, HandleErrorCode, HandleOperation,
-    HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError, WorkflowStartError,
+    process_role, wait_inside_task_message, BrokerError, CustomCode, HandleOperation, HandleResult,
+    ProcessRole, WorkflowError, WorkflowHandleError, WorkflowHandleErrorCode, WorkflowStartError,
     WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
@@ -44,7 +44,7 @@ use uuid::Uuid;
 use super::{async_context_message, place, HorsiesView, Place};
 use crate::workflow::new_workflow_id;
 use crate::{
-    NodeKey, NodeResult, TaskOutcome, UserErrorCode, WaitLimit, WorkflowDefinition,
+    CustomErrorCode, NodeKey, NodeResult, TaskOutcome, WaitLimit, WorkflowDefinition,
     WorkflowFunction, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError, WorkflowSpec,
     WorkflowTemplate,
 };
@@ -364,7 +364,7 @@ impl<T> WorkflowHandleView<'_, T> {
     pub fn result_for<V, E>(&self, key: &NodeKey<V>) -> Result<TaskOutcome<V, E>, WorkflowReadError>
     where
         V: DeserializeOwned,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.block_read(
             self.handle.result_for::<V, E>(key),
@@ -374,7 +374,7 @@ impl<T> WorkflowHandleView<'_, T> {
     }
 
     /// Run a handle method on the process runtime, or answer why it cannot
-    /// run. A process runtime that did not start is `DB_OPERATION_FAILED`
+    /// run. A process runtime that did not start is `DATABASE_OPERATION_FAILED`
     /// of `operation`, retryable, with the refusal as its cause.
     ///
     /// # Panics
@@ -391,7 +391,7 @@ impl<T> WorkflowHandleView<'_, T> {
             "blocking WorkflowHandle::{method} for workflow {workflow_id}"
         )) {
             Place::Runs(runtime) => runtime.block_on(call),
-            Place::AsyncContext => Err(HandleOperationError::AsyncContext {
+            Place::AsyncContext => Err(WorkflowHandleError::AsyncContext {
                 message: async_context_message(
                     &format!("WorkflowHandle::{method} for workflow {workflow_id}"),
                     &format!("handle.{method}"),
@@ -401,7 +401,7 @@ impl<T> WorkflowHandleView<'_, T> {
             Place::RuntimeStartFailed(failed) => {
                 let message = operation
                     .failure_message(workflow_id, &format!("the call did not run: {failed}"));
-                Err(HandleOperationError::DbOperationFailed {
+                Err(WorkflowHandleError::DatabaseOperationFailed {
                     message,
                     retryable: true,
                     workflow_id,
@@ -439,8 +439,8 @@ impl<T> WorkflowHandleView<'_, T> {
                     &format!("handle.{async_method}"),
                 ),
             }),
-            Place::RuntimeStartFailed(failed) => Err(WorkflowReadError::Database {
-                code: HandleErrorCode::DbOperationFailed,
+            Place::RuntimeStartFailed(failed) => Err(WorkflowReadError::DatabaseError {
+                database_code: WorkflowHandleErrorCode::DatabaseOperationFailed,
                 message: format!("the read did not run: {failed}"),
                 retryable: true,
             }),
@@ -457,8 +457,8 @@ where
     /// `InvalidInput`. Then, in Python's order: a process that runs task
     /// bodies refuses the wait (`WaitInsideTask`), then a runtime thread
     /// answers `AsyncContext`.
-    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
-        let _wait = self.handle.checked_wait(limit)?;
+    pub fn get(&self, wait: WaitLimit) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError> {
+        let _checked = self.handle.checked_wait(wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
                 message: wait_inside_task_message(&format!(
@@ -467,7 +467,7 @@ where
                 )),
             });
         }
-        self.block_read(self.handle.get(limit), "get()", "get(limit)")
+        self.block_read(self.handle.get(wait), "get()", "get(wait)")
     }
 }
 

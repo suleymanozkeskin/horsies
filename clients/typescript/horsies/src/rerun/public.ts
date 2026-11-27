@@ -23,7 +23,7 @@ export type {
 
 export type {
   CallerRerunError,
-  RerunCallerKeyRefused,
+  RerunIdempotencyKeyRefused,
   RerunClassNotRegistered,
   RerunClientFamily,
   RerunClientFamilyMismatch,
@@ -38,10 +38,12 @@ export type {
   RerunNoOpenTransaction,
   RerunRequestRefused,
   RerunResultNotText,
+  RerunRetryCodeNotDeclared,
   RerunStatementFailed,
   RerunStatementOutcome,
   RerunStepRefused,
   RerunStoredFamily,
+  RerunTaskNotRegistered,
   RerunUnknownStoredFamily,
 } from "./errors.ts";
 

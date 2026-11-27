@@ -68,13 +68,13 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
         """Build a fresh spec shaped by this order's lines."""
         order_id = order.order_id
         validate = TaskNode(
-            fn=validate_order,
+            function=validate_order,
             kwargs={'order_id': order_id},
             node_id='validate_order',
         )
         reservations = [
             TaskNode(
-                fn=reserve_stock,
+                function=reserve_stock,
                 kwargs={
                     'order_id': order_id,
                     'line_no': line.line_no,
@@ -87,19 +87,19 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             for line in order.lines
         ]
         authorize = TaskNode(
-            fn=authorize_payment,
+            function=authorize_payment,
             kwargs={'order_id': order_id, 'amount_cents': order.total_cents},
             waits_for=reservations,
             node_id='authorize_payment',
         )
         pick = TaskNode(
-            fn=pick_pack,
+            function=pick_pack,
             kwargs={'order_id': order_id},
             waits_for=[authorize],
             node_id='pick_pack',
         )
         invoice = TaskNode(
-            fn=generate_invoice,
+            function=generate_invoice,
             kwargs={'order_id': order_id},
             waits_for=[authorize],
             node_id='generate_invoice',
@@ -115,14 +115,14 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             node_id='shipping',
         )
         capture = TaskNode(
-            fn=capture_payment,
+            function=capture_payment,
             kwargs={'order_id': order_id},
             waits_for=[shipping, authorize],
             args_from={'authorization': authorize},
             node_id='capture_payment',
         )
         email = TaskNode(
-            fn=send_order_email,
+            function=send_order_email,
             kwargs={'order_id': order_id},
             waits_for=[capture],
             args_from={'capture': capture},

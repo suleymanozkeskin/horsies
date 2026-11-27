@@ -5,7 +5,7 @@
 //!   no connection. The first operation starts the core of the process and
 //!   connects the handle's broker; a failed connect is not kept, so the next
 //!   operation connects again.
-//! - The lazy handle is the core's ([`horsies_core::handle::CoreHandle`]),
+//! - The lazy handle is the core's ([`horsies_core::handle::CoreConnection`]),
 //!   with the client family `TYPESCRIPT`.
 //! - The operations of other areas are free functions of those areas that
 //!   take `&CoreHandle`: they use [`CoreHandle::connection`] and the child
@@ -14,11 +14,11 @@
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
+use horsies_core::handle::{CoreConnection as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::{
-    BrokerError, BrokerOperationError, ChildSpecSource, ClientFamily, CoverageRequest, PoolProfile,
-    PostgresBroker, RetentionDays,
+    BrokerError, ChildSpecSource, ClientFamily, CoverageRequest, DatabaseOperationError,
+    PoolProfile, PostgresBroker, RetentionDays,
 };
 use napi::bindgen_prelude::Object;
 use napi::Env;
@@ -77,7 +77,7 @@ impl BrokerConnection {
             handle: Arc::new(
                 LazyHandle::new(
                     self.handle.manifest().clone(),
-                    self.handle.profile(),
+                    self.handle.pool_profile(),
                     ClientFamily::TypeScript,
                 )
                 .with_install_coverage(request),
@@ -97,10 +97,6 @@ impl BrokerConnection {
     }
 
     /// The core's lazy handle, for a core function of a later area.
-    #[allow(
-        dead_code,
-        reason = "the operations of the sends, workflows and facades areas use it"
-    )]
     pub fn lazy_handle(&self) -> &LazyHandle {
         &self.handle
     }
@@ -142,10 +138,6 @@ impl CoreHandle {
 
     /// Set the child spec source of the handle's workflow operations. A
     /// second set is refused. Starts nothing.
-    #[allow(
-        dead_code,
-        reason = "the workflows area sets the source that it builds"
-    )]
     pub fn set_child_spec_source(
         &self,
         source: Arc<dyn ChildSpecSource>,
@@ -281,7 +273,7 @@ impl CoreHandle {
     }
 
     /// Ping the database: the round trip, or the catalog value with
-    /// `DB_PING_FAILED`.
+    /// `DATABASE_PING_FAILED`.
     #[napi(ts_return_type = "Promise<NativeEnvelope<NativeOutcome<DatabasePingRecord>>>")]
     pub fn ping_database<'env>(&self, env: &'env Env) -> napi::Result<Object<'env>> {
         let connection = self.connection();
@@ -346,7 +338,7 @@ async fn ping_database_operation(connection: BrokerConnection) -> Outcome<Databa
         Err(error) => {
             return Outcome::failed(
                 "ping_database",
-                &BrokerOperationError::db_ping_failed(error),
+                &DatabaseOperationError::database_ping_failed(error),
             )
         }
     };
@@ -371,7 +363,7 @@ mod tests {
             "pool_pre_ping": true,
             "pool_size": 5,
             "max_overflow": 0,
-            "pool_timeout": 30,
+            "pool_timeout_seconds": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {
@@ -399,7 +391,7 @@ mod tests {
     #[test]
     fn a_handle_writes_the_typescript_family_and_starts_nothing() {
         let handle = built(HandleProfile::Worker);
-        assert_eq!(handle.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.pool_profile(), PoolProfile::Worker);
         assert_eq!(handle.connection.handle.family(), ClientFamily::TypeScript);
         assert!(matches!(
             handle.connection.connect_state(),
@@ -438,7 +430,10 @@ mod tests {
             RetentionDays::parse_period(chrono::Duration::days(7)).expect("seven days");
         let request = CoverageRequest::new(3, 6, &[seven_days]).expect("a request in bounds");
         assert_eq!(covered.connection.handle.install_coverage(), &request);
-        assert_eq!(covered.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(
+            covered.connection.handle.pool_profile(),
+            PoolProfile::Worker
+        );
         assert_eq!(covered.connection.handle.family(), ClientFamily::TypeScript);
         assert!(matches!(
             covered.connection.connect_state(),

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import * as otel from "@opentelemetry/api";
 
+import { PACKAGE_VERSION } from "../../../../horsies/src/_catalog/package_version.ts";
 import { createHorsies, type Horsies } from "../../../../horsies/src/app.ts";
 import { WorkflowId } from "../../../../horsies/src/contract/ids.ts";
 import { defineTask } from "../../../../horsies/src/contract/public.ts";
@@ -56,9 +57,9 @@ function apiWithBrokenEnd(): OtelApi {
     ...api,
     trace: {
       ...api.trace,
-      getTracer: (name) => ({
+      getTracer: (name, version) => ({
         startSpan: (spanName, options, context) => {
-          const span = api.trace.getTracer(name).startSpan(spanName, options, context);
+          const span = api.trace.getTracer(name, version).startSpan(spanName, options, context);
 
           return {
             setAttribute: (key, value) => span.setAttribute(key, value),
@@ -95,6 +96,7 @@ describe("the start span", () => {
 
     assert.equal(span.kind, otel.SpanKind.PRODUCER);
     assert.equal(span.instrumentationScope.name, "horsies");
+    assert.equal(span.instrumentationScope.version, PACKAGE_VERSION);
     assert.deepEqual(span.attributes, {
       "messaging.system": "horsies",
       "messaging.operation.type": "send",
@@ -212,7 +214,7 @@ const hello = defineWorkflow(
 /** The app of `hello` on `core`, with the tracing `tracing`. A refused create fails the test. */
 function workflowApp(core: FakeCore, tracing: { readonly kind: "otelTracing" } | { readonly kind: "noTracing" }): Horsies {
   const created = createHorsies(
-    { broker: { databaseUrl: DATABASE_URL }, tracing, tasks: [greet], workflows: [hello] },
+    { database: { databaseUrl: DATABASE_URL }, tracing, tasks: [greet], workflows: [hello] },
     fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }), producer: { ...fakeProducer(), workflows: core } }),
   );
 

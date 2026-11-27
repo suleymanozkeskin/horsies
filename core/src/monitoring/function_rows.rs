@@ -24,7 +24,7 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::lifecycle::TerminalizationKind;
-use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
+use crate::core::task::error::{ContractCode, OperationalCode, OutcomeCode, RetrievalCode};
 use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
 use crate::core::types::status::TaskStatus;
@@ -236,7 +236,7 @@ pub(super) static MONITORING_SCHEDULES: TypedStatement = TypedStatement::new(
 );
 
 /// The built-in error-code taxonomy as the two parallel arrays the functions
-/// take: code `i` belongs to category `i`. A code outside it is a `DOMAIN`
+/// take: code `i` belongs to category `i`. A code outside it is a `CUSTOM`
 /// code.
 pub(super) struct BuiltinTaxonomy {
     pub(super) codes: Vec<String>,
@@ -247,7 +247,7 @@ pub(super) fn builtin_taxonomy() -> BuiltinTaxonomy {
     let families: [(ErrorCategory, Vec<String>); 4] = [
         (
             ErrorCategory::Operational,
-            OperationalErrorCode::ALL
+            OperationalCode::ALL
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
@@ -1878,7 +1878,7 @@ mod tests {
     #[test]
     fn a_failed_node_shows_the_message_of_its_stored_error() {
         let failed = stored(&TaskResult::Err(
-            crate::core::task::error::TaskError::builtin(
+            crate::core::task::error::TaskError::built_in(
                 OutcomeCode::UpstreamSkipped,
                 "node blew up",
             ),
@@ -1894,7 +1894,7 @@ mod tests {
     fn no_result_a_value_and_a_blank_message_show_no_error() {
         let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
         let blank = stored(&TaskResult::Err(
-            crate::core::task::error::TaskError::builtin(OutcomeCode::UpstreamSkipped, "  "),
+            crate::core::task::error::TaskError::built_in(OutcomeCode::UpstreamSkipped, "  "),
         ));
 
         assert_eq!(node_error_from_result(0, None).expect("decodes"), None);

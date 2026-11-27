@@ -95,7 +95,7 @@ pub const OUTCOME_WRITE_DRAIN: Duration = Duration::from_secs(30);
 pub const SPAWNER_STOP_WAIT: Duration = CHILD_KILL_WAIT;
 
 /// The error text of a failed start hook (Python `_HOOK_FAILURE_MESSAGE`).
-pub const CHILD_HOOK_FAILURE_MESSAGE: &str = "on_child_process_start hook failed in a worker \
+pub const CHILD_HOOK_FAILURE_MESSAGE: &str = "on_child_start hook failed in a worker \
      child (see the child log line above for the hook name); fix the hook, the worker will not \
      restart-loop on it";
 
@@ -1279,9 +1279,7 @@ impl Worker {
         PoolFacts {
             worker_id: self.worker_id.clone(),
             orphan_self_heal: OrphanSelfHeal::of_recovery_flag(
-                self.app_config
-                    .recovery
-                    .auto_terminate_orphaned_workflow_tasks,
+                self.app_config.recovery.terminate_orphaned_workflow_tasks,
             ),
             pending_limit: pending_task_limit(
                 &self.profile.profile,
@@ -1522,7 +1520,8 @@ impl Worker {
         // Server facts of the profile, before any claim: a warning, never a
         // refusal (Python `_log_connection_fit`).
         let _logged =
-            log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker).await;
+            log_connection_fit_at_boot(&self.profile, &self.app_config.database, &self.broker)
+                .await;
         let batcher = match self.finalize_batcher() {
             Ok(batcher) => batcher,
             Err(error) => {
@@ -1580,6 +1579,7 @@ impl Worker {
             profile.seat_count(),
             self.app_config
                 .cluster_wide_cap
+                .claim_parameter()
                 .map_or_else(|| "unlimited".to_owned(), |cap| cap.to_string()),
             claim.max_claim_per_worker,
             claim.max_claim_batch,
@@ -1645,7 +1645,7 @@ impl Worker {
             prefetch_buffer: self.app_config.prefetch_buffer,
             max_claim_per_worker: Self::claim_limit(claim.claimed_per_worker),
             max_claim_batch: Self::claim_limit(claim.per_queue_per_pass),
-            cluster_wide_cap: self.app_config.cluster_wide_cap,
+            cluster_wide_cap: self.app_config.cluster_wide_cap.claim_parameter(),
             claim_lease_ms: claim_lease(&self.app_config),
         }
     }
@@ -2131,7 +2131,7 @@ impl Worker {
         // stops the worker through its token.
         let beats_cancel = CancellationToken::new();
         let fail_closed_stop = FailClosedStop::new(self.cancel.clone());
-        let beat_pool = runner_beat_pool(&self.app_config.broker).map_err(|error| {
+        let beat_pool = runner_beat_pool(&self.app_config.database).map_err(|error| {
             WorkerError::Config(format!("the runner heartbeat pool is refused: {error}"))
         })?;
         let (runner_beat_watch, runner_beats) = launch_runner_beats(
@@ -2290,7 +2290,7 @@ impl Worker {
         &self,
         live: &LiveDispatches,
     ) -> Result<Option<StartedLivenessLock>, WorkerError> {
-        let plan = liveness_connect_plan(&self.app_config.broker)
+        let plan = liveness_connect_plan(&self.app_config.database)
             .map_err(|refused| WorkerError::LivenessLock(LivenessStartError::Plan(refused)))?;
         let plan = Arc::new(plan);
         let rule = LivenessRule::of_config(&self.app_config.recovery);
@@ -2392,7 +2392,7 @@ impl Worker {
     /// `FOR UPDATE SKIP LOCKED` alone is sufficient and no lock is taken.
     fn claim_lock_keys(&self, ordered_queues: &[String]) -> Vec<i64> {
         compute_claim_lock_keys(
-            self.app_config.cluster_wide_cap,
+            self.app_config.cluster_wide_cap.claim_parameter(),
             ordered_queues,
             &self.worker_config.queue_max_concurrency,
         )
@@ -2424,7 +2424,7 @@ mod tests {
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::StartupCoverageOutcome;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMetadata};
-    use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
+    use crate::core::task::{CustomCode, OperationalCode, TaskError, TaskErrorCode, TaskResult};
     use chrono::Utc;
     use futures::FutureExt;
     use serial_test::serial;
@@ -2472,7 +2472,7 @@ mod tests {
         use crate::worker::executor::protocol::{
             ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
         };
-        let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+        let database_url = DatabaseUrl::new(app_config.database.database_url.clone());
         Worker::of_child_specs(
             broker,
             crate::test_support::child_specs::no_child_specs(),
@@ -2534,7 +2534,7 @@ mod tests {
                 pool.url(),
                 crate::ClientFamily::Rust,
             )),
-            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            AppConfig::from_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig::default(),
         );
 
@@ -2566,7 +2566,7 @@ mod tests {
         ));
         let worker = worker_of_one_idle_child(
             Arc::clone(&broker),
-            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            AppConfig::from_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
             WorkerConfig {
                 queues: vec!["listener_boot_q".to_owned()],
                 ..WorkerConfig::default()
@@ -3170,7 +3170,7 @@ mod tests {
             .expect("database start with retry");
         let connections = run
             .find(
-                "log_connection_fit_at_boot(&self.profile, &self.app_config.broker, &self.broker)",
+                "log_connection_fit_at_boot(&self.profile, &self.app_config.database, &self.broker)",
             )
             .expect("connection fit at boot");
         let banner = run.find("print_banner(").expect("startup banner");
@@ -3218,7 +3218,7 @@ mod tests {
                 crate::ClientFamily::Rust,
             )),
             crate::test_support::child_specs::no_child_specs(),
-            AppConfig::for_database_url(url),
+            AppConfig::from_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
                 name: "default".to_owned(),
@@ -3250,7 +3250,7 @@ mod tests {
                 crate::ClientFamily::Rust,
             )),
             crate::test_support::child_specs::no_child_specs(),
-            AppConfig::for_database_url(url),
+            AppConfig::from_database_url(url),
             WorkerConfig::default(),
             SelectedProfile {
                 name: "empty".to_owned(),
@@ -3296,7 +3296,7 @@ mod tests {
                     crate::ClientFamily::Rust,
                 )),
                 crate::test_support::child_specs::no_child_specs(),
-                AppConfig::for_database_url(url),
+                AppConfig::from_database_url(url),
                 WorkerConfig::default(),
                 SelectedProfile {
                     name: name.to_owned(),
@@ -3983,7 +3983,7 @@ mod tests {
     /// with no `claim_lease_ms`, claims carry the 60 s default lease.
     #[test]
     fn hard_cap_returns_default_lease() {
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         assert_eq!(app_config.claim_lease_ms, None);
         assert_eq!(
             effective_claim_lease_ms(&app_config),
@@ -4141,11 +4141,11 @@ mod tests {
     }
 
     async fn retryable_failure(_: ()) -> Result<String, TaskError> {
-        Err(TaskError::new("RETRY_ME", "retry me").unwrap())
+        Err(TaskError::custom("RETRY_ME", "retry me").unwrap())
     }
 
     async fn fatal_failure(_: ()) -> Result<String, TaskError> {
-        Err(TaskError::new("FATAL", "boom").unwrap())
+        Err(TaskError::custom("FATAL", "boom").unwrap())
     }
 
     async fn callback_success_task(_: ()) -> Result<String, TaskError> {
@@ -4357,7 +4357,7 @@ mod tests {
             task_fn,
             task_id,
             OrphanSelfHeal::of_recovery_flag(
-                RecoveryConfig::default().auto_terminate_orphaned_workflow_tasks,
+                RecoveryConfig::default().terminate_orphaned_workflow_tasks,
             ),
         )
         .await;
@@ -5044,11 +5044,11 @@ mod tests {
             "timeout_ms": 4_294_967_296_u64,
             "retry_policy": {
                 "max_retries": 2,
-                "intervals": [1, 1],
+                "intervals_seconds": [1, 1],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["WORKER_SERIALIZATION_ERROR"]
+                "retry_for": ["WORKER_SERIALIZATION_ERROR"]
             }
         })
         .to_string();
@@ -5076,17 +5076,17 @@ mod tests {
         clean(&pool).await;
 
         let task_id = Uuid::new_v4();
-        // Python's stored layout: auto_retry_for lives inside retry_policy.
+        // Python's stored layout: retry_for lives inside retry_policy.
         // The retry is 60 s away, so the check of a future next_retry_at
         // holds when the finalize and the reads are slow.
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [60, 60, 60],
+                "intervals_seconds": [60, 60, 60],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["RETRY_ME"]
+                "retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -5144,7 +5144,7 @@ mod tests {
         let persisted_error = persisted.unwrap_err();
         assert_eq!(
             persisted_error.error_code,
-            TaskErrorCode::User(UserCode::parse("FATAL").unwrap())
+            TaskErrorCode::Custom(CustomCode::parse("FATAL").unwrap())
         );
 
         let (outcome, will_retry, attempt_error_code) =
@@ -5159,7 +5159,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let task_error_code = OperationalErrorCode::UnhandledException.to_string();
+        let task_error_code = OperationalCode::UnhandledException.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
@@ -5207,11 +5207,11 @@ mod tests {
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [1, 1, 1],
+                "intervals_seconds": [1, 1, 1],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["RETRY_ME"]
+                "retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -5230,7 +5230,7 @@ mod tests {
                     max_retries: 3,
                 },
             ),
-            TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
+            TaskResult::Err(TaskError::custom("RETRY_ME", "try again").unwrap()),
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )
@@ -5291,7 +5291,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let ser_error_code = OperationalErrorCode::WorkerSerializationError.to_string();
+        let ser_error_code = OperationalCode::WorkerSerializationError.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
@@ -5452,36 +5452,36 @@ mod tests {
             payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 database_url: config_url,
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig {
-                db_retry_initial_ms: 100,
-                db_retry_max_ms: 100,
-                db_retry_max_attempts: 1,
+                database_retry_initial_ms: 100,
+                database_retry_max_ms: 100,
+                database_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -5753,9 +5753,9 @@ mod tests {
                 // A wait of at least 0.75 s gives the release time to land
                 // before the second attempt.
                 resilience: WorkerResilienceConfig {
-                    db_retry_initial_ms: 1_000,
-                    db_retry_max_ms: 1_000,
-                    db_retry_max_attempts: 3,
+                    database_retry_initial_ms: 1_000,
+                    database_retry_max_ms: 1_000,
+                    database_retry_max_attempts: 3,
                     notify_poll_interval_ms: 100,
                 },
                 ..test_app_config(database.config_url.clone())
@@ -5898,14 +5898,16 @@ mod tests {
         let broker = PostgresBroker::connect_with(
             &PostgresConfig {
                 database_url: main_url.clone(),
-                session_database_url: Some(session_url),
+                session_database: crate::core::config::SessionDatabase::Separate {
+                    url: session_url,
+                },
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
@@ -6006,7 +6008,7 @@ mod tests {
         // claims on the wakes of its listener: a broker of a worker.
         let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_worker_with(
-            &test_app_config(worker_url.clone()).broker,
+            &test_app_config(worker_url.clone()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -6114,7 +6116,7 @@ mod tests {
         .expect("install the claim refusal");
         let worker_url = database_url_for(&database.config_url, database.database.name());
         let broker = PostgresBroker::connect_worker_with(
-            &test_app_config(worker_url.clone()).broker,
+            &test_app_config(worker_url.clone()).database,
             crate::ClientFamily::Rust,
         )
         .await
@@ -6225,14 +6227,16 @@ mod tests {
         let broker = PostgresBroker::connect_with(
             &PostgresConfig {
                 database_url: with_application_name(&database_url, "reaper_runtime"),
-                session_database_url: Some(with_application_name(&database_url, "reaper_session")),
+                session_database: crate::core::config::SessionDatabase::Separate {
+                    url: with_application_name(&database_url, "reaper_session"),
+                },
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
@@ -6243,7 +6247,7 @@ mod tests {
         .await
         .expect("connect a broker with two pools");
         let mut app_config = test_app_config(database.config_url.clone());
-        app_config.recovery.auto_requeue_stale_claimed = true;
+        app_config.recovery.requeue_stale_claimed = true;
         let worker = worker_with_config(broker, app_config);
         let health = new_reaper_health();
 

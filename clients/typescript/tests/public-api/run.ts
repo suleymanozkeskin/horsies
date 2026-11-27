@@ -5,21 +5,24 @@
 //                                       refuses each type that a public declaration names and the entry point does
 //                                       not export, and runs the no-`any` check with the `unknown` allow list
 //   bun tests/public-api/run.ts write   writes the API report files of `report/`
+//   bun tests/public-api/run.ts check --tarball <file.tgz>
+//                                       the same check, with the declarations of the unpacked `horsies` tarball
+//                                       (npm pack) in place of the declarations that the compiler writes here
 //
 // Exit status: 0 when the check passes or the files are written; 1 when a report differs, a type is not exported or
 // a top type is refused; 2 when a tool fails or the command is unknown. The work files are in a new folder of the
 // system's temporary folder, removed at the end.
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { allowListOf, allowListRefusedText, judgeTopTypes, topTypesPass, type TopTypeVerdict } from "./allow-list.ts";
-import { type BuiltPackage, buildPackage, manifestRefusedText } from "./package.ts";
+import { type BuiltPackage, buildPackage, entryPointsOf, manifestRefusedText, type ParsedJson } from "./package.ts";
 import { apiReport, compareReport, type EntryReport, REPORT_DIR, reportFailedText, reportFileName } from "./report.ts";
 import { anyPlaces, declarationProgram, type SurfaceWalkFailed, type TopTypePlace, unknownPlaces } from "./surface.ts";
-import { toolFailedText } from "./tools.ts";
+import { runTool, TESTS_DIR, toolFailedText } from "./tools.ts";
 
 /** The command that writes the report files again. */
 export const REGENERATE_COMMAND = "(cd clients/typescript && bun tests/public-api/run.ts write)";
@@ -33,8 +36,48 @@ type Verdict = "passed" | "refused" | "toolFailed";
 
 const EXIT_STATUS: Readonly<Record<Verdict, number>> = { passed: 0, refused: 1, toolFailed: 2 };
 
+/** Where the declarations come from: the compiler of this tree, or an unpacked tarball of `npm pack`. */
+type Source = { readonly kind: "compiled" } | { readonly kind: "tarball"; readonly file: string };
+
+/**
+ * The package of the tarball `file`, unpacked into `workFolder`: the declarations as a user receives them. Effects:
+ * runs `tar`; links the workspace's zod (the optional peer that the `horsies/zod` declarations import).
+ */
+function unpacked(file: string, workFolder: string): BuiltPackage | "toolFailed" {
+  const extractFolder = join(workFolder, "tarball");
+
+  mkdirSync(extractFolder);
+
+  const untar = runTool("tar", ["-xzf", file, "-C", extractFolder], workFolder);
+
+  if (!untar.ok || untar.value.code !== 0) {
+    console.error(`tar did not unpack ${file}`);
+
+    return "toolFailed";
+  }
+
+  const folder = join(extractFolder, "package");
+  // SAFETY: JSON.parse gives a parsed JSON document.
+  const entryPoints = entryPointsOf(JSON.parse(readFileSync(join(folder, "package.json"), "utf8")) as ParsedJson);
+
+  if (!entryPoints.ok) {
+    console.error(manifestRefusedText(entryPoints.error));
+
+    return "toolFailed";
+  }
+
+  mkdirSync(join(folder, "node_modules"), { recursive: true });
+  symlinkSync(`${TESTS_DIR}node_modules/zod`, join(folder, "node_modules", "zod"), "dir");
+
+  return { folder, entryPoints: entryPoints.value };
+}
+
 /** The built package, or the verdict of a build that failed (its message is printed). */
-function built(workFolder: string): BuiltPackage | "toolFailed" {
+function built(workFolder: string, source: Source): BuiltPackage | "toolFailed" {
+  if (source.kind === "tarball") {
+    return unpacked(source.file, workFolder);
+  }
+
   const packageFolder = join(workFolder, "package");
 
   mkdirSync(packageFolder);
@@ -236,8 +279,8 @@ function worse(first: Verdict, second: Verdict): Verdict {
   return EXIT_STATUS[first] >= EXIT_STATUS[second] ? first : second;
 }
 
-function runCommand(command: Command, workFolder: string): Verdict {
-  const builtPackage = built(workFolder);
+function runCommand(command: Command, workFolder: string, source: Source): Verdict {
+  const builtPackage = built(workFolder, source);
 
   if (builtPackage === "toolFailed") {
     return "toolFailed";
@@ -268,6 +311,21 @@ function commandOf(argument: string | undefined): Command | "unknown" {
   }
 }
 
+/** The source of the declarations from the arguments after the command, or the text of the refusal. Pure. */
+function sourceOf(command: Command, args: readonly string[]): Source | { readonly refused: string } {
+  if (args.length === 0) {
+    return { kind: "compiled" };
+  }
+
+  const [flag, file, ...rest] = args;
+
+  if (flag !== "--tarball" || file === undefined || rest.length > 0 || command !== "check") {
+    return { refused: "usage: bun tests/public-api/run.ts check|write, or check --tarball <file.tgz>" };
+  }
+
+  return { kind: "tarball", file: realpathSync(file) };
+}
+
 function main(): Verdict {
   const command = commandOf(process.argv[2]);
 
@@ -277,10 +335,18 @@ function main(): Verdict {
     return "toolFailed";
   }
 
+  const source = sourceOf(command, process.argv.slice(3));
+
+  if ("refused" in source) {
+    console.error(source.refused);
+
+    return "toolFailed";
+  }
+
   const workFolder = realpathSync(mkdtempSync(join(tmpdir(), "horsies-public-api-")));
 
   try {
-    return runCommand(command, workFolder);
+    return runCommand(command, workFolder, source);
   } finally {
     rmSync(workFolder, { recursive: true, force: true });
   }

@@ -170,7 +170,7 @@ things follow, and they are not optional in a real deployment:
   in this showcase does, and the `replayed` field on its result says whether
   this run did the work or found it already done.
 - **Retry the crash, not the cause.** `WORKER_CRASHED` belongs in
-  `auto_retry_for`; the error that caused the kill does not. `generate_invoice`
+  `retry_for`; the error that caused the kill does not. `generate_invoice`
   omits `TASK_TIMEOUT` on purpose — its stall is a stable property of the order,
   so a retry would stall again and cost another child.
 
@@ -188,7 +188,7 @@ state. The same run on the shared process pool lost 37 tasks to 7 pool restarts.
 
 `store.py` contains every psycopg exception at the one call that performs I/O
 and converts it into a `StoreError` carrying the operation name. Tasks turn that
-into `TaskError(error_code='STORE_UNAVAILABLE')` with the failing operation in
+into `TaskError(code='STORE_UNAVAILABLE')` with the failing operation in
 `data`.
 
 This was demonstrated by accident. During development the host volume filled
@@ -265,7 +265,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `WorkflowMetadata` | `pick_pack` | workflow id and node index in the result |
 | Crash recovery | `chaos`: `flaky_export` calls `os._exit(1)` | `WORKER_CRASHED` attempts, then recovery |
 | Worker health | 12 worker children, 10 s snapshots | CPU and memory history |
-| `resend_on_transient_err` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
+| `resend_on_transient_error` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
 
 ## Layout
 
@@ -321,7 +321,7 @@ will pause, because the draw is a hash of the return id.
 
 - `cluster_wide_cap` — mutually exclusive with a non-zero `prefetch_buffer`,
   and the showcase demonstrates exact per-queue caps instead.
-- `on_child_process_start` — there is no per-child engine to rebind here.
+- `on_child_start` — there is no per-child engine to rebind here.
 - `catch_up_missed=True` — restarting a demo would replay a backlog of noise.
 
 ## Configuration on show
@@ -345,6 +345,6 @@ Recovery is demo-tuned: worker snapshots every 10 s (so the CPU and memory
 charts move), the reaper polling at the same cadence, and terminal rows kept for
 24 hours.
 
-`resend_on_transient_err=True` retries transient enqueue failures on the send
+`resend_on_transient_error=True` retries transient enqueue failures on the send
 and start path. That is infrastructure retry, and it is a different thing from
 `RetryPolicy`, which retries task *execution*.

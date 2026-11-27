@@ -4,7 +4,7 @@ Strict-serde (design §8) routes library-constructed ``TaskError`` payloads
 through ``encode_task_result`` for the wire envelope. The strict codec
 cannot emit a raw ``BaseException``, so this module exposes the
 ``flatten_exception`` primitive that converts a live exception into the
-``FlattenedException`` dict shape ``TaskError.exception`` is annotated to
+``ExceptionRecord`` dict shape ``TaskError.exception`` is annotated to
 accept on the wire side.
 
 Kept out of ``codec/typed.py`` because typed.py is the generic strict
@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.validation_errors import exception_text, validation_summary
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import FlattenedException, TaskError
+from horsies.core.models.tasks import ExceptionRecord, TaskError
 from horsies.core.types.result import Err, is_err
 
 
@@ -58,7 +58,7 @@ def serialize_error_payload(error: TaskError) -> str:
     err slot is encoded against the fixed ``TaskError`` schema.
 
     Live ``BaseException`` on ``TaskError.exception`` is flattened to
-    ``FlattenedException`` by ``encode_task_result`` itself, so a caller can
+    ``ExceptionRecord`` by ``encode_task_result`` itself, so a caller can
     hand us a ``TaskError`` that holds a live exception without pre-flattening.
 
     Returns the JSON string on success, or a hardcoded fallback if
@@ -93,8 +93,8 @@ _GROUP_MEMBERS_NOT_SHOWN: Final = (
 )
 
 
-def flatten_exception(exc: BaseException) -> FlattenedException:
-    """Convert a live ``BaseException`` to a wire-safe ``FlattenedException``.
+def flatten_exception(exc: BaseException) -> ExceptionRecord:
+    """Convert a live ``BaseException`` to a wire-safe ``ExceptionRecord``.
 
     The shape extends the legacy ``_exception_to_json`` triple
     (``type`` / ``message`` / ``traceback``) with ``module`` and
@@ -109,7 +109,7 @@ def flatten_exception(exc: BaseException) -> FlattenedException:
     ``MAX_EXCEPTION_CHAIN_LINKS`` exceptions; past the bound it treats the
     rest as holding a validation error.
     """
-    return FlattenedException(
+    return ExceptionRecord(
         type=type(exc).__name__,
         module=type(exc).__module__,
         message=exception_text(exc),

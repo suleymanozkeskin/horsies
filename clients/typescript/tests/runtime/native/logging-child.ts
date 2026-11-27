@@ -3,7 +3,10 @@
 
 import { writeSync } from "node:fs";
 
+import { Horsies } from "../../../horsies/src/app.ts";
 import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
+import { appInternals } from "../../../horsies/src/app/internals.ts";
+import { processCheckCommandDeps } from "../../../horsies/src/cli/check-command.ts";
 import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
@@ -56,6 +59,8 @@ async function runCase(name: string | undefined): Promise<string> {
       return defectRecordToSink();
     case "first-payload-warning":
       return firstPayloadWarning();
+    case "command-json-lines":
+      return commandJsonLines();
     case undefined:
     default:
       return `unknown case ${String(name)}`;
@@ -70,10 +75,38 @@ async function idleExitWithSink(): Promise<string> {
   configureLogging({ levels: { default: "WARNING" }, sink: { kind: "function", sink: () => undefined } });
 
   const probe = envelopeValue(
-    await probeAddon().probeCallback(settlingCallback((argument: string) => argument, addonSettlement), "ping"),
+    await probeAddon().probeCallback(settlingCallback((argument: string) => argument, addonSettlement), "ping", {
+      kind: "noBound",
+    }),
   );
 
   return `probed ${probe.kind}`;
+}
+
+/**
+ * The log setup of a command of an app with `logFormat: { kind: "jsonLogs" }` (the `check` command's), then a ping
+ * with the default stderr sink: each record goes to stderr as one JSON line.
+ */
+async function commandJsonLines(): Promise<string> {
+  const created = Horsies.create({
+    database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } },
+    tasks: [],
+    logFormat: { kind: "jsonLogs" },
+  });
+
+  if (!created.ok) {
+    return `refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`;
+  }
+
+  processCheckCommandDeps(appInternals(created.value)).setLogLevel("DEBUG");
+
+  const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), true), "PRODUCER");
+  const ping = await handle.pingDatabase();
+
+  await sleep(STDERR_WRITE_WAIT_MS);
+  await handle.close();
+
+  return `pinged ${ping.kind}`;
 }
 
 /** A sink that throws: the batch goes to stderr, and the process goes on. */
@@ -165,7 +198,7 @@ async function firstPayloadWarning(): Promise<string> {
 function warningRules(): NativeSendRules {
   const config = parseAppConfig(
     {
-      broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
+      database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
       payload: { warnBytes: { kind: "bytes", bytes: WARN_BYTES } },
     },
     () => undefined,
@@ -175,7 +208,7 @@ function warningRules(): NativeSendRules {
     throw new Error(`the config is refused: ${JSON.stringify(config.error)}`);
   }
 
-  const checked = checkAppConfig(config.value.coreConfigJson);
+  const checked = checkAppConfig(config.value.coreConfigJson, config.value.schemaMode);
 
   if (checked.kind !== "accepted") {
     throw new Error(`the core refuses the config: ${JSON.stringify(checked.refusals)}`);

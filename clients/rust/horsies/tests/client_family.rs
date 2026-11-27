@@ -37,7 +37,7 @@ async fn install_template(url: &str) {
 #[tokio::test]
 async fn the_first_operation_of_an_app_records_the_rust_family() {
     let database = TestDatabase::create_empty().await;
-    let app = Horsies::new(AppConfig::for_database_url(database.url())).expect("the app");
+    let app = Horsies::new(AppConfig::from_database_url(database.url())).expect("the app");
 
     match app
         .get_task_info(Uuid::new_v4(), TaskInfoParts::default())

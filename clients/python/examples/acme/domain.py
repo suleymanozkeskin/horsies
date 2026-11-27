@@ -9,12 +9,13 @@ renders and downstream nodes consume through `args_from`.
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Final, Literal
 
 from pydantic import BaseModel
 
 # --- Domain error codes -------------------------------------------------
-# Plain `str`, never `str, Enum`: user codes must survive a JSON round trip
+# Plain `str`, never `str, Enum`: custom codes must survive a JSON round trip
 # as strings, and none of them may collide with a reserved built-in code.
 
 CARD_DECLINED: Final[str] = 'CARD_DECLINED'
@@ -37,6 +38,30 @@ SUPPLIER_TIMEOUT: Final[str] = 'SUPPLIER_TIMEOUT'
 DATA_CORRUPTION: Final[str] = 'DATA_CORRUPTION'
 LOYALTY_ENGINE_BUG: Final[str] = 'LOYALTY_ENGINE_BUG'
 STORE_UNAVAILABLE: Final[str] = 'STORE_UNAVAILABLE'
+
+
+# --- Retryable code classes ---------------------------------------------
+# `auto_retry_for` takes code members, not text. A task that retries on one of
+# its own codes declares the Enum class with `error_codes=`; the bodies keep
+# returning the plain text constants above, which are the member values.
+
+
+class PaymentRetryCode(str, Enum):
+    """The code of `authorize_payment` that its retry policy follows."""
+
+    PSP_UNAVAILABLE = PSP_UNAVAILABLE
+
+
+class ShippingRetryCode(str, Enum):
+    """The code of `book_courier` that its retry policy follows."""
+
+    COURIER_UNAVAILABLE = COURIER_UNAVAILABLE
+
+
+class SupplierRetryCode(str, Enum):
+    """The code of `sync_supplier_feed` that its retry policy follows."""
+
+    SUPPLIER_TIMEOUT = SUPPLIER_TIMEOUT
 
 # Plain assignments, not PEP 695 `type` aliases: strict-serde inspects the
 # annotations of every model that appears in the `Ok` value of a task, and a

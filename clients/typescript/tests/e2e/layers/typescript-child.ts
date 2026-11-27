@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe } from "node:test";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon } from "#horsies";
 import { providedState } from "../src/app.ts";
 import { type Instance, TEST_DRAIN_TIMEOUT_MS } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
@@ -20,8 +20,8 @@ import { processAlive } from "../support/process.ts";
 import { pollUntil } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 30_000;

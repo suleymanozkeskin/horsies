@@ -1,6 +1,6 @@
 //! The blocking views of the Rust client on PostgreSQL: each view method
 //! runs its async method on the core's process runtime and returns its
-//! answer (Python's sync calls: `send` and `schedule`, `retry_send`,
+//! answer (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and `resend_start`, and the
 //! sync methods of `WorkflowHandle`). One test per outcome of the database.
@@ -24,10 +24,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use horsies::{
-    task, AppConfig, HandleOperationError, HandleResult, Horsies, HorsiesError, NodeKey,
-    NodeResult, PingTarget, ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome,
-    TaskSendErrorCode, TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit,
-    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowReadError, WorkflowSpec,
+    task, AppConfig, HandleResult, Horsies, HorsiesError, NodeKey, NodeResult, PingTarget,
+    ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
+    TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefinition,
+    WorkflowDefinitionConfig, WorkflowHandleError, WorkflowReadError, WorkflowSpec,
     WorkflowSpecBuilder, WorkflowStartErrorCode, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome};
@@ -105,7 +105,7 @@ const ENDED_WAIT: Duration = Duration::from_secs(10);
 const PING_WINDOW: Duration = Duration::from_millis(300);
 
 /// The delay of a delayed send (`TaskSendOptions::delay`).
-const SCHEDULE_DELAY_SECS: u32 = 3_600;
+const SEND_DELAY_SECS: u32 = 3_600;
 
 /// A worker id that never reported a state.
 const ABSENT_WORKER: &str = "blocking-views-absent-worker";
@@ -234,7 +234,7 @@ where
 /// An app on the database of `url` with the tasks `echo` and `answer`, and
 /// the function of `echo`. No I/O.
 fn app_on(url: &str) -> (Horsies, TaskFunction<echo::Input, u32, Infallible>) {
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the app");
     let echo_function = echo::register(&mut app).expect("register echo");
     let _answer_function = answer::register(&mut app).expect("register answer");
     (app, echo_function)
@@ -478,7 +478,7 @@ fn assert_task_not_found<V: Debug>(read: Result<V, ReadError>, task_id: Uuid) {
 /// `answer` is `WORKFLOW_NOT_FOUND` of `workflow_id`.
 fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uuid) {
     match answer {
-        Err(HandleOperationError::WorkflowNotFound {
+        Err(WorkflowHandleError::NotFound {
             workflow_id: missing,
             ..
         }) => assert_eq!(missing, workflow_id),
@@ -487,20 +487,20 @@ fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uui
 }
 
 /// A send now and a send with a delay write PENDING tasks with the sent
-/// input; the delayed one is due after its delay. `retry_send` of a send
+/// input; the delayed one is due after its delay. `resend` of a send
 /// refused on a runtime thread writes the task id of the refused send.
 #[tokio::test]
 async fn blocking_sends_write_their_tasks() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
-    let (sent, delayed, retried) = off_the_runtime(move || {
+    let (sent, delayed, resent) = off_the_runtime(move || {
         let (_app, echo_function) = app_on(&url);
         let sent = echo_function
             .blocking()
             .send(echo_input())
             .expect("the blocking send")
             .task_id();
-        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SCHEDULE_DELAY_SECS));
+        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SEND_DELAY_SECS));
         let delayed_id = echo_function
             .blocking()
             .with_options(delayed)
@@ -514,17 +514,17 @@ async fn blocking_sends_write_their_tasks() {
         let refused_id = refused
             .task_id()
             .expect("the refused send keeps its task id");
-        let retried = echo_function
+        let resent = echo_function
             .blocking()
-            .retry_send(&refused)
-            .expect("the blocking retry of the refused send")
+            .resend(&refused)
+            .expect("the blocking resend of the refused send")
             .task_id();
-        assert_eq!(retried, refused_id);
-        (sent, delayed_id, retried)
+        assert_eq!(resent, refused_id);
+        (sent, delayed_id, resent)
     })
     .await;
 
-    for (task_id, due_later) in [(sent, false), (delayed, true), (retried, false)] {
+    for (task_id, due_later) in [(sent, false), (delayed, true), (resent, false)] {
         let row = database
             .client()
             .query_one(
@@ -562,7 +562,7 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
 
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let with_result = TaskInfoParts {
             result: true,
             ..TaskInfoParts::default()
@@ -623,7 +623,7 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
             .expect("the blocking send");
         let task_id = handle.task_id();
         let timed_out = |read: Result<(), ReadError>| match read {
-            Err(ReadError::WaitTimedOut {
+            Err(ReadError::WaitTimeout {
                 task_id: waited,
                 status: TaskStatus::Pending,
             }) => assert_eq!(waited, task_id),
@@ -655,22 +655,25 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
 
         let coverage = app
             .blocking()
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .expect("the class coverage");
         assert_eq!(coverage.live_workers, 0);
         match coverage.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
-        let report = app.blocking().get_class_report().expect("the class report");
+        let report = app
+            .blocking()
+            .get_execution_class_report()
+            .expect("the class report");
         assert!(report.workers.is_empty(), "{report:?}");
         match report.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
@@ -688,7 +691,7 @@ async fn blocking_reads_of_an_unknown_task_are_task_not_found() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         let task_id = Uuid::new_v4();
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
 
         assert_task_not_found(handle.blocking().get(wait_of(SHORT_WAIT)), task_id);
         assert_task_not_found(handle.blocking().info(TaskInfoParts::default()), task_id);
@@ -741,11 +744,11 @@ async fn blocking_reads_of_a_cancelled_task_answer_task_cancelled() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         match app
-            .task_handle_of::<u32, Infallible>(task_id)
+            .task_handle::<u32, Infallible>(task_id)
             .blocking()
             .get(wait_of(ENDED_WAIT))
         {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "TASK_CANCELLED"),
             other => panic!("expected TASK_CANCELLED, got {other:?}"),
         }
         match app.blocking().get_raw_result(task_id, wait_of(ENDED_WAIT)) {
@@ -795,7 +798,11 @@ async fn blocking_health_reads_and_the_live_check_answer_from_the_database() {
         assert!(history.is_empty(), "{history:?}");
         let pongs = app
             .blocking()
-            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, None)
+            .ping_workers(
+                PingTarget::EveryWorker,
+                PING_WINDOW,
+                horsies::MinResponses::FullWindow,
+            )
             .expect("the worker ping");
         assert!(pongs.is_empty(), "{pongs:?}");
         let passed = app.blocking().check_live().expect("the live check passes");
@@ -1137,7 +1144,7 @@ async fn blocking_handle_reads_of_a_running_workflow() {
             other => panic!("expected RESULT_NOT_READY, got {other:?}"),
         }
         match view.get(wait_of(SHORT_WAIT)) {
-            Err(WorkflowReadError::WaitTimedOut {
+            Err(WorkflowReadError::WaitTimeout {
                 workflow_id: waited,
             }) => assert_eq!(waited, workflow_id),
             other => panic!("expected WAIT_TIMEOUT, got {other:?}"),
@@ -1169,7 +1176,7 @@ async fn blocking_pause_and_resume_move_the_workflow_between_running_and_paused(
         let paused_again = view.pause();
         assert!(matches!(paused_again, Ok(false)), "{paused_again:?}");
         match view.get(wait_of(ENDED_WAIT)) {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "WORKFLOW_PAUSED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "WORKFLOW_PAUSED"),
             other => panic!("expected WORKFLOW_PAUSED, got {other:?}"),
         }
         let resumed = view.resume();
@@ -1204,7 +1211,7 @@ async fn a_blocking_cancel_ends_the_workflow_as_cancelled() {
         );
         match view.get(wait_of(ENDED_WAIT)) {
             Ok(TaskOutcome::Failed(error)) => {
-                assert_eq!(error.code().text(), "WORKFLOW_CANCELLED");
+                assert_eq!(error.code().as_str(), "WORKFLOW_CANCELLED");
             }
             other => panic!("expected WORKFLOW_CANCELLED, got {other:?}"),
         }

@@ -15,7 +15,7 @@ Read the outcome of a task with `TaskHandle.get()` or `get_async()`. A read retu
 ### Basic Retrieval
 
 ```python
-from horsies import Err, Failed, Ok, Succeeded, WaitTimeout
+from horsies import Err, Failed, Ok, ReadWaitTimeout, Succeeded
 from instance import my_task
 
 send_result = my_task.send(x=10, y=20)
@@ -28,8 +28,8 @@ match handle.get():
     case Ok(Succeeded(value)):
         print(f"Success: {value}")
     case Ok(Failed(task_error)):
-        print(f"Task failed: {task_error.error_code} - {task_error.message}")
-    case Err(WaitTimeout()):
+        print(f"Task failed: {task_error.code} - {task_error.message}")
+    case Err(ReadWaitTimeout()):
         print(f"Timeout waiting for {handle.task_id}")
     case Err(read_error):
         print(f"Read failed: {read_error.code} - {read_error.message}")
@@ -46,7 +46,7 @@ read = await handle.get_async()  # a ReadResult: match it as in Basic Retrieval
 ```
 `get_async()` waits for broker notifications (LISTEN/NOTIFY) with a polling fallback if notifications are lost.
 
-On a thread that runs an event loop, sync `get()` returns `Err(AsyncContext(...))`, and sync `info()` returns `Err(BrokerAsyncContext(...))`. Both do nothing. Use `get_async()` and `info_async()` there.
+On a thread that runs an event loop, sync `get()` returns `Err(ReadAsyncContext(...))`, and sync `info()` returns `Err(DatabaseAsyncContext(...))`. Both do nothing. Use `get_async()` and `info_async()` there.
 
 ### Timeouts
 
@@ -54,19 +54,19 @@ Specify maximum wait time in milliseconds:
 
 ```python
 # Wait up to 5 seconds
-match handle.get(timeout_ms=5000):
-    case Err(WaitTimeout()):
+match handle.get(wait_ms=5000):
+    case Err(ReadWaitTimeout()):
         # Task didn't complete in time - may still be running
         print("Timed out, task may still complete later")
     case _:
         pass  # an outcome or another read error: match them as in Basic Retrieval
 ```
 
-A `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` gives `Err(InvalidInput(...))`, and nothing is read.
+A `wait_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` gives `Err(ReadInvalidInput(...))`, and nothing is read.
 
 ### Result Caching
 
-The handle keeps a final answer: an outcome, `ResultNotAvailable`, `ResultDeserializationError` or `NoTypeAvailable`. A later `get()` returns it with no database query. The handle does not keep the other read errors, for example `WaitTimeout` or `BrokerError`. After one of them, a later `get()` reads again.
+The handle keeps a final answer: an outcome, `ReadResultNotAvailable`, `ReadResultDeserializationError` or `ReadNoTypeAvailable`. A later `get()` returns it with no database query. The handle does not keep the other read errors, for example `ReadWaitTimeout` or `ReadDatabaseError`. After one of them, a later `get()` reads again.
 
 ```python
 send_result = my_task.send(...)
@@ -171,7 +171,7 @@ match handle.get():
         # depending on your use case, either pass to a error handler ( prefer this when possible )
         your_error_handler(task_error)
         # or return/raise to propagate
-        return task_error.error_code
+        return task_error.code
     case Err(read_error):
         your_read_error_handler(read_error)
         return read_error.code

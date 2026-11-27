@@ -31,7 +31,7 @@ describe("workerProfilesJson", () => {
           kind: "isolated_children",
           count: 4,
           recycle: { after: { kind: "task_limit", tasks: 50 }, above: { kind: "memory_limit", mb: 512 } },
-          pool: { min_size: 1, max_size: { kind: "pool_size", connections: 3 }, check: true },
+          pool: { min_size: 1, max_size: { kind: "pool_size", connections: 3 }, pre_ping: true },
           task_send_pool: { kind: "pool_size", connections: 2 },
         },
       },
@@ -77,10 +77,24 @@ describe("workerProfilesJson", () => {
           kind: "shared_async_children",
           count: 1,
           seats: 8,
-          pool: { min_size: 0, max_size: { kind: "pool_size", connections: 4 }, check: false },
+          pool: { min_size: 0, max_size: { kind: "pool_size", connections: 4 }, pre_ping: false },
           task_send_pool: { kind: "pool_size", connections: 2 },
         },
       },
+    );
+  });
+
+  test("shared async children with a set number of runtime threads", () => {
+    assert.deepEqual(
+      profileObject({ sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 8, executor: { kind: "threads", threads: 3 } } }),
+      { shared_async: { kind: "shared_async_children", count: 1, seats: 8, executor: { kind: "executor_threads", threads: 3 } } },
+    );
+  });
+
+  test("shared async children with runtime threads that follow the seats", () => {
+    assert.deepEqual(
+      profileObject({ sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 8, executor: { kind: "fromSeats" } } }),
+      { shared_async: { kind: "shared_async_children", count: 1, seats: 8, executor: { kind: "executor_threads_from_seats" } } },
     );
   });
 

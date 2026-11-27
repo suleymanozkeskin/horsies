@@ -25,7 +25,7 @@ from pydantic import BaseModel, SecretStr
 
 from horsies.core.app import Horsies
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -48,7 +48,7 @@ DATABASE_URL = 'postgresql://u:p@localhost:5432/db'
 
 def _real_app() -> Horsies:
     return Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
 
@@ -89,11 +89,11 @@ class TestSpecConstructionRefusesALoneSurrogate:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='surrogate-task-node',
-                nodes=[TaskNode(fn=note, kwargs=kwargs)],
+                nodes=[TaskNode(function=note, kwargs=kwargs)],
                 definition_key=_key('task_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert raised.value.code.value == 'HRS-031'
         assert (
             f'{subject} holds a lone surrogate' in ' '.join(raised.value.notes)
@@ -122,7 +122,7 @@ class TestSpecConstructionRefusesALoneSurrogate:
                 definition_key=_key('sub_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
 
 class _ListValued(Enum):
@@ -170,7 +170,7 @@ class TestDictKeyWithoutAJsonForm:
 
         # A `build_with` parameter cannot be `Any` any more, so the allow-list
         # refuses this before the dump can.
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert 'banned type `Any`' in ' '.join(raised.value.notes)
 
 
@@ -196,11 +196,11 @@ class TestValueThatHoldsItself:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='circular-task-node',
-                nodes=[TaskNode(fn=linked, kwargs={'x': node})],
+                nodes=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('circular_task_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert 'Circular reference detected (id repeated)' in ' '.join(
             raised.value.notes,
         )
@@ -232,7 +232,7 @@ class TestValueThatHoldsItself:
                 definition_key=_key('circular_sub_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert 'banned type `Any`' in ' '.join(raised.value.notes)
 
 
@@ -252,12 +252,12 @@ class TestValueThatIsTooDeep:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='deep-task-node',
-                nodes=[TaskNode(fn=linked, kwargs={'x': node})],
+                nodes=[TaskNode(function=linked, kwargs={'x': node})],
                 definition_key=_key('deep_task_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-        assert 'Circular reference detected (depth exceeded)' in ' '.join(
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Maximum serialization depth exceeded' in ' '.join(
             raised.value.notes,
         )
 
@@ -277,11 +277,11 @@ class TestValuePastTheDepthBound:
         with pytest.raises(WorkflowValidationError) as raised:
             _ = app.workflow(
                 name='cycle-task-node',
-                nodes=[TaskNode(fn=holds_json, kwargs={'x': value})],
+                nodes=[TaskNode(function=holds_json, kwargs={'x': value})],
                 definition_key=_key('cycle_task_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert 'nested deeper than' in ' '.join(raised.value.notes)
 
 
@@ -312,7 +312,7 @@ class TestBytesThatAreNotUtf8:
                 definition_key=_key('not_utf8_sub_node'),
             )
 
-        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         assert 'banned type `bytes`' in ' '.join(raised.value.notes)
 
 

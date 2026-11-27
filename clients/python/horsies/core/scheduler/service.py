@@ -30,7 +30,7 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.payload_guard import warn_if_payload_large
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.logging import get_logger
 from horsies.core.models.schedule import ScheduleConfig
 from horsies.core.scheduler.manifest import to_scheduler_manifest
@@ -68,7 +68,7 @@ def _raise_start_not_completed(
         case SchedulerStartRefused(schedule=schedule, reason=reason):
             raise ConfigurationError(
                 message=f"schedule '{schedule}' cannot start",
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[reason],
                 help_text=(
                     "fix the schedule's pattern, timezone or kwargs, or the task's "
@@ -99,7 +99,7 @@ class Scheduler:
         if not app.config.schedule:
             raise ConfigurationError(
                 message='app config must have schedule configuration',
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=['schedule config is None or not provided in AppConfig'],
                 help_text='add schedule=ScheduleConfig(...) to your AppConfig',
             )

@@ -45,7 +45,7 @@ Both work with tracing on or off. With tracing on, the `trace_id` of a record of
 | Client | Turn on | Keys |
 |--------|---------|------|
 | Python | `AppConfig(log_format=JsonLogs())` | `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`; each line has every key |
-| Rust | `horsies::cli::run_with_log_format(app, LogFormat::Json)` | `timestamp`, `level`, `target`, the fields of the event at the top level (`message` among them), `span` (the innermost span, with its name and fields) and `spans` (every span of the record, outermost first) |
+| Rust | `horsies::cli::run_with_log_format(app, LogFormat::JsonLogs)` | `timestamp`, `level`, `target`, the fields of the event at the top level (`message` among them), `span` (the innermost span, with its name and fields) and `spans` (every span of the record, outermost first) |
 
 The worker, the scheduler, the check and each worker child write in the format. The setup of each client: [Log Setup (Python)](/horsies/observability/log-setup/), [Logs (Rust)](/horsies/rust/cli/#logs).
 

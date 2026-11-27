@@ -80,8 +80,10 @@ export type ZodContainerValue<S> =
     ? ZodObjectValue<M>
     : ZodDefOf<S> extends { readonly type: "array"; readonly element: infer I }
       ? ZodValueOf<I>[]
-      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
-        ? { -readonly [K in keyof T]: ZodValueOf<T[K]> }
+      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T extends readonly ZodSchemaLike[]; readonly rest: infer R }
+        ? R extends ZodSchemaLike
+          ? [...{ -readonly [K in keyof T]: ZodValueOf<T[K]> }, ...ZodValueOf<R>[]]
+          : { -readonly [K in keyof T]: ZodValueOf<T[K]> }
         : ZodDefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
           ? { [K in keyof ZodOutputOf<S>]: ZodValueOf<V> }
           : ZodDefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }
@@ -113,8 +115,10 @@ export type ZodContainerSent<S> =
     ? ZodObjectSent<M>
     : ZodDefOf<S> extends { readonly type: "array"; readonly element: infer I }
       ? ZodSentOf<I>[]
-      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
-        ? { -readonly [K in keyof T]: ZodSentOf<T[K]> }
+      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T extends readonly ZodSchemaLike[]; readonly rest: infer R }
+        ? R extends ZodSchemaLike
+          ? [...{ -readonly [K in keyof T]: ZodSentOf<T[K]> }, ...ZodSentOf<R>[]]
+          : { -readonly [K in keyof T]: ZodSentOf<T[K]> }
         : ZodDefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
           ? { [K in keyof ZodOutputOf<S>]: ZodSentOf<V> }
           : ZodDefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }

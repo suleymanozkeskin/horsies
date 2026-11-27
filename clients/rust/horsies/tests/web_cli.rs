@@ -93,7 +93,7 @@ fn an_unknown_toml_key_is_refused_by_name() {
     let mut file = tempfile::NamedTempFile::new().expect("a temporary file");
     std::io::Write::write_all(
         &mut file,
-        b"[broker]\ndatabase_url = \"postgresql://127.0.0.1:1/none\"\npool_sise = 3\n",
+        b"[database]\ndatabase_url = \"postgresql://127.0.0.1:1/none\"\npool_sise = 3\n",
     )
     .expect("the config is written");
     let path = file.path().to_str().expect("a UTF-8 temporary path");

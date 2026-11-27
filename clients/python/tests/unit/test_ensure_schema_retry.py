@@ -9,7 +9,7 @@ import pytest
 
 from psycopg import InterfaceError, OperationalError
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailed
 from horsies.core.cli import _ensure_schema_with_retry
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
@@ -19,14 +19,14 @@ def _schema_err(
     message: str,
     *,
     retryable: bool = True,
-    exception: BaseException | None = None,
-) -> Err[BrokerOperationError]:
+    cause: BaseException | None = None,
+) -> Err[DatabaseOperationError]:
     """Build an Err for schema init failure in tests."""
-    return Err(BrokerOperationFailed(
-        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+    return Err(DatabaseOperationFailed(
+        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
-        exception=exception or ConnectionError(message),
+        cause=cause or ConnectionError(message),
     ))
 
 
@@ -49,14 +49,14 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
                 Ok(None),
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
         )
         logger = logging.getLogger('test')
 
@@ -71,7 +71,7 @@ class TestEnsureSchemaWithRetry:
             return_value=_schema_err(
                 'bad config',
                 retryable=False,
-                exception=ValueError('bad config'),
+                cause=ValueError('bad config'),
             ),
         )
         resilience = WorkerResilienceConfig()
@@ -87,13 +87,13 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=3,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=3,
         )
         logger = logging.getLogger('test')
 
@@ -112,22 +112,22 @@ class TestEnsureSchemaWithRetry:
         """max_attempts=0 means infinite retries; verify it keeps going."""
         call_count = 0
 
-        def fail_then_succeed() -> Ok[None] | Err[BrokerOperationError]:
+        def fail_then_succeed() -> Ok[None] | Err[DatabaseOperationError]:
             nonlocal call_count
             call_count += 1
             if call_count <= 10:
                 return _schema_err(
                     'connection refused',
-                    exception=OperationalError('connection refused'),
+                    cause=OperationalError('connection refused'),
                 )
             return Ok(None)
 
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(side_effect=fail_then_succeed)
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -141,16 +141,16 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=1000,
-            db_retry_max_ms=100_000,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=1000,
+            database_retry_max_ms=100_000,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -169,21 +169,21 @@ class TestEnsureSchemaWithRetry:
             )
 
     async def test_backoff_capped_at_max_ms(self) -> None:
-        """Delay stops growing once it hits db_retry_max_ms."""
+        """Delay stops growing once it hits database_retry_max_ms."""
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=1000,
-            db_retry_max_ms=1500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=1000,
+            database_retry_max_ms=1500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -209,14 +209,14 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('fail', exception=OperationalError('fail')),
+                _schema_err('fail', cause=OperationalError('fail')),
                 Ok(None),
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -237,14 +237,14 @@ class TestEnsureSchemaWithRetry:
             side_effect=[
                 _schema_err(
                     'server closed connection',
-                    exception=InterfaceError('server closed connection'),
+                    cause=InterfaceError('server closed connection'),
                 ),
                 Ok(None),
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
         )
         logger = logging.getLogger('test')
 
@@ -259,13 +259,13 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=1,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=1,
         )
         logger = logging.getLogger('test')
 
@@ -282,14 +282,14 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
-                _schema_err('connection refused', exception=OperationalError('connection refused')),
+                _schema_err('connection refused', cause=OperationalError('connection refused')),
                 Ok(None),
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test.retry_msg')
 
@@ -310,13 +310,13 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             return_value=_schema_err(
                 'connection refused',
-                exception=OperationalError('connection refused'),
+                cause=OperationalError('connection refused'),
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=1,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=1,
         )
         logger = logging.getLogger('test.exhaust_msg')
 

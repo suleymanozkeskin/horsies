@@ -69,7 +69,7 @@ impl NotMadeSpan {
 /// Write the WARNING record of `span`, not made for `cause` (the type and
 /// the message of what the SDK threw), once per process and kind. Starts no
 /// core; starts the log bridge of the process, and a forwarder thread that
-/// cannot start throws `CORE_START_FAILED`.
+/// cannot start throws `RUNTIME_START_FAILED`.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
 #[allow(
     clippy::needless_pass_by_value,

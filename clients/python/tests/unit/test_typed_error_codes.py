@@ -21,18 +21,19 @@ from horsies import (
     Err,
     Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
+    ReadUnknownCustomCode,
     Result,
+    RetrievalCode,
     Succeeded,
     TaskError,
     TaskOutcome,
-    UnknownCustomCode,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
+from horsies.core.brokers.result_types import DatabaseResult, StoredResult
 from horsies.core.codec.typed import encode_returned_result
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import EnumCodes, TextCodes
@@ -61,13 +62,13 @@ class OtherCode(Enum):
 
 def _app(mapper: dict[type[BaseException], str] | None = None) -> Horsies:
     return Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
         exception_mapper=mapper or {},
     ))
 
 
-def _stored_error(code: str) -> BrokerResult[RawResultRecord | None]:
-    return Ok(RawResultRecord(
+def _stored_error(code: str) -> DatabaseResult[StoredResult | None]:
+    return Ok(StoredResult(
         task_id=TASK_ID,
         task_name='send_welcome_email',
         status=TaskStatus.FAILED,
@@ -89,12 +90,12 @@ def test_body_passes_a_member_and_stores_its_value() -> None:
 
     @app.task('send_welcome_email', error_codes=WelcomeCode)
     def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:
-        return Err(TaskError(error_code=WelcomeCode.INVALID_EMAIL, message=email))
+        return Err(TaskError(code=WelcomeCode.INVALID_EMAIL, message=email))
 
     returned = send_welcome_email(email='a')
 
     match returned:
-        case Err(err_value=TaskError(error_code=WelcomeCode.INVALID_EMAIL)):
+        case Err(err_value=TaskError(code=WelcomeCode.INVALID_EMAIL)):
             pass
         case other:
             pytest.fail(f'expected Err(INVALID_EMAIL), got {other!r}')
@@ -110,10 +111,10 @@ def test_text_code_in_a_typed_task_is_return_type_mismatch() -> None:
 
     @app.task('send_welcome_email', error_codes=WelcomeCode)
     def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:
-        return Err(TaskError(error_code='INVALID_EMAIL', message=email))  # pyright: ignore
+        return Err(TaskError(code='INVALID_EMAIL', message=email))  # pyright: ignore
 
     match send_welcome_email(email='a'):
-        case Err(err_value=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH, data=data)):
+        case Err(err_value=TaskError(code=ContractCode.RETURN_TYPE_MISMATCH, data=data)):
             assert isinstance(data, dict) and data['variant'] == 'err'
         case other:
             pytest.fail(f'expected RETURN_TYPE_MISMATCH, got {other!r}')
@@ -124,11 +125,11 @@ def test_untyped_task_keeps_text_codes() -> None:
 
     @app.task('send_receipt', error_codes=WelcomeCode)
     def send_receipt(*, email: str) -> Result[str, TaskError]:
-        return Err(TaskError(error_code='MAILBOX_FULL', message=email))
+        return Err(TaskError(code='MAILBOX_FULL', message=email))
 
     assert send_receipt.task_code_type == TextCodes()
     match send_receipt(email='a'):
-        case Err(err_value=TaskError(error_code='MAILBOX_FULL')):
+        case Err(err_value=TaskError(code='MAILBOX_FULL')):
             pass
         case other:
             pytest.fail(f'expected Err(MAILBOX_FULL), got {other!r}')
@@ -142,7 +143,7 @@ def test_typed_error_without_its_declaration_is_refused() -> None:
         def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
             return Ok(email)
 
-    assert refused.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+    assert refused.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
 
 
 def test_mapper_code_outside_the_enum_is_refused() -> None:
@@ -153,7 +154,7 @@ def test_mapper_code_outside_the_enum_is_refused() -> None:
         def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
             return Ok(email)
 
-    assert refused.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+    assert refused.value.code == HorsiesErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
 
 def test_mapped_exception_gives_the_member() -> None:
@@ -164,7 +165,7 @@ def test_mapped_exception_gives_the_member() -> None:
         raise KeyError(email)
 
     match send_welcome_email(email='a'):
-        case Err(err_value=TaskError(error_code=code)):
+        case Err(err_value=TaskError(code=code)):
             assert code is WelcomeCode.MAILBOX_FULL
         case other:
             pytest.fail(f'expected Err(MAILBOX_FULL), got {other!r}')
@@ -180,7 +181,7 @@ def test_typed_read_gives_the_member() -> None:
         TASK_ID, _stored_error('INVALID_EMAIL'), str, None, EnumCodes(code_type=WelcomeCode),
     )
     match read:
-        case Ok(Failed(TaskError(error_code=code))):
+        case Ok(Failed(TaskError(code=code))):
             assert code is WelcomeCode.INVALID_EMAIL
         case other:
             pytest.fail(f'expected Ok(Failed(member)), got {other!r}')
@@ -189,7 +190,7 @@ def test_typed_read_gives_the_member() -> None:
 def test_untyped_read_gives_the_text() -> None:
     read = read_of_record(TASK_ID, _stored_error('INVALID_EMAIL'), str, None, TextCodes())
     match read:
-        case Ok(Failed(TaskError(error_code=code))):
+        case Ok(Failed(TaskError(code=code))):
             assert code == 'INVALID_EMAIL' and not isinstance(code, Enum)
         case other:
             pytest.fail(f'expected Ok(Failed(text)), got {other!r}')
@@ -200,19 +201,19 @@ def test_stored_code_that_the_enum_does_not_name_is_unknown_custom_code() -> Non
         TASK_ID, _stored_error('RATE_LIMITED'), str, None, EnumCodes(code_type=WelcomeCode),
     )
     match read:
-        case Err(err_value=UnknownCustomCode(custom_code='RATE_LIMITED')):
-            pass
+        case Err(err_value=ReadUnknownCustomCode(custom_code='RATE_LIMITED') as unknown):
+            assert unknown.code is RetrievalCode.UNKNOWN_CUSTOM_CODE
         case other:
-            pytest.fail(f'expected Err(UnknownCustomCode), got {other!r}')
+            pytest.fail(f'expected Err(ReadUnknownCustomCode), got {other!r}')
     assert is_final_read(read)
 
 
 def test_built_in_code_reads_unchanged_with_typed_codes() -> None:
-    stored: BrokerResult[RawResultRecord | None] = Ok(RawResultRecord(
+    stored: DatabaseResult[StoredResult | None] = Ok(StoredResult(
         task_id=TASK_ID, task_name='send_welcome_email', status=TaskStatus.CANCELLED, raw_result=None,
     ))
     match read_of_record(TASK_ID, stored, str, None, EnumCodes(code_type=WelcomeCode)):
-        case Ok(Failed(TaskError(error_code=OutcomeCode.TASK_CANCELLED))):
+        case Ok(Failed(TaskError(code=OutcomeCode.TASK_CANCELLED))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(TASK_CANCELLED)), got {other!r}')
@@ -271,7 +272,7 @@ def test_typed_node_input_gives_the_member() -> None:
     prepared = _prepared(_report_input('MAILBOX_FULL'))
     assert isinstance(prepared, child_runner._PreparedCall), prepared
     match prepared.kwargs['sent']:
-        case Failed(TaskError(error_code=code)):
+        case Failed(TaskError(code=code)):
             assert code is WelcomeCode.MAILBOX_FULL
         case other:
             pytest.fail(f'expected Failed(member), got {other!r}')
@@ -294,11 +295,11 @@ def test_args_from_source_with_other_codes_is_refused() -> None:
         return Ok('x')
 
     refusal = _args_from_code_type_error(
-        'report', 'sent', TaskNode(fn=produce), TaskOutcome[str, TaskError[WelcomeCode]],
+        'report', 'sent', TaskNode(function=produce), TaskOutcome[str, TaskError[WelcomeCode]],
     )
 
     assert refusal is not None
-    assert refusal.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+    assert refusal.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
 
 def test_args_from_source_with_the_same_codes_is_accepted() -> None:
@@ -309,7 +310,7 @@ def test_args_from_source_with_the_same_codes_is_accepted() -> None:
         return Ok('x')
 
     refusal = _args_from_code_type_error(
-        'report', 'sent', TaskNode(fn=produce), TaskOutcome[str, TaskError[WelcomeCode]],
+        'report', 'sent', TaskNode(function=produce), TaskOutcome[str, TaskError[WelcomeCode]],
     )
 
     assert refusal is None
@@ -355,7 +356,7 @@ def test_result_for_a_typed_node_gives_the_member() -> None:
     from horsies.core.models.workflow.handle import _node_read
 
     match _node_read(_node_decode(_typed_app(), 'send_welcome_email', 'MAILBOX_FULL')):
-        case Ok(Failed(TaskError(error_code=code))):
+        case Ok(Failed(TaskError(code=code))):
             assert code is WelcomeCode.MAILBOX_FULL
         case other:
             pytest.fail(f'expected Ok(Failed(member)), got {other!r}')
@@ -365,17 +366,17 @@ def test_result_for_an_unknown_code_is_unknown_custom_code() -> None:
     from horsies.core.models.workflow.handle import _node_read
 
     match _node_read(_node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
-        case Err(err_value=UnknownCustomCode(custom_code='RATE_LIMITED')):
+        case Err(err_value=ReadUnknownCustomCode(custom_code='RATE_LIMITED')):
             pass
         case other:
-            pytest.fail(f'expected Err(UnknownCustomCode), got {other!r}')
+            pytest.fail(f'expected Err(ReadUnknownCustomCode), got {other!r}')
 
 
 def test_result_for_an_untyped_node_gives_the_text() -> None:
     from horsies.core.models.workflow.handle import _node_read
 
     match _node_read(_node_decode(_typed_app(), 'send_receipt', 'MAILBOX_FULL')):
-        case Ok(Failed(TaskError(error_code=code))):
+        case Ok(Failed(TaskError(code=code))):
             assert code == 'MAILBOX_FULL' and not isinstance(code, Enum)
         case other:
             pytest.fail(f'expected Ok(Failed(text)), got {other!r}')
@@ -385,7 +386,7 @@ def test_results_map_folds_an_unknown_code_into_the_entry() -> None:
     from horsies.core.models.workflow.handle import _folded
 
     match _folded('n', _node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
-        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+        case Failed(TaskError(code=OperationalCode.RESULT_DESERIALIZATION_ERROR, data=data)):
             assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
         case other:
             pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')
@@ -410,7 +411,7 @@ def test_outputless_map_entry_gives_the_member() -> None:
         envelope, _OUTPUTLESS_TERMINALS, app=_typed_app(), workflow_id='w',
     )
     match read:
-        case Ok(Succeeded({'n': Failed(TaskError(error_code=code))})):
+        case Ok(Succeeded({'n': Failed(TaskError(code=code))})):
             assert code is WelcomeCode.INVALID_EMAIL
         case other:
             pytest.fail(f'expected the member in the map, got {other!r}')
@@ -418,9 +419,9 @@ def test_outputless_map_entry_gives_the_member() -> None:
 
 def test_context_entry_gives_the_member() -> None:
     match child_runner._context_entry(
-        'n', Failed(TaskError(error_code='MAILBOX_FULL')), EnumCodes(code_type=WelcomeCode),
+        'n', Failed(TaskError(code='MAILBOX_FULL')), EnumCodes(code_type=WelcomeCode),
     ):
-        case Failed(TaskError(error_code=code)):
+        case Failed(TaskError(code=code)):
             assert code is WelcomeCode.MAILBOX_FULL
         case other:
             pytest.fail(f'expected Failed(member), got {other!r}')
@@ -428,9 +429,9 @@ def test_context_entry_gives_the_member() -> None:
 
 def test_context_entry_with_an_unknown_code_is_result_deserialization_error() -> None:
     match child_runner._context_entry(
-        'n', Failed(TaskError(error_code='RATE_LIMITED')), EnumCodes(code_type=WelcomeCode),
+        'n', Failed(TaskError(code='RATE_LIMITED')), EnumCodes(code_type=WelcomeCode),
     ):
-        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+        case Failed(TaskError(code=OperationalCode.RESULT_DESERIALIZATION_ERROR, data=data)):
             assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
         case other:
             pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')

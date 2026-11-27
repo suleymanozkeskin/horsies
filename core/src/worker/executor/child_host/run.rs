@@ -25,7 +25,7 @@ use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
 use crate::core::codec::JsonText;
 use crate::core::lifecycle::OwnedClaim;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
@@ -456,10 +456,7 @@ pub(super) fn refusal_end(task_name: &str, refusal: &StoredOptionsRefusal) -> Ru
             }),
         ),
     };
-    let mut error = TaskError::builtin(
-        OperationalErrorCode::WorkerSerializationError,
-        reason.as_str(),
-    );
+    let mut error = TaskError::built_in(OperationalCode::WorkerSerializationError, reason.as_str());
     error.data = Some(JsonText::of_engine_value(&data));
     error_envelope(error)
 }
@@ -480,13 +477,13 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
     let task = match app.registry.get(task_name) {
         Ok(task) => task.clone(),
         Err(error) => {
-            return Prepared::Ended(error_envelope(TaskError::builtin(
-                OperationalErrorCode::WorkerResolutionError,
+            return Prepared::Ended(error_envelope(TaskError::built_in(
+                OperationalCode::WorkerResolutionError,
                 format!("task '{task_name}' is not registered in this binary: {error}"),
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_ctx()) {
+    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,
@@ -503,13 +500,13 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
         TaskResult::Ok(bytes) => match serde_json::from_slice::<&RawValue>(&bytes) {
             Ok(raw) => match serde_json::to_string(&TaskResult::Ok(raw)) {
                 Ok(text) => RunEnd::Result(ResultEnvelopeText::new(text)),
-                Err(error) => error_envelope(TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                Err(error) => error_envelope(TaskError::built_in(
+                    OperationalCode::WorkerSerializationError,
                     format!("failed to encode the result envelope: {error}"),
                 )),
             },
-            Err(error) => error_envelope(TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
+            Err(error) => error_envelope(TaskError::built_in(
+                OperationalCode::WorkerSerializationError,
                 format!("failed to parse task result JSON: {error}"),
             )),
         },

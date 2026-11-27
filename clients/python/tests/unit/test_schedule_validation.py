@@ -7,6 +7,7 @@ skip) and the ``app.check()`` integration including the worker-role gate.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,12 +18,13 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     RegistryError,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.schedule import (
     IntervalSchedule,
@@ -60,15 +62,15 @@ def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
     app = MagicMock()
     app.tasks = tasks or {}
     app.config.payload = PayloadPolicy()
-    app.validate_queue_name = MagicMock(return_value='default')
+    app.validate_queue = MagicMock(return_value='default')
     return app
 
 
 def _make_task_mock(fn: object, *, task_options_json: str | None = None) -> MagicMock:
-    """Mock task object exposing _original_fn, a default queue and its options text."""
+    """Mock task object exposing _original_function, a default queue and its options text."""
     task = MagicMock()
-    task._original_fn = fn
-    task.task_queue_name = None
+    task._original_function = fn
+    task.queue = None
     task.task_options_json = task_options_json
     return task
 
@@ -80,16 +82,16 @@ def _schedule(
     timezone: str = 'UTC',
     enabled: bool = True,
     kwargs: dict[str, object] | None = None,
-    queue_name: str | None = None,
+    queue: str | None = None,
 ) -> TaskSchedule:
     return TaskSchedule(
         name=name,
         task_name=task_name,
-        pattern=IntervalSchedule(seconds=5),
+        pattern=IntervalSchedule(every=timedelta(seconds=5)),
         timezone=timezone,
         enabled=enabled,
         kwargs=kwargs or {},
-        queue_name=queue_name,
+        queue=queue,
     )
 
 
@@ -172,7 +174,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert 'lone surrogate' in ' '.join(errors[0].notes)
             case Ok(encoded_kwargs):
@@ -195,7 +197,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: a validation error holds a lone surrogate'
@@ -219,7 +221,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: serialization failed: Circular reference detected'
@@ -244,7 +246,7 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert 'not encodable' in errors[0].message
                 assert 'nested deeper than' in ' '.join(errors[0].notes)
             case Ok(encoded_kwargs):
@@ -266,9 +268,9 @@ class TestPrepareSchedules:
             case Err(errors):
                 assert len(errors) == 1
                 assert isinstance(errors[0], ConfigurationError)
-                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert (
-                    'Circular reference detected (depth exceeded)'
+                    'Maximum serialization depth exceeded'
                     in ' '.join(errors[0].notes)
                 )
             case Ok(encoded_kwargs):
@@ -354,7 +356,7 @@ class TestCollectScheduleErrors:
         )
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
 
     def test_unregistered_task(self) -> None:
@@ -362,21 +364,36 @@ class TestCollectScheduleErrors:
         errors = self._collect([_schedule(task_name='missing')], tasks={})
         assert len(errors) == 1
         assert isinstance(errors[0], RegistryError)
-        assert errors[0].code == ErrorCode.TASK_NOT_REGISTERED
+        assert errors[0].code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
     def test_invalid_queue(self) -> None:
-        """A queue that fails validate_queue_name is rejected."""
+        """A queue that fails validate_queue is rejected."""
         def fn() -> str:
             return 'ok'
 
         app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
-        app.validate_queue_name = MagicMock(side_effect=ValueError('bad queue'))
+        app.validate_queue = MagicMock(side_effect=ValueError('bad queue'))
 
         errors = self._collect([_schedule()], app=app)
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid queue configuration' in errors[0].message
+        assert errors[0].help_text == (
+            'check queue in schedule matches app.config queue settings'
+        )
+
+    def test_the_schedule_queue_is_checked_in_place_of_the_task_queue(self) -> None:
+        """The schedule's `queue` is the queue that the app checks."""
+        def fn(x: int) -> str:
+            return str(x)
+
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        errors = self._collect([_schedule(kwargs={'x': 1}, queue='reports')], app=app)
+
+        assert errors == []
+        app.validate_queue.assert_called_once_with('reports')
 
     def test_signature_mismatch(self) -> None:
         """Kwargs that do not bind to the task signature are rejected."""
@@ -405,7 +422,7 @@ class TestCollectScheduleErrors:
         )
         assert len(errors) == 1
         assert isinstance(errors[0], ConfigurationError)
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in errors[0].message
 
     def test_first_error_wins_per_schedule(self) -> None:
@@ -449,7 +466,7 @@ class TestCollectScheduleErrors:
 def _make_real_app(schedule: ScheduleConfig | None) -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:pass@localhost/db',
             ),
             schedule=schedule,
@@ -492,14 +509,14 @@ class TestCheckValidatesSchedules:
     def test_valid_schedule_passes_check(self) -> None:
         """A valid schedule yields no check errors."""
         app = self._valid_schedule_app()
-        assert app.check() == []
+        assert app.check().refusals == []
 
     def test_bad_schedule_surfaced_by_check(self) -> None:
         """check() (producer role) reports the invalid schedule."""
         app = self._bad_schedule_app()
-        errors = app.check()
+        errors = app.check().refusals
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
 
     def test_schedule_over_the_limit_surfaced_by_check(self) -> None:
@@ -507,7 +524,7 @@ class TestCheckValidatesSchedules:
         schedule = _schedule(task_name='my_task', kwargs={'blob': 'x' * 2048})
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://user:pass@localhost/db',
                 ),
                 schedule=ScheduleConfig(schedules=[schedule]),
@@ -519,19 +536,19 @@ class TestCheckValidatesSchedules:
         def my_task(*, blob: str) -> Result[int, TaskError]:
             return Ok(len(blob))
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'payload.reject_bytes' in errors[0].message
 
     def test_worker_role_skips_schedule_validation(self) -> None:
         """Workers never act on schedules; check() skips them."""
         app = self._bad_schedule_app()
-        app.set_role('worker')
-        assert app.check() == []
+        app.set_role(AppRole.WORKER)
+        assert app.check().refusals == []
 
     def test_no_schedule_config_returns_empty(self) -> None:
         """An app without schedule config produces no schedule errors."""
         app = _make_real_app(None)
-        assert app.check() == []
+        assert app.check().refusals == []

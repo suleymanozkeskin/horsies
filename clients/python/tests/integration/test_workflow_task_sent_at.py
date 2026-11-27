@@ -1,6 +1,6 @@
 """The sent_at of a task that the workflow engine creates.
 
-``sent_at`` is the call time of ``.send()``, ``.schedule()`` or ``.start()``.
+``sent_at`` is the call time of ``.send()`` (with or without a delay) or ``.start()``.
 A task that the engine creates for a workflow node stores the ``sent_at`` of
 its workflow row: the call time of the start of that workflow. This holds for
 a root task written at the start, for a dependent promoted later, and for the
@@ -34,7 +34,7 @@ START_CALL_TIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 def _task(app: Horsies, prefix: str) -> Any:
-    @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
+    @app.task(name=f'{prefix}_{uuid.uuid4().hex[:8]}')
     def fn(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -79,8 +79,8 @@ class TestEngineTaskSentAt:
         session: AsyncSession,
     ) -> None:
         fn = _task(app, 'sent_at')
-        root = TaskNode(fn=fn, kwargs={'value': 0})
-        dependent = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[root])
+        root = TaskNode(function=fn, kwargs={'value': 0})
+        dependent = TaskNode(function=fn, kwargs={'value': 1}, waits_for=[root])
         spec = app.workflow(
             f'sent_at_{uuid.uuid4().hex[:6]}', [root, dependent],
             definition_key=f'sent-at-{uuid.uuid4().hex[:6]}',
@@ -116,7 +116,7 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = TaskNode(fn=child_fn, kwargs={'value': 2})
+                node = TaskNode(function=child_fn, kwargs={'value': 2})
                 return app.workflow(cls.name, [node], output=node)
 
         spec = app.workflow(
@@ -152,7 +152,7 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = TaskNode(fn=leaf_fn, kwargs={'value': 3})
+                node = TaskNode(function=leaf_fn, kwargs={'value': 3})
                 return app.workflow(cls.name, [node], output=node)
 
         class SentAtMiddle(WorkflowDefinition[int]):

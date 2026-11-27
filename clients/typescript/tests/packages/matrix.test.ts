@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { buildEntryOf, installEntriesOf, runtimeVersionsOf } from "./matrix.ts";
+import { buildEntryOf, installEntriesOf, runtimeVersionsOf, webPageOf } from "./matrix.ts";
 import type { ReleasePlatform } from "./platforms.ts";
 
 const VERSIONS = { node: "26.13.1", bun: "1.4.4" };
@@ -105,6 +105,18 @@ describe("installEntriesOf", () => {
   });
 });
 
+describe("webPageOf", () => {
+  test("run: the Linux x86_64 glibc row", () => {
+    assert.equal(webPageOf(GLIBC_ROW), "run");
+    assert.deepEqual(installEntriesOf(GLIBC_ROW, VERSIONS).map((entry) => entry.web_page), ["run", "run"]);
+  });
+
+  test("skip: the musl row and the macOS row", () => {
+    assert.equal(webPageOf(MUSL_ROW), "skip");
+    assert.equal(webPageOf(MACOS_ROW), "skip");
+  });
+});
+
 describe("runtimeVersionsOf", () => {
   test("reads both exact versions", () => {
     assert.deepEqual(runtimeVersionsOf(["--node-version", "26.13.1", "--bun-version", "1.4.4"]), VERSIONS);
@@ -117,5 +129,13 @@ describe("runtimeVersionsOf", () => {
 
   test("refuses an unknown argument", () => {
     assert.ok("refused" in runtimeVersionsOf(["--node", "26.13.1"]));
+  });
+});
+
+describe("the selection list of the install entries", () => {
+  test("each entry of a row carries the packages that the caller passes", () => {
+    const entries = installEntriesOf(MUSL_ROW, VERSIONS, "@horsies/native-a,@horsies/native-b");
+
+    assert.deepEqual(entries.map((entry) => entry.all_packages), ["@horsies/native-a,@horsies/native-b", "@horsies/native-a,@horsies/native-b"]);
   });
 });

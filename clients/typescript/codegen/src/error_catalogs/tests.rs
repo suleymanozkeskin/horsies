@@ -187,27 +187,37 @@ export type ProbeOperationCode =
   | "PING_FAILED"
   | "CLOSE_FAILED";
 
+export interface ProbeOperationCodeKind {
+  readonly PING_FAILED: "pingFailed";
+  readonly CLOSE_FAILED: "closeFailed";
+}
+
 export interface ProbeEnqueueFailed {
+  readonly kind: "enqueueFailed";
   readonly code: "ENQUEUE_FAILED";
   readonly taskId: string;
   readonly message: string;
   readonly retryable: boolean;
-  readonly exception: CoreCause | NoCause;
+  readonly cause: CoreCause | NoCause;
 }
 
 export interface ProbePayloadMismatch {
+  readonly kind: "payloadMismatch";
   readonly code: "PAYLOAD_MISMATCH";
   readonly retryable: false;
   readonly message: string;
   readonly sizeBytes: bigint;
 }
 
-export interface ProbeOperationFailed {
-  readonly code: ProbeOperationCode;
-  readonly message: string;
-  readonly currentStatus: TaskStatus;
-  readonly exception: CoreCause;
-}
+export type ProbeOperationFailed<Code extends ProbeOperationCode = ProbeOperationCode> = {
+  readonly [Member in Code]: {
+    readonly kind: ProbeOperationCodeKind[Member];
+    readonly code: Member;
+    readonly message: string;
+    readonly currentStatus: TaskStatus;
+    readonly cause: CoreCause;
+  };
+}[Code];
 
 export type ProbeCoreError =
   | ProbeEnqueueFailed
@@ -224,7 +234,7 @@ export interface NativeProbeEnqueueFailed {
     readonly task_id: string;
     readonly message: string;
     readonly retryable: boolean;
-    readonly exception: CoreCause | NoCause;
+    readonly cause: CoreCause | NoCause;
   };
 }
 
@@ -242,7 +252,7 @@ export interface NativeProbeOperationFailed {
     readonly code: ProbeOperationCode;
     readonly message: string;
     readonly current_status: TaskStatus;
-    readonly exception: CoreCause;
+    readonly cause: CoreCause;
   };
 }
 
@@ -256,28 +266,79 @@ function unknownClass(converter: string, raw: { readonly class: string }): never
   throw new Error(`${converter}: unknown class name ${raw.class}`);
 }
 
-/** The frozen value of `raw`. A class name that this build does not know throws. */
-export function probeCoreErrorFromNative(raw: NativeProbeCoreError): ProbeCoreError {
-  switch (raw.class) {
-    case "ProbeEnqueueFailed": {
-      const value: ProbeEnqueueFailed = {
-        code: "ENQUEUE_FAILED",
-        taskId: raw.slots.task_id,
+function unknownCode(converter: string, code: string): never {
+  throw new Error(`${converter}: unknown code ${code}`);
+}
+
+/** The frozen value of `raw`, its `kind` named after its code. A code that this build does not know throws. */
+function probeOperationFailedFromNative(raw: NativeProbeOperationFailed): ProbeOperationFailed {
+  switch (raw.slots.code) {
+    case "PING_FAILED": {
+      const value: ProbeOperationFailed<"PING_FAILED"> = {
+        kind: "pingFailed",
+        code: raw.slots.code,
         message: raw.slots.message,
-        retryable: raw.slots.retryable,
-        exception: Object.freeze({ ...raw.slots.exception }),
+        currentStatus: raw.slots.current_status,
+        cause: Object.freeze({ ...raw.slots.cause }),
       };
 
       return Object.freeze(
         Object.defineProperties(value, {
           message: { enumerable: false },
-          exception: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    case "CLOSE_FAILED": {
+      const value: ProbeOperationFailed<"CLOSE_FAILED"> = {
+        kind: "closeFailed",
+        code: raw.slots.code,
+        message: raw.slots.message,
+        currentStatus: raw.slots.current_status,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
+        }),
+      );
+    }
+
+    default: {
+      const unreachable: never = raw.slots.code;
+
+      return unknownCode("probeOperationFailedFromNative", unreachable);
+    }
+  }
+}
+
+/** The frozen value of `raw`. A class name that this build does not know throws. */
+export function probeCoreErrorFromNative(raw: NativeProbeCoreError): ProbeCoreError {
+  switch (raw.class) {
+    case "ProbeEnqueueFailed": {
+      const value: ProbeEnqueueFailed = {
+        kind: "enqueueFailed",
+        code: "ENQUEUE_FAILED",
+        taskId: raw.slots.task_id,
+        message: raw.slots.message,
+        retryable: raw.slots.retryable,
+        cause: Object.freeze({ ...raw.slots.cause }),
+      };
+
+      return Object.freeze(
+        Object.defineProperties(value, {
+          message: { enumerable: false },
+          cause: { enumerable: false },
         }),
       );
     }
 
     case "ProbePayloadMismatch": {
       const value: ProbePayloadMismatch = {
+        kind: "payloadMismatch",
         code: "PAYLOAD_MISMATCH",
         retryable: false,
         message: raw.slots.message,
@@ -291,21 +352,8 @@ export function probeCoreErrorFromNative(raw: NativeProbeCoreError): ProbeCoreEr
       );
     }
 
-    case "ProbeOperationFailed": {
-      const value: ProbeOperationFailed = {
-        code: raw.slots.code,
-        message: raw.slots.message,
-        currentStatus: raw.slots.current_status,
-        exception: Object.freeze({ ...raw.slots.exception }),
-      };
-
-      return Object.freeze(
-        Object.defineProperties(value, {
-          message: { enumerable: false },
-          exception: { enumerable: false },
-        }),
-      );
-    }
+    case "ProbeOperationFailed":
+      return probeOperationFailedFromNative(raw);
 
     default: {
       const unreachable: never = raw;
@@ -519,8 +567,9 @@ fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
         ],
     };
     assert_eq!(
-        class_interface(&conflict, &CODES),
-        "export interface ProbeConflict {\n  readonly code: \"PAYLOAD_MISMATCH\";\n  \
+        class_type(&conflict, &CODES, "Probe", &[]),
+        "export interface ProbeConflict {\n  readonly kind: \"conflict\";\n  \
+         readonly code: \"PAYLOAD_MISMATCH\";\n  \
          readonly retryable: true;\n  readonly message: string;\n}"
     );
     assert_eq!(
@@ -528,10 +577,90 @@ fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
         "export interface NativeProbeConflict {\n  readonly class: \"ProbeConflict\";\n  \
          readonly slots: {\n    readonly message: string;\n  };\n}"
     );
-    assert!(converter_case(&conflict, &CODES).contains(
-        "      const value: ProbeConflict = {\n        code: \"PAYLOAD_MISMATCH\",\n        \
-         retryable: true,\n        message: raw.slots.message,\n      };\n"
+    assert!(value_case(
+        "\"ProbeConflict\"",
+        "ProbeConflict",
+        "conflict",
+        &conflict,
+        &CODES
+    )
+    .contains(
+        "      const value: ProbeConflict = {\n        kind: \"conflict\",\n        \
+             code: \"PAYLOAD_MISMATCH\",\n        \
+             retryable: true,\n        message: raw.slots.message,\n      };\n"
     ));
+}
+
+#[test]
+fn a_class_kind_is_its_name_without_the_family_prefix() {
+    assert_eq!(family_prefix(&CATALOG), "Probe");
+    assert_eq!(class_kind(&PAYLOAD_MISMATCH, "Probe"), "payloadMismatch");
+}
+
+#[test]
+fn a_code_kind_is_the_code_in_camel_case() {
+    assert_eq!(code_kind("DATABASE_PING_FAILED"), "databasePingFailed");
+}
+
+#[test]
+fn the_family_prefix_is_every_word_that_the_class_names_share() {
+    let catalog = ErrorCatalog {
+        classes: &[
+            ErrorClass {
+                python_class: "WorkflowHandleNotFound",
+                doc: "",
+                slots: &[],
+            },
+            ErrorClass {
+                python_class: "WorkflowHandleNotPaused",
+                doc: "",
+                slots: &[],
+            },
+            ErrorClass {
+                python_class: "WorkflowHandleAsyncContext",
+                doc: "",
+                slots: &[],
+            },
+        ],
+        ..CATALOG
+    };
+    assert_eq!(family_prefix(&catalog), "WorkflowHandle");
+}
+
+#[test]
+#[should_panic(expected = "the catalog ProbeCoreError has fewer than two classes")]
+fn a_catalog_with_one_class_has_no_family_prefix() {
+    let catalog = ErrorCatalog {
+        classes: &[ENQUEUE_FAILED],
+        ..CATALOG
+    };
+    let _prefix = family_prefix(&catalog);
+}
+
+#[test]
+#[should_panic(expected = "the class names of the catalog ProbeCoreError share no first word")]
+fn a_catalog_whose_class_names_share_no_word_is_a_defect() {
+    const STRANGER: ErrorClass = ErrorClass {
+        python_class: "StrangerFailed",
+        doc: "",
+        slots: &[],
+    };
+    let catalog = ErrorCatalog {
+        classes: &[ENQUEUE_FAILED, STRANGER],
+        ..CATALOG
+    };
+    let _prefix = family_prefix(&catalog);
+}
+
+#[test]
+#[should_panic(expected = "the class Probe is only the family prefix of its catalog")]
+fn a_class_that_is_only_the_prefix_is_a_defect() {
+    let bare = ErrorClass {
+        python_class: "Probe",
+        doc: "",
+        slots: &[],
+    };
+    let _kind = class_kind(&bare, "Probe");
 }
 
 #[test]
@@ -703,8 +832,8 @@ fn the_model_leaves_out_the_four_async_context_classes_and_no_other() {
     assert_eq!(
         left_out,
         [
-            "BrokerAsyncContext",
-            "HandleAsyncContext",
+            "DatabaseAsyncContext",
+            "WorkflowHandleAsyncContext",
             "TaskSendAsyncContext",
             "WorkflowStartAsyncContext",
         ]
@@ -726,11 +855,18 @@ fn the_model_s_modules_convert_every_rendered_class_and_name_no_other() {
         let rendered = rendered_catalog(catalog, &subsets);
         for class in catalog.classes {
             let name = error_class_type_name(class);
-            let marks = [
-                format!("export interface {name} {{\n"),
-                format!("export interface Native{name} {{\n"),
-                format!("    case \"{name}\": {{\n"),
-            ];
+            let marks = match class_code_subset(class) {
+                Some(_) => [
+                    format!("export type {name}<"),
+                    format!("export interface Native{name} {{\n"),
+                    format!("    case \"{name}\":\n      return "),
+                ],
+                None => [
+                    format!("export interface {name} {{\n"),
+                    format!("export interface Native{name} {{\n"),
+                    format!("    case \"{name}\": {{\n"),
+                ],
+            };
             let kept = rendered.classes.contains(&class);
             for mark in &marks {
                 assert_eq!(all_text.contains(mark.as_str()), kept, "{name}: {mark}");
@@ -787,12 +923,14 @@ fn the_model_s_send_module_has_the_payload_record_and_its_converter() {
     assert!(text.contains("\n  readonly sizeBytes: bigint;\n  readonly limitBytes: bigint;\n"));
     assert!(text.contains(
         "\nexport interface TaskSendIdempotencyKeyConflict {\n  \
-         readonly code: \"IDEMPOTENCY_KEY_CONFLICT\";\n  readonly retryable: true;\n  \
+         readonly kind: \"idempotencyKeyConflict\";\n  \
+         readonly code: \"IDEMPOTENCY_KEY_CONFLICT\";\n  readonly retryable: false;\n  \
          readonly taskId: string;\n"
     ));
-    assert!(
-        text.contains("\n        code: \"IDEMPOTENCY_KEY_CONFLICT\",\n        retryable: true,\n")
-    );
+    assert!(text.contains(
+        "\n        kind: \"idempotencyKeyConflict\",\n        \
+                       code: \"IDEMPOTENCY_KEY_CONFLICT\",\n        retryable: false,\n"
+    ));
     assert!(text.contains(
         "\nexport function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): \
          TaskSendCoreError {\n"
@@ -815,13 +953,17 @@ fn the_model_s_monitoring_module_has_two_converters_and_imports_the_status() {
 fn the_model_s_broker_module_has_the_subset_and_both_unions() {
     let text = model_module("broker_errors");
     assert!(text.contains(
-        "\nexport type BrokerOperationFailedCode =\n  | \"SCHEMA_INIT_FAILED\"\n  \
+        "\nexport type DatabaseOperationFailedCode =\n  | \"SCHEMA_INIT_FAILED\"\n  \
          | \"TASK_INFO_QUERY_FAILED\"\n"
     ));
-    assert!(text.contains("\n  readonly code: BrokerOperationFailedCode;\n"));
+    assert!(text.contains("\n  readonly DATABASE_PING_FAILED: \"databasePingFailed\";\n"));
     assert!(text.contains(
-        "\nexport type BrokerCoreEnqueueError =\n  | BrokerEnqueueFailed\n  \
-         | BrokerPayloadMismatch\n  | BrokerIdempotencyKeyConflict\n  \
-         | BrokerInvalidTaskOptions\n  | BrokerInvalidInput;\n"
+        "\nexport type DatabaseOperationFailed<Code extends DatabaseOperationFailedCode = \
+         DatabaseOperationFailedCode> = {\n"
+    ));
+    assert!(text.contains(
+        "\nexport type DatabaseCoreEnqueueError =\n  | DatabaseEnqueueFailed\n  \
+         | DatabasePayloadMismatch\n  | DatabaseIdempotencyKeyConflict\n  \
+         | DatabaseInvalidTaskOptions\n  | DatabaseInvalidInput;\n"
     ));
 }

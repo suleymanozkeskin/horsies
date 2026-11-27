@@ -52,7 +52,7 @@ class _AliasWithoutNewName(BaseModel):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
+            database=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
         ),
     )
 
@@ -62,7 +62,7 @@ def _register(annotation: Any) -> None:
         return Ok(1)
 
     take.__annotations__ = {'car': annotation, 'return': Result[int, TaskError]}
-    _app().task(task_name='recipe')(take)
+    _app().task(name='recipe')(take)
 
 
 @pytest.mark.unit

@@ -24,7 +24,7 @@ CORE_ERROR_EXPORTS = (
     'CoreStopped',
     'TooManyPendingCalls',
     'CoreCallTimedOut',
-    'CoreStartFailed',
+    'RuntimeStartFailed',
 )
 
 

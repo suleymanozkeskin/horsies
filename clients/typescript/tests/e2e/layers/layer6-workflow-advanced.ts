@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe } from "node:test";
 
-import type { WorkflowId } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import type { WorkflowId } from "#horsies";
+import { loadAddon } from "#horsies";
 import { errorCode } from "../support/outcome.ts";
 import { SERIAL_QUEUE } from "../src/instances.ts";
 import { recoveryCrash } from "../src/tasks/recovery-queues.ts";
@@ -36,8 +36,8 @@ import {
   workflowStatus,
 } from "../support/workflow-rows.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for a workflow whose node retries three times, 1 s, 2 s and 4 s apart. */
 const RETRY_WAIT_MS = 60_000;

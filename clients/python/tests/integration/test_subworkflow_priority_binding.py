@@ -45,7 +45,7 @@ def _custom_app(broker: PostgresBroker) -> Horsies:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=broker.config,
+            database=broker.config,
             custom_queues=[
                 CustomQueueConfig(
                     name='scraping', priority=SCRAPING_PRIORITY, max_concurrency=1,
@@ -70,7 +70,7 @@ class TestSubworkflowPriorityBinding:
         app = _custom_app(broker)
         suffix = uuid.uuid4().hex[:8]
 
-        @app.task(task_name=f'scrape_{suffix}', queue_name='scraping')
+        @app.task(name=f'scrape_{suffix}', queue='scraping')
         def scrape_task(*, run_postproc: bool = False) -> Result[int, TaskError]:
             return Ok(1)  # pragma: no cover - never executed in this test
 
@@ -83,7 +83,7 @@ class TestSubworkflowPriorityBinding:
                 # Direct WorkflowSpec — bypasses app.workflow() binding, exactly
                 # like the documented parameterized-subworkflow pattern.
                 scrape = TaskNode(
-                    fn=scrape_task, kwargs={'run_postproc': False}, node_id='scrape',
+                    function=scrape_task, kwargs={'run_postproc': False}, node_id='scrape',
                 )
                 return WorkflowSpec(name=cls.name, nodes=[scrape], output=scrape)
 

@@ -259,7 +259,7 @@ mod tests {
             "pool_pre_ping": true,
             "pool_size": 5,
             "max_overflow": 0,
-            "pool_timeout": 30,
+            "pool_timeout_seconds": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {"kind": "ON", "idle_seconds": 30, "interval_seconds": 10, "probes": 3},
@@ -279,7 +279,7 @@ mod tests {
     /// One enabled schedule `name` that fires every 30 seconds.
     fn enabled(name: &str) -> String {
         format!(
-            r#"{{"name": "{name}", "activation": {{"kind": "ENABLED", "pattern_json": "{{\"type\":\"interval\",\"seconds\":30,\"minutes\":null,\"hours\":null,\"days\":null}}", "timezone": "UTC", "catch_up_missed": false, "max_catch_up_runs": 100, "send": {{"task_name": "ping", "queue_name": "default", "priority": 100, "input_json": "{{}}", "task_options": {{"kind": "NO_OPTIONS"}}, "retention_class_key": "standard_30d", "retain_rerun_input": false}}}}}}"#
+            r#"{{"name": "{name}", "activation": {{"kind": "ENABLED", "pattern_json": "{{\"kind\":\"interval\",\"every\":\"PT30S\"}}", "timezone": "UTC", "catch_up_missed": false, "max_catch_up_runs": 100, "send": {{"task_name": "ping", "queue": "default", "priority": 100, "input_json": "{{}}", "task_options": {{"kind": "NO_OPTIONS"}}, "retention_class_key": "standard_30d", "retain_rerun_input": false}}}}}}"#
         )
     }
 
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn a_pattern_that_breaks_its_rules_is_refused_at_its_activation() {
         let text = manifest_text(&format!("[{}]", enabled("nightly")))
-            .replace(r#"\"seconds\":30"#, r#"\"seconds\":0"#);
+            .replace(r#"\"every\":\"PT30S\""#, r#"\"every\":\"PT0S\""#);
         assert!(refused_path(&text).starts_with("schedules[0].activation"));
     }
 

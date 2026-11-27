@@ -60,14 +60,14 @@ from horsies.core.codec.typed import (
     reportable_error,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
 from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
-    SubWorkflowError,
+    OperationalCode,
+    SubWorkflowFailure,
 )
 from horsies.core.models.workflow import WorkflowStatus
 from horsies.core.models.workflow.context import SubWorkflowSummary
@@ -487,12 +487,12 @@ class TestLostFields:
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -544,12 +544,12 @@ class TestEntryPoints:
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
         assert is_err(result)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_a_schedule_refuses_a_value_the_worker_cannot_read(self) -> None:
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://user:password@localhost/unused',
                 ),
             ),
@@ -564,14 +564,14 @@ class TestEntryPoints:
         schedule = TaskSchedule(
             name='nightly',
             task_name='schedule_read_back',
-            pattern=IntervalSchedule(hours=1),
+            pattern=IntervalSchedule(every=datetime.timedelta(hours=1)),
             kwargs={'order': value},
         )
 
         result = _encode_schedule_kwargs(app, schedule)
 
         assert is_err(result)
-        assert result.err_value.code is ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code is HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_the_checked_entry_keeps_the_wire_form(self) -> None:
         def task(*, order: Note) -> Result[int, TaskError]:
@@ -674,62 +674,62 @@ class TestReportableError:
         ids=lambda data: type(data).__name__,
     )
     def test_bad_data_keeps_the_code_and_the_message(self, data: object) -> None:
-        read = _stored(TaskError(error_code='RATE_LIMITED', message='m', data=data))
+        read = _stored(TaskError(code='RATE_LIMITED', message='m', data=data))
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
         assert read.message == 'm'
         assert 'data_refused' in read.data
 
     def test_an_int_too_long_for_json_keeps_the_code(self) -> None:
-        read = _stored(TaskError(error_code='RATE_LIMITED', data=10**5000))
+        read = _stored(TaskError(code='RATE_LIMITED', data=10**5000))
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
         assert 'data_refused' in read.data
 
     def test_a_self_reference_keeps_the_code(self) -> None:
         data: dict[str, Any] = {}
         data['self'] = data
 
-        read = _stored(TaskError(error_code='RATE_LIMITED', data=data))
+        read = _stored(TaskError(code='RATE_LIMITED', data=data))
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
 
     @pytest.mark.parametrize('data', [{'a': 1.5}, None, 'x', [1, 'y', None], 5])
     def test_good_data_is_unchanged(self, data: object) -> None:
-        err = TaskError(error_code='RATE_LIMITED', message='m', data=data)
+        err = TaskError(code='RATE_LIMITED', message='m', data=data)
 
         assert _stored(err).data == data
 
     def test_a_lone_surrogate_in_the_message_is_escaped(self) -> None:
-        read = _stored(TaskError(error_code='RATE_LIMITED', message='bad \ud800'))
+        read = _stored(TaskError(code='RATE_LIMITED', message='bad \ud800'))
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
         assert read.message == 'bad \\ud800'
 
     def test_a_lone_surrogate_in_the_exception_is_escaped(self) -> None:
         read = _stored(
-            TaskError(error_code='RATE_LIMITED', exception=ValueError('bad \ud800')),
+            TaskError(code='RATE_LIMITED', exception=ValueError('bad \ud800')),
         )
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
 
     def test_a_lone_surrogate_in_the_code_is_escaped(self) -> None:
-        read = _stored(TaskError(error_code='RATE\ud800'))
+        read = _stored(TaskError(code='RATE\ud800'))
 
-        assert read.error_code == 'RATE\\ud800'
+        assert read.code == 'RATE\\ud800'
 
     def test_an_exception_whose_str_raises_keeps_the_code(self) -> None:
-        read = _stored(TaskError(error_code='RATE_LIMITED', exception=_Evil()))
+        read = _stored(TaskError(code='RATE_LIMITED', exception=_Evil()))
 
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
         assert isinstance(read.exception, dict)
         assert read.exception['message'] == 'exception text unavailable'
 
     @pytest.mark.parametrize(
         'err',
         [
-            _RateLimited(error_code='RATE_LIMITED'),
-            _WithObject(error_code='RATE_LIMITED', holds=_Opaque()),
+            _RateLimited(code='RATE_LIMITED'),
+            _WithObject(code='RATE_LIMITED', holds=_Opaque()),
         ],
         ids=['new-field', 'object-field'],
     )
@@ -737,15 +737,15 @@ class TestReportableError:
         read = _stored(err)
 
         assert type(read) is TaskError
-        assert read.error_code == 'RATE_LIMITED'
+        assert read.code == 'RATE_LIMITED'
         assert 'data_refused' in read.data
 
     def test_a_built_in_code_keeps_its_type(self) -> None:
         read = _stored(
-            TaskError(error_code=OperationalErrorCode.BROKER_ERROR, data=_Opaque()),
+            TaskError(code=OperationalCode.DATABASE_ERROR, data=_Opaque()),
         )
 
-        assert read.error_code is OperationalErrorCode.BROKER_ERROR
+        assert read.code is OperationalCode.DATABASE_ERROR
 
     @pytest.mark.parametrize(
         'summary',
@@ -761,57 +761,57 @@ class TestReportableError:
         summary: SubWorkflowSummary[Any],
     ) -> None:
         read = _stored(
-            SubWorkflowError(
-                error_code='X',
+            SubWorkflowFailure(
+                code='X',
                 sub_workflow_id='wf-1',
                 sub_workflow_summary=summary,
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_id == 'wf-1'
         assert read.sub_workflow_summary.failed_nodes == 1
 
     def test_a_surrogate_in_the_id_keeps_the_class(self) -> None:
         read = _stored(
-            SubWorkflowError(
-                error_code='X',
+            SubWorkflowFailure(
+                code='X',
                 sub_workflow_id='wf-\ud800',
                 sub_workflow_summary=_summary(),
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_id == 'wf-\\ud800'
 
     def test_bad_data_keeps_a_good_output(self) -> None:
         read = _stored(
-            SubWorkflowError(
-                error_code='X',
+            SubWorkflowFailure(
+                code='X',
                 data=_Opaque(),
                 sub_workflow_id='wf-1',
                 sub_workflow_summary=_summary(output={'a': 1}),
             ),
         )
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.sub_workflow_summary.output == {'a': 1}
 
     def test_a_good_sub_workflow_error_stays(self) -> None:
-        err = SubWorkflowError(
-            error_code='X',
+        err = SubWorkflowFailure(
+            code='X',
             sub_workflow_id='wf-1',
             sub_workflow_summary=_summary(output={'a': 1}),
         )
 
         read = _stored(err)
 
-        assert isinstance(read, SubWorkflowError)
+        assert isinstance(read, SubWorkflowFailure)
         assert read.data is None
 
     def test_damaged_counts_fall_back_to_a_plain_error(self) -> None:
-        err = SubWorkflowError(
-            error_code='X',
+        err = SubWorkflowFailure(
+            code='X',
             sub_workflow_id='wf-1',
             sub_workflow_summary=_summary(failed_nodes='many'),
         )
@@ -819,27 +819,27 @@ class TestReportableError:
         read = _stored(err)
 
         assert type(read) is TaskError
-        assert read.error_code == 'X'
+        assert read.code == 'X'
 
     def test_a_constructed_error_keeps_its_code(self) -> None:
-        err = SubWorkflowError.model_construct(error_code='X')
+        err = SubWorkflowFailure.model_construct(code='X')
 
         read = _stored(err)
 
-        assert read.error_code == 'X'
+        assert read.code == 'X'
 
     def test_the_check_runs_the_real_writer(self) -> None:
         with patch(
             'horsies.core.codec.typed.dumps_json',
             side_effect=[Err(SerializationError('cannot write')), Ok('{}')],
         ):
-            kept = reportable_error(TaskError(error_code='X', data={'a': 1}), 'task')
+            kept = reportable_error(TaskError(code='X', data={'a': 1}), 'task')
 
         assert kept.data == {'data_refused': 'SerializationError'}
 
     def test_the_cause_holds_no_value(self) -> None:
         kept = reportable_error(
-            TaskError(error_code='X', data={'secret-marker': _Opaque()}),
+            TaskError(code='X', data={'secret-marker': _Opaque()}),
             'task',
         )
 
@@ -850,7 +850,7 @@ class TestReportableError:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level('ERROR', logger='horsies.codec'):
-            reportable_error(TaskError(error_code='X', data=_Opaque()), 'task')
+            reportable_error(TaskError(code='X', data=_Opaque()), 'task')
 
         record = next(item for item in caplog.records if item.name == 'horsies.codec')
         assert 'X' in record.getMessage()
@@ -863,7 +863,7 @@ class TestReportableError:
     ) -> None:
         with caplog.at_level('ERROR', logger='horsies.codec'):
             encode_task_result(
-                Err(TaskError(error_code='X', data=_Opaque())),
+                Err(TaskError(code='X', data=_Opaque())),
                 type(None),
             )
 
@@ -883,17 +883,17 @@ class TestReportableError:
     def test_a_field_assigned_after_construction_keeps_the_code(
         self, field: str, bad: object,
     ) -> None:
-        err = TaskError(error_code='RATE_LIMITED', data={'a': 1})
+        err = TaskError(code='RATE_LIMITED', data={'a': 1})
         setattr(err, field, bad)
 
         kept = _stored(reportable_error(err, 'task'))
 
-        assert kept.error_code == 'RATE_LIMITED'
+        assert kept.code == 'RATE_LIMITED'
         assert isinstance(kept.data, dict) and 'data_refused' in kept.data
 
     def test_an_int_message_does_not_stop_the_escape_of_the_exception(self) -> None:
         err = TaskError(
-            error_code='RATE_LIMITED',
+            code='RATE_LIMITED',
             exception={
                 'type': 'ValueError',
                 'module': 'builtins',
@@ -910,7 +910,7 @@ class TestReportableError:
         assert kept.exception['message'] == 'bad \\ud800'
 
     def test_an_int_exception_does_not_stop_the_escape_of_the_message(self) -> None:
-        err = TaskError(error_code='RATE_LIMITED', message='bad \ud800')
+        err = TaskError(code='RATE_LIMITED', message='bad \ud800')
         err.exception = 5  # pyright: ignore[reportAttributeAccessIssue]
 
         kept = _stored(reportable_error(err, 'task'))
@@ -922,13 +922,13 @@ class TestReportableError:
             data: Any = None
 
         kept = _stored(
-            reportable_error(WideData(error_code='RATE_LIMITED', data=(1, 2)), 'task'),
+            reportable_error(WideData(code='RATE_LIMITED', data=(1, 2)), 'task'),
         )
 
         assert isinstance(kept.data, dict) and 'data_refused' in kept.data
 
     def test_a_good_message_stays_when_the_exception_is_dropped(self) -> None:
-        err = TaskError(error_code='RATE_LIMITED', message='slow down')
+        err = TaskError(code='RATE_LIMITED', message='slow down')
         err.exception = 5  # pyright: ignore[reportAttributeAccessIssue]
 
         kept = _stored(reportable_error(err, 'task'))
@@ -938,7 +938,7 @@ class TestReportableError:
 
     def test_a_good_exception_stays_when_the_data_is_bad(self) -> None:
         err = TaskError(
-            error_code='RATE_LIMITED',
+            code='RATE_LIMITED',
             exception=ValueError('boom'),
             data=cast('Any', object()),
         )
@@ -950,26 +950,26 @@ class TestReportableError:
         assert kept.message is None
 
     def test_a_built_in_code_stays_when_a_field_is_bad(self) -> None:
-        err = TaskError(error_code=OperationalErrorCode.BROKER_ERROR)
+        err = TaskError(code=OperationalCode.DATABASE_ERROR)
         err.message = 5  # pyright: ignore[reportAttributeAccessIssue]
 
-        assert _stored(reportable_error(err, 'task')).error_code is OperationalErrorCode.BROKER_ERROR
+        assert _stored(reportable_error(err, 'task')).code is OperationalCode.DATABASE_ERROR
 
     def test_a_lone_surrogate_with_a_damaged_exception_keeps_the_code(self) -> None:
-        err = TaskError(error_code='RATE_LIMITED', message='bad \ud800')
+        err = TaskError(code='RATE_LIMITED', message='bad \ud800')
         err.exception = _RaisingDict({'type': 'V'})  # pyright: ignore[reportAttributeAccessIssue]
 
         kept = _stored(reportable_error(err, 'task'))
 
-        assert kept.error_code == 'RATE_LIMITED'
+        assert kept.code == 'RATE_LIMITED'
         assert kept.message is None
 
-    @pytest.mark.parametrize('code', [5, True, None, 'BROKER_ERROR'])
+    @pytest.mark.parametrize('code', [5, True, None, 'DATABASE_ERROR'])
     def test_a_code_that_cannot_be_kept_is_a_catalog_error(self, code: object) -> None:
-        err = TaskError(error_code='RATE_LIMITED')
-        err.error_code = cast('Any', code)
+        err = TaskError(code='RATE_LIMITED')
+        err.code = cast('Any', code)
 
-        with pytest.raises(ValueValidationError, match='error_code'):
+        with pytest.raises(ValueValidationError, match='holds a code of type'):
             reportable_error(err, 'task')
 
     def test_a_missing_code_is_a_catalog_error(self) -> None:
@@ -980,12 +980,12 @@ class TestReportableError:
 
     def test_a_good_error_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level('ERROR', logger='horsies.codec'):
-            encode_task_error(reportable_error(TaskError(error_code='X', data={'a': 1})))
+            encode_task_error(reportable_error(TaskError(code='X', data={'a': 1})))
 
         assert caplog.records == []
 
     def test_an_error_slot_decodes_with_the_helper(self) -> None:
-        wire = encode_task_error(TaskError(error_code='X', data={'a': [1]}))
+        wire = encode_task_error(TaskError(code='X', data={'a': [1]}))
 
         assert decode_task_error(wire).data == {'a': [1]}
 
@@ -1010,10 +1010,10 @@ class TestJsonInput:
 
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
+                database=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
             ),
         )
-        _ = app.task(task_name='json_input_parameter')(pass_on)
+        _ = app.task(name='json_input_parameter')(pass_on)
 
         assert encode_kwargs_read_back(pass_on, {'payload': ['a']}) == {'payload': ['a']}
         with pytest.raises(StrictJsonError, match='tuple'):
@@ -1023,7 +1023,7 @@ class TestJsonInput:
 @pytest.mark.unit
 def test_json_text_of_a_refused_error_is_valid() -> None:
     wire = encode_task_result(
-        Err(TaskError(error_code='X', data=_Opaque())),
+        Err(TaskError(code='X', data=_Opaque())),
         type(None),
         'task',
     )

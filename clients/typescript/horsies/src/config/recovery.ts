@@ -2,7 +2,7 @@
 // core's `RecoveryConfig`, `core/src/core/config/recovery.rs`). A refusal of a recovery field has the code of the
 // recovery config (`HRS-204`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
   accepted,
   type Checked,
@@ -35,10 +35,10 @@ export interface RecoveryConfigInput {
 }
 
 /** A `u32` field of the recovery config. */
-const RECOVERY_U32 = u32Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+const RECOVERY_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_RECOVERY);
 
 /** A `u64` field of the recovery config. */
-const RECOVERY_U64 = u64Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+const RECOVERY_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_RECOVERY);
 
 /** The core's `recovery` object of `input`. Pure. */
 export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<ConfigJson> {
@@ -48,14 +48,14 @@ export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<
       checkedInteger(value, bound, memberPath(path, name));
 
   return checkedObject([
-    optionalEntry("auto_requeue_stale_claimed", input.requeueStaleClaimed, accepted),
+    optionalEntry("requeue_stale_claimed", input.requeueStaleClaimed, accepted),
     optionalEntry(
       "claimed_stale_threshold_ms",
       input.claimedStaleThresholdMs,
       integer("claimedStaleThresholdMs", RECOVERY_U64),
     ),
-    optionalEntry("auto_fail_stale_running", input.failStaleRunning, accepted),
-    optionalEntry("auto_terminate_orphaned_workflow_tasks", input.terminateOrphanedWorkflowTasks, accepted),
+    optionalEntry("fail_stale_running", input.failStaleRunning, accepted),
+    optionalEntry("terminate_orphaned_workflow_tasks", input.terminateOrphanedWorkflowTasks, accepted),
     optionalEntry(
       "orphan_task_audit_interval_ms",
       input.orphanTaskAuditIntervalMs,
@@ -77,7 +77,7 @@ export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<
       integer("crashedWorkerRecoveryGraceMs", RECOVERY_U64),
     ),
     optionalEntry(
-      "phase2_quarantine_after_attempts",
+      "finalization_quarantine_after_attempts",
       input.finalizationQuarantineAfterAttempts,
       integer("finalizationQuarantineAfterAttempts", RECOVERY_U32),
     ),

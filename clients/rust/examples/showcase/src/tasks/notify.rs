@@ -21,7 +21,7 @@ const DEMO_RECIPIENT: &str = "customer@example.invalid";
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn send_order_email(
     order_id: String,
@@ -45,7 +45,7 @@ pub async fn send_order_email(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn send_shipping_sms(
     order_id: String,
@@ -65,7 +65,7 @@ pub async fn send_shipping_sms(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn marketing_blast(segment: String) -> Result<MarketingBlast, TaskError<AcmeCode>> {
     let recipients = segment_size(&segment);
@@ -82,7 +82,7 @@ pub async fn marketing_blast(segment: String) -> Result<MarketingBlast, TaskErro
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn winback_blast(
     segment: String,

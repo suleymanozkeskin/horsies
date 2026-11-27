@@ -22,7 +22,7 @@ use super::*;
 use crate::broker::claims::WorkflowNodeIndex;
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{
     AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMetadata, TaskModule,
@@ -37,7 +37,7 @@ const SEEDED_TASK_NAME: &str = "app.tasks.start";
 const CARRIER_TEXT: &str =
     r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01","tracestate":""}"#;
 
-/// The user code of a body that fails.
+/// The custom code of a body that fails.
 const DECLINED: &str = "DECLINED";
 
 thread_local! {
@@ -233,7 +233,9 @@ fn returns_one() -> RawTaskResult {
 }
 
 fn declines() -> RawTaskResult {
-    TaskResult::Err(TaskError::new(DECLINED, "the card was declined").expect("a free user code"))
+    TaskResult::Err(
+        TaskError::custom(DECLINED, "the card was declined").expect("a free custom code"),
+    )
 }
 
 fn panics() -> RawTaskResult {
@@ -504,7 +506,7 @@ async fn a_failed_body_closes_its_scope_with_its_error_code() {
 /// A body that panics closes its scope with `UNHANDLED_EXCEPTION`.
 #[tokio::test]
 async fn a_panicking_body_closes_its_scope_with_unhandled_exception() {
-    let unhandled = TaskErrorCode::BuiltIn(OperationalErrorCode::UnhandledException.into());
+    let unhandled = TaskErrorCode::BuiltIn(OperationalCode::UnhandledException.into());
     for make_task in [async_task, blocking_task] {
         let (_result, calls, _seen) = isolated_run_of(make_task, panics).await;
         let span = opened_span(&calls);

@@ -460,8 +460,8 @@ def _run_fleet_metrics(
             'horsies',
             'metrics',
             instance_path,
-            f'--listen={listen}',
-            '--loglevel=warning',
+            f'--metrics-listen={listen}',
+            '--log-level=warning',
         ],
         stdout=log_handle,
         stderr=subprocess.STDOUT,
@@ -485,7 +485,7 @@ def _healthcheck_completes() -> bool:
     sent = basic_tasks.healthcheck.send()
     if is_err(sent):
         return False
-    return read_succeeded(sent.ok_value.get(timeout_ms=2000))
+    return read_succeeded(sent.ok_value.get(wait_ms=2000))
 
 
 def _otlp_output_path() -> Path:

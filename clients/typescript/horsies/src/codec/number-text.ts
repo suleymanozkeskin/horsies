@@ -11,7 +11,7 @@
 // bound, is a defect of the path that made the `JsonText`: the reader throws a `TypeError`. The reader does not look
 // for repeated keys (the last one wins) or lone surrogate escapes: the core refuses them first.
 
-import { MAX_JSON_DEPTH } from "./bounds.ts";
+import { MAX_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import type { JsonText } from "./json-text.ts";
 
 /** A float text whose value is an integer: `h.float()` takes `value`, `h.int()` refuses it. */

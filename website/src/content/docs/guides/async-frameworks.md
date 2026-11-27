@@ -22,7 +22,7 @@ The sync forms block their thread. On a thread that runs an event loop, the bloc
 
 `app.get_broker()` creates the broker once per process. A configuration error raises at that call, so a call in the lifespan fails the start of the server. The call opens no connection. Connections open on the first database call.
 
-Close the broker at shutdown with `close_async()`. It returns a `BrokerResult`. Handle the `Err` side.
+Close the broker at shutdown with `close_async()`. It returns a `DatabaseResult`. Handle the `Err` side.
 
 ```python
 import logging
@@ -68,7 +68,7 @@ async def welcome(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqueued. The error keeps the payload, so `retry_send_async()` can send it.
+A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqueued. The error keeps the payload, so `resend_async()` can send it.
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 

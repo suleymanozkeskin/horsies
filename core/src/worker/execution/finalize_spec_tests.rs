@@ -82,20 +82,15 @@ struct Seeded {
 }
 
 /// Stored options with a retry policy (Python's stored layout).
-fn retry_options(
-    max_retries: u32,
-    backoff: &str,
-    intervals: &[u32],
-    auto_retry_for: &[&str],
-) -> String {
+fn retry_options(max_retries: u32, backoff: &str, intervals: &[u32], retry_for: &[&str]) -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
-            "intervals": intervals,
+            "intervals_seconds": intervals,
             "backoff_strategy": backoff,
             "jitter": false,
             "max_delay_seconds": null,
-            "auto_retry_for": auto_retry_for,
+            "retry_for": retry_for,
         }
     })
     .to_string()
@@ -262,7 +257,8 @@ async fn finalize_with(
 
 fn error_result(code: &str) -> TaskResult<Vec<u8>> {
     TaskResult::Err(
-        TaskError::new(code, format!("{code} happened")).expect("the test codes are user codes"),
+        TaskError::custom(code, format!("{code} happened"))
+            .expect("the test codes are custom codes"),
     )
 }
 
@@ -646,12 +642,12 @@ async fn a_plain_task_owes_no_phase_two() {
 /// `WORKFLOW_STOPPED` is a reserved code and the branch
 /// that left the row RUNNING is removed (decisions, "Task returns: one rule
 /// in the core"). No task result can carry the code: it is not a built-in
-/// code and `TaskError::new` refuses it, so no result that reaches
+/// code and `TaskError::custom` refuses it, so no result that reaches
 /// `persist_terminal_state` holds it.
 #[test]
 fn a_task_result_cannot_carry_the_workflow_stopped_code() {
     assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
-    assert!(TaskError::new("WORKFLOW_STOPPED", "workflow was stopped").is_err());
+    assert!(TaskError::custom("WORKFLOW_STOPPED", "workflow was stopped").is_err());
 }
 
 /// Python `test_layer1_tasks.py::test_exponential_backoff_intervals`: two
@@ -1052,7 +1048,7 @@ async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
     );
     let database_url = crate::test_support::migrated_database_url().await;
     let timeout_broker = PostgresBroker::connect_with(
-        &PostgresConfig::from_url(with_query_parameter(
+        &PostgresConfig::from_database_url(with_query_parameter(
             &database_url,
             CONSUME_LOCK_TIMEOUT_PARAMETER,
         )),

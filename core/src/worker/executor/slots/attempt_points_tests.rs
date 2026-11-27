@@ -22,7 +22,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::AttemptPlacement;
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
-use crate::events::{AttemptRecord, AttemptStart, ChildResult, Event, WorkerDecision};
+use crate::events::{AnyEvent, AttemptRecord, AttemptStart, ChildResult, WorkerDecision};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::registry::SampleValue;
@@ -102,7 +102,7 @@ fn distinct_start() -> DateTime<Utc> {
 
 /// The result frame of `task` with the error envelope of code `code`.
 fn error_frame(task: &ClaimedTask, code: &str) -> ChildFrame {
-    let error = TaskError::new(code, "the task failed").expect("a code of the task's own");
+    let error = TaskError::custom(code, "the task failed").expect("a code of the task's own");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
             .expect("a task error holds only JSON values"),
@@ -181,7 +181,7 @@ async fn run_scripted_attempt(
 }
 
 /// The name of each event, in order.
-fn names(events: &[Event]) -> Vec<&'static str> {
+fn names(events: &[AnyEvent]) -> Vec<&'static str> {
     events.iter().map(|event| event.event_type().name).collect()
 }
 
@@ -219,11 +219,11 @@ async fn a_completed_attempt_is_placed_ended_and_recorded_once_each() {
     );
     match (&events[0], &events[1], &events[2]) {
         (
-            Event::AttemptPlaced(placed),
-            Event::AttemptEnded(ended),
-            Event::AttemptRecorded(record),
+            AnyEvent::AttemptPlaced(placed),
+            AnyEvent::AttemptEnded(ended),
+            AnyEvent::AttemptRecorded(record),
         ) => {
-            assert_eq!(placed.child_kind, ExecutionClass::Isolated);
+            assert_eq!(placed.child_execution, ExecutionClass::Isolated);
             assert_eq!(
                 ended.end,
                 crate::events::AttemptEnd::ReportedByChild {
@@ -286,7 +286,7 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
         vec!["AttemptPlaced", "AttemptEnded", "AttemptRecorded"]
     );
     match (&events[1], &events[2]) {
-        (Event::AttemptEnded(ended), Event::AttemptRecorded(record)) => {
+        (AnyEvent::AttemptEnded(ended), AnyEvent::AttemptRecorded(record)) => {
             match &ended.end {
                 crate::events::AttemptEnd::ReportedByChild {
                     result: ChildResult::Failed { error_code },
@@ -294,7 +294,8 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
                 } if *start == scripted_start() => assert_eq!(
                     error_code,
                     &crate::events::AttemptErrorCode::Custom {
-                        code: crate::events::UserCodeText::new("RATE_LIMITED".to_owned()).unwrap(),
+                        code: crate::events::CustomCodeText::new("RATE_LIMITED".to_owned())
+                            .unwrap(),
                     }
                 ),
                 other => panic!("a reported failure, not {other:?}"),
@@ -312,7 +313,7 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
         }
         other => panic!("ended, recorded, not {other:?}"),
     }
-    // The task declares no code, so its user code is `undeclared` in every
+    // The task declares no code, so its custom code is `undeclared` in every
     // label; the event keeps the exact code.
     assert_eq!(
         watched.series(MetricId::TaskRetries),
@@ -363,7 +364,7 @@ async fn a_task_that_reaches_no_child_is_released_once_and_not_placed() {
     let events = watched.events();
     assert_eq!(names(&events), vec!["ClaimReleased"]);
     match &events[0] {
-        Event::ClaimReleased(released) => {
+        AnyEvent::ClaimReleased(released) => {
             assert_eq!(released.reason, ReleaseReason::PoolStopping);
         }
         other => panic!("a release, not {other:?}"),
@@ -402,13 +403,13 @@ async fn with_telemetry_off_an_attempt_emits_nothing() {
 
 /// The one `AttemptEnded` of `events`, after its placement and before its
 /// record.
-fn the_attempt_ended(events: &[Event]) -> &crate::events::AttemptEnded {
+fn the_attempt_ended(events: &[AnyEvent]) -> &crate::events::AttemptEnded {
     assert_eq!(
         names(events),
         vec!["AttemptPlaced", "AttemptEnded", "AttemptRecorded"]
     );
     match &events[1] {
-        Event::AttemptEnded(ended) => ended,
+        AnyEvent::AttemptEnded(ended) => ended,
         other => panic!("an AttemptEnded, not {other:?}"),
     }
 }

@@ -24,7 +24,7 @@ use super::PROTOCOL_VERSION;
 use crate::broker::OrphanSelfHeal;
 use crate::core::codec::check_json_text;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
-use crate::core::config::{PostgresConfig, PostgresConfigError};
+use crate::core::config::{PostgresConfig, PostgresConfigError, SessionDatabase};
 use crate::core::mask_database_url;
 use crate::events::{AttemptNumber, QueueName, RunTrace, TraceCarrierText};
 
@@ -206,21 +206,24 @@ impl ChildConnection {
     /// Errors: the [`PostgresConfigError`] of [`PostgresConfig::validate`].
     pub fn of_config(config: &PostgresConfig) -> Result<Self, PostgresConfigError> {
         config.validate()?;
-        let server_sessions = match (
-            config.pgbouncer_transaction_mode,
-            &config.session_database_url,
-        ) {
+        let server_sessions = match (config.pgbouncer_transaction_mode, &config.session_database) {
             (false, _) => ServerSessions::Kept,
-            (true, Some(session_url)) => ServerSessions::PgBouncerTransactionMode {
-                session_database_url: DatabaseUrl::new(session_url.clone()),
+            (true, SessionDatabase::Separate { url }) => ServerSessions::PgBouncerTransactionMode {
+                session_database_url: DatabaseUrl::new(url.clone()),
             },
-            (true, None) => unreachable!(
-                "PostgresConfig::validate refuses transaction mode without a session URL"
+            (true, SessionDatabase::SameAsDatabaseUrl) => unreachable!(
+                "PostgresConfig::validate refuses transaction mode without a separate session database"
             ),
         };
         Ok(Self {
-            tcp_keepalives: config.tcp_keepalives,
-            tcp_user_timeout: config.tcp_user_timeout,
+            tcp_keepalives: config
+                .tcp_keepalives
+                .checked()
+                .expect("PostgresConfig::validate checked the keepalive values"),
+            tcp_user_timeout: config
+                .tcp_user_timeout
+                .checked()
+                .expect("PostgresConfig::validate checked the TCP user timeout"),
             server_sessions,
         })
     }
@@ -312,7 +315,7 @@ pub struct RunFrame {
     pub claimed_at: DateTime<Utc>,
     /// Whether the stop before start of a workflow task cancels the task
     /// when no node links it live (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: IsolatedWork,
     /// The trace carrier that the send stored on the task row. The child

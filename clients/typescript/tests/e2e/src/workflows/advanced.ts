@@ -3,7 +3,7 @@
 // `pause`, success policies, node retries, and the params of a sub-workflow node. The recovery tests use the
 // workflows of the structure layer; the crash test uses the instance `recovery_queues`.
 
-import { defineWorkflow, h } from "../../../../horsies/src/index.ts";
+import { defineWorkflow, h } from "#horsies";
 import { subLabel } from "./children.ts";
 import { ctxReaderStr, fail, failWith, mark, produceInt, retryThenOk, slowStep, step } from "../tasks/workflow-nodes.ts";
 import { named } from "./naming.ts";

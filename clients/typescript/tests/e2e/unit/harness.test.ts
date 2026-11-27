@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import { LAYER_FILES } from "../layers.ts";
-import { fileCommand, runPlan } from "../run.ts";
+import { entryEnvironment, entryOf, fileCommand, runPlan } from "../run.ts";
 import { connectionEnv, connectionFromEnv, DATABASE_URL_ENV, SESSION_DATABASE_URL_ENV } from "../src/connection.ts";
 import { instanceConfig, parseInstance, readyClass, readyQueue } from "../src/instances.ts";
 import { appendLine, createOnce, MARKER_DIR_ENV, MAX_ATTEMPTS, nextAttempt } from "../src/markers.ts";
@@ -163,7 +163,7 @@ describe("the instances", () => {
   test("a transaction pool connection gives the PgBouncer mode with its session URL", () => {
     const config = instanceConfig("default", { kind: "transactionPool", poolUrl: "postgresql://p@h:6432/d", sessionUrl: SERVER });
 
-    assert.deepEqual(config.broker.connection, { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "value", value: SERVER } });
+    assert.deepEqual(config.database.connection, { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "value", value: SERVER } });
   });
 });
 
@@ -232,5 +232,21 @@ describe("the marker files", () => {
 
       assert.deepEqual(createOnce("a", "x"), { ok: false, error: { kind: "directoryNotSet" } });
     });
+  });
+});
+
+describe("the entry of a run", () => {
+  test("no variable or `source` selects the source entry; `package` the built package; another text is refused", () => {
+    assert.deepEqual(entryOf(undefined), { ok: true, entry: "source" });
+    assert.deepEqual(entryOf("source"), { ok: true, entry: "source" });
+    assert.deepEqual(entryOf("package"), { ok: true, entry: "package" });
+    assert.deepEqual(entryOf("built"), { ok: false, error: 'HORSIES_E2E_ENTRY is "built"; it is source or package' });
+  });
+
+  test("the built package sets the condition in the option variable of the runtime; the source entry sets none", () => {
+    assert.deepEqual(entryEnvironment("node", "package"), { NODE_OPTIONS: "--conditions=horsies-package" });
+    assert.deepEqual(entryEnvironment("bun", "package"), { BUN_OPTIONS: "--conditions=horsies-package" });
+    assert.deepEqual(entryEnvironment("node", "source"), {});
+    assert.deepEqual(entryEnvironment("bun", "source"), {});
   });
 });

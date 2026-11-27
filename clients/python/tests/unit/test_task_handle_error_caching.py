@@ -1,6 +1,6 @@
 """Regression tests: TaskHandle must not cache transient retrieval errors.
 
-A handle previously cached BROKER_ERROR / TASK_NOT_FOUND permanently —
+A handle previously cached DATABASE_ERROR / TASK_NOT_FOUND permanently —
 one DB hiccup during get() poisoned the handle, and every later call
 replayed the stale error even after the task completed. WAIT_TIMEOUT
 already (correctly) bypassed the cache; these tests pin the same
@@ -15,13 +15,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, RawResultRecord
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed, StoredResult
 from horsies.core.models.outcome import (
-    BrokerError,
     Failed,
+    ReadDatabaseError,
     ReadResult,
+    ReadTaskNotFound,
     Succeeded,
-    TaskNotFound,
 )
 from horsies.core.models.tasks import (
     OutcomeCode,
@@ -45,14 +45,14 @@ def _make_handle(broker: MagicMock) -> TaskHandle[int]:
     )
 
 
-def _ok_record(value: int) -> Ok[RawResultRecord]:
+def _ok_record(value: int) -> Ok[StoredResult]:
     envelope: dict[str, Any] = {
         '__h_task_result__': True,
         'ok': value,
         'err': None,
     }
     return Ok(
-        RawResultRecord(
+        StoredResult(
             task_id='task-1',
             task_name='t',
             status=TaskStatus.COMPLETED,
@@ -64,7 +64,7 @@ def _ok_record(value: int) -> Ok[RawResultRecord]:
 def _assert_failed_with(read: ReadResult[int, TaskError], code: OutcomeCode) -> None:
     match read:
         case Ok(Failed(task_error)):
-            assert task_error.error_code == code
+            assert task_error.code == code
         case _:
             pytest.fail(f'expected a failed outcome with {code}, got {read!r}')
 
@@ -92,15 +92,15 @@ class TestTransientErrorsNotCached:
         assert broker.get_raw_result_record_async.await_count == 2
 
     async def test_broker_error_result_then_success(self) -> None:
-        """An Err(BrokerOperationError) must not poison the handle."""
+        """An Err(DatabaseOperationError) must not poison the handle."""
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             side_effect=[
-                Err(BrokerOperationFailed(
-                    code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+                Err(DatabaseOperationFailed(
+                    code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
                     message='transient',
                     retryable=True,
-                    exception=ConnectionError('db gone'),
+                    cause=ConnectionError('db gone'),
                 )),
                 _ok_record(7),
             ],
@@ -108,7 +108,7 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        assert isinstance(first, Err) and isinstance(first.err_value, BrokerError), first
+        assert isinstance(first, Err) and isinstance(first.err_value, ReadDatabaseError), first
 
         second = await handle.get_async()
         assert second == Ok(Succeeded(7))
@@ -122,7 +122,7 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        assert isinstance(first, Err) and isinstance(first.err_value, TaskNotFound), first
+        assert isinstance(first, Err) and isinstance(first.err_value, ReadTaskNotFound), first
 
         second = await handle.get_async()
         assert second == Ok(Succeeded(3))
@@ -135,7 +135,7 @@ class TestTerminalErrorsStillCached:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.CANCELLED,

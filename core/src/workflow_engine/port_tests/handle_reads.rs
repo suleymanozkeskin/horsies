@@ -11,7 +11,7 @@ use super::support::{
     shared_pool, spec, start, task_node, unreachable_handle, IsolatedDatabase, NodeSeed,
     ParentLink, WorkflowSeed,
 };
-use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 use crate::core::PausedWorkflowAge;
 use crate::core::{
     OnError, SubWorkflowSummary, TaskResult, WorkflowNodeStatus, WorkflowSpec, WorkflowStatus,
@@ -134,7 +134,7 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id has no status");
 
-    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::WorkflowNotFound);
     assert!(!error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
 }
@@ -702,14 +702,17 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("status() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`:
 /// the result read on a lost database fails with a retryable database
-/// error, which a client's handle names `BROKER_ERROR`.
+/// error, which a client's handle names `DATABASE_ERROR`.
 #[tokio::test]
 async fn a_lost_database_makes_the_result_read_fail_retryably() {
     let error = unreachable_handle(Uuid::new_v4())
@@ -729,7 +732,10 @@ async fn a_lost_database_makes_cancel_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("cancel() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
 }
 
@@ -743,7 +749,10 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
         .await
         .expect_err("results() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert_eq!(error.workflow_id(), workflow_id);
 }
 

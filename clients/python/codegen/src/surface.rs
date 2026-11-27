@@ -406,7 +406,7 @@ const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_i
 const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
 const PING_WORKERS_PARAMETERS: &[StubParameter] = &[
     keyword("target_worker_id", "str | None"),
-    keyword("timeout_seconds", "float"),
+    keyword("wait_ms", "int"),
     keyword("min_responses", "int | None"),
 ];
 const WORKER_STATE_PARAMETERS: &[StubParameter] = &[positional("worker_id", "str")];
@@ -428,16 +428,16 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
+const PING_OUTCOME: &str = "DatabasePingRecord | DatabaseOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | DatabaseOperationFailed";
 /// A refused or failed send is a generated class of
 /// `horsies._catalog.broker_errors`, built in Rust.
-const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
+const SEND_OUTCOME: &str = "Enqueued | DatabaseCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
-    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+    "TaskInfoRecord | TaskInfoNotFound | DatabaseOperationFailed | DatabaseInvalidJsonPayload";
 const TASK_WORKFLOW_NODE_OUTCOME: &str =
-    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
+    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | DatabaseOperationFailed";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | DatabaseOperationFailed | DatabaseInvalidJsonPayload | DatabaseInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -484,7 +484,7 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("spec_json", "str"),
     keyword("workflow_id", "uuid.UUID"),
     keyword("sent_at", "datetime.datetime"),
-    keyword("resend_on_transient_err", "bool"),
+    keyword("resend_on_transient_error", "bool"),
     keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
@@ -493,7 +493,7 @@ const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
 /// A failed handle operation is a generated class of
 /// `horsies._catalog.workflow_handle_errors`, built in Rust.
 const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid | WorkflowHandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -516,20 +516,20 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("quarantine_after_attempts", "int"),
 ];
 const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
-     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_STATUS_OUTCOME: &str =
-    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowStatusRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
-     HandleStoredDataInvalid";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | \
+     WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
-     HandleDbOperationFailed | HandleStoredDataInvalid";
+     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODES_OUTCOME: &str =
-    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+    "WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -976,14 +976,18 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
 /// `horsies._catalog.monitoring_errors`, built in Rust.
 const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
 const PING_WORKERS_OUTCOME: &str =
-    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+    "WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled";
 const WORKER_STATES_OUTCOME: &str =
-    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
-const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
-const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
-const TASK_LIST_OUTCOME: &str =
-    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+    "WorkerStatesRecord | DatabaseOperationFailed | DatabaseInvalidInput";
+const WORKER_STATE_OUTCOME: &str =
+    "WorkerStateRecord | WorkerStateAbsent | DatabaseOperationFailed";
+const EXECUTION_CLASS_COVERAGE_OUTCOME: &str =
+    "ExecutionClassCoverageRecord | DatabaseOperationFailed";
+const EXECUTION_CLASS_REPORT_OUTCOME: &str = "ExecutionClassReportRecord | DatabaseOperationFailed";
+const STALE_TASK_LIST_OUTCOME: &str =
+    "StaleTaskListComplete | StaleTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput";
+const EXPIRED_TASK_LIST_OUTCOME: &str =
+    "ExpiredTaskListComplete | ExpiredTaskListTruncated | DatabaseOperationFailed | DatabaseInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
     "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
@@ -1050,22 +1054,34 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,\nin one statement.",
     },
     StubFunction {
+        name: "stale_tasks",
+        parameters: STALE_TASKS_PARAMETERS,
+        returns: TypeText::Plain(STALE_TASK_LIST_OUTCOME),
+        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+    },
+    StubFunction {
         name: "stale_tasks_async",
         parameters: STALE_TASKS_PARAMETERS,
-        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
-        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+        returns: TypeText::FutureOf(STALE_TASK_LIST_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "expired_tasks",
+        parameters: &[],
+        returns: TypeText::Plain(EXPIRED_TASK_LIST_OUTCOME),
+        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
     StubFunction {
         name: "expired_tasks_async",
         parameters: &[],
-        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
-        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
+        returns: TypeText::FutureOf(EXPIRED_TASK_LIST_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
     },
     StubFunction {
         name: "ping_workers",
         parameters: PING_WORKERS_PARAMETERS,
         returns: TypeText::Plain(PING_WORKERS_OUTCOME),
-        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call; not bounded for an infinite window.",
+        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call.",
     },
     StubFunction {
         name: "ping_workers_async",
@@ -1110,27 +1126,27 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
-        name: "class_coverage",
+        name: "execution_class_coverage",
         parameters: &[],
-        returns: TypeText::Plain(CLASS_COVERAGE_OUTCOME),
+        returns: TypeText::Plain(EXECUTION_CLASS_COVERAGE_OUTCOME),
         doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
     },
     StubFunction {
-        name: "class_coverage_async",
+        name: "execution_class_coverage_async",
         parameters: &[],
-        returns: TypeText::FutureOf(CLASS_COVERAGE_OUTCOME),
+        returns: TypeText::FutureOf(EXECUTION_CLASS_COVERAGE_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
-        name: "class_report",
+        name: "execution_class_report",
         parameters: &[],
-        returns: TypeText::Plain(CLASS_REPORT_OUTCOME),
-        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
+        returns: TypeText::Plain(EXECUTION_CLASS_REPORT_OUTCOME),
+        doc: "The execution class report: the pending streams with their oldest wait and coverage,\nand the budget load of each live worker. Reads only, in one statement.",
     },
     StubFunction {
-        name: "class_report_async",
+        name: "execution_class_report_async",
         parameters: &[],
-        returns: TypeText::FutureOf(CLASS_REPORT_OUTCOME),
+        returns: TypeText::FutureOf(EXECUTION_CLASS_REPORT_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
 ];
@@ -1199,7 +1215,7 @@ const EXCEPTIONS: &[StubException] = &[
         body: ExceptionBody::ArgsOnly,
     },
     StubException {
-        name: "CoreStartFailed",
+        name: "RuntimeStartFailed",
         base: "CoreError",
         doc: "The core runtime or its log forwarder could not start. args: (cause,).",
         body: ExceptionBody::ArgsOnly,
@@ -1523,13 +1539,13 @@ const RECORD_CLASSES: &[StubClass] = &[
                 name: "status",
                 annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
             },
-            property("queue_name", "str"),
+            property("queue", "str"),
             property("priority", "int"),
             property("retry_count", "int"),
             property("max_retries", "int"),
             property("next_retry_at", "datetime.datetime | None"),
             property("sent_at", "datetime.datetime | None"),
-            property("enqueued_at", "datetime.datetime"),
+            property("due_at", "datetime.datetime"),
             property("claimed_at", "datetime.datetime | None"),
             property("started_at", "datetime.datetime | None"),
             property("completed_at", "datetime.datetime | None"),
@@ -2284,18 +2300,66 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "TaskListComplete",
-        doc: "Every matching row of a task list: one dict per row, with the task id as uuid.UUID.",
+        name: "StaleTaskRecord",
+        doc: "One RUNNING task of the stale list. last_heartbeat_at is None when the task has no\nrunner beat since its start.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("rows", "list[dict[str, object]]")],
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("worker_hostname", "str | None"),
+            property("worker_pid", "int | None"),
+            property("worker_process_name", "str | None"),
+            property("started_at", "datetime.datetime"),
+            property("last_heartbeat_at", "datetime.datetime | None"),
+        ],
         methods: &[],
     },
     StubClass {
-        name: "TaskListTruncated",
-        doc: "The first bound matching rows of a task list; more rows match.",
+        name: "ExpiredTaskRecord",
+        doc: "One PENDING task of the expired list.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("rows", "list[dict[str, object]]"),
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("queue_name", "str"),
+            property("priority", "int"),
+            property("sent_at", "datetime.datetime"),
+            property("enqueued_at", "datetime.datetime"),
+            property("good_until", "datetime.datetime"),
+            property("expired_for", "datetime.timedelta"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleTaskListComplete",
+        doc: "Every matching row of the stale list.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[StaleTaskRecord]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleTaskListTruncated",
+        doc: "The first bound matching rows of the stale list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[StaleTaskRecord]"),
+            property("bound", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ExpiredTaskListComplete",
+        doc: "Every matching row of the expired list.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[ExpiredTaskRecord]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ExpiredTaskListTruncated",
+        doc: "The first bound matching rows of the expired list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[ExpiredTaskRecord]"),
             property("bound", "int"),
         ],
         methods: &[],
@@ -2361,7 +2425,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "ClassBudgetRecord",
+        name: "ExecutionClassBudgetRecord",
         doc: "One claim budget of a worker, as its snapshot recorded it; serves is in Execution order.",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2396,9 +2460,9 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("snapshot_at", "datetime.datetime"),
             property("hostname", "str"),
             property("pid", "int"),
-            property("processes", "int"),
-            property("max_claim_batch", "int"),
-            property("max_claim_per_worker", "int"),
+            property("child_count", "int"),
+            property("per_queue_per_pass", "int | None"),
+            property("claimed_per_worker", "int | None"),
             property("cluster_wide_cap", "int | None"),
             property("queues", "list[str]"),
             property("queue_priorities", "dict[str, int]"),
@@ -2412,7 +2476,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("children_memory_mb", "float | None"),
             property("worker_started_at", "datetime.datetime"),
             property("slot_health", "AllSlotsServingRecord | SlotsDownRecord"),
-            property("class_capacity", "list[ClassBudgetRecord]"),
+            property("execution_class_budgets", "list[ExecutionClassBudgetRecord]"),
             property("profile", "ProfileNamedRecord | ProfileNotRecordedRecord"),
         ],
         methods: &[],
@@ -2466,14 +2530,14 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "The coverage of one pending stream.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("queue_name", "str"),
+            property("queue", "str"),
             property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
-            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
+            property("coverage", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
         ],
         methods: &[],
     },
     StubClass {
-        name: "ClassCoverageRecord",
+        name: "ExecutionClassCoverageRecord",
         doc: "The fleet check, read at checked_at (database time).",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2488,7 +2552,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "At least one row of the stream is due; wait is how long the oldest due row waited.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("enqueued_at", "datetime.datetime"),
+            property("oldest_due_at", "datetime.datetime"),
             property("wait", "datetime.timedelta"),
         ],
         methods: &[],
@@ -2504,13 +2568,13 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "PendingStreamRecord",
-        doc: "One pending stream of the class report.",
+        doc: "One pending stream of the execution class report.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("queue_name", "str"),
+            property("queue", "str"),
             property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("coverage", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
             property("wait", "OldestWaitingRecord | NoneDueRecord"),
-            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
         ],
         methods: &[],
     },
@@ -2527,7 +2591,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkerClassLoadRecord",
+        name: "WorkerExecutionClassLoadRecord",
         doc: "The claim budgets of one live worker, in Execution order.",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2538,13 +2602,14 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "ClassReportRecord",
-        doc: "The class report, read at checked_at (database time); workers by worker id.",
+        name: "ExecutionClassReportRecord",
+        doc: "The execution class report, read at checked_at (database time); workers by worker id.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("checked_at", "datetime.datetime"),
+            property("live_window", "datetime.timedelta"),
             property("streams", "list[PendingStreamRecord]"),
-            property("workers", "list[WorkerClassLoadRecord]"),
+            property("workers", "list[WorkerExecutionClassLoadRecord]"),
         ],
         methods: &[],
     },
@@ -3173,14 +3238,14 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunCommandRecord",
-        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,\nor the TraceCarrier of the caller's current context). A naive deadline raises TypeError.",
-        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
+        doc: "One rerun command: the source task id, the latest start time of the new task (aware,\nor None for no limit), the idempotency key, and the trace that the new task stores\n(NoTraceCarrier, or the TraceCarrier of the caller's current context). A naive good_until\nraises TypeError.",
+        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("good_until", "datetime.datetime | None"), keyword("idempotency_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
         properties: &[],
         methods: &[],
     },
     StubClass {
         name: "RerunPolicyRecord",
-        doc: "The enqueue policy of the new task: its retention class key, whether it keeps its input\nfor a rerun, and the reservation window of a caller key in microseconds. A window not\nabove 0 or above 30 days, or an empty class key, raises ValueError.",
+        doc: "The enqueue policy of the new task: its retention class key, whether it keeps its input\nfor a rerun, and the reservation window of an idempotency key in microseconds. A window\nnot above 0 or above 30 days, or a text that is not the key of a retention class, raises\nValueError.",
         constructor: Constructor::Parameters(&[keyword("retention_class_key", "str"), keyword("retain_rerun_input", "bool"), keyword("reservation_window_us", "int")]),
         properties: &[],
         methods: &[],
@@ -3257,16 +3322,30 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunUnknownStoredFamily",
-        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task.",
+        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task_in.",
         constructor: Constructor::NoConstructor,
         properties: &[property("stored", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
-        name: "RerunCallerKeyRefused",
-        doc: "The caller key is not a valid idempotency key; cause names why. Nothing written.",
+        name: "RerunIdempotencyKeyRefused",
+        doc: "The idempotency key is not valid; cause names why. Nothing written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("cause", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunRetryCodeNotDeclared",
+        doc: "The stored retry list of the source names the custom code retry_code, and the task task_name\nof the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.\nmessage names both; exception is a CorePreconditionFailed with the subject rerun_task,\nnot retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("retry_code", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
+        name: "RerunTaskNotRegistered",
+        doc: "The stored retry list of the source names a custom code, and the calling app does not\nregister the task task_name (TASK_NOT_REGISTERED). Nothing written. message names the\ntask; exception is a CorePreconditionFailed with the subject rerun_task, not retryable.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_name", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
@@ -3278,16 +3357,16 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunKeyReplayRecord",
-        doc: "The caller key already holds this rerun command, as existing_task_id.",
+        doc: "The idempotency key already holds this rerun command, as existing_task_id.",
         constructor: Constructor::NoConstructor,
         properties: &[property("existing_task_id", "uuid.UUID")],
         methods: &[],
     },
     StubClass {
         name: "RerunKeyConflictRecord",
-        doc: "The caller key holds another command (the source's own included).",
+        doc: "The idempotency key holds another command (the source's own included), as owner_task_id.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("reserved_by_task_id", "uuid.UUID")],
+        properties: &[property("task_id", "uuid.UUID"), property("owner_task_id", "uuid.UUID")],
         methods: &[],
     },
 ];
@@ -3936,9 +4015,9 @@ const FUNCTIONS: &[StubFunction] = &[
     },
     StubFunction {
         name: "prepare_rerun_write",
-        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
-        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
+        parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("registered_task_codes", "dict[str, tuple[str, ...]]"), keyword("sent_at", "datetime.datetime")],
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunIdempotencyKeyRefused | RerunRetryCodeNotDeclared | RerunTaskNotRegistered | IdMintRefused"),
+        doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. registered_task_codes maps the name of each task\nthat the calling app registers to the custom codes that it declares; the stored retry\nlist of the source is checked against it. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect; a code set that the core refuses raises ValueError.",
     },
     StubFunction {
         name: "prepare_worker",
@@ -4000,11 +4079,11 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.broker_errors",
         names: &[
-            "BrokerCoreEnqueueError",
-            "BrokerInvalidInput",
-            "BrokerInvalidJsonPayload",
-            "BrokerListenerDisabled",
-            "BrokerOperationFailed",
+            "DatabaseCoreEnqueueError",
+            "DatabaseInvalidInput",
+            "DatabaseInvalidJsonPayload",
+            "DatabaseListenerDisabled",
+            "DatabaseOperationFailed",
         ],
     },
     StubImport {
@@ -4014,9 +4093,9 @@ const IMPORTS: &[StubImport] = &[
     StubImport {
         module: "horsies._catalog.workflow_handle_errors",
         names: &[
-            "HandleDbOperationFailed",
-            "HandleResumeRecoveryFailed",
-            "HandleStoredDataInvalid",
+            "WorkflowHandleDatabaseOperationFailed",
+            "WorkflowHandleResumeRecoveryFailed",
+            "WorkflowHandleStoredDataInvalid",
         ],
     },
     StubImport {

@@ -87,7 +87,7 @@ to serve). The `--database-url` form is registry-less by design:
 ## Fleet Metrics — `horsies metrics` and `GET /metrics`
 
 ```bash
-horsies metrics myapp.tasks:app --listen 0.0.0.0:9465   # --listen is required, no default
+horsies metrics myapp.tasks:app --metrics-listen 0.0.0.0:9465   # --metrics-listen is required, no default
 ```
 
 - Serves the fleet gauges of the app's database at `GET /metrics`
@@ -159,8 +159,8 @@ error changes stored data. HTTP is the status of the web read routes.
 <!-- members: MonitoringQueryErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
-| `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `CoreStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_status_counts`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `DATABASE_OPERATION_FAILED` | `MonitoringQueryDatabaseOperationFailed` | `cause` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `RuntimeStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `cause` (the `HistoryContractError`) | `False` | 500 | `task_status_counts`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -187,35 +187,42 @@ list_schedules(app)                                  # next run, then name; at m
   `Breakdown.total` is a `BreakdownCounts` over every group.
 - Filter lists: OR within a dimension, AND across dimensions; empty = no filter.
 - `error_categories` (`ErrorCategory`: OPERATIONAL / CONTRACT / RETRIEVAL /
-  OUTCOME / DOMAIN) expands server-side from the library's own code registry —
-  DOMAIN is the complement of every built-in code.
+  OUTCOME / CUSTOM) expands server-side from the library's own code registry —
+  CUSTOM is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`,
-  `get_class_report_async`.
+  `get_execution_class_report_async`.
 - A snapshot's `slot_health` is `SlotHealthAllServing()` or `SlotHealthSlotsDown(slots)` (the
   worker is degraded). Each `DownSlot` has `slot`, `cause`
-  (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (at
+  (`ResourceShortage(errno)` or `ThreadStartRefused()`), `detail` (at
   most 2400 characters), `down_since` and `failed_boots`. A slot is down
   when its child start failed for a cause that can clear; it takes no task and
   boots again after a growing wait. Match both variants.
-- A snapshot's `class_capacity` is `ClassBudgets(budgets)`. Each
-  `ClassBudget` has `budget` (an `Execution`), `capacity` (children or seats
-  in service) and `serves` (the classes whose rows it claims). Empty
-  `budgets`: the worker serves no class.
+- A snapshot's `execution_class_budgets` is `ExecutionClassBudgets(budgets)`
+  (the stored column `class_capacity`). Each `ExecutionClassBudget` has
+  `budget` (an `Execution`), `capacity` (children or seats in service) and
+  `serves` (the classes whose rows it claims). Empty `budgets`: the worker
+  serves no class.
+- A snapshot's `child_count` counts its children; `claim_limits` is a
+  `ClaimLimits(per_queue_per_pass, claimed_per_worker)`, each `TaskLimit(tasks)`
+  or `NoTaskLimit()`. `claimed_per_worker` is the limit that the worker
+  resolved: its seat count when its profile sets none.
 - A snapshot's `profile` is `SnapshotProfileNamed(name)` (the worker profile that
   the worker runs) or `SnapshotProfileNotRecorded()` (a worker of a build before
   schema migration 1004 wrote the snapshot). Match both variants. Web:
   `GET /api/workers` gives `profile` as `{"kind": "named", "name": ...}` or
-  `{"kind": "not_recorded"}`.
+  `{"kind": "not_recorded"}`, and `slot_health` as `{"kind": "all_serving"}`
+  or `{"kind": "slots_down", "slots": [...]}` (each cause as its text).
 - A snapshot's `queue_priorities`, `queue_max_concurrency` and
   `recovery_config` are `dict`, empty when the worker had none set.
-- Fleet check: `app.get_class_coverage_async()` →
-  `ClassCoverage(checked_at, live_workers, streams)`. One `StreamCoverage`
-  per (queue, class) with PENDING rows; `state` is
+- Fleet check: `app.get_execution_class_coverage_async()` →
+  `ExecutionClassCoverage(checked_at, live_workers, streams)`. One
+  `StreamCoverage(queue, execution, coverage)` per (queue, class) with PENDING
+  rows; `coverage` is
   `StreamCoverageStateServed(workers, capacity)`, `StreamCoverageStateNoCapacity(workers)` (every
   serving child or seat is down) or `StreamCoverageStateUnserved()` (no live worker has
   the queue and a budget that serves the class). Live = latest snapshot at
-  most `WORKER_STATE_LIVE_WINDOW_S` (120) s old;
+  most `WORKER_STATE_LIVE_WINDOW_SECONDS` (120) s old;
   `worker_state_snapshot_interval_ms` is at most half of it (60,000 ms), so a
   running worker stays live when a snapshot write is late by up to half the
   window. Each reaper pass runs it and
@@ -224,13 +231,16 @@ list_schedules(app)                                  # next run, then name; at m
   isolated children (shared rows go back to the queue as `ISOLATED` when
   their task's class changed); a shared class with children of that class or
   isolated children.
-- `app.get_class_report_async()` → `ClassReport(checked_at, streams,
-  workers)`. `PendingStream.wait` is `StreamWaitDue(enqueued_at, wait)` or
-  `StreamWaitNoneDue(next_due_at)`; `WorkerClassLoad.budgets` holds `BudgetLoad(budget,
-  capacity, serves, in_flight)` with `.free` = `max(0, capacity -
-  in_flight)`. Both reads fail with `MONITORING_QUERY_FAILED`
-  (`retryable=False`) when a live snapshot has an unreadable
-  `class_capacity`, naming the worker. Web: `GET /api/workers/classes`.
+- `app.get_execution_class_report_async()` →
+  `ExecutionClassReport(checked_at, live_window, streams, workers)`.
+  `PendingStream(queue, execution, coverage, wait)`: `wait` is
+  `StreamWaitDue(oldest_due_at, wait)` or `StreamWaitNoneDue(next_due_at)`;
+  `WorkerExecutionClassLoad.budgets` holds `BudgetLoad(budget, capacity,
+  serves, in_flight)` with `.free` = `max(0, capacity - in_flight)`. Both
+  reads fail with `MONITORING_QUERY_FAILED` (`retryable=False`) when a live
+  snapshot has an unreadable stored `class_capacity`, naming the worker.
+  Web: `GET /api/workers/classes` answers the same record; its JSON has
+  `wait_seconds` and `live_window_seconds` and no `free`.
 - A snapshot's `recovery_config` embeds three health payloads:
   `partition_coverage` (coverage-ensure outcome; fails before fewer than two
   future partitions remain), `partition_pruning`
@@ -401,8 +411,8 @@ cancel_task(app, task_id: uuid.UUID, *, policy=CancelPolicy.PENDING_OR_CLAIMED_O
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` with `CancelPolicy.PENDING_OR_CLAIMED_ONLY`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionIsWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
-| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
-| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
+| `DATABASE_OPERATION_FAILED` | `TaskActionDatabaseOperationFailed` | `cause` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `cause` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
 cancel function (a lost claim, or no observed status). That is a defect, not
@@ -415,7 +425,7 @@ of its own; subscriptions start at the first stream) to `horsies_task_status`,
 `horsies_workflow_status`, and `horsies_worker_state`, coalesces notifies
 (250 ms), and fans out over `GET /api/events` (SSE). After a listener
 reconnect each stream gets one event with no ids per topic; a broker with
-`assume_initialized=True` has no listener, and its stream sends `degraded`.
+`SchemaMode.ASSUME_INITIALIZED` has no listener, and its stream sends `degraded`.
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
 schedules table always polls (its table has no trigger). A task's start
@@ -430,7 +440,7 @@ schedules table always polls (its table has no trigger). A task's start
   queries; put a ~1 s shared cache in front (`Cache-Control: max-age=1` via a
   proxy) to make audience size irrelevant to database load.
 - Under PgBouncer transaction pooling, provide the session-capable URL for
-  LISTEN (`session_database_url` / `--session-database-url`).
+  LISTEN (`session_database` / `--session-database-url`).
 
 ## All Public Imports
 
@@ -444,10 +454,10 @@ from horsies.monitoring import (
     cancel_task, CancelPolicy, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
     TaskActionNotFound, TaskActionNotCancellable, TaskActionIsWorkflowTask,
-    TaskActionDbOperationFailed, TaskActionStoredDataInvalid,
+    TaskActionDatabaseOperationFailed, TaskActionStoredDataInvalid,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,
-    MonitoringQueryDbOperationFailed, MonitoringQueryHistoryContractViolation,
+    MonitoringQueryDatabaseOperationFailed, MonitoringQueryHistoryContractViolation,
     # Vocabularies
     ErrorCategory, TaskSortField, TaskGroupBy, SortDirection,
     # Response models (unstable pre-1.0)
@@ -456,11 +466,14 @@ from horsies.monitoring import (
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
     BreakdownCounts, BreakdownGroup, BreakdownGroupValue, BreakdownGroupUnclaimed,
     WorkflowRunSummary, WorkflowNodeSummary, WorkflowEdge, WorkflowRunDetail,
-    WorkflowNodeDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
-    ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
-    PendingStreamInfo, WorkerClassLoadInfo, BudgetLoadInfo, StreamServedInfo,
-    StreamNoCapacityInfo, StreamUnservedInfo, StreamWaitingInfo,
-    StreamNoneDueInfo,
+    WorkflowNodeDetail, WorkerStateInfo, LivenessReport, DatabaseLiveness,
+    ScheduleStateInfo, WorkerHistoryPoint,
+    # Health records of the worker routes (one type per record)
+    WorkerPong, DatabasePing, DatabaseUnreachable, DownSlot, SlotHealth,
+    SlotHealthAllServing, SlotHealthSlotsDown, SnapshotProfile, SnapshotProfileNamed,
+    SnapshotProfileNotRecorded, ExecutionClassReport, PendingStream,
+    StreamCoverageState, StreamCoverageStateServed, StreamCoverageStateNoCapacity, StreamCoverageStateUnserved,
+    StreamWait, StreamWaitDue, StreamWaitNoneDue, WorkerExecutionClassLoad, BudgetLoad,
     # Phase timing (the lifecycle record)
     AttemptPhasesInfo, AttemptPhasesCapturedInfo, AttemptPhasesNotCapturedInfo,
     AttemptClaimsInfo, AttemptClaimsCountedInfo, AttemptClaimsNotCountedInfo,

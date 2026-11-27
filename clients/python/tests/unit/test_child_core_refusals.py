@@ -294,7 +294,7 @@ class TestTheMarkerAfterABody:
 
 
 def _error_with(exception: BaseException | None) -> Result[Any, TaskError]:
-    return Err(TaskError(error_code='MAPPED_BY_THE_TASK', exception=exception))
+    return Err(TaskError(code='MAPPED_BY_THE_TASK', exception=exception))
 
 
 def _ok(value: str) -> Result[Any, TaskError]:

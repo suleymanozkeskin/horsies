@@ -24,6 +24,8 @@ const fixture: { readonly patterns: readonly PatternRow[] } = JSON.parse(readFil
 /** The pattern of each row of the fixture, in the TypeScript form, with the defaulted fields left out. */
 const CASES: readonly (readonly [string, SchedulePattern])[] = [
   ["interval", { kind: "interval", every: Temporal.Duration.from({ seconds: 30 }) }],
+  ["interval_days_and_time", { kind: "interval", every: Temporal.Duration.from({ days: 1, hours: 2, minutes: 30, seconds: 15 }) }],
+  ["interval_365_days", { kind: "interval", every: Temporal.Duration.from({ days: 365 }) }],
   ["hourly", { kind: "hourly", minute: 15 }],
   ["daily", { kind: "daily", time: Temporal.PlainTime.from("09:00") }],
   ["weekly", { kind: "weekly", weekdays: ["monday", "friday"], time: Temporal.PlainTime.from("09:30") }],
@@ -128,22 +130,20 @@ describe("patternText: each kind maps to Python's stored text", () => {
     });
   }
 
-  test("an interval keeps each part of the duration as given: 90 minutes stay 90 minutes", () => {
+  test("an interval is stored as its length, the largest unit first: 90 minutes are 1 hour 30 minutes", () => {
     assert.equal(
       textOf({ kind: "interval", every: Temporal.Duration.from({ days: 1, hours: 2, minutes: 90, seconds: 5 }) }),
-      '{"type":"interval","seconds":5,"minutes":90,"hours":2,"days":1}',
+      '{"kind":"interval","every":"P1DT3H30M5S"}',
     );
+    assert.equal(textOf({ kind: "interval", every: Temporal.Duration.from({ seconds: 90 }) }), '{"kind":"interval","every":"PT1M30S"}');
   });
 
   test("a time of day with a fraction of a second keeps it in the text, which the core refuses", () => {
-    assert.equal(textOf({ kind: "daily", time: Temporal.PlainTime.from("09:30:00.5") }), '{"type":"daily","time":"09:30:00.5"}');
+    assert.equal(textOf({ kind: "daily", time: Temporal.PlainTime.from("09:30:00.5") }), '{"kind":"daily","time":"09:30:00.5"}');
   });
 
-  test("a negative interval keeps its parts, which the core refuses", () => {
-    assert.equal(
-      textOf({ kind: "interval", every: Temporal.Duration.from({ minutes: -5 }) }),
-      '{"type":"interval","seconds":null,"minutes":-5,"hours":null,"days":null}',
-    );
+  test("a negative interval keeps its sign, which the core refuses", () => {
+    assert.equal(textOf({ kind: "interval", every: Temporal.Duration.from({ minutes: -5 }) }), '{"kind":"interval","every":"-PT5M"}');
   });
 });
 

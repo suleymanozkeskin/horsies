@@ -46,7 +46,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(DB_URL),
         pool_size=5,
         max_overflow=5,
@@ -56,7 +56,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker  # pyright: ignore[reportPrivateUsage]
 broker.app = app
 
@@ -90,25 +90,25 @@ def set_tracer_provider() -> None:
     trace.set_tracer_provider(provider)
 
 
-@app.on_child_process_start
+@app.on_child_start
 def set_child_tracer_provider() -> None:
     """The task children export their attempt spans to the same file."""
     set_tracer_provider()
 
 
-@app.task(task_name='e2e_worker_ended_spans_healthcheck')
+@app.task(name='e2e_worker_ended_spans_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
+@app.task(name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
 def sleeper() -> Result[str, TaskError]:
     time.sleep(60)
     return Ok('woke')
 
 
 @app.task(
-    task_name='e2e_worker_ended_spans_shared_sleeper',
+    name='e2e_worker_ended_spans_shared_sleeper',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SLEEPER_TIMEOUT_MS,
 )
@@ -121,7 +121,7 @@ async def shared_sleeper() -> Result[str, TaskError]:
 
 # One node of the sleeper: the worker kills it at its timeout, and the
 # handler child reads its node for the span.
-node_sleeper = TaskNode(fn=sleeper)
+node_sleeper = TaskNode(function=sleeper)
 
 spec_sleeper = app.workflow(
     name='e2e_worker_ended_spans_flow',

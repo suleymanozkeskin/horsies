@@ -31,10 +31,15 @@ export const PING_WINDOW_MS = 2_000;
 /** An error of a monitoring or health read: a code with a message, or a refused query field. */
 type ReadFailure =
   | { readonly code: string; readonly message: string }
-  | { readonly code: string; readonly field: string; readonly reason: string };
+  | { readonly code: string; readonly field: string; readonly reason: string }
+  | { readonly code: string; readonly subject: string; readonly cause: string };
 
 function readFailureText(failure: ReadFailure): string {
-  return "message" in failure ? `${failure.code}: ${failure.message}` : `${failure.code}: ${failure.field}: ${failure.reason}`;
+  if ("message" in failure) {
+    return `${failure.code}: ${failure.message}`;
+  }
+
+  return "field" in failure ? `${failure.code}: ${failure.field}: ${failure.reason}` : `${failure.code}: ${failure.subject}: ${failure.cause}`;
 }
 
 /** The line of a read: its text, or the read's failure. Pure. */

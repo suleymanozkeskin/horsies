@@ -14,11 +14,11 @@
 
 import { z } from "zod";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import type { JsonValue } from "../../../horsies/src/codec/json-value.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
-import type { Kind, Member, MemberPresence, UpstreamOutput } from "../../../horsies/src/wire/kinds.ts";
+import type { Kind, Member, MemberPresence, TupleRest, UpstreamOutput } from "../../../horsies/src/wire/kinds.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
 import { compileMember, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
@@ -156,7 +156,7 @@ export function kindText(kind: Kind, depth: number): string {
     case "object":
       return `object(${kind.members.map((member) => memberEntryText(member, inner)).join(",")})`;
     case "tuple":
-      return `tuple(${kind.items.map(inner).join(",")})`;
+      return `tuple(${[...kind.items.map(inner), ...restText(kind.rest, inner)].join(",")})`;
     case "array":
       return `array(${inner(kind.item)})`;
     case "record":
@@ -168,6 +168,9 @@ export function kindText(kind: Kind, depth: number): string {
       return `taskOutcome(${upstreamOutputText(kind.output, inner)})`;
     case "conversion":
       return `conversion(${inner(kind.stored)})`;
+    case "lazy":
+      // The kind of a lazy node holds the node again: the text stops here.
+      return "lazy";
     case "null":
     case "boolean":
     case "int":
@@ -188,6 +191,18 @@ export function kindText(kind: Kind, depth: number): string {
   }
 }
 
+/** The text of the rest item of a tuple: `...<kind>`, or nothing. */
+function restText(rest: TupleRest, inner: (kind: Kind) => string): readonly string[] {
+  switch (rest.state) {
+    case "none":
+      return [];
+    case "items":
+      return [`...${inner(rest.item)}`];
+    default:
+      return unreachable(rest, "restText");
+  }
+}
+
 /** The text of the upstream output of an outcome kind: its kind, or `refused`. */
 function upstreamOutputText(output: UpstreamOutput, inner: (kind: Kind) => string): string {
   switch (output.state) {
@@ -202,17 +217,6 @@ function upstreamOutputText(output: UpstreamOutput, inner: (kind: Kind) => strin
 
 function memberEntryText(member: Member, inner: (kind: Kind) => string): string {
   return `${member.name}:${presenceMark(member.presence)}${inner(member.kind)}`;
-}
-
-/** A function default whose value changes at each read. */
-function changingDefault(): () => number {
-  let reads = 0;
-
-  return () => {
-    reads += 1;
-
-    return reads;
-  };
 }
 
 function kindCase(
@@ -280,6 +284,7 @@ function acceptedCases(): readonly SelfCheckCase[] {
     kindCase("nullable", z.string().nullable(), "nullable(string)"),
     kindCase("nullish", z.string().nullish(), "?nullable(string)"),
     kindCase("prefault", z.string().prefault("x"), "=string"),
+    kindCase("function default", z.uuid().default(() => crypto.randomUUID()), "=checked(string)"),
     kindCase("nonoptional", z.string().optional().nonoptional(), "string"),
     kindCase("json", z.json(), "json"),
     kindCase("lazy", z.lazy(() => z.string()), "string"),
@@ -306,6 +311,19 @@ function containerCases(): readonly SelfCheckCase[] {
     kindCase("array", z.array(z.boolean()), "array(boolean)"),
     kindCase("readonly", z.array(z.string()).readonly(), "array(string)"),
     kindCase("tuple", z.tuple([z.string(), z.null()]), "tuple(string,null)"),
+    kindCase("tuple rest", z.tuple([z.string()], z.boolean()), "tuple(string,...boolean)", [
+      { value: ["a"], written: "stored" },
+      { value: ["a", true, false], written: "stored" },
+      { value: ["a", "b"], written: "refused" },
+    ]),
+    kindCase("recursive lazy", recursiveLazy(), "array(lazy)", [
+      { value: [[], [[]]], written: "stored" },
+      { value: [[1]], written: "refused" },
+    ]),
+    kindCase("recursive getter", recursiveGetter(), "object(name:string,children:array(lazy))", [
+      { value: { name: "a", children: [{ name: "b", children: [] }] }, written: "stored" },
+      { value: { name: "a", children: [{ name: "b" }] }, written: "refused" },
+    ]),
     kindCase("record", z.record(z.string(), z.boolean()), "record(boolean)"),
     kindCase("enum record", z.record(z.enum(["a"]), z.boolean()), "checked(record(boolean))", [
       { value: {}, written: "refused" },
@@ -323,8 +341,27 @@ function containerCases(): readonly SelfCheckCase[] {
   ];
 }
 
-function refusedCases(): readonly SelfCheckCase[] {
+/** A schema that contains itself through `z.lazy()`: an array of itself. */
+function recursiveLazy(): ZodSchema {
   const recursive: z.ZodType = z.lazy(() => z.array(recursive));
+
+  return recursive;
+}
+
+/** A schema that contains itself through a getter member: an object with an array of itself. */
+function recursiveGetter(): ZodSchema {
+  const category = z.object({
+    name: z.string(),
+    get children(): z.ZodArray<typeof category> {
+      return z.array(category);
+    },
+  });
+
+  return category;
+}
+
+function refusedCases(): readonly SelfCheckCase[] {
+  const optionalRecursive: z.ZodType = z.object({ next: z.lazy(() => optionalRecursive) }).optional();
   const optionA = z.object({ kind: z.literal("a") });
   const convertedA = z.codec(optionA, optionA, { decode: (value) => value, encode: (value) => value });
   const optionB = z.object({ kind: z.literal("b") });
@@ -341,21 +378,17 @@ function refusedCases(): readonly SelfCheckCase[] {
     refusedCase("catchall", z.object({}).catchall(z.string()), "LOOSE_OBJECT"),
     refusedCase("map", z.map(z.string(), z.string()), "NOT_DATA"),
     refusedCase("custom", z.custom<string>(), "NOT_DATA"),
-    refusedCase("object union", z.union([z.object({}), z.string()]), "UNDISCRIMINATED_UNION"),
     refusedCase(
       "union fallback",
       z.discriminatedUnion("kind", [optionA, optionB], { unionFallback: true }),
-      "UNDISCRIMINATED_UNION",
+      "UNION_FALLBACK",
     ),
-    refusedCase("container union", z.union([z.array(z.string()), z.string()]), "MIXED_UNION"),
-    refusedCase("int float union", z.union([z.int(), z.number()]), "INT_FLOAT_UNION"),
     refusedCase("record key", z.record(z.int(), z.string()), "RECORD_KEY"),
     refusedCase("engine key", z.object({ __h_x: z.string() }), "ENGINE_KEY"),
     refusedCase("intersection", z.intersection(z.object({}), z.object({})), "INTERSECTION"),
     refusedCase("optional item", z.array(z.string().optional()), "OPTIONAL_NOT_A_MEMBER"),
-    refusedCase("changing default", z.number().default(changingDefault()), "CHANGING_DEFAULT"),
-    refusedCase("recursive", recursive, "RECURSIVE"),
-    refusedCase("tuple rest", z.tuple([z.string()], z.string()), "TUPLE_REST"),
+    refusedCase("default under nonoptional", z.string().default("ab").nonoptional(), "DEFAULT_UNDER_NONOPTIONAL"),
+    refusedCase("recursive presence", optionalRecursive, "RECURSIVE_PRESENCE"),
     refusedCase("literal member", z.literal(1n), "LITERAL_MEMBER"),
     refusedCase("union option", z.discriminatedUnion("kind", [convertedA, optionB]), "UNION_OPTION"),
   ];

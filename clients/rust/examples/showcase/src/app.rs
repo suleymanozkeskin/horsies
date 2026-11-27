@@ -6,13 +6,15 @@
 //! server. Building it does no I/O.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use chrono::NaiveTime;
 use horsies::{
     AppConfig, ChildPreload, CronEnumTerm, CronNumericTerm, CronSchedule, CustomQueueConfig,
     DailySchedule, DaySelector, Horsies, HorsiesError, HourlySchedule, IntervalSchedule,
     IsolatedChildren, Month, MonthlySchedule, QueueMode, ScheduleConfig, SchedulePattern,
-    SchemaMode, SharedAsyncChildren, TaskSchedule, Weekday, WeeklySchedule, WorkerProfile,
+    SchemaMode, SharedAsyncChildren, TaskSchedule, ValidationReport, Weekday, WeeklySchedule,
+    WorkerProfile,
 };
 use serde_json::json;
 
@@ -54,14 +56,16 @@ pub struct ShowcaseApp {
 pub enum ShowcaseAppError {
     #[error("settings: {0}")]
     Settings(SettingsError),
+    #[error("horsies config: {0}")]
+    Config(ValidationReport),
     #[error("horsies app: {0}")]
     Horsies(HorsiesError),
 }
 
 /// The app of the database that the five Acme resolution rules name.
 ///
-/// Errors: `Settings` when no rule gives a usable URL; `Horsies` for a
-/// refused config or registration.
+/// Errors: `Settings` when no rule gives a usable URL; `Config` for a
+/// refused config; `Horsies` for a refused registration.
 pub fn build_app(mode: SchemaMode) -> Result<ShowcaseApp, ShowcaseAppError> {
     let settings = resolve_database_settings().map_err(ShowcaseAppError::Settings)?;
     build_app_for_url(settings.sqlx_url(), mode)
@@ -69,7 +73,8 @@ pub fn build_app(mode: SchemaMode) -> Result<ShowcaseApp, ShowcaseAppError> {
 
 /// The app of the database at `url`, with the schema mode `mode`.
 ///
-/// Errors: `Horsies` for a refused config or registration.
+/// Errors: `Config` for a refused config; `Horsies` for a refused
+/// registration.
 pub fn build_app_for_url(url: &str, mode: SchemaMode) -> Result<ShowcaseApp, ShowcaseAppError> {
     build_app_with_config(config_for_url(url), url, mode)
 }
@@ -77,13 +82,14 @@ pub fn build_app_for_url(url: &str, mode: SchemaMode) -> Result<ShowcaseApp, Sho
 /// The app of `config`, whose task bodies use the Acme store at
 /// `store_url`.
 ///
-/// Errors: `Horsies` for a refused config or registration.
+/// Errors: `Config` for a refused config; `Horsies` for a refused
+/// registration.
 pub fn build_app_with_config(
     config: AppConfig,
     store_url: &str,
     mode: SchemaMode,
 ) -> Result<ShowcaseApp, ShowcaseAppError> {
-    let mut app = Horsies::with_schema_mode(config, mode).map_err(ShowcaseAppError::Horsies)?;
+    let mut app = Horsies::with_schema_mode(config, mode).map_err(ShowcaseAppError::Config)?;
     app.provide(TaskStore::new(store_url))
         .map_err(ShowcaseAppError::Horsies)?;
     let tasks = tasks::register_all(&mut app).map_err(ShowcaseAppError::Horsies)?;
@@ -98,7 +104,7 @@ pub fn build_app_with_config(
 /// The Acme config of the database at `url`: the four queues, the worker
 /// profile, the tuned recovery and retention settings, and the schedules.
 pub fn config_for_url(url: &str) -> AppConfig {
-    let mut config = AppConfig::for_database_url(url);
+    let mut config = AppConfig::from_database_url(url);
     config.queue_mode = QueueMode::Custom;
     config.custom_queues = Some(
         QUEUES
@@ -117,7 +123,7 @@ pub fn config_for_url(url: &str) -> AppConfig {
     config.retention.terminal_record_retention_hours =
         Some(crate::tuning::TERMINAL_RECORD_RETENTION_HOURS);
     config.schedule = Some(schedules());
-    config.resend_on_transient_err = true;
+    config.resend_on_transient_error = true;
     config
 }
 
@@ -141,15 +147,13 @@ fn at(hour: u32, minute: u32) -> NaiveTime {
 
 fn interval_seconds(seconds: u64) -> SchedulePattern {
     SchedulePattern::Interval(IntervalSchedule {
-        seconds: Some(u32::try_from(seconds).unwrap_or(u32::MAX)),
-        ..IntervalSchedule::default()
+        every: Duration::from_secs(seconds),
     })
 }
 
 fn interval_minutes(minutes: u64) -> SchedulePattern {
     SchedulePattern::Interval(IntervalSchedule {
-        minutes: Some(u32::try_from(minutes).unwrap_or(u32::MAX)),
-        ..IntervalSchedule::default()
+        every: Duration::from_secs(minutes.saturating_mul(60)),
     })
 }
 
@@ -163,16 +167,16 @@ fn daily(hour: u32, minute: u32) -> SchedulePattern {
     })
 }
 
-fn weekly(days: Vec<Weekday>, hour: u32, minute: u32) -> SchedulePattern {
+fn weekly(weekdays: Vec<Weekday>, hour: u32, minute: u32) -> SchedulePattern {
     SchedulePattern::Weekly(WeeklySchedule {
-        days,
+        weekdays,
         time: at(hour, minute),
     })
 }
 
-fn monthly(day: u32, hour: u32, minute: u32) -> SchedulePattern {
+fn monthly(day_of_month: u32, hour: u32, minute: u32) -> SchedulePattern {
     SchedulePattern::Monthly(MonthlySchedule {
-        day,
+        day_of_month,
         time: at(hour, minute),
     })
 }

@@ -7,7 +7,7 @@ the wrong shape past the contract.
 
 Tests bypass the real Postgres broker by patching `Horsies.get_broker`
 to return a mock whose `get_raw_result_record_async` yields a crafted
-`RawResultRecord` envelope.
+`StoredResult` envelope.
 """
 
 from __future__ import annotations
@@ -19,21 +19,22 @@ import pytest
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    RawResultRecord,
+    DatabaseErrorCode,
+    StoredResult,
 )
+from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
     Failed,
-    ResultDeserializationError,
-    ResultNotAvailable,
-    WaitTimeout,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadWaitTimeout,
 )
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
-    SubWorkflowError,
+    SubWorkflowFailure,
 )
 from horsies.core.task_read import is_final_read
 from horsies.core.types.result import Err, Ok, is_err, is_ok
@@ -44,7 +45,7 @@ def _make_app() -> Horsies:
     """Build a minimal Horsies (no real broker connection used in tests)."""
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://u:p@localhost/db',
             ),
         ),
@@ -82,13 +83,13 @@ class TestHorsiesGetResultEnvelopeGuards:
             '__h_task_result__': True,
             # ``ok`` key missing
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'smuggled',
                 'data': None,
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -99,27 +100,27 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         match result:
-            case Err(ResultDeserializationError() as read_error):
+            case Err(ReadResultDeserializationError() as read_error):
                 assert 'envelope invalid' in read_error.message
             case _:
-                pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+                pytest.fail(f'expected ReadResultDeserializationError, got {result!r}')
         assert is_final_read(result) is True
 
     @pytest.mark.asyncio
     async def test_envelope_with_both_slots_populated_rejected(self) -> None:
-        """`ok` and `err` both populated → ``ResultDeserializationError``."""
+        """`ok` and `err` both populated → ``ReadResultDeserializationError``."""
         app = _make_app()
         malformed = {
             '__h_task_result__': True,
             'ok': 1,
             'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
                 'message': 'm',
                 'data': None,
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -130,13 +131,13 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     @pytest.mark.asyncio
     async def test_envelope_missing_marker_rejected(self) -> None:
         """Payload lacking the marker isn't a TaskResult envelope."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
@@ -147,7 +148,7 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     @pytest.mark.asyncio
     async def test_removed_builtin_code_in_err_slot_returns_invalid_json_payload(
@@ -155,7 +156,7 @@ class TestHorsiesGetResultEnvelopeGuards:
     ) -> None:
         """A stored err slot tagged with the removed code
         ``PYDANTIC_HYDRATION_ERROR`` fails closed with
-        ``ResultDeserializationError``."""
+        ``ReadResultDeserializationError``."""
         app = _make_app()
         stored = {
             '__h_task_result__': True,
@@ -167,7 +168,7 @@ class TestHorsiesGetResultEnvelopeGuards:
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -178,26 +179,26 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         match result:
-            case Err(ResultDeserializationError() as read_error):
+            case Err(ReadResultDeserializationError() as read_error):
                 assert (
                     "Unknown built-in task code: 'PYDANTIC_HYDRATION_ERROR'"
                     in read_error.message
                 )
             case _:
-                pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+                pytest.fail(f'expected ReadResultDeserializationError, got {result!r}')
 
     @pytest.mark.asyncio
     async def test_terminal_status_with_none_payload_is_result_not_available(
         self,
     ) -> None:
-        """Terminal status + empty result column → ``ResultNotAvailable``.
+        """Terminal status + empty result column → ``ReadResultNotAvailable``.
 
         Mirrors the TaskHandle-level guard: terminal failures to write
         the payload are cacheable (engine misbehaviour), not transient
         timeouts.
         """
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
@@ -209,16 +210,16 @@ class TestHorsiesGetResultEnvelopeGuards:
 
         # A read failure, not a task outcome: kept by a handle.
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultNotAvailable)
+        assert isinstance(result.err_value, ReadResultNotAvailable)
         assert is_final_read(result) is True
 
     @pytest.mark.asyncio
     async def test_non_terminal_status_with_none_payload_is_wait_timeout(
         self,
     ) -> None:
-        """Non-terminal + raw_result=None → ``WaitTimeout``."""
+        """Non-terminal + raw_result=None → ``ReadWaitTimeout``."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.RUNNING,
@@ -226,16 +227,16 @@ class TestHorsiesGetResultEnvelopeGuards:
         )
         _patch_broker(app, Ok(record))
 
-        result = await app.get_result_async('task-x', timeout_ms=100)
+        result = await app.get_result_async('task-x', wait_ms=100)
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, WaitTimeout)
+        assert isinstance(result.err_value, ReadWaitTimeout)
 
     @pytest.mark.asyncio
     async def test_cancelled_status_returns_task_cancelled(self) -> None:
         """Cancelled row → ``Ok(Failed(TASK_CANCELLED))``."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.CANCELLED,
@@ -247,21 +248,21 @@ class TestHorsiesGetResultEnvelopeGuards:
 
         match result:
             case Ok(Failed(task_error)):
-                assert task_error.error_code == OutcomeCode.TASK_CANCELLED
+                assert task_error.code == OutcomeCode.TASK_CANCELLED
             case _:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
     @pytest.mark.asyncio
     async def test_err_fast_path_polymorphic_sub_workflow_error(self) -> None:
-        """End-to-end: a valid envelope carrying a SubWorkflowError dump
+        """End-to-end: a valid envelope carrying a SubWorkflowFailure dump
         in the err slot round-trips through `Horsies.get_result_async`
         as the concrete subclass — not a downgraded TaskError."""
         app = _make_app()
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
 
-        original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-abc',
             sub_workflow_summary=SubWorkflowSummary(
@@ -277,9 +278,9 @@ class TestHorsiesGetResultEnvelopeGuards:
         wire = {
             '__h_task_result__': True,
             'ok': None,
-            'err': original.model_dump(mode='json'),
+            'err': encode_task_error(original),
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='parent-task',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -290,11 +291,11 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('parent-task')
 
         match result:
-            case Ok(Failed(SubWorkflowError() as sub)):
+            case Ok(Failed(SubWorkflowFailure() as sub)):
                 assert sub.sub_workflow_id == 'wf-abc'
                 assert sub.sub_workflow_summary.failed_nodes == 2
             case _:
-                pytest.fail(f'expected Ok(Failed(SubWorkflowError)), got {result!r}')
+                pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
 
 def _patch_broker_task_info(app: Horsies, task_info_result: Any) -> MagicMock:
@@ -320,13 +321,13 @@ def _make_task_info(
         task_id=task_id,
         task_name=task_name,
         status=TaskStatus.FAILED,
-        queue_name='default',
+        queue='default',
         priority=0,
         retry_count=0,
         max_retries=0,
         next_retry_at=None,
         sent_at=now,
-        enqueued_at=now,
+        due_at=now,
         claimed_at=now,
         started_at=now,
         completed_at=None,
@@ -383,14 +384,14 @@ class TestHorsiesGetTaskInfoErrFastPath:
 
     @pytest.mark.asyncio
     async def test_err_only_preserves_sub_workflow_error_subclass(self) -> None:
-        """Polymorphic decode path: SubWorkflowError survives via
+        """Polymorphic decode path: SubWorkflowFailure survives via
         ``decode_task_error``, even for an unregistered task."""
         app = _make_app()
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
 
-        original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-xyz',
             sub_workflow_summary=SubWorkflowSummary(
@@ -406,7 +407,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
         wire = {
             '__h_task_result__': True,
             'ok': None,
-            'err': original.model_dump(mode='json'),
+            'err': encode_task_error(original),
         }
         info = _make_task_info(
             task_id='task-2', task_name='not.registered', raw_result=wire,
@@ -420,10 +421,10 @@ class TestHorsiesGetTaskInfoErrFastPath:
         assert decoded_info is not None
         assert decoded_info.result_decoded is True
         match decoded_info.decoded_result:
-            case Failed(SubWorkflowError() as sub):
+            case Failed(SubWorkflowFailure() as sub):
                 assert sub.sub_workflow_id == 'wf-xyz'
             case other:
-                pytest.fail(f'expected Failed(SubWorkflowError), got {other!r}')
+                pytest.fail(f'expected Failed(SubWorkflowFailure), got {other!r}')
 
     @pytest.mark.asyncio
     async def test_ok_only_unregistered_task_leaves_decoded_result_none(
@@ -476,5 +477,5 @@ class TestHorsiesGetTaskInfoErrFastPath:
 
         assert is_err(result)
         err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert err.code == DatabaseErrorCode.INVALID_JSON_PAYLOAD
         assert err.retryable is False

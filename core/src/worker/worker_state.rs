@@ -236,6 +236,18 @@ struct ResourceMetrics {
     cpu_percent: Option<f64>,
 }
 
+impl ResourceMetrics {
+    /// No metric could be read.
+    fn unreadable() -> Self {
+        Self {
+            parent_rss: ParentRss::Unreadable,
+            memory_usage_mb: None,
+            memory_percent: None,
+            cpu_percent: None,
+        }
+    }
+}
+
 /// Collect resource metrics (memory and CPU) for the current process.
 ///
 /// Uses the `sysinfo` crate to mirror Python's psutil-based metrics:
@@ -246,7 +258,9 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[pid]),
         true,
-        sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory(),
     );
 
     if let Some(process) = sys.process(pid) {
@@ -269,12 +283,7 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
             cpu_percent: Some((cpu_percent * 100.0).round() / 100.0),
         }
     } else {
-        ResourceMetrics {
-            parent_rss: ParentRss::Unreadable,
-            memory_usage_mb: None,
-            memory_percent: None,
-            cpu_percent: None,
-        }
+        ResourceMetrics::unreadable()
     }
 }
 
@@ -402,7 +411,9 @@ pub(crate) struct SnapshotSource {
     pub handler_child: HandlerChildView,
     /// Where each snapshot sets the worker gauges of the values it writes.
     pub telemetry: WorkerTelemetry,
-    sys: System,
+    /// The process reader; `None` when the host refused to start it, so
+    /// every resource read is unreadable.
+    sys: Option<System>,
     sys_pid: Pid,
 }
 
@@ -441,13 +452,17 @@ impl SnapshotSource {
         telemetry: WorkerTelemetry,
     ) -> Self {
         let sys_pid = Pid::from(pid as usize);
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
-            true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
-        );
-        sys.refresh_memory();
+        let mut sys = System::new().ok();
+        if let Some(reader) = sys.as_mut() {
+            reader.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory(),
+            );
+            reader.refresh_memory();
+        }
         Self {
             worker_id,
             hostname,
@@ -476,7 +491,10 @@ impl SnapshotSource {
             down,
             down_by_kind,
             budgets: budget_columns(&self.children.service()),
-            resources: collect_resource_metrics(&mut self.sys, self.sys_pid),
+            resources: match self.sys.as_mut() {
+                Some(sys) => collect_resource_metrics(sys, self.sys_pid),
+                None => ResourceMetrics::unreadable(),
+            },
             children_rss: children_rss_of(&self.children.child_rss()),
         }
     }
@@ -611,7 +629,13 @@ pub(crate) async fn write_snapshot(
     let processes = source.claim_columns.processes as i32;
     let max_claim_batch = source.claim_columns.max_claim_batch as i32;
     let max_claim_per_worker = source.claim_columns.max_claim_per_worker as i32;
-    let cluster_wide_cap = source.app_config.cluster_wide_cap.map(|cap| cap as i32);
+    // The column `cluster_wide_cap` stores the cap as a nullable integer:
+    // NULL for no cap.
+    let cluster_wide_cap = source
+        .app_config
+        .cluster_wide_cap
+        .claim_parameter()
+        .map(|cap| cap as i32);
     // The queue maps are stored as they are: an empty map is `{}`, never
     // NULL (both columns are NOT NULL on the baseline).
     let queue_priorities = Json(&source.worker_config.queue_priorities);
@@ -786,7 +810,7 @@ mod tests {
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
         health.write().await.phase2_recovery = Some(phase2.clone());
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 10;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
@@ -1004,7 +1028,7 @@ mod tests {
                 },
             )]);
 
-            let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+            let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
                 panic!("the written down slot reads back: {column}");
             };
 
@@ -1049,7 +1073,7 @@ mod tests {
                 failed_boots: NonZeroU32::new(3).expect("3"),
             },
         )]);
-        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+        let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
             panic!("the written down slot reads back: {column}");
         };
         let [DownSlot {
@@ -1084,12 +1108,12 @@ mod tests {
     }
 
     /// Python `test_health_models.py::TestClassCapacity::test_the_writer_covers_every_read_field`:
-    /// each field of the read `ClassBudget` but the budget (the key of its
+    /// each field of the read `ExecutionClassBudget` but the budget (the key of its
     /// entry) reaches the stored entry, so a new field cannot be read
     /// without a writer. The pattern names every field with no rest.
     #[test]
     fn the_writer_covers_every_read_field_of_a_budget() {
-        use crate::broker::class_budgets::{parse_class_capacity, ClassBudget};
+        use crate::broker::class_budgets::{parse_class_capacity, ExecutionClassBudget};
         use std::collections::BTreeSet;
 
         let column = class_capacity_json(&[BudgetColumn {
@@ -1098,7 +1122,7 @@ mod tests {
             serves: vec![Execution::Isolated],
         }]);
         let budgets = parse_class_capacity(&column).expect("the written column reads back");
-        let [ClassBudget {
+        let [ExecutionClassBudget {
             budget,
             capacity,
             serves,
@@ -1221,7 +1245,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         assert!(worker_config.queue_priorities.is_empty());
@@ -1331,7 +1355,7 @@ mod tests {
             "claimed-count-test".to_owned(),
             std::process::id() as i32,
             WorkerConfig::default(),
-            AppConfig::for_database_url("postgresql://unused/test"),
+            AppConfig::from_database_url("postgresql://unused/test"),
             new_reaper_health(),
             children,
             isolated_claim_columns(isolated),
@@ -1714,11 +1738,13 @@ mod tests {
     #[test]
     fn collect_resource_metrics_returns_values() {
         let pid = Pid::from(std::process::id() as usize);
-        let mut sys = System::new();
+        let mut sys = System::new().expect("the process reader starts on a supported host");
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
         sys.refresh_memory();
         let metrics = collect_resource_metrics(&mut sys, pid);
@@ -1742,7 +1768,7 @@ mod tests {
             crate::ClientFamily::Rust,
         ));
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
@@ -1814,7 +1840,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();

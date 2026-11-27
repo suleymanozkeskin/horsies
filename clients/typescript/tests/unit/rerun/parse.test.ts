@@ -26,7 +26,7 @@ describe("parseRerunRequest accepts", () => {
     assert.deepEqual(parseRerunRequest(COMMAND, POLICY), {
       ok: true,
       value: {
-        command: { sourceTaskId: SOURCE_TASK_ID, deadline: { kind: "noDeadline" }, callerKey: { kind: "unkeyed" } },
+        command: { sourceTaskId: SOURCE_TASK_ID, goodUntil: { kind: "noDeadline" }, idempotencyKey: { kind: "unkeyed" } },
         policy: {
           retention: { kind: "days", days: 7 },
           rerunInput: "keep",
@@ -46,8 +46,8 @@ describe("parseRerunRequest accepts", () => {
     const parsed = parseRerunRequest(command, POLICY);
 
     assert.ok(parsed.ok);
-    assert.deepEqual(parsed.value.command.deadline, { kind: "until", epochMicros: 1_795_684_212_654_321n });
-    assert.deepEqual(parsed.value.command.callerKey, { kind: "keyed", key: "order-7" });
+    assert.deepEqual(parsed.value.command.goodUntil, { kind: "until", epochMicros: 1_795_684_212_654_321n });
+    assert.deepEqual(parsed.value.command.idempotencyKey, { kind: "keyed", key: "order-7" });
   });
 
   test("a deadline with a part below the microsecond, cut toward the past", () => {
@@ -62,8 +62,8 @@ describe("parseRerunRequest accepts", () => {
     );
 
     assert.ok(after.ok && before.ok);
-    assert.deepEqual(after.value.command.deadline, { kind: "until", epochMicros: 1n });
-    assert.deepEqual(before.value.command.deadline, { kind: "until", epochMicros: -2n });
+    assert.deepEqual(after.value.command.goodUntil, { kind: "until", epochMicros: 1n });
+    assert.deepEqual(before.value.command.goodUntil, { kind: "until", epochMicros: -2n });
   });
 
   test("the first and the last deadline that the bounds hold", () => {

@@ -37,8 +37,8 @@ pytestmark = [pytest.mark.unit]
 # value equals its name.
 REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]], ...]] = (
     (
-        result_types.BrokerErrorCode,
-        horsies._catalog.broker.BrokerErrorCode,
+        result_types.DatabaseErrorCode,
+        horsies._catalog.broker.DatabaseErrorCode,
         (
             'SCHEMA_INIT_FAILED',
             'ENQUEUE_FAILED',
@@ -46,13 +46,13 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'IDEMPOTENCY_KEY_CONFLICT',
             'TASK_INFO_QUERY_FAILED',
             'MONITORING_QUERY_FAILED',
-            'DB_PING_FAILED',
+            'DATABASE_PING_FAILED',
             'WORKER_PING_FAILED',
             'CLEANUP_FAILED',
             'CLOSE_FAILED',
             'LISTENER_START_FAILED',
             'LISTENER_SUBSCRIBE_FAILED',
-            'NO_BROKER',
+            'NO_DATABASE',
             'NO_TYPE_AVAILABLE',
             'INVALID_JSON_PAYLOAD',
             'INVALID_TASK_OPTIONS',
@@ -88,20 +88,21 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ),
     ),
     (
-        handle_types.HandleErrorCode,
-        horsies._catalog.workflow_handle.HandleErrorCode,
+        handle_types.WorkflowHandleErrorCode,
+        horsies._catalog.workflow_handle.WorkflowHandleErrorCode,
         (
             'WORKFLOW_NOT_FOUND',
-            'DB_OPERATION_FAILED',
+            'DATABASE_OPERATION_FAILED',
             'STORED_DATA_INVALID',
             'RESUME_RECOVERY_FAILED',
             'ASYNC_CONTEXT',
+            'INVALID_WORKFLOW_ID',
         ),
     ),
     (
         errors.MonitoringQueryErrorCode,
         horsies._catalog.monitoring.MonitoringQueryErrorCode,
-        ('DB_OPERATION_FAILED', 'HISTORY_CONTRACT_VIOLATION'),
+        ('DATABASE_OPERATION_FAILED', 'HISTORY_CONTRACT_VIOLATION'),
     ),
     (
         task_actions.TaskActionErrorCode,
@@ -110,18 +111,18 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'TASK_NOT_FOUND',
             'TASK_NOT_CANCELLABLE',
             'TASK_IS_WORKFLOW_TASK',
-            'DB_OPERATION_FAILED',
+            'DATABASE_OPERATION_FAILED',
             'STORED_DATA_INVALID',
         ),
     ),
     (
-        tasks.OperationalErrorCode,
-        horsies._catalog.task_codes.OperationalErrorCode,
+        tasks.OperationalCode,
+        horsies._catalog.task_codes.OperationalCode,
         (
             'UNHANDLED_EXCEPTION',
             'TASK_EXCEPTION',
             'WORKER_CRASHED',
-            'BROKER_ERROR',
+            'DATABASE_ERROR',
             'WORKER_RESOLUTION_ERROR',
             'WORKER_SERIALIZATION_ERROR',
             'RESULT_DESERIALIZATION_ERROR',
@@ -137,7 +138,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
     (
         tasks.ContractCode,
         horsies._catalog.task_codes.ContractCode,
-        ('RETURN_TYPE_MISMATCH', 'WORKFLOW_CTX_MISSING_ID', 'NO_TYPE_AVAILABLE'),
+        ('RETURN_TYPE_MISMATCH', 'WORKFLOW_CONTEXT_MISSING_ID', 'NO_TYPE_AVAILABLE'),
     ),
     (
         tasks.RetrievalCode,
@@ -151,6 +152,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'ASYNC_CONTEXT',
             'INVALID_INPUT',
             'WAIT_INSIDE_TASK',
+            'UNKNOWN_CUSTOM_CODE',
         ),
     ),
     (
@@ -165,7 +167,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'WORKFLOW_FAILED',
             'WORKFLOW_CANCELLED',
             'UPSTREAM_SKIPPED',
-            'SUBWORKFLOW_FAILED',
+            'SUB_WORKFLOW_FAILED',
             'WORKFLOW_SUCCESS_CASE_NOT_MET',
             'WORKFLOW_OUTPUT_SKIPPED',
         ),
@@ -283,10 +285,10 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
 
 def test_the_built_in_registry_holds_every_generated_member() -> None:
     # `BUILTIN_CODE_REGISTRY` is built from the four re-exported families;
-    # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a user code cannot
+    # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a custom code cannot
     # take it.
     families = (
-        tasks.OperationalErrorCode,
+        tasks.OperationalCode,
         tasks.ContractCode,
         tasks.RetrievalCode,
         tasks.OutcomeCode,
@@ -295,7 +297,7 @@ def test_the_built_in_registry_holds_every_generated_member() -> None:
     assert tasks.BUILTIN_CODE_REGISTRY == expected
     assert (
         tasks.BUILTIN_CODE_REGISTRY['WORKFLOW_START_INCOMPLETE']
-        is tasks.OperationalErrorCode.WORKFLOW_START_INCOMPLETE
+        is tasks.OperationalCode.WORKFLOW_START_INCOMPLETE
     )
     with pytest.raises(ValueError, match='reserved built-in error code'):
-        tasks.TaskError(error_code='WORKFLOW_START_INCOMPLETE')
+        tasks.TaskError(code='WORKFLOW_START_INCOMPLETE')

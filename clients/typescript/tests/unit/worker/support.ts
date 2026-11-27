@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import { createHorsies, type Horsies } from "../../../horsies/src/app.ts";
 import type { AppContext } from "../../../horsies/src/app/context.ts";
+import type { HorsiesConfig } from "../../../horsies/src/app/create.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -26,9 +27,12 @@ export const charge = defineTask({
 /** A task that the app does not list. */
 export const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null() });
 
-/** The app of `ping` and `charge`, built with the fakes; a failed create fails the test. */
-export function testApp(): Horsies {
-  const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping, charge] }, fakeEnvironment());
+/** The settings of a test app that the core's config does not hold. */
+export type ProcessSettings = Pick<HorsiesConfig, "schemaMode" | "logFormat">;
+
+/** The app of `ping` and `charge` with `settings`, built with the fakes; a failed create fails the test. */
+export function testApp(settings: ProcessSettings = {}): Horsies {
+  const created = createHorsies({ database: { databaseUrl: DATABASE_URL }, tasks: [ping, charge], ...settings }, fakeEnvironment());
 
   if (!created.ok) {
     assert.fail(`the test app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
@@ -38,8 +42,8 @@ export function testApp(): Horsies {
 }
 
 /** The app of `testApp` with both tasks implemented. */
-export function implementedApp(): Horsies {
-  const app = testApp();
+export function implementedApp(settings: ProcessSettings = {}): Horsies {
+  const app = testApp(settings);
 
   app.implement(ping, ({ n }, { ok }) => ok(n));
   app.implement(charge, async (_input, { ok }) => ok(null));

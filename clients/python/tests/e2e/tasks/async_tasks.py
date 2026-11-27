@@ -13,13 +13,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from horsies.core.brokers.result_types import BrokerWaitInsideTask
+from horsies.core.brokers.result_types import DatabaseWaitInsideTask
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
+    ReadWaitInsideTask,
     Succeeded,
     TaskOutcome,
-    WaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
@@ -34,7 +34,7 @@ from tests.e2e.tasks.workflows import double_task, produce_int_task, spec_single
 _SEEN_LOOPS: list[asyncio.AbstractEventLoop] = []
 
 
-@app.task(task_name='e2e_async_loop_report')
+@app.task(name='e2e_async_loop_report')
 async def async_loop_report() -> Result[str, TaskError]:
     """Report the child pid and the count of distinct loops that ran here."""
     loop = asyncio.get_running_loop()
@@ -44,14 +44,14 @@ async def async_loop_report() -> Result[str, TaskError]:
     return Ok(f'{os.getpid()}:{len(_SEEN_LOOPS)}')
 
 
-@app.task(task_name='e2e_sync_loop_report')
+@app.task(name='e2e_sync_loop_report')
 def sync_loop_report() -> Result[str, TaskError]:
     """Report the child pid and a running loop, then run a loop of its own."""
     ran = asyncio.run(asyncio.sleep(0, 'ran'))
     return Ok(f'{os.getpid()}:{in_running_event_loop()}:{ran}')
 
 
-@app.task(task_name='e2e_async_sends')
+@app.task(name='e2e_async_sends')
 async def async_sends(*, x: int) -> Result[str, TaskError]:
     """Send a task with `send_async` from an async task. Return its id."""
     match await simple_task.send_async(x=x):
@@ -59,11 +59,11 @@ async def async_sends(*, x: int) -> Result[str, TaskError]:
             return Ok(str(handle.task_id))
         case Err(send_err):
             return Err(
-                TaskError(error_code='SEND_FAILED', message=send_err.message),
+                TaskError(code='SEND_FAILED', message=send_err.message),
             )
 
 
-@app.task(task_name='e2e_async_add_one')
+@app.task(name='e2e_async_add_one')
 async def async_add_one(
     *,
     upstream: TaskOutcome[int, TaskError],
@@ -94,13 +94,13 @@ class AsyncWaitProbe(BaseModel):
 
 def _refused(read: ReadResult[Any, TaskError]) -> bool:
     match read:
-        case Err(err_value=WaitInsideTask()):
+        case Err(err_value=ReadWaitInsideTask()):
             return True
         case _:
             return False
 
 
-@app.task(task_name='e2e_async_wait_inside_task')
+@app.task(name='e2e_async_wait_inside_task')
 async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
     """Send a task and start a workflow, then try the async result waits.
 
@@ -112,7 +112,7 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
             pass
         case Err(send_err):
             return Err(
-                TaskError(error_code='E2E_SEND_FAILED', message=send_err.message),
+                TaskError(code='E2E_SEND_FAILED', message=send_err.message),
             )
     read = await app.get_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)
     raw = await app.get_raw_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)
@@ -121,21 +121,21 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
         AsyncWaitProbe(
             sent_task_id=str(handle.task_id),
             get_async_refused=_refused(
-                await handle.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
+                await handle.get_async(wait_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
             app_get_result_async_refused=_refused(read),
             raw_async_refused=is_err(raw)
-            and isinstance(raw.err_value, BrokerWaitInsideTask),
+            and isinstance(raw.err_value, DatabaseWaitInsideTask),
             workflow_started=is_ok(started),
             workflow_get_async_refused=is_ok(started)
             and _refused(
-                await started.ok_value.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
+                await started.ok_value.get_async(wait_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
         ),
     )
 
 
-@app.task(task_name='e2e_async_timeout_sleeper', timeout_ms=2_000)
+@app.task(name='e2e_async_timeout_sleeper', timeout_ms=2_000)
 async def async_timeout_sleeper(*, duration_ms: int) -> Result[str, TaskError]:
     """Await past the 2 s timeout_ms, so the parent kills the child."""
     await asyncio.sleep(duration_ms / 1000)
@@ -146,14 +146,14 @@ async def async_timeout_sleeper(*, duration_ms: int) -> Result[str, TaskError]:
 # A def node feeds an async def node, which feeds a def node: 5 -> 6 -> 12.
 # =============================================================================
 
-node_mixed_source = TaskNode(fn=produce_int_task, kwargs={'value': 5})
+node_mixed_source = TaskNode(function=produce_int_task, kwargs={'value': 5})
 node_mixed_async = TaskNode(
-    fn=async_add_one,
+    function=async_add_one,
     waits_for=[node_mixed_source],
     args_from={'upstream': node_mixed_source},
 )
 node_mixed_sink = TaskNode(
-    fn=double_task,
+    function=double_task,
     waits_for=[node_mixed_async],
     args_from={'input_result': node_mixed_async},
 )
@@ -190,7 +190,7 @@ async def _write_marker_later(path: str) -> None:
         marker.write('ended')
 
 
-@app.task(task_name='e2e_async_leaves_work')
+@app.task(name='e2e_async_leaves_work')
 async def async_leaves_work(*, marker_path: str) -> Result[str, TaskError]:
     """Start work that writes the marker later, and return the pid without
     awaiting it."""
@@ -200,7 +200,7 @@ async def async_leaves_work(*, marker_path: str) -> Result[str, TaskError]:
     return Ok(str(os.getpid()))
 
 
-@app.task(task_name='e2e_read_marker')
+@app.task(name='e2e_read_marker')
 def read_marker(
     *,
     marker_path: str,
@@ -220,11 +220,11 @@ def read_marker(
 
 
 node_left_work = TaskNode(
-    fn=async_leaves_work,
+    function=async_leaves_work,
     kwargs={'marker_path': LEFT_WORK_MARKER},
 )
 node_after_left_work = TaskNode(
-    fn=read_marker,
+    function=read_marker,
     waits_for=[node_left_work],
     args_from={'upstream': node_left_work},
     kwargs={'marker_path': LEFT_WORK_MARKER},

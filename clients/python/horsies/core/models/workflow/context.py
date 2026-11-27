@@ -40,13 +40,13 @@ class SubWorkflowSummary(Generic[OkT_co]):
     Useful for conditional logic based on partial success/failure.
 
     Example:
-        def make_report(workflow_ctx: WorkflowContext | None) -> Result[str, TaskError]:
-            if workflow_ctx is None:
+        def make_report(workflow_context: WorkflowContext | None) -> Result[str, TaskError]:
+            if workflow_context is None:
                 return Err(TaskError(
-                    error_code="NO_CTX",
+                    code="NO_CTX",
                     message="make_report ran without a workflow context",
                 ))
-            summary = workflow_ctx.summary_for(data_pipeline_node)
+            summary = workflow_context.summary_for(data_pipeline_node)
             if summary.failed_nodes > 0:
                 return Ok(f"Partial: {summary.completed_nodes}/{summary.total_nodes}")
             return Ok(f"Full: {summary.output}")
@@ -188,7 +188,7 @@ class WorkflowMetadata:
 # =============================================================================
 
 
-class WorkflowContextMissingIdError(RuntimeError):
+class WorkflowContextMissingId(RuntimeError):
     """Raised when TaskNode node_id is missing for WorkflowContext.result_for()."""
 
 
@@ -203,7 +203,7 @@ class WorkflowContext(BaseModel):
 
     Only injected if:
     1. TaskNode has workflow_context_from set, AND
-    2. Task function declares `workflow_ctx: WorkflowContext | None` parameter
+    2. Task function declares `workflow_context: WorkflowContext | None` parameter
 
     Use result_for(node) to access results in a type-safe manner.
     Use summary_for(node) to access SubWorkflowSummary for SubWorkflowNodes.
@@ -548,7 +548,7 @@ class WorkflowContext(BaseModel):
             node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.'
             )
@@ -603,7 +603,7 @@ class WorkflowContext(BaseModel):
         node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id.'
             )
 

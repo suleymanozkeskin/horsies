@@ -5,13 +5,17 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
+import { encodeWithReadBack } from "../../../horsies/src/codec/read-back.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
+import { checkKind, checkMemberKind } from "../../../horsies/src/wire/check.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { memberText } from "./self-check-cases.ts";
 import {
   acceptedKind,
   acceptedMember,
+  decoded,
   decodeRefusal,
   encodeRefusal,
   storedText,
@@ -57,6 +61,20 @@ describe("zod adapter: primitive forms", () => {
 
     assert.equal(encodeRefusal(acceptedKind(z.int32()), 2 ** 40).refusal, "CheckFailed");
     assert.equal(encodeRefusal(acceptedKind(z.uint32()), -1).refusal, "CheckFailed");
+  });
+
+  test("z.int() under a fraction and a whole number above the safe range: one text for each, with no builder name", () => {
+    const kind = acceptedKind(z.object({ id: z.int() }));
+
+    assert.equal(encodeRefusal(kind, { id: 7.5 }).detail, "the integer kind takes a whole number");
+    assert.match(encodeRefusal(kind, { id: 2 ** 53 }).detail, /^the integer kind takes a whole number from -\(2\^53 - 1\)/u);
+  });
+
+  test("z.uuid() stores the text as given; h.uuid() refuses a text that is not lower-case", () => {
+    const upper = "0190A3B4-0000-7000-8000-000000000001";
+
+    assert.equal(storedText(acceptedKind(z.uuid()), upper), `"${upper}"`);
+    assert.equal(encodeRefusal(kindOf(h.uuid()), upper).refusal, "NotCanonicalUuid");
   });
 
   test("z.number(), z.float64(), z.float32() map to float in Python's float text", () => {
@@ -179,13 +197,103 @@ describe("zod adapter: modifiers", () => {
     assert.deepEqual(workerValue(kind, "{}"), { at: Temporal.Instant.from("2026-08-12T07:10:12Z") });
   });
 
-  test("a default that does not encode is stored as refused, for checkKind to report", () => {
+  test("a default is computed: checkKind reads it once and refuses a value that does not encode", () => {
     const member = acceptedMember(z.int().default(1.5));
 
-    assert.equal(member.presence.mode, "defaulted");
-    assert.deepEqual(member.presence.mode === "defaulted" ? member.presence.fallback.state : "", "refused");
+    assert.equal(member.presence.mode === "defaulted" && member.presence.fallback.state, "computed");
+    assert.deepEqual(
+      checkMemberKind(member.kind, member.presence).map((refused) => refused.rule),
+      ["DefaultNotStored"],
+    );
+  });
+
+  test("a function default gives a new value at each worker decode and stays absent in the stored form", () => {
+    let calls = 0;
+    const kind = acceptedKind(z.object({ id: z.int().default(() => (calls += 1)), name: z.string() }));
+
+    assert.equal(calls, 0);
+    assert.deepEqual(workerValue(kind, '{"name":"a"}'), { id: 1, name: "a" });
+    assert.deepEqual(workerValue(kind, '{"name":"a"}'), { id: 2, name: "a" });
+    assert.deepEqual(decoded(kind, '{"name":"a"}', "stored"), { ok: true, value: { name: "a" } });
+    assert.deepEqual(encodeWithReadBack(kind, { name: "a" }), { ok: true, value: '{"name":"a"}' });
+    assert.equal(storedText(kind, { id: 7, name: "a" }), '{"id":7,"name":"a"}');
+  });
+
+  test("DefaultRefused: a function default whose value does not encode, at a worker decode", () => {
+    const kind = acceptedKind(z.object({ id: z.int().default(() => 1.5) }));
+
+    assert.equal(decodeRefusal(kind, "{}", "worker").refusal, "DefaultRefused");
+    assert.deepEqual(decoded(kind, "{}", "stored"), { ok: true, value: {} });
   });
 });
+
+describe("zod adapter: recursive schemas and tuples with a rest item", () => {
+  /** A tree of `levels` objects, each in the children array of the one above it. */
+  function tree(levels: number): object {
+    let node: object = { name: "leaf", children: [] };
+
+    for (let level = 1; level < levels; level += 1) {
+      node = { name: "node", children: [node] };
+    }
+
+    return node;
+  }
+
+  const lazyTree: z.ZodType = z.lazy(() => z.object({ name: z.string(), children: z.array(lazyTree) }));
+
+  const getterTree = z.object({
+    name: z.string(),
+    get children(): z.ZodArray<typeof getterTree> {
+      return z.array(getterTree);
+    },
+  });
+
+  test("a tree with z.lazy() and with a getter member encodes and decodes", () => {
+    for (const schema of [lazyTree, getterTree]) {
+      const kind = acceptedKind(schema);
+      const text = '{"name":"a","children":[{"name":"b","children":[]},{"name":"c","children":[]}]}';
+
+      assert.equal(kindTextOf(schema), "object(name:string,children:array(lazy))");
+      assert.deepEqual(checkKind(kind), []);
+      assert.equal(storedText(kind, JSON.parse(text)), text);
+      assert.deepEqual(workerValue(kind, text), JSON.parse(text));
+      assert.equal(decodeRefusal(kind, '{"name":"a","children":[{"name":"b"}]}', "worker").path, "$.children[0].children");
+    }
+  });
+
+  test("a value of 201 levels is TooDeep at encode and at decode; 200 levels pass", () => {
+    const kind = acceptedKind(lazyTree);
+    const deep = JSON.stringify(tree(MAX_VALUE_JSON_DEPTH / 2 + 1));
+
+    assert.equal(storedText(kind, tree(MAX_VALUE_JSON_DEPTH / 2)).length > 0, true);
+    assert.equal(encodeRefusal(kind, tree(MAX_VALUE_JSON_DEPTH / 2 + 1)).refusal, "TooDeep");
+    assert.equal(decodeRefusal(kind, deep, "worker").refusal, "TooDeep");
+  });
+
+  test("z.tuple([...], rest) encodes and decodes with 0, 1 and many rest items", () => {
+    const kind = acceptedKind(z.tuple([z.int(), z.string()], z.boolean()));
+
+    assert.equal(kindTextOf(z.tuple([z.int(), z.string()], z.boolean())), "tuple(checked(int),string,...boolean)");
+
+    for (const value of [[1, "a"], [1, "a", true], [1, "a", true, false, true]]) {
+      assert.equal(storedText(kind, value), JSON.stringify(value));
+      assert.deepEqual(workerValue(kind, JSON.stringify(value)), value);
+    }
+  });
+
+  test("a wrong rest item is WrongType at its index; fewer items than the fixed items are WrongType", () => {
+    const kind = acceptedKind(z.tuple([z.int()], z.boolean()));
+
+    assert.deepEqual(pick(encodeRefusal(kind, [1, true, "x"])), ["WrongType", "$[2]"]);
+    assert.deepEqual(pick(decodeRefusal(kind, '[1,true,"x"]', "worker")), ["WrongType", "$[2]"]);
+    assert.deepEqual(pick(encodeRefusal(kind, [])), ["WrongType", "$"]);
+    assert.deepEqual(pick(decodeRefusal(kind, "[]", "worker")), ["WrongType", "$"]);
+  });
+});
+
+function pick(refused: { readonly refusal: string; readonly path: string }): readonly [string, string] {
+  return [refused.refusal, refused.path];
+}
 
 describe("zod adapter: unions", () => {
   test("z.union([...]) of primitives maps to union", () => {

@@ -59,9 +59,9 @@ function apiWithBrokenSpans(member: "end" | "recordException"): OtelApi {
     ...api,
     trace: {
       ...api.trace,
-      getTracer: (name) => ({
+      getTracer: (name, version) => ({
         startSpan: (spanName, options, context) => {
-          const span = api.trace.getTracer(name).startSpan(spanName, options, context);
+          const span = api.trace.getTracer(name, version).startSpan(spanName, options, context);
 
           const broken = (): never => {
             throw new Error(`the SDK is broken at ${member}`);
@@ -285,5 +285,56 @@ describe("the time of an instant", () => {
   test("seconds and nanoseconds since the epoch, also before 1970", () => {
     assert.deepEqual(highResolutionTimeOfInstant(Temporal.Instant.fromEpochNanoseconds(1_500_000_001n)), [1, 500_000_001]);
     assert.deepEqual(highResolutionTimeOfInstant(Temporal.Instant.fromEpochNanoseconds(-1n)), [-1, 999_999_999]);
+  });
+});
+
+describe("the span of a run whose seat isolate ended", () => {
+  const STARTED_AT = Temporal.Instant.from("2026-11-26T10:00:00.000001234Z");
+  const EXITED_AT = Temporal.Instant.from("2026-11-26T10:00:03.250001234Z");
+
+  let sdk: TestSdk;
+
+  beforeEach(() => {
+    sdk = installSdk();
+  });
+
+  afterEach(() => {
+    sdk.remove();
+  });
+
+  test("one CONSUMER span `run <task_name>`, ERROR with WORKER_CRASHED, source worker, the parent from the carrier", () => {
+    const { carrier, send } = sendCarrier();
+
+    observerOf().observer.isolateEnded({ facts: factsWith(carrier), startedAt: STARTED_AT, endedAt: EXITED_AT });
+
+    const span = onlySpan(sdk.spans(), "run crunch");
+
+    assert.equal(span.kind, otel.SpanKind.CONSUMER);
+    assert.equal(span.parentSpanContext?.spanId, send.spanId);
+    assert.deepEqual([span.status.code, span.attributes["error.type"]], [otel.SpanStatusCode.ERROR, "WORKER_CRASHED"]);
+    assert.equal(span.attributes["horsies.span.source"], "worker");
+    assert.equal(span.attributes["horsies.task.id"], TASK_ID);
+    assert.equal(span.attributes["horsies.task.execution"], "SHARED_THREAD");
+  });
+
+  test("it starts at the time of the run post and ends at the time of the isolate's exit", () => {
+    observerOf().observer.isolateEnded({ facts: factsWith(NO_CARRIER), startedAt: STARTED_AT, endedAt: EXITED_AT });
+
+    const span = onlySpan(sdk.spans(), "run crunch");
+
+    assert.deepEqual(span.startTime, highResolutionTimeOfInstant(STARTED_AT));
+    assert.deepEqual(span.endTime, highResolutionTimeOfInstant(EXITED_AT));
+  });
+
+  test("facts that are not recorded give no span", () => {
+    observerOf().observer.isolateEnded({ facts: { kind: "notRecorded" }, startedAt: STARTED_AT, endedAt: EXITED_AT });
+    assert.deepEqual(sdk.spans(), []);
+  });
+
+  test("a throw of the SDK at the end is one report of a span not made, and no throw out of the observer", () => {
+    const { observer, written } = observerOf(apiWithBrokenSpans("end"));
+
+    observer.isolateEnded({ facts: factsWith(NO_CARRIER), startedAt: STARTED_AT, endedAt: EXITED_AT });
+    assert.equal(written.length, 1);
   });
 });

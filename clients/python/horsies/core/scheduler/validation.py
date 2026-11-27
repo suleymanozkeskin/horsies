@@ -38,7 +38,7 @@ from horsies.core.codec.payload_guard import (
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     RegistryError,
 )
@@ -144,7 +144,7 @@ def _definition_error(
         # (the missing-row self-heal would retry it forever).
         return ConfigurationError(
             message=f"invalid timezone for schedule '{schedule.name}'",
-            code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+            code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'timezone: {schedule.timezone!r}', f'error: {exc}'],
             help_text='use an IANA timezone name, e.g. "UTC" or "Europe/Berlin"',
         )
@@ -153,7 +153,7 @@ def _definition_error(
         available = list(app.tasks.keys())
         return RegistryError(
             message=f"scheduled task '{schedule.task_name}' not registered",
-            code=ErrorCode.TASK_NOT_REGISTERED,
+            code=HorsiesErrorCode.TASK_NOT_REGISTERED,
             notes=[
                 f"schedule '{schedule.name}' references task '{schedule.task_name}'",
                 f'available tasks: {available}'
@@ -176,18 +176,18 @@ def _resolve_queue_error(
 ) -> HorsiesError | None:
     """Resolve the schedule's queue (explicit, else task default) and validate it."""
     task = app.tasks.get(schedule.task_name)
-    task_queue = task.task_queue_name if task is not None else None
+    task_queue = task.queue if task is not None else None
     queue_name = (
-        schedule.queue_name if schedule.queue_name is not None else task_queue
+        schedule.queue if schedule.queue is not None else task_queue
     )
     try:
-        app.validate_queue_name(queue_name)
+        app.validate_queue(queue_name)
     except Exception as exc:
         return ConfigurationError(
             message=f"invalid queue configuration for schedule '{schedule.name}'",
-            code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+            code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'underlying error: {exc}'],
-            help_text='check queue_name in schedule matches app.config queue settings',
+            help_text='check queue in schedule matches app.config queue settings',
         )
     return None
 
@@ -202,20 +202,20 @@ def _signature_error(
     the runtime on each run, so a schedule does not supply it, and a schedule
     kwarg with its name does not bind."""
     task = app.tasks.get(schedule.task_name)
-    original_fn = getattr(task, '_original_fn', None) if task else None
-    if original_fn is None:
+    original_function = getattr(task, '_original_function', None) if task else None
+    if original_function is None:
         return None  # Cannot validate without original function signature
 
     sig = without_runtime_parameter(
-        inspect.signature(original_fn),
-        task_runtime_parameter(original_fn),
+        inspect.signature(original_function),
+        task_runtime_parameter(original_function),
     )
     try:
         sig.bind(**schedule.kwargs)
     except TypeError as exc:
         return ConfigurationError(
             message=f"schedule '{schedule.name}' kwargs do not match task '{schedule.task_name}' signature",
-            code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+            code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'signature bind error: {exc}'],
             help_text='update TaskSchedule args/kwargs to match task function parameters',
         )
@@ -230,7 +230,7 @@ def _encode_schedule_kwargs(
 
     ``sig.bind`` only checks parameter names/arity, not the strict-serde wire
     contract. This refuses a kwarg that targets an engine-injected parameter
-    (``workflow_ctx``/``workflow_meta``), a TaskOutcome-typed parameter, a value
+    (``workflow_context``/``workflow_meta``), a TaskOutcome-typed parameter, a value
     that cannot be JSON-serialized, and kwargs over ``payload.reject_bytes``.
     Each repeats on every fire, so the schedule is refused once at boot.
 
@@ -246,15 +246,15 @@ def _encode_schedule_kwargs(
     except (StrictJsonError, ValueValidationError) as exc:
         return Err(ConfigurationError(
             message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
-            code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+            code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'encode error: {exc}'],
-            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskOutcome-typed kwargs',
+            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_context/workflow_meta) or TaskOutcome-typed kwargs',
         ))
     ser = dumps_json(encoded)
     if is_err(ser):
         return Err(ConfigurationError(
             message=f"schedule '{schedule.name}' kwargs are not JSON-serializable for task '{schedule.task_name}'",
-            code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+            code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'serialization error: {ser.err_value}'],
             help_text='ensure all scheduled kwargs serialize to JSON',
         ))
@@ -279,7 +279,7 @@ def _payload_size_error(
         case PayloadOverLimit(size_bytes=size_bytes, limit_bytes=limit_bytes):
             return ConfigurationError(
                 message=f"schedule '{schedule.name}' kwargs exceed payload.reject_bytes",
-                code=ErrorCode.CONFIG_INVALID_SCHEDULE,
+                code=HorsiesErrorCode.CONFIG_INVALID_SCHEDULE,
                 notes=[
                     f'kwargs payload size: {size_bytes} bytes',
                     f'payload.reject_bytes: {limit_bytes}',

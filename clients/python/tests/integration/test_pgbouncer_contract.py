@@ -11,7 +11,7 @@ import pytest
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ConfigurationError
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.types.result import is_err, is_ok
 from tests.pgbouncer_utils import (
     PgbouncerUrls,
@@ -48,11 +48,11 @@ def test_transaction_pool_rejected_as_session_url(
 ) -> None:
     with pytest.raises(
         ConfigurationError,
-        match='session_database_url must not use the transaction-pool URL',
+        match='session_database must not use the transaction-pool URL',
     ):
         PostgresConfig(
             database_url=pgbouncer_urls.transaction,
-            session_database_url=pgbouncer_urls.transaction,
+            session_database=SessionDatabaseSeparate(url=pgbouncer_urls.transaction),
             pgbouncer_transaction_mode=True,
         )
 
@@ -66,7 +66,7 @@ async def test_statement_pool_fails_loudly_for_runtime_transactions(
     retryable. The message names the cause."""
     config = PostgresConfig(
         database_url=pgbouncer_urls.statement,
-        session_database_url=pgbouncer_urls.direct,
+        session_database=SessionDatabaseSeparate(url=pgbouncer_urls.direct),
         pgbouncer_transaction_mode=True,
         pool_size=2,
         max_overflow=0,

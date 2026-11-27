@@ -15,7 +15,9 @@
 //   attempt, and the handler child makes none.
 // - A `SHARED_THREAD` task: its seat isolate makes the span. A sync body that holds its isolate past its deadline and
 //   then returns ends its span at the settle of the run on the child's main thread, with `TASK_TIMEOUT`. A neighbour
-//   with time left keeps the thread child alive past that deadline. `SHARED_THREAD` children run on Node only: on Bun
+//   with time left keeps the thread child alive past that deadline. A body that ends its isolate with `process.exit`
+//   gives the run `WORKER_CRASHED`, and the main thread of the thread child makes the span, with `horsies.span.source`
+//   = `worker`, in the trace of the send. `SHARED_THREAD` children run on Node only: on Bun
 //   these cases are skipped (the worker refuses the profile).
 //
 // Run it with `run.ts` (see that file).
@@ -29,7 +31,7 @@ import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-ho
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { loadAddon, type RerunEnqueuePolicy } from "#horsies";
 import { parseSpanLine, type SpanLine, SPAN_LINES_MARKER } from "../src/span-lines.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as endedSpans from "../src/tasks/ended-spans.ts";
@@ -39,8 +41,8 @@ import { found, NOT_YET, pollFor } from "../support/poll.ts";
 import { pause } from "../support/process.ts";
 import { e2eTest, READY_LIMIT_MS, type Suite, WORKER_READY_LINE } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 30_000;
@@ -349,6 +351,63 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
       assert.equal(SPAN_SOURCE_KEY in span.attributes, false, "the seat isolate made the span");
       assert.ok(BigInt(span.endNanos) - BigInt(span.startNanos) >= heldNanos, `the span holds the body: ${span.startNanos} to ${span.endNanos}`);
       assert.ok(BigInt(span.endNanos) <= readAt, `the span ended at the settle, before the outcome was read: ${span.endNanos}`);
+    });
+  });
+
+  threadSeatTest("a seat body that ends its isolate with process.exit gets a WORKER_CRASHED span that the thread child's main thread made, in the trace of the sender", async (suite) => {
+    await threadWorker(suite);
+    await withTestTracing(async (tracing) => {
+      const handle = await inParentSpan(tracing, async () => sentHandle("the thread exit", suite.app.send(endedSpans.endedSpansThreadExit, {})));
+
+      assert.equal(await failedCode(handle, RESULT_WAIT_MS), "WORKER_CRASHED");
+
+      const span = onlySpan(await waitForSpans(suite, TASK_ID_KEY, handle.taskId));
+
+      assert.equal(span.name, `run ${endedSpans.endedSpansThreadExit.name}`);
+      assert.equal(span.status, "ERROR");
+      assert.equal(span.attributes[ERROR_TYPE_KEY], "WORKER_CRASHED");
+      assert.equal(span.attributes[SPAN_SOURCE_KEY], "worker");
+      assert.equal(span.attributes[TASK_EXECUTION_KEY], "SHARED_THREAD");
+      assert.equal(span.attributes[TASK_ATTEMPT_KEY], 1);
+      assert.equal(span.traceId, tracing.parent.spanContext().traceId);
+      assert.deepEqual(span.parent, { kind: "parent", spanId: sendSpanOf(tracing, handle.taskId).spanContext().spanId });
+      assert.ok(BigInt(span.startNanos) <= BigInt(span.endNanos), `start ${span.startNanos}, end ${span.endNanos}`);
+    });
+  });
+});
+
+/** The enqueue policy of the rerun in the case below. */
+const RERUN_POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "forever" },
+  retainRerunInput: "keep",
+  reservationWindow: Temporal.Duration.from({ days: 1 }),
+};
+
+describe("the carrier of a rerun", () => {
+  e2eTest("a rerun in a span stores the carrier of the active context, not the carrier of the source task", "worker_ended_spans", async (suite) => {
+    await suite.worker("isolated-1");
+
+    await withTestTracing(async (tracing) => {
+      const source = await inParentSpan(tracing, async () => sentHandle("e2e_error", suite.app.send(basic.deliberateError, {})));
+
+      await failedCode(source, RESULT_WAIT_MS);
+
+      const caller = otel.trace.getTracer("e2e").startSpan("rerun caller");
+
+      const rerun = await otel.context.with(otel.trace.setSpan(otel.context.active(), caller), async () =>
+        suite.app.rerunTask({ sourceTaskId: source.taskId, goodUntil: { kind: "none" } }, RERUN_POLICY),
+      );
+
+      caller.end();
+      assert.ok(rerun.ok && rerun.value.kind === "enqueued", `the rerun: ${JSON.stringify(rerun)}`);
+
+      const sourceTrace = await suite.app.monitoring.getTaskDetail(source.taskId);
+      const rerunTrace = await suite.app.monitoring.getTaskDetail(rerun.value.newTaskId);
+
+      assert.ok(sourceTrace.ok && sourceTrace.value.kind === "found" && rerunTrace.ok && rerunTrace.value.kind === "found");
+      assert.equal(rerunTrace.value.taskDetail.leaf.traceId, caller.spanContext().traceId);
+      assert.equal(sourceTrace.value.taskDetail.leaf.traceId, tracing.parent.spanContext().traceId);
+      assert.notEqual(rerunTrace.value.taskDetail.leaf.traceId, sourceTrace.value.taskDetail.leaf.traceId);
     });
   });
 });

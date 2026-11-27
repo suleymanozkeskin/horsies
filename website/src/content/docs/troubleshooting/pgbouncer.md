@@ -9,8 +9,8 @@ tags: [troubleshooting, pgbouncer, planetscale, postgres]
 # PgBouncer Troubleshooting
 
 Horsies supports PgBouncer transaction pooling only with a second
-session-capable PostgreSQL URL: `database_url` is the pooled URL,
-`session_database_url` is the direct URL, and `pgbouncer_transaction_mode` is
+session-capable PostgreSQL URL: `database_url` is the pooled URL, a separate
+`session_database` holds the direct URL, and `pgbouncer_transaction_mode` is
 true. The API is on the client pages:
 [PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
 (Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
@@ -42,7 +42,7 @@ pool max_size                                           # pool of the worker pro
 Task code that sends through the app adds the `task_send_pool` of its child
 kind in each child, also to the pooled
 `database_url`. The listener connection and the session pool of the worker
-process go to `session_database_url`, not through PgBouncer. Each `max_size`
+process go to the session database URL, not through PgBouncer. Each `max_size`
 is the resolved value; see
 [Connections](/horsies/workers/worker-profiles/#connections).
 
@@ -106,48 +106,48 @@ server connections then add no throughput.
   a workflow task (`BEGIN`, update, node, `COMMIT`: 4 round trips) and the
   other writes of a workflow task that run as one transaction. Count each as
   its round trips × the RTT between the worker and PgBouncer.
-- The listener connection of each worker goes to `session_database_url`, not
+- The listener connection of each worker goes to the session database URL, not
   through PgBouncer: `LISTEN` needs a session, and transaction pooling does not
   keep one. The session pool of the worker process (schema work and partition
   maintenance, up to the pool `max_size` of the worker process) goes there
   too. Neither is part of `default_pool_size` or of the client connections
   above. They use at most `1 + pool max_size` direct Postgres slots per
   worker. `HRS-219` counts the listener as `listener 1`, and the session pool
-  as `session pool max_size N` when `session_database_url` differs from
+  as `session pool max_size N` when the session database URL differs from
   `database_url`; with `pgbouncer_transaction_mode=True` it compares
   nothing.
 
-## Error: session_database_url required
+## Error: a separate session_database is required
 
 ```text
-session_database_url required when pgbouncer_transaction_mode=True
+a separate session_database is required when pgbouncer_transaction_mode=True
 ```
 
 `pgbouncer_transaction_mode=True` tells Horsies that `database_url` may point to
 transaction pooling. Workers still need PostgreSQL `LISTEN`, and `LISTEN`
 requires a persistent session. Partition detach and finalize also use session
-advisory locks. Set `session_database_url` to a direct Postgres URL or a
+advisory locks. Set `session_database` to a separate direct Postgres URL or a
 session-pooling URL.
 
 ## Error: session URL matches the transaction URL
 
 ```text
-session_database_url must not use the transaction-pool URL
+session_database must not use the transaction-pool URL
 ```
 
 Use two different URLs. Put the transaction-pool URL in `database_url`. Put a
-direct or session-pooled URL in `session_database_url`.
+direct or session-pooled URL in the separate `session_database`.
 
 ## Error: Session URL Check Failed
 
 ```text
 session URL check failed: LISTEN on <session URL> received no NOTIFY within 2000 ms:
 the session URL does not keep session state (for example PgBouncer transaction pooling);
-set session_database_url to a direct or session-pooled URL
+set session_database to a separate direct or session-pooled URL
 ```
 
 At each start, the worker sends a `NOTIFY` and waits at most 2 seconds for it
-on a `LISTEN` of the session URL. Check that `session_database_url` does not
+on a `LISTEN` of the session URL. Check that the session database URL does not
 point to transaction-pooled PgBouncer. Horsies workers intentionally fail
 startup here; poll-only workers are not supported.
 
@@ -165,12 +165,12 @@ real-time notifications.
 ## Live Check: Notification Not Delivered
 
 ```text
-session_database_url appears to be transaction-pooled; LISTEN notification was not delivered
+the session_database URL appears to be transaction-pooled; LISTEN notification was not delivered
 ```
 
 The URL accepted `LISTEN` and `NOTIFY` SQL, but the live behavior probe did not
 receive a notification within the bounded timeout. This is the common signature
-of transaction pooling. Use the direct Postgres URL for `session_database_url`.
+of transaction pooling. Use the direct Postgres URL for the separate `session_database`.
 
 ## Prepared Statement Errors
 

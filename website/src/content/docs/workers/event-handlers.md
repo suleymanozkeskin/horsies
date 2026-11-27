@@ -95,7 +95,7 @@ def configure_event_log() -> None:
     event_log.addHandler(logging.FileHandler('/var/log/myapp/events.log'))
 ```
 
-The `on_child_process_start` hooks do not run in the handler child.
+The `on_child_start` hooks do not run in the handler child.
 
 ## Event Types
 
@@ -231,7 +231,7 @@ def log_end(event: AttemptEnded) -> None: ...
 
 **Raises:** `ConfigurationError` with one code per rule:
 
-<!-- members: ErrorCode subset -->
+<!-- members: HorsiesErrorCode subset -->
 | Code | When |
 |------|------|
 | `HRS-222` | `event_type` is not an event type (at the call of `on_event`) |
@@ -248,7 +248,7 @@ Registers a sync function with no arguments. Hooks run in registration order, ea
 
 ### `app.get_event_handlers() -> tuple[EventHandler, ...]`
 
-The registered handlers in registration order. Each record (`horsies.core.event_handlers.EventHandler`) holds the `name`, the `event_type` (its `event_class` and its `name`), the `kind` (`HandlerKind.DEF` or `HandlerKind.ASYNC_DEF`) and the `function`.
+The registered handlers in registration order. Each record (`horsies.core.event_handlers.EventHandler`) holds the `name`, the `event_type` (its `event_class` and its `name`), the `handler_kind` (`HandlerKind.DEF` or `HandlerKind.ASYNC_DEF`) and the `function`.
 
 ### `app.get_handler_child_start_hooks() -> list[HandlerChildStartHook]`
 

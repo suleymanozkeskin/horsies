@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.queues import (
     QUEUE_NAME_MAX_BYTES,
     CustomQueueConfig,
@@ -24,7 +24,7 @@ _TWO_BYTE_CHARACTER = '\u00e9'
 def test_empty_or_blank_name_is_refused(name: str) -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         CustomQueueConfig(name=name)
-    assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+    assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
 
 
 @pytest.mark.parametrize('name', [' fast', 'fast ', '\tfast', 'fast\n'])
@@ -42,7 +42,7 @@ def test_bound_leaves_the_notify_channel_within_63_bytes() -> None:
 def test_name_over_the_byte_bound_is_refused() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         CustomQueueConfig(name='q' * (QUEUE_NAME_MAX_BYTES + 1))
-    assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+    assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE
     assert '53 bytes' in str(exc_info.value)
 
 

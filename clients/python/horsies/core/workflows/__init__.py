@@ -17,7 +17,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
     WorkflowStartResult,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 
@@ -37,6 +37,6 @@ __all__ = [
     'WorkflowStartErrorCode',
     'WorkflowStartIdConflict',
     'WorkflowStartResult',
-    'WorkflowStartRetryable',
+    'WorkflowStartResendable',
     'WorkflowStartValidationFailed',
 ]

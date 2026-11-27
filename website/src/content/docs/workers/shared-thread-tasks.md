@@ -59,7 +59,7 @@ The shared thread child holds the deadline of each of its tasks. It starts the d
 
 The outcome of a task is fixed when it returns: what it returned before its deadline, or `TASK_TIMEOUT` after it. A task that returned has no deadline left, so the finalizing marker that follows cannot turn its value into a timeout. That marker is written only for a task that returned before its deadline, and the seat waits for a pooled connection for it at most until that deadline. A task that timed out gets no marker: the child reports its end at once, and the runner heartbeats of the worker cover the row until the worker reads that end.
 
-The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
+The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `OutcomeCode.TASK_TIMEOUT` to `retry_for` for a retry.
 
 The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no new culprit. A task whose deadline already closed the child keeps its retry in an isolated child at this kill, and at the drain deadline of a stop.
 
@@ -113,7 +113,7 @@ A seat thread waits up to 30 seconds for a free connection. A thread that gets n
 
 The pool size that the seats give is a default. The connections that a child uses come from its writes. To size the pool from the writes, set `pool=SharedPool(max_size=PoolSize(connections=N))`:
 
-- Each write holds one connection for one statement in autocommit: one database round trip, and one more when the `check` of the pool is on. The RUNNING update of a workflow task holds it for a transaction of four round trips.
+- Each write holds one connection for one statement in autocommit: one database round trip, and one more when the `pre_ping` of the pool is on. The RUNNING update of a workflow task holds it for a transaction of four round trips.
 - Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
 - Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. A pool of 2 is enough.
 - Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. A pool of 2 is then full, and seat threads wait for each other. Set `max_size=PoolSize(connections=4)` or more.

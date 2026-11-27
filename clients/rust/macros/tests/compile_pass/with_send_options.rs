@@ -13,7 +13,7 @@ async fn no_arg_with_options() -> Result<i32, TaskError<std::convert::Infallible
 }
 
 fn main() {
-    let Ok(app) = Horsies::new(AppConfig::for_database_url(
+    let Ok(app) = Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     )) else {
         return;

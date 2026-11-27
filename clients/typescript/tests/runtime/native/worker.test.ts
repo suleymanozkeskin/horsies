@@ -30,7 +30,7 @@ const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 /** The core's config text of an app with one profile `io` of one isolated child, on `databaseUrl`. */
 function configText(databaseUrl: string): string {
   return JSON.stringify({
-    broker: { database_url: databaseUrl },
+    database: { database_url: databaseUrl },
     worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
   });
 }
@@ -67,7 +67,7 @@ describe("the worker area of the addon", () => {
     assert.equal(prepareWorker(config, startText({ kind: "NOT_GIVEN" }), "CAPPED").kind, "profileRefused");
 
     const pooled = JSON.stringify({
-      broker: { database_url: "postgresql://127.0.0.1:6432/horsies", pgbouncer_transaction_mode: true },
+      database: { database_url: "postgresql://127.0.0.1:6432/horsies", pgbouncer_transaction_mode: true },
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
@@ -77,9 +77,9 @@ describe("the worker area of the addon", () => {
     // The config check compares the URL texts as written; the manifest writes `postgres://` as `postgresql://`, so
     // the plan's connection step sees one URL twice.
     const sameSession = JSON.stringify({
-      broker: {
+      database: {
         database_url: "postgres://127.0.0.1:6432/horsies",
-        session_database_url: "postgresql://127.0.0.1:6432/horsies",
+        session_database: { kind: "SEPARATE", url: "postgresql://127.0.0.1:6432/horsies" },
         pgbouncer_transaction_mode: true,
       },
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
@@ -91,8 +91,8 @@ describe("the worker area of the addon", () => {
     );
 
     const capped = JSON.stringify({
-      broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
-      cluster_wide_cap: 4_294_967_295,
+      database: { database_url: "postgresql://127.0.0.1:55432/horsies" },
+      cluster_wide_cap: { kind: "cluster_cap", tasks: 4_294_967_295 },
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
@@ -101,7 +101,7 @@ describe("the worker area of the addon", () => {
     assert.equal(bound.kind === "manifestBound" ? bound.path : bound.kind, "clusterWideCap.tasks");
 
     const threads = JSON.stringify({
-      broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
+      database: { database_url: "postgresql://127.0.0.1:55432/horsies" },
       worker_profiles: {
         cpu: {
           isolated: { kind: "isolated_children", count: 1 },
@@ -118,6 +118,28 @@ describe("the worker area of the addon", () => {
       profile: "cpu",
     });
     assert.equal(coreState(), "not_started");
+  });
+
+  test("the core's parser accepts each form of the metrics endpoint, the handler list, the spans switch and the task facts", () => {
+    const config = configText("postgresql://127.0.0.1:55432/horsies");
+    const base: Record<string, unknown> = JSON.parse(startText({ kind: "NAMED", name: "io" }));
+
+    const forms: readonly (readonly [string, unknown])[] = [
+      ["metrics_endpoint", { kind: "LISTEN_ADDRESS", host: "127.0.0.1", port: 9464 }],
+      ["metrics_endpoint", { kind: "NO_METRICS_ENDPOINT" }],
+      ["handlers", { kind: "HANDLERS", handlers: [{ name: "alerts", event_type: "AttemptEnded" }] }],
+      ["handlers", { kind: "NO_HANDLERS" }],
+      ["worker_ended_spans", "MAKE_SPANS"],
+      ["worker_ended_spans", "NO_SPANS"],
+      ["tasks", { ping: { execution: "SHARED_ASYNC", error_codes: ["CARD_DECLINED"] } }],
+      ["tasks", { ping: { execution: "SHARED_THREAD", error_codes: [] } }],
+    ];
+
+    for (const [member, form] of forms) {
+      const prepared = prepareWorker(config, JSON.stringify({ ...base, [member]: form }), "CAPPED");
+
+      assert.equal(prepared.kind, "prepared", `${member} ${JSON.stringify(form)}`);
+    }
   });
 
   test("a start member that the core's parser refuses throws ManifestRefused", () => {

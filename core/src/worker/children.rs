@@ -215,7 +215,7 @@ fn child_pool(pool: crate::core::config::worker_profile::ResolvedPool) -> ChildP
     ChildPool {
         min_size: protocol_count(pool.min_size().get(), PoolMinSize::new, "pool min_size"),
         max_size: protocol_count(pool.max_size().get(), PoolMaxSize::new, "pool max_size"),
-        check: pool.check(),
+        check: pool.pre_ping(),
     }
 }
 

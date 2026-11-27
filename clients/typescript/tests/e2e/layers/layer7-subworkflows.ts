@@ -7,16 +7,16 @@
 // reaper runs the workflow recovery each second (Python runs one recovery pass in the test process); each test reaches
 // its stuck state through the client and a change of the workflow rows, never a forged task row.
 //
-// A workflow has an output node in the TypeScript client: each Python case whose parent has none runs here with an
-// output node and reads the other nodes through `results` and `resultFor`. The reads of the results of the terminal
-// nodes wait for #2459.
+// Each Python case whose parent has no output node runs here twice: with an output node, reading the other nodes
+// through `results` and `resultFor`, and with a parent that has no `outputType`, reading the outcome of each terminal
+// node through `get` (`WorkflowTerminalResults`).
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe } from "node:test";
 
-import { type JsonValue, type NodeResult, TaskId, type TaskOutcome } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { type JsonValue, type NodeResult, TaskId, type TaskOutcome, type WorkflowTerminalResults } from "#horsies";
+import { loadAddon } from "#horsies";
 import { FAST_RECOVERY, SERIAL_QUEUE } from "../src/instances.ts";
 import { serialBlocker, serialChildTask, serialDirectTask, serialParent } from "../src/tasks/recovery-queues.ts";
 import { CHILD_NODE, SUB_OK_VALUE, subFail, subNestedFailMiddle, tenantReport } from "../src/workflows/children.ts";
@@ -51,8 +51,8 @@ import {
   workflowTree,
 } from "../support/workflow-rows.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the reaper of a worker to finalize a workflow again: one recovery pass each second. */
 const RECOVERY_WAIT_MS = 30_000;
@@ -84,6 +84,15 @@ function resultOutcome(results: ReadonlyMap<string, NodeResult>, nodeId: string)
     case "unreadable":
       assert.fail(`the result of node ${nodeId} does not read: ${result.cause}`);
   }
+}
+
+/** The outcome that the terminal results of a workflow hold for node `nodeId`; fails the test when they hold none. */
+function terminalOutcome(results: WorkflowTerminalResults, nodeId: string): TaskOutcome<JsonValue, string> {
+  const outcome = results.byNodeId.get(nodeId);
+
+  assert.ok(outcome !== undefined, `the terminal results hold no node ${nodeId}: ${JSON.stringify([...results.byNodeId.keys()])}`);
+
+  return outcome;
 }
 
 /** Put the ended workflow `workflowId` and its node at `taskIndex` back to RUNNING, with no result: a step that never committed. */
@@ -212,7 +221,7 @@ describe("layer 7: sub-workflows", () => {
     const childId = childIdOf(nodeById(nodes, parents.FAILURE_PROBE_CHILD));
 
     assert.deepEqual(await workflowValue(handle), {
-      argsCode: "SUBWORKFLOW_FAILED",
+      argsCode: "SUB_WORKFLOW_FAILED",
       argsChildId: childId,
       ctxChildId: childId,
       summaryStatus: "FAILED",
@@ -781,6 +790,90 @@ describe("layer 7: sub-workflows", () => {
       value: { kind: "failed", code: "E2E_UPSTREAM_FAIL" },
     });
     failedChildOf(resultOutcome(results, "l7_deep_mixed_nested_optional_fail"), childIdOf(nodeById(nodes, "l7_deep_mixed_nested_optional_fail")));
+  });
+
+  e2eTest("with no output node, a failed optional child completes the workflow; get gives the outcome of each terminal node", "default", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const handle = await startedHandle("outputless_optional_failed_child", suite.app.start(parents.outputlessOptionalFailedChild, {}));
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "COMPLETED", WORKFLOW_WAIT_MS);
+    const results = await workflowValue(handle);
+
+    assert.equal(results.kind, "terminalResults");
+    assert.deepEqual([...results.byNodeId.keys()].toSorted(), ["e2e_sub_outputless_fail_child", "e2e_sub_outputless_ok"]);
+    assert.deepEqual(terminalOutcome(results, "e2e_sub_outputless_ok"), { kind: "succeeded", value: "required_ok" });
+    failedChildOf(terminalOutcome(results, "e2e_sub_outputless_fail_child"), childIdOf(nodeById(nodes, "e2e_sub_outputless_fail_child")));
+  });
+
+  e2eTest("with no output node, the reaper finalizes again a parent with a failed optional child; get keeps the child's failure", "recovery", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const handle = await startedHandle("outputless_optional_failed_child", suite.app.start(parents.outputlessOptionalFailedChild, {}));
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "COMPLETED", WORKFLOW_WAIT_MS);
+
+    await changeWorkflowRows(
+      suite.rows,
+      `put workflow ${handle.workflowId} back to RUNNING`,
+      `UPDATE horsies_workflows SET status = 'RUNNING', result = NULL, error = NULL, completed_at = NULL, updated_at = NOW()
+       WHERE id = ${sqlText(handle.workflowId)}`,
+      1,
+    );
+    await waitForWorkflowStatus(suite.rows, handle.workflowId, "COMPLETED", RECOVERY_WAIT_MS);
+
+    const results = await workflowValue(handle);
+
+    assert.deepEqual(terminalOutcome(results, "e2e_sub_outputless_ok"), { kind: "succeeded", value: "required_ok" });
+    failedChildOf(terminalOutcome(results, "e2e_sub_outputless_fail_child"), childIdOf(nodeById(nodes, "e2e_sub_outputless_fail_child")));
+  });
+
+  e2eTest("with no output node, an optional child whose own child fails keeps that failure in the terminal results", "default", async (suite) => {
+    await suite.worker("isolated-2");
+
+    const handle = await startedHandle("outputless_deep_optional_failure", suite.app.start(parents.outputlessDeepOptionalFailure, {}));
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "COMPLETED", WORKFLOW_WAIT_MS);
+    const results = await workflowValue(handle);
+
+    assert.deepEqual(terminalOutcome(results, "l7_deep_outputless_required"), { kind: "succeeded", value: "required_ok" });
+    failedChildOf(terminalOutcome(results, "l7_deep_outputless_nested_fail"), childIdOf(nodeById(nodes, "l7_deep_outputless_nested_fail")));
+    assert.ok((await workflowTree(suite.rows, handle.workflowId)).some((row) => row.depth === 2), "the tree has a leaf at depth 2");
+  });
+
+  e2eTest("with no output node, two required children that fail fail the workflow; each node row keeps its failure", "default", async (suite) => {
+    await suite.worker("isolated-2");
+
+    const handle = await startedHandle("outputless_deep_required_failures", suite.app.start(parents.outputlessDeepRequiredFailures, {}));
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "FAILED", WORKFLOW_WAIT_MS);
+
+    for (const nodeId of ["l7_deep_all_failed_a", "l7_deep_all_failed_b"] as const) {
+      const node = nodeById(nodes, nodeId);
+
+      assert.equal(node.status, "FAILED", `node ${nodeId}`);
+      failedChildOf(await nodeOutcome(nodeId, handle.resultFor(nodeId)), childIdOf(node));
+    }
+
+    const error = await workflowError(handle);
+
+    assert.ok(error.subWorkflow !== null, `the workflow error is a sub-workflow failure: ${errorText(error)}`);
+  });
+
+  e2eTest("with no output node, a completed child, a child after a failed task and an optional failed nested child each keep their result", "default", async (suite) => {
+    await suite.worker("isolated-4");
+
+    const handle = await startedHandle("outputless_deep_mixed_paths", suite.app.start(parents.outputlessDeepMixedPaths, {}));
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "COMPLETED", WORKFLOW_WAIT_MS);
+    const results = await workflowValue(handle);
+
+    assert.equal(results.kind, "terminalResults");
+    assert.deepEqual(
+      [...results.byNodeId.keys()].toSorted(),
+      ["l7_deep_mixed_allow_failed_sub", "l7_deep_mixed_nested_optional_fail", "l7_deep_mixed_ok_sub"],
+    );
+    assert.deepEqual(terminalOutcome(results, "l7_deep_mixed_ok_sub"), { kind: "succeeded", value: SUB_OK_VALUE });
+    assert.deepEqual(terminalOutcome(results, "l7_deep_mixed_allow_failed_sub"), {
+      kind: "succeeded",
+      value: { kind: "failed", code: "E2E_UPSTREAM_FAIL" },
+    });
+    failedChildOf(terminalOutcome(results, "l7_deep_mixed_nested_optional_fail"), childIdOf(nodeById(nodes, "l7_deep_mixed_nested_optional_fail")));
   });
 
   e2eTest(

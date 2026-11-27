@@ -20,15 +20,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.outcome import (
-    BrokerError,
     Failed,
-    ResultNotReady,
+    ReadDatabaseError,
+    ReadResultNotReady,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
+    ReadWorkflowNotFound,
     Succeeded,
-    WaitTimeout,
-    WorkflowCtxMissingId,
-    WorkflowNotFound,
 )
 from horsies.core.models.tasks import TaskError, OutcomeCode
 from horsies.core.models.workflow import (
@@ -37,9 +38,9 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowNodeStatus,
     OnError,
-    HandleDbOperationFailed,
-    HandleErrorCode,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleErrorCode,
+    WorkflowHandleStoredDataInvalid,
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.typed import encode_task_error
@@ -66,7 +67,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     the core's retryable database failure for each call."""
     broken = PostgresBroker(
         PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     yield broken
     _ = await broken.close_async()
@@ -80,16 +81,16 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
     the workflow row. The session URL names a database of its own, so the
     listener of the process for it is new.
 
-    The broker runs no schema install (``run_schema_migrations=False``):
+    The broker runs no schema install (``SchemaMode.OBSERVE_ONLY``):
     the install runs on the session URL."""
     reader = PostgresBroker(
         PostgresConfig(
             database_url=SecretStr(DB_URL),
-            session_database_url=SecretStr(
+            session_database=SessionDatabaseSeparate(url=SecretStr(
                 f'postgresql://postgres:none@127.0.0.1:1/listener_refused_{uuid.uuid4().hex}',
-            ),
+            )),
         ),
-        run_schema_migrations=False,
+        schema_mode=SchemaMode.OBSERVE_ONLY,
     )
     yield reader
     _ = await reader.close_async()
@@ -130,8 +131,8 @@ class TestWorkflowHandleStatus:
         task_a = make_simple_task(app, 'status_running_a')
         task_b = make_simple_task(app, 'status_running_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='status_running', tasks=[node_a, node_b],
@@ -157,7 +158,7 @@ class TestWorkflowHandleStatus:
 
         status_r = await handle.status_async()
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert status_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert status_r.err_value.retryable is False
 
 
@@ -182,8 +183,8 @@ class TestWorkflowHandleGet:
         """The PENDING node that the expiry of a paused workflow skips gets completed_at."""
         failing = make_failing_task(app, 'expiry_skip_completed_at_a')
         waiting = make_simple_task(app, 'expiry_skip_completed_at_b')
-        node_a = TaskNode(fn=failing)
-        node_b = TaskNode(fn=waiting, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=failing)
+        node_b = TaskNode(function=waiting, kwargs={'value': 1}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker,
             name='expiry_skip_completed_at',
@@ -196,7 +197,7 @@ class TestWorkflowHandleGet:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='pause')),
+            Err(TaskError(code='FAIL', message='pause')),
         )
 
         # The core refuses an age of 0; the workflow paused more than 1 µs ago.
@@ -226,14 +227,14 @@ class TestWorkflowHandleGet:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Returns timeout error after timeout_ms."""
+        """Returns timeout error after wait_ms."""
         task_a = make_simple_task(app, 'get_timeout_a')
         task_b = make_simple_task(app, 'get_timeout_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'timeout_queue'
         node_a.priority = 100
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         node_b.queue = 'timeout_queue'
         node_b.priority = 100
 
@@ -246,8 +247,8 @@ class TestWorkflowHandleGet:
         handle = await start_ok(spec, broker)
 
         # Don't complete any tasks - workflow stays RUNNING
-        result = await handle.get_async(timeout_ms=500)  # Short timeout
-        assert isinstance(result, Err) and isinstance(result.err_value, WaitTimeout), result
+        result = await handle.get_async(wait_ms=500)  # Short timeout
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWaitTimeout), result
 
     async def test_get_cancelled_returns_cancelled_error(
         self,
@@ -260,8 +261,8 @@ class TestWorkflowHandleGet:
         task_a = make_simple_task(app, 'get_cancelled_a')
         task_b = make_simple_task(app, 'get_cancelled_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='get_cancelled', tasks=[node_a, node_b],
@@ -272,10 +273,10 @@ class TestWorkflowHandleGet:
         cancel_r = await handle.cancel_async()
         assert is_ok(cancel_r)
 
-        result = await handle.get_async(timeout_ms=1000)
+        result = await handle.get_async(wait_ms=1000)
         match result:
             case Ok(Failed(error=error)):
-                assert error.error_code is OutcomeCode.WORKFLOW_CANCELLED
+                assert error.code is OutcomeCode.WORKFLOW_CANCELLED
             case _:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
@@ -284,14 +285,14 @@ class TestWorkflowHandleGet:
         clean_workflow_tables: None,
         broker: PostgresBroker,
     ) -> None:
-        """get_async() returns Err(WorkflowNotFound) for nonexistent workflow."""
+        """get_async() returns Err(ReadWorkflowNotFound) for nonexistent workflow."""
         handle = WorkflowHandle(
             workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
-        result = await handle.get_async(timeout_ms=500)
-        assert isinstance(result, Err) and isinstance(result.err_value, WorkflowNotFound), result
+        result = await handle.get_async(wait_ms=500)
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWorkflowNotFound), result
 
 
 # =============================================================================
@@ -311,10 +312,10 @@ class TestWorkflowHandleResults:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for() returns Err(ResultNotReady) if task not completed."""
+        """result_for() returns Err(ReadResultNotReady) if task not completed."""
         task_a = make_simple_task(app, 'result_for_not_ready_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='result_for_not_ready', tasks=[node_a],
@@ -325,7 +326,7 @@ class TestWorkflowHandleResults:
         # Call result_for without completing the task
         result = await handle.result_for_async(node_a)
 
-        assert isinstance(result, Err) and isinstance(result.err_value, ResultNotReady), result
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadResultNotReady), result
 
     async def test_result_for_missing_node_id_returns_error(
         self,
@@ -333,10 +334,10 @@ class TestWorkflowHandleResults:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for_async() returns WORKFLOW_CTX_MISSING_ID when node_id is None."""
+        """result_for_async() returns WORKFLOW_CONTEXT_MISSING_ID when node_id is None."""
         task_a = make_simple_task(app, 'result_for_no_id_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='result_for_no_id', tasks=[node_a],
@@ -345,15 +346,15 @@ class TestWorkflowHandleResults:
         handle = await start_ok(spec, broker)
 
         # Create a bare TaskNode not assigned to any spec — node_id is None
-        orphan_node: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
+        orphan_node: TaskNode[int] = TaskNode(function=task_a, kwargs={'value': 1})
         assert orphan_node.node_id is None
 
         result = await handle.result_for_async(orphan_node)
         match result:
-            case Err(WorkflowCtxMissingId(message=message)):
+            case Err(ReadWorkflowContextMissingId(message=message)):
                 assert 'node_id is not set' in message
             case _:
-                pytest.fail(f'expected Err(WorkflowCtxMissingId), got {result!r}')
+                pytest.fail(f'expected Err(ReadWorkflowContextMissingId), got {result!r}')
 
     async def test_results_empty_when_no_tasks_completed(
         self,
@@ -365,8 +366,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'results_empty_a')
         task_b = make_simple_task(app, 'results_empty_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='results_empty', tasks=[node_a, node_b],
@@ -389,8 +390,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'tasks_info_a')
         task_b = make_simple_task(app, 'tasks_info_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_info', tasks=[node_a, node_b],
@@ -417,9 +418,9 @@ class TestWorkflowHandleResults:
         task_b = make_simple_task(app, 'tasks_order_b')
         task_c = make_simple_task(app, 'tasks_order_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2})
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a, node_b])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_order', tasks=[node_a, node_b, node_c],
@@ -444,8 +445,8 @@ class TestWorkflowHandleResults:
         task_a = make_simple_task(app, 'tasks_status_a')
         task_b = make_simple_task(app, 'tasks_status_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='tasks_status', tasks=[node_a, node_b],
@@ -483,7 +484,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """Regular TaskNode has sub_workflow_id=None and sub_workflow_summary=None."""
         task_a = make_simple_task(app, 'subwf_regular_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_regular', tasks=[node_a],
@@ -505,7 +506,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """When sub_workflow_id is set (child started), tasks_async() exposes it."""
         task_a = make_simple_task(app, 'subwf_id_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_id', tasks=[node_a],
@@ -554,7 +555,7 @@ class TestWorkflowHandleSubWorkflowFields:
     ) -> None:
         """Completed subworkflow node has both sub_workflow_id and sub_workflow_summary."""
         task_a = make_simple_task(app, 'subwf_summary_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_summary', tasks=[node_a],
@@ -621,9 +622,9 @@ class TestWorkflowHandleSubWorkflowFields:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Corrupt sub_workflow_summary JSON is Err(HandleStoredDataInvalid) with the cause."""
+        """Corrupt sub_workflow_summary JSON is Err(WorkflowHandleStoredDataInvalid) with the cause."""
         task_a = make_simple_task(app, 'subwf_corrupt_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_corrupt', tasks=[node_a],
@@ -664,9 +665,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert err.code == HandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err, WorkflowHandleStoredDataInvalid)
+        assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.cause, SerializationError)
         assert 'sub_workflow_summary JSON corrupt' in err.message
 
     async def test_subworkflow_node_with_bad_status_summary_returns_err(
@@ -680,10 +681,10 @@ class TestWorkflowHandleSubWorkflowFields:
 
         Regression: an invalid persisted status used to be silently coerced to
         WorkflowStatus.FAILED, masquerading as a genuine child failure. It must
-        now surface as Err(HandleStoredDataInvalid) with the ValueError.
+        now surface as Err(WorkflowHandleStoredDataInvalid) with the ValueError.
         """
         task_a = make_simple_task(app, 'subwf_badstatus_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker, name='subwf_badstatus', tasks=[node_a],
@@ -724,9 +725,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert err.code == HandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, ValueError)
+        assert isinstance(err, WorkflowHandleStoredDataInvalid)
+        assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.cause, ValueError)
         assert 'sub_workflow_summary invalid for node' in err.message
 
 
@@ -751,8 +752,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_a')
         task_b = make_simple_task(app, 'cancel_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(broker=broker, name='cancel', tasks=[node_a, node_b])
 
@@ -774,7 +775,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """The cancelled root and its cancelled child both get completed_at."""
         task_a = make_simple_task(app, 'cancel_completed_at_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='cancel_completed_at', tasks=[node_a],
         )
@@ -822,8 +823,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_skip_a')
         task_b = make_simple_task(app, 'cancel_skip_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='cancel_skip', tasks=[node_a, node_b],
@@ -850,8 +851,8 @@ class TestWorkflowHandleCancel:
         """The PENDING node and the ENQUEUED node that the cancel skips get completed_at."""
         task_a = make_simple_task(app, 'cancel_skip_completed_at_a')
         task_b = make_simple_task(app, 'cancel_skip_completed_at_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_skip_completed_at', tasks=[node_a, node_b],
         )
@@ -895,8 +896,8 @@ class TestWorkflowHandleCancel:
         """
         task_a = make_simple_task(app, 'cancel_lock_order_a')
         task_b = make_simple_task(app, 'cancel_lock_order_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_lock_order', tasks=[node_a, node_b],
         )
@@ -949,7 +950,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """The cascade sets completed_at on each child workflow it cancels."""
         task_a = make_simple_task(app, 'descendant_cancel_completed_at_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker,
             name='descendant_cancel_completed_at',
@@ -998,7 +999,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """Descendant cancellation locks its workflow row before its nodes."""
         task_a = make_simple_task(app, 'descendant_cancel_lock_order_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker,
             name='descendant_cancel_lock_order',
@@ -1088,8 +1089,8 @@ class TestWorkflowHandleCancel:
         task_a = make_simple_task(app, 'cancel_guarantee_states_a')
         task_b = make_simple_task(app, 'cancel_guarantee_states_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
         spec = make_workflow_spec(
             broker=broker, name='cancel_guarantee_states', tasks=[node_a, node_b],
         )
@@ -1137,7 +1138,7 @@ class TestWorkflowHandleCancel:
     ) -> None:
         """Cancel turns ENQUEUED+CLAIMED-not-started work into CANCELLED+SKIPPED."""
         task_a = make_simple_task(app, 'cancel_guarantee_claimed_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='cancel_guarantee_claimed', tasks=[node_a],
         )
@@ -1226,7 +1227,7 @@ class TestWorkflowHandleCancel:
 
         cancel_r = await handle.cancel_async()
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert cancel_r.err_value.retryable is False
 
 
@@ -1251,8 +1252,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'pause_run_a')
         task_b = make_simple_task(app, 'pause_run_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='pause_running', tasks=[node_a, node_b],
@@ -1284,8 +1285,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'resume_paused_a')
         task_b = make_simple_task(app, 'resume_paused_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='resume_paused', tasks=[node_a, node_b],
@@ -1317,8 +1318,8 @@ class TestWorkflowHandlePauseResume:
         task_a = make_simple_task(app, 'resume_running_a')
         task_b = make_simple_task(app, 'resume_running_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker, name='resume_running', tasks=[node_a, node_b],
@@ -1352,7 +1353,7 @@ class TestWorkflowHandlePauseResume:
 
         pause_r = await handle.pause_async()
         assert is_err(pause_r)
-        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert pause_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert pause_r.err_value.retryable is False
 
     async def test_resume_nonexistent_returns_not_found(
@@ -1368,7 +1369,7 @@ class TestWorkflowHandlePauseResume:
 
         resume_r = await handle.resume_async()
         assert is_err(resume_r)
-        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert resume_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
         assert resume_r.err_value.retryable is False
 
 
@@ -1397,7 +1398,7 @@ class TestUnknownStoredWorkflowStatus:
         spec = make_workflow_spec(
             broker=broker,
             name='unknown_status_refused',
-            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            tasks=[TaskNode(function=task_a, kwargs={'value': 1})],
         )
         handle = await start_ok(spec, broker)
 
@@ -1421,22 +1422,22 @@ def _assert_failed_connect(
     """A handle operation whose server refuses the connection, as the core
     builds it. The core pool opens its connection at the first statement, so
     the statement fails and its workflow error wraps the broker error:
-    ``HandleDbOperationFailed`` with Python's message (the operation's label,
+    ``WorkflowHandleDatabaseOperationFailed`` with Python's message (the operation's label,
     the workflow id and the workflow error's text, ``broker error: ...``),
     retryable, and the core's class of the cause with the operation as its
     subject and the broker error's own text."""
-    assert type(error) is HandleDbOperationFailed
+    assert type(error) is WorkflowHandleDatabaseOperationFailed
     assert error.workflow_id == workflow_id
     assert error.retryable is True
     prefix = f'{label} failed for workflow {workflow_id}: '
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == subject
-    assert error.exception.message != ''
-    assert cause_text == f'broker error: {error.exception.message}'
-    assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {error.exception.message}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == subject
+    assert error.cause.message != ''
+    assert cause_text == f'broker error: {error.cause.message}'
+    assert error.cause.retryable is True
+    assert str(error.cause) == f'{subject}: {error.cause.message}'
 
 
 @pytest.mark.integration
@@ -1456,7 +1457,7 @@ class TestWorkflowHandleInfraErrors:
         run in the core; each fails at its first statement, where the core
         pool opens its connection."""
         task_a = make_simple_task(app, f'{name}_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a])
         started = await start_ok(spec, broker)
         return WorkflowHandle(workflow_id=started.workflow_id, broker=unreachable_broker)
@@ -1468,7 +1469,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """status_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        """status_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'status_db_err',
         )
@@ -1476,7 +1477,7 @@ class TestWorkflowHandleInfraErrors:
         status_r = await handle.status_async()
 
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert status_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert status_r.err_value.workflow_id == str(handle.workflow_id)
         assert status_r.err_value.retryable is True
         _assert_failed_connect(
@@ -1490,20 +1491,20 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """get_async() returns Err(BrokerError) when the read of the wait
+        """get_async() returns Err(ReadDatabaseError) when the read of the wait
         fails."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'get_db_err',
         )
 
-        result = await handle.get_async(timeout_ms=500)
+        result = await handle.get_async(wait_ms=500)
 
         match result:
-            case Err(BrokerError(message=message)):
+            case Err(ReadDatabaseError(message=message)):
                 # The core's message of the failed wait, as the handle built it.
                 assert message.startswith(f'Get failed for workflow {handle.workflow_id}: ')
             case _:
-                pytest.fail(f'expected Err(BrokerError), got {result!r}')
+                pytest.fail(f'expected Err(ReadDatabaseError), got {result!r}')
 
     async def test_result_for_db_error_names_the_node(
         self,
@@ -1512,10 +1513,10 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for_async() and result_for() return Err(BrokerError) when
+        """result_for_async() and result_for() return Err(ReadDatabaseError) when
         the read fails, with Python 0.7's message, which names the node."""
         task_a = make_simple_task(app, 'result_for_db_err_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = make_workflow_spec(
             broker=broker, name='result_for_db_err', tasks=[node_a],
         )
@@ -1534,11 +1535,11 @@ class TestWorkflowHandleInfraErrors:
 
         for result in (async_result, sync_result):
             match result:
-                case Err(BrokerError(message=message)):
+                case Err(ReadDatabaseError(message=message)):
                     assert message.startswith(prefix)
                     assert message.removeprefix(prefix) != ''
                 case _:
-                    pytest.fail(f'expected Err(BrokerError), got {result!r}')
+                    pytest.fail(f'expected Err(ReadDatabaseError), got {result!r}')
 
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
@@ -1548,7 +1549,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """cancel_async() returns Err(DB_OPERATION_FAILED) on DB failure, and
+        """cancel_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure, and
         the workflow is not cancelled."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'cancel_db_err',
@@ -1557,7 +1558,7 @@ class TestWorkflowHandleInfraErrors:
         cancel_r = await handle.cancel_async()
 
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert cancel_r.err_value.retryable is True
         _assert_failed_connect(
             cancel_r.err_value, 'Cancel', 'cancel_workflow', str(handle.workflow_id),
@@ -1577,7 +1578,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """results_async() returns Err(DB_OPERATION_FAILED) on DB failure."""
+        """results_async() returns Err(DATABASE_OPERATION_FAILED) on DB failure."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'results_db_err',
         )
@@ -1585,7 +1586,7 @@ class TestWorkflowHandleInfraErrors:
         results_r = await handle.results_async()
 
         assert is_err(results_r)
-        assert results_r.err_value.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert results_r.err_value.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert results_r.err_value.workflow_id == str(handle.workflow_id)
         _assert_failed_connect(
             results_r.err_value, 'Results', 'workflow_node_results', str(handle.workflow_id),
@@ -1605,31 +1606,31 @@ class TestWorkflowHandleInfraErrors:
         # All wrap-strategy methods return HandleResult (not raise)
         status_r = await handle.status_async()
         assert is_err(status_r)
-        assert status_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert status_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         cancel_r = await handle.cancel_async()
         assert is_err(cancel_r)
-        assert cancel_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert cancel_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         pause_r = await handle.pause_async()
         assert is_err(pause_r)
-        assert pause_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert pause_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         resume_r = await handle.resume_async()
         assert is_err(resume_r)
-        assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert resume_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         results_r = await handle.results_async()
         assert is_err(results_r)
-        assert results_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert results_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
-        assert tasks_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert tasks_r.err_value.code == WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
 
         # Fold-strategy: get returns typed error
-        get_r = await handle.get_async(timeout_ms=500)
-        assert isinstance(get_r, Err) and isinstance(get_r.err_value, WorkflowNotFound), get_r
+        get_r = await handle.get_async(wait_ms=500)
+        assert isinstance(get_r, Err) and isinstance(get_r.err_value, ReadWorkflowNotFound), get_r
 
 
 # =============================================================================
@@ -1679,7 +1680,7 @@ class TestListenerFallbackContract:
         on ``listener_refused_broker``. Checks that the workflow is RUNNING:
         that read opens the connection of the handle's core pool."""
         task_a = make_simple_task(app, f'{name}_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 50})
+        node_a = TaskNode(function=task_a, kwargs={'value': 50})
         spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a], output=node_a)
         started = await start_ok(spec, broker)
         handle: WorkflowHandle[Any] = WorkflowHandle(
@@ -1707,7 +1708,7 @@ class TestListenerFallbackContract:
             broker, listener_refused_broker, app, 'listen_refused_poll',
         )
 
-        wait = asyncio.create_task(handle.get_async(timeout_ms=POLLED_WAIT_LIMIT_MS))
+        wait = asyncio.create_task(handle.get_async(wait_ms=POLLED_WAIT_LIMIT_MS))
         await asyncio.sleep(END_DURING_THE_WAIT_AFTER_S)
         assert not wait.done(), (
             f'the wait answered before the workflow ended: {wait.result()!r}'
@@ -1734,13 +1735,13 @@ class TestListenerFallbackContract:
 
         started_at = time.monotonic()
         result = await asyncio.wait_for(
-            handle.get_async(timeout_ms=SHORT_WAIT_LIMIT_MS),
+            handle.get_async(wait_ms=SHORT_WAIT_LIMIT_MS),
             timeout=WAIT_ANSWER_BOUND_S,
         )
         waited_s = time.monotonic() - started_at
 
-        assert isinstance(result, Err) and isinstance(result.err_value, WaitTimeout), (
-            f'Expected Err(WaitTimeout), got {result}'
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWaitTimeout), (
+            f'Expected Err(ReadWaitTimeout), got {result}'
         )
         assert waited_s >= SHORT_WAIT_LIMIT_MS / 1000, (
             f'the wait answered after {waited_s:.3f} s, '
@@ -1760,7 +1761,7 @@ async def _paused_workflow(
     name: str,
 ) -> str:
     """A one-node workflow with ``on_error=PAUSE`` whose task failed: PAUSED."""
-    node = TaskNode(fn=make_failing_task(app, name))
+    node = TaskNode(function=make_failing_task(app, name))
     spec = make_workflow_spec(
         broker=broker, name=name, tasks=[node], on_error=OnError.PAUSE,
     )
@@ -1770,7 +1771,7 @@ async def _paused_workflow(
         broker,
         str(handle.workflow_id),
         0,
-        Err(TaskError(error_code='FAIL', message='pause')),
+        Err(TaskError(code='FAIL', message='pause')),
     )
     return str(handle.workflow_id)
 
@@ -1780,8 +1781,8 @@ def _expiry_error_json(older_than: timedelta) -> str:
     match dumps_json(
         encode_task_error(
             TaskError(
-                error_code=OutcomeCode.WORKFLOW_EXPIRED,
-                message=f'paused_workflow_auto_cancel_after elapsed: {older_than}',
+                code=OutcomeCode.WORKFLOW_EXPIRED,
+                message=f'paused_workflow_cancel_after elapsed: {older_than}',
             ),
         ),
     ):

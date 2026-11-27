@@ -151,12 +151,14 @@ impl Instance {
 
     /// The configuration of the instance on `connection`.
     pub fn config(self, connection: &Connection) -> AppConfig {
-        let mut config = AppConfig::for_database_url(connection.database_url.clone());
-        config.broker.pool_size = POOL_SIZE;
-        config.broker.max_overflow = POOL_OVERFLOW;
+        let mut config = AppConfig::from_database_url(connection.database_url.clone());
+        config.database.pool_size = POOL_SIZE;
+        config.database.max_overflow = POOL_OVERFLOW;
         if let Some(session) = &connection.session_database_url {
-            config.broker.session_database_url = Some(session.clone());
-            config.broker.pgbouncer_transaction_mode = true;
+            config.database.session_database = horsies::SessionDatabase::Separate {
+                url: session.clone(),
+            };
+            config.database.pgbouncer_transaction_mode = true;
         }
         config.worker_profiles = Profile::ALL
             .into_iter()
@@ -168,7 +170,11 @@ impl Instance {
                 config.queue_mode = QueueMode::Custom;
                 config.custom_queues = Some(custom_queues(&CUSTOM_QUEUES));
             }
-            Self::ClusterCap => config.cluster_wide_cap = Some(CLUSTER_WIDE_CAP),
+            Self::ClusterCap => {
+                config.cluster_wide_cap = horsies::ClusterCapSetting::ClusterCap {
+                    tasks: CLUSTER_WIDE_CAP,
+                }
+            }
             Self::Recovery => config.recovery = fast_recovery(),
             Self::SoftCap => {
                 config.prefetch_buffer = SOFT_CAP_PREFETCH;
@@ -222,8 +228,7 @@ pub fn fast_recovery() -> RecoveryConfig {
 fn schedules() -> ScheduleConfig {
     let interval = |seconds: u32| {
         SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(seconds),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(u64::from(seconds)),
         })
     };
     ScheduleConfig::new(vec![

@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use horsies::{
-    Horsies, TaskFunction, TaskFunctionNotFound, TaskHandle, TaskOutcome, TaskRuntime,
-    UserErrorCode, WaitLimit,
+    CustomErrorCode, Horsies, TaskFunction, TaskFunctionNotFound, TaskHandle, TaskOutcome,
+    TaskRuntime, WaitLimit,
 };
 use horsies_test_support::database::{TestDatabase, Topology};
 use horsies_test_support::process::TestProcess;
@@ -147,7 +147,7 @@ impl Suite {
                 "worker",
                 "--profile",
                 profile.name(),
-                "--loglevel",
+                "--log-level",
                 LOG_LEVEL,
             ],
         )
@@ -209,7 +209,7 @@ impl Suite {
 
     /// Start the scheduler and wait until it wrote a schedule state row.
     pub async fn scheduler(&self) -> TestProcess {
-        let mut scheduler = self.spawn("scheduler", &["scheduler", "--loglevel", LOG_LEVEL]);
+        let mut scheduler = self.spawn("scheduler", &["scheduler", "--log-level", LOG_LEVEL]);
         let client = self.client().await;
         scheduler
             .wait_until(
@@ -229,7 +229,7 @@ impl Suite {
 pub async fn outcome<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> TaskOutcome<T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     handle
         .get(within(limit))
@@ -242,7 +242,7 @@ where
 pub async fn succeeded<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> T
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode + std::fmt::Debug,
+    E: CustomErrorCode + std::fmt::Debug,
 {
     match outcome(handle, limit).await {
         TaskOutcome::Succeeded(value) => value,
@@ -257,10 +257,10 @@ where
 pub async fn failed_code<T, E>(handle: &TaskHandle<T, E>, limit: Duration) -> String
 where
     T: DeserializeOwned + Clone + std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match outcome(handle, limit).await {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => {
             panic!("task {} succeeded with {value:?}", handle.task_id())
         }

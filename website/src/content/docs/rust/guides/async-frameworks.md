@@ -36,7 +36,7 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<Infallible>> {
 type Receipt = TaskFunction<send_receipt::Input, (), Infallible>;
 
 fn build_app() -> Result<(Horsies, Receipt), HorsiesError> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let receipt = send_receipt::register(&mut app)?;

@@ -15,7 +15,7 @@ from typing import (
     cast,
 )
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
 from .enums import OkT_co, OnError
 from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy, SuccessCase
@@ -78,7 +78,7 @@ def _check_definition_config(cls: type) -> None:
                 f"workflow class '{cls.__qualname__}' defines 'Meta', which is "
                 'not read; set config = WorkflowDefinitionConfig(...) in the class body'
             ),
-            code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+            code=HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
             notes=[
                 'config = WorkflowDefinitionConfig(output=..., on_error=..., success_policy=...) '
                 'can name the nodes of the same class body',
@@ -96,7 +96,7 @@ def _check_definition_config(cls: type) -> None:
                     f"workflow class '{cls.__qualname__}' sets 'config' to "
                     f'{type(other).__name__}, not WorkflowDefinitionConfig'
                 ),
-                code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
                 help_text="set 'config = WorkflowDefinitionConfig(...)' in the class body",
             )
 
@@ -198,7 +198,7 @@ class WorkflowDefinitionMeta(type):
                     f"not constructed during this call. "
                     f"build_with() must return a fresh WorkflowSpec per call — "
                     f"cached or prebuilt spec reuse is not supported.",
-                    code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                    code=HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                     help_text='build a new WorkflowSpec inside build_with() on each call',
                 )
             validate_workflow_generic_output_match(klass, spec)
@@ -230,9 +230,9 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         class ScrapeWorkflow(WorkflowDefinition[PersistResult]):
             name = "scrape_pipeline"
 
-            fetch = TaskNode(fn=fetch_listing, kwargs={"url": "url"})
-            parse = TaskNode(fn=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
-            persist = TaskNode(fn=persist_listing, waits_for=[parse], args_from={"data": parse})
+            fetch = TaskNode(function=fetch_listing, kwargs={"url": "url"})
+            parse = TaskNode(function=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
+            persist = TaskNode(function=persist_listing, waits_for=[parse], args_from={"data": parse})
 
             config = WorkflowDefinitionConfig(
                 output=persist,  # Output type is PersistResult
@@ -288,7 +288,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         if not hasattr(cls, 'name') or not cls.name:
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' must define a 'name' class attribute",
-                code=ErrorCode.WORKFLOW_NO_NAME,
+                code=HorsiesErrorCode.WORKFLOW_NO_NAME,
                 help_text="add a class attribute, for example name = 'my_workflow'",
             )
 
@@ -297,7 +297,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         if not nodes:
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes",
-                code=ErrorCode.WORKFLOW_NO_NODES,
+                code=HorsiesErrorCode.WORKFLOW_NO_NODES,
                 help_text=(
                     'declare a TaskNode or SubWorkflowNode as a class attribute, '
                     'or override build_with() and call it in place of build()'
@@ -423,7 +423,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     f"WorkflowDefinition '{cls.__name__}' must define a non-empty "
                     "'definition_key' class attribute"
                 ),
-                code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+                code=HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY,
                 help_text=(
                     'add a class attribute, for example '
                     "definition_key = 'myapp.my_workflow.v1'"

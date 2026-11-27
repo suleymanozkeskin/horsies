@@ -83,7 +83,7 @@ pub enum PoolFailure {
 impl std::fmt::Display for PoolFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChildHookFailed => f.write_str("an on_child_process_start hook failed"),
+            Self::ChildHookFailed => f.write_str("an on_child_start hook failed"),
             Self::BootAttemptsExhausted { attempts, last } => {
                 write!(
                     f,

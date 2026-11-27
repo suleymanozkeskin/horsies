@@ -43,11 +43,11 @@ const UNUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 /** The retry policy of a vector, as Python's `RetryPolicy` stores it. */
 type RetryNotation = {
   readonly max_retries: number;
-  readonly intervals: readonly number[];
+  readonly intervals_seconds: readonly number[];
   readonly backoff_strategy: "fixed" | "exponential";
   readonly jitter: boolean;
   readonly max_delay_seconds: number | null;
-  readonly auto_retry_for: readonly string[];
+  readonly retry_for: readonly string[];
 };
 
 /** One vector: the facts of the options, the deadline of a send or a node, and Python's text. */
@@ -71,15 +71,15 @@ function vectors(): readonly OptionsVector[] {
 
 /** The `retryPolicy` field of `defineTask` of a vector's policy. */
 function retryOf(policy: RetryNotation): object {
-  const [base] = policy.intervals;
+  const [base] = policy.intervals_seconds;
 
   switch (policy.backoff_strategy) {
     case "fixed":
       return {
         kind: "fixed",
-        intervalsSeconds: policy.intervals,
+        intervalsSeconds: policy.intervals_seconds,
         jitter: policy.jitter,
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     case "exponential":
       return {
@@ -88,7 +88,7 @@ function retryOf(policy: RetryNotation): object {
         maxRetries: policy.max_retries,
         jitter: policy.jitter,
         ...(policy.max_delay_seconds === null ? {} : { maxDelaySeconds: policy.max_delay_seconds }),
-        autoRetryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     default: {
       const unexpected: never = policy.backoff_strategy;
@@ -126,13 +126,13 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
 
 /** The send rules of a config with only a database URL. */
 function sendRules(): NativeSendRules {
-  const config = parseAppConfig({ broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
+  const config = parseAppConfig({ database: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } }, () => undefined);
 
   if (!config.ok) {
     assert.fail(`the minimal config is refused: ${JSON.stringify(config.error)}`);
   }
 
-  const checked = checkAppConfig(config.value.coreConfigJson);
+  const checked = checkAppConfig(config.value.coreConfigJson, config.value.schemaMode);
 
   if (checked.kind !== "accepted") {
     assert.fail(`the core refuses the minimal config: ${JSON.stringify(checked.refusals)}`);

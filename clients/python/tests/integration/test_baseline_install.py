@@ -28,9 +28,10 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
+from horsies.core.brokers.result_types import DatabaseErrorCode, DatabaseOperationFailed
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
@@ -53,6 +54,8 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1004: 'worker profile name',
     1005: 'claim generation by status',
     1006: 'typescript client family',
+    1007: 'sub-workflow failed code',
+    1008: 'retry policy keys and custom category',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""
@@ -92,17 +95,19 @@ async def _connect(url: str) -> Connection:
     return await psycopg.AsyncConnection.connect(to_psycopg_url(url), autocommit=True)
 
 
-async def _initialize(url: str, *, run_schema_migrations: bool = True) -> Ok[None] | Err[str]:
+async def _initialize(
+    url: str, *, schema_mode: SchemaMode = SchemaMode.MIGRATE_AND_VALIDATE,
+) -> Ok[None] | Err[str]:
     """Run the install with a new broker; return the refusal text on failure."""
     broker = PostgresBroker(
         PostgresConfig(database_url=SecretStr(url)),
-        run_schema_migrations=run_schema_migrations,
+        schema_mode=schema_mode,
     )
     try:
         match await broker.ensure_schema_initialized():
             case Ok():
                 return Ok(None)
-            case Err(BrokerOperationFailed(code=BrokerErrorCode.SCHEMA_INIT_FAILED) as failed):
+            case Err(DatabaseOperationFailed(code=DatabaseErrorCode.SCHEMA_INIT_FAILED) as failed):
                 return Err(failed.message)
             case Err(other):
                 pytest.fail(f'unexpected install error: {other!r}')
@@ -394,7 +399,7 @@ async def test_an_install_that_stopped_before_the_publication_is_completed(
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_migrations_off_runs_no_statement(database_url: str) -> None:
-    assert await _initialize(database_url, run_schema_migrations=False) == Ok(None)
+    assert await _initialize(database_url, schema_mode=SchemaMode.OBSERVE_ONLY) == Ok(None)
     connection = await _connect(database_url)
     try:
         assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == (0, 0)
@@ -501,10 +506,10 @@ async def test_a_family_row_that_holds_no_client_family_fails_closed(database_ur
         try:
             match await broker.ensure_schema_initialized():
                 case Err(
-                    BrokerOperationFailed(
-                        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+                    DatabaseOperationFailed(
+                        code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
                         retryable=False,
-                        exception=CoreContractViolation() as exception,
+                        cause=CoreContractViolation() as exception,
                     )
                 ):
                     assert exception.subject == 'install_schema'

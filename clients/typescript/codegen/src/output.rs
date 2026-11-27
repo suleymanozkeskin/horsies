@@ -8,6 +8,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use crate::package_version::{self, PackageVersion};
 use crate::ts_text::GENERATED_HEADER;
 use crate::{
     catalogs, constants, error_catalogs, error_detail, events, manifest, monitoring_models,
@@ -138,6 +139,14 @@ pub fn render_all() -> Vec<GeneratedFile> {
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// Every file of the package of `version`: the files of [`render_all`],
+/// then `package_version.ts`. `write` and `check` take this set. Pure.
+pub fn render_package(version: &PackageVersion) -> Vec<GeneratedFile> {
+    let mut files = render_all();
+    files.push(package_version::generated_file(version));
+    files
 }
 
 /// Write every file under `package_dir`, and remove the modules of
@@ -337,6 +346,7 @@ mod tests {
             "broker",
             "broker_bounds",
             "broker_errors",
+            "codec_bounds",
             "error_codes",
             "error_detail",
             "event_bounds",
@@ -352,6 +362,7 @@ mod tests {
             "retention_class",
             "schedule_pattern",
             "scheduler_manifest",
+            "send_bounds",
             "status",
             "task_code",
             "task_codes",
@@ -369,6 +380,22 @@ mod tests {
         .map(str::to_owned)
         .collect();
         assert_eq!(stems, expected);
+    }
+
+    #[test]
+    fn the_package_set_is_the_rendered_set_and_the_package_version() {
+        let version = package_version::parse_package_version(r#"{"version": "1.2.3"}"#)
+            .expect("the manifest has a version");
+
+        let files = render_package(&version);
+
+        let mut expected = render_all();
+        expected.push(package_version::generated_file(&version));
+        assert_eq!(files, expected);
+        assert_eq!(
+            files.last().map(GeneratedFile::relative_path),
+            Some(Path::new("src/_catalog/package_version.ts"))
+        );
     }
 
     #[test]

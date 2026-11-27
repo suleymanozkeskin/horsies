@@ -59,7 +59,7 @@ def _task(app: Horsies, name: str, annotation: Any) -> Any:
         'value': annotation,
         'return': Result[int, TaskError],
     }
-    return app.task(task_name=name)(take)
+    return app.task(name=name)(take)
 
 
 def _stored(value: object) -> object:
@@ -113,11 +113,11 @@ class _GrandchildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
-        @app.task(task_name='container_kwargs_grandchild_task')
+        @app.task(name='container_kwargs_grandchild_task')
         def grandchild_task(*, values: list[int]) -> Result[int, TaskError]:
             return Ok(len(values))
 
-        node = TaskNode(fn=grandchild_task, kwargs={'values': values})
+        node = TaskNode(function=grandchild_task, kwargs={'values': values})
         return app.workflow(
             name=cls.name,
             nodes=[node],
@@ -133,11 +133,11 @@ class _ChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
-        @app.task(task_name='container_kwargs_child_task')
+        @app.task(name='container_kwargs_child_task')
         def child_task(*, values: list[int]) -> Result[int, TaskError]:
             return Ok(len(values))
 
-        node = TaskNode(fn=child_task, kwargs={'values': values})
+        node = TaskNode(function=child_task, kwargs={'values': values})
         nested: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_definition=_GrandchildWorkflow,
             kwargs={'values': values},
@@ -182,7 +182,7 @@ class TestContainerKwargsAtStart:
     ) -> None:
         session, broker, app = setup
         node: TaskNode[int] = TaskNode(
-            fn=_task(app, f'container_{label}', annotation),
+            function=_task(app, f'container_{label}', annotation),
             kwargs={'value': value},
         )
         spec = app.workflow(

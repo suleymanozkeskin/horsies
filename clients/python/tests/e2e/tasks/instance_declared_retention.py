@@ -31,7 +31,7 @@ E2E_CLASS_KEY = period_class_key(E2E_CLASS_DURATION.days)
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=DB_URL,
         pool_size=5,
         max_overflow=5,
@@ -40,14 +40,14 @@ config = AppConfig(
     retention=RetentionConfig(
         # The floor, so the first maintenance tick lands promptly and the
         # test needs no clock manipulation.
-        partition_maintenance_interval_s=60,
+        partition_maintenance_interval_seconds=60,
         retention_periods=(E2E_CLASS_DURATION,),
     ),
     worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker
 broker.app = app
 

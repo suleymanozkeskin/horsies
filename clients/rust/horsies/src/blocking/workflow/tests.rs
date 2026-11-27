@@ -12,7 +12,7 @@ use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefinitionConfig, Workflow
 use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap()
@@ -236,7 +236,7 @@ async fn a_blocking_spec_start_on_a_runtime_thread_writes_nothing() {
     assert_eq!(with_id.workflow_id(), workflow_id);
 }
 
-/// Python `HandleAsyncContext`: each handle method answers
+/// Python `WorkflowHandleAsyncContext`: each handle method answers
 /// `ASYNC_CONTEXT`, not retryable, with the workflow id, and names its
 /// async form.
 #[tokio::test]
@@ -253,7 +253,11 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
         view.resume().map(|_resumed| ()).unwrap_err(),
     ];
     for refused in &refusals {
-        assert_eq!(refused.code(), HandleErrorCode::AsyncContext, "{refused}");
+        assert_eq!(
+            refused.code(),
+            WorkflowHandleErrorCode::AsyncContext,
+            "{refused}"
+        );
         assert!(!refused.retryable(), "{refused}");
         assert_eq!(refused.workflow_id(), workflow_id);
     }
@@ -293,9 +297,9 @@ async fn a_blocking_outcome_read_on_a_runtime_thread_is_async_context() {
         matches!(read, WorkflowReadError::AsyncContext { .. }),
         "{read}"
     );
-    assert_eq!(read.code().value(), "ASYNC_CONTEXT");
+    assert_eq!(read.code().as_str(), "ASYNC_CONTEXT");
     assert!(
-        read.to_string().contains("`handle.get(limit).await`"),
+        read.to_string().contains("`handle.get(wait).await`"),
         "{read}"
     );
     let node = handle

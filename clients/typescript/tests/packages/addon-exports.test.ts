@@ -42,8 +42,8 @@ describe("coreStateProblem", () => {
 
   test("a thrown answer is a problem", () => {
     assert.equal(
-      coreStateProblem({ kind: "thrown", thrown: { code: "CORE_START_FAILED", cause: "no runtime" } }),
-      "coreState() threw CORE_START_FAILED",
+      coreStateProblem({ kind: "thrown", thrown: { code: "RUNTIME_START_FAILED", cause: "no runtime" } }),
+      "coreState() threw RUNTIME_START_FAILED",
     );
   });
 });

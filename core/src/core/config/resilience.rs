@@ -10,26 +10,26 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct WorkerResilienceConfig {
     /// Initial delay before first DB retry (100ms–60s).
-    #[serde(default = "default_db_retry_initial_ms")]
-    pub db_retry_initial_ms: u64,
+    #[serde(default = "default_database_retry_initial_ms")]
+    pub database_retry_initial_ms: u64,
 
     /// Maximum delay between DB retries (500ms–5min).
-    #[serde(default = "default_db_retry_max_ms")]
-    pub db_retry_max_ms: u64,
+    #[serde(default = "default_database_retry_max_ms")]
+    pub database_retry_max_ms: u64,
 
     /// Maximum number of consecutive retry attempts. 0 = infinite (0–10000).
     #[serde(default)]
-    pub db_retry_max_attempts: u64,
+    pub database_retry_max_attempts: u64,
 
     /// Fallback poll interval when NOTIFY is unavailable (1s–5min).
     #[serde(default = "default_notify_poll_interval_ms")]
     pub notify_poll_interval_ms: u64,
 }
 
-fn default_db_retry_initial_ms() -> u64 {
+fn default_database_retry_initial_ms() -> u64 {
     500
 }
-fn default_db_retry_max_ms() -> u64 {
+fn default_database_retry_max_ms() -> u64 {
     30_000
 }
 fn default_notify_poll_interval_ms() -> u64 {
@@ -39,9 +39,9 @@ fn default_notify_poll_interval_ms() -> u64 {
 impl Default for WorkerResilienceConfig {
     fn default() -> Self {
         Self {
-            db_retry_initial_ms: 500,
-            db_retry_max_ms: 30_000,
-            db_retry_max_attempts: 0,
+            database_retry_initial_ms: 500,
+            database_retry_max_ms: 30_000,
+            database_retry_max_attempts: 0,
             notify_poll_interval_ms: 5_000,
         }
     }
@@ -64,7 +64,9 @@ pub enum ResilienceConfigError {
         max: u64,
     },
 
-    #[error("db_retry_max_ms ({max_ms}ms) must be >= db_retry_initial_ms ({initial_ms}ms)")]
+    #[error(
+        "database_retry_max_ms ({max_ms}ms) must be >= database_retry_initial_ms ({initial_ms}ms)"
+    )]
     MaxBelowInitial { max_ms: u64, initial_ms: u64 },
 }
 
@@ -73,49 +75,49 @@ impl WorkerResilienceConfig {
     ///
     /// Checks:
     /// - Range bounds for each field
-    /// - `db_retry_max_ms >= db_retry_initial_ms`
+    /// - `database_retry_max_ms >= database_retry_initial_ms`
     ///
     /// Returns all validation errors found, not just the first.
     pub fn validate(&self) -> Vec<ResilienceConfigError> {
         let mut errors = Vec::new();
 
-        // db_retry_initial_ms: [100, 60000]
-        if self.db_retry_initial_ms < 100 {
+        // database_retry_initial_ms: [100, 60000]
+        if self.database_retry_initial_ms < 100 {
             errors.push(ResilienceConfigError::BelowMinimum {
-                field: "db_retry_initial_ms",
-                value: self.db_retry_initial_ms,
+                field: "database_retry_initial_ms",
+                value: self.database_retry_initial_ms,
                 min: 100,
             });
         }
-        if self.db_retry_initial_ms > 60_000 {
+        if self.database_retry_initial_ms > 60_000 {
             errors.push(ResilienceConfigError::AboveMaximum {
-                field: "db_retry_initial_ms",
-                value: self.db_retry_initial_ms,
+                field: "database_retry_initial_ms",
+                value: self.database_retry_initial_ms,
                 max: 60_000,
             });
         }
 
-        // db_retry_max_ms: [500, 300000]
-        if self.db_retry_max_ms < 500 {
+        // database_retry_max_ms: [500, 300000]
+        if self.database_retry_max_ms < 500 {
             errors.push(ResilienceConfigError::BelowMinimum {
-                field: "db_retry_max_ms",
-                value: self.db_retry_max_ms,
+                field: "database_retry_max_ms",
+                value: self.database_retry_max_ms,
                 min: 500,
             });
         }
-        if self.db_retry_max_ms > 300_000 {
+        if self.database_retry_max_ms > 300_000 {
             errors.push(ResilienceConfigError::AboveMaximum {
-                field: "db_retry_max_ms",
-                value: self.db_retry_max_ms,
+                field: "database_retry_max_ms",
+                value: self.database_retry_max_ms,
                 max: 300_000,
             });
         }
 
-        // db_retry_max_attempts: [0, 10000]
-        if self.db_retry_max_attempts > 10_000 {
+        // database_retry_max_attempts: [0, 10000]
+        if self.database_retry_max_attempts > 10_000 {
             errors.push(ResilienceConfigError::AboveMaximum {
-                field: "db_retry_max_attempts",
-                value: self.db_retry_max_attempts,
+                field: "database_retry_max_attempts",
+                value: self.database_retry_max_attempts,
                 max: 10_000,
             });
         }
@@ -136,11 +138,11 @@ impl WorkerResilienceConfig {
             });
         }
 
-        // Cross-field: db_retry_max_ms >= db_retry_initial_ms
-        if self.db_retry_max_ms < self.db_retry_initial_ms {
+        // Cross-field: database_retry_max_ms >= database_retry_initial_ms
+        if self.database_retry_max_ms < self.database_retry_initial_ms {
             errors.push(ResilienceConfigError::MaxBelowInitial {
-                max_ms: self.db_retry_max_ms,
-                initial_ms: self.db_retry_initial_ms,
+                max_ms: self.database_retry_max_ms,
+                initial_ms: self.database_retry_initial_ms,
             });
         }
 
@@ -161,41 +163,41 @@ mod tests {
     #[test]
     fn default_field_values() {
         let config = WorkerResilienceConfig::default();
-        assert_eq!(config.db_retry_initial_ms, 500);
-        assert_eq!(config.db_retry_max_ms, 30_000);
-        assert_eq!(config.db_retry_max_attempts, 0);
+        assert_eq!(config.database_retry_initial_ms, 500);
+        assert_eq!(config.database_retry_max_ms, 30_000);
+        assert_eq!(config.database_retry_max_attempts, 0);
         assert_eq!(config.notify_poll_interval_ms, 5_000);
     }
 
     // --- BelowMinimum tests ---
 
     #[test]
-    fn db_retry_initial_below_minimum() {
+    fn database_retry_initial_below_minimum() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 50,
+            database_retry_initial_ms: 50,
             ..Default::default()
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| matches!(
             e,
             ResilienceConfigError::BelowMinimum {
-                field: "db_retry_initial_ms",
+                field: "database_retry_initial_ms",
                 ..
             }
         )));
     }
 
     #[test]
-    fn db_retry_max_below_minimum() {
+    fn database_retry_max_below_minimum() {
         let config = WorkerResilienceConfig {
-            db_retry_max_ms: 200,
+            database_retry_max_ms: 200,
             ..Default::default()
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| matches!(
             e,
             ResilienceConfigError::BelowMinimum {
-                field: "db_retry_max_ms",
+                field: "database_retry_max_ms",
                 ..
             }
         )));
@@ -220,49 +222,49 @@ mod tests {
     // --- AboveMaximum tests ---
 
     #[test]
-    fn db_retry_initial_above_maximum() {
+    fn database_retry_initial_above_maximum() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 60_001,
-            db_retry_max_ms: 300_000,
+            database_retry_initial_ms: 60_001,
+            database_retry_max_ms: 300_000,
             ..Default::default()
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| matches!(
             e,
             ResilienceConfigError::AboveMaximum {
-                field: "db_retry_initial_ms",
+                field: "database_retry_initial_ms",
                 ..
             }
         )));
     }
 
     #[test]
-    fn db_retry_max_above_maximum() {
+    fn database_retry_max_above_maximum() {
         let config = WorkerResilienceConfig {
-            db_retry_max_ms: 300_001,
+            database_retry_max_ms: 300_001,
             ..Default::default()
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| matches!(
             e,
             ResilienceConfigError::AboveMaximum {
-                field: "db_retry_max_ms",
+                field: "database_retry_max_ms",
                 ..
             }
         )));
     }
 
     #[test]
-    fn db_retry_max_attempts_above_maximum() {
+    fn database_retry_max_attempts_above_maximum() {
         let config = WorkerResilienceConfig {
-            db_retry_max_attempts: 10_001,
+            database_retry_max_attempts: 10_001,
             ..Default::default()
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| matches!(
             e,
             ResilienceConfigError::AboveMaximum {
-                field: "db_retry_max_attempts",
+                field: "database_retry_max_attempts",
                 ..
             }
         )));
@@ -289,8 +291,8 @@ mod tests {
     #[test]
     fn max_below_initial_rejected() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 5_000,
-            db_retry_max_ms: 1_000,
+            database_retry_initial_ms: 5_000,
+            database_retry_max_ms: 1_000,
             ..Default::default()
         };
         let errors = config.validate();
@@ -302,8 +304,8 @@ mod tests {
     #[test]
     fn max_equal_to_initial_passes() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 500,
-            db_retry_max_ms: 500,
+            database_retry_initial_ms: 500,
+            database_retry_max_ms: 500,
             ..Default::default()
         };
         let errors = config.validate();
@@ -320,9 +322,9 @@ mod tests {
     #[test]
     fn all_at_minimum_boundary_passes() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 100,
-            db_retry_max_ms: 500,
-            db_retry_max_attempts: 0,
+            database_retry_initial_ms: 100,
+            database_retry_max_ms: 500,
+            database_retry_max_attempts: 0,
             notify_poll_interval_ms: 1_000,
         };
         let errors = config.validate();
@@ -332,9 +334,9 @@ mod tests {
     #[test]
     fn all_at_maximum_boundary_passes() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 60_000,
-            db_retry_max_ms: 300_000,
-            db_retry_max_attempts: 10_000,
+            database_retry_initial_ms: 60_000,
+            database_retry_max_ms: 300_000,
+            database_retry_max_attempts: 10_000,
             notify_poll_interval_ms: 300_000,
         };
         let errors = config.validate();
@@ -346,9 +348,9 @@ mod tests {
     #[test]
     fn multiple_violations_collected() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 50,
-            db_retry_max_ms: 200,
-            db_retry_max_attempts: 10_001,
+            database_retry_initial_ms: 50,
+            database_retry_max_ms: 200,
+            database_retry_max_attempts: 10_001,
             notify_poll_interval_ms: 500,
         };
         let errors = config.validate();
@@ -368,25 +370,25 @@ mod tests {
     fn serde_defaults_applied() {
         let json = "{}";
         let config: WorkerResilienceConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.db_retry_initial_ms, 500);
-        assert_eq!(config.db_retry_max_ms, 30_000);
-        assert_eq!(config.db_retry_max_attempts, 0);
+        assert_eq!(config.database_retry_initial_ms, 500);
+        assert_eq!(config.database_retry_max_ms, 30_000);
+        assert_eq!(config.database_retry_max_attempts, 0);
         assert_eq!(config.notify_poll_interval_ms, 5_000);
     }
 
     #[test]
     fn serde_roundtrip() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 1_000,
-            db_retry_max_ms: 10_000,
-            db_retry_max_attempts: 5,
+            database_retry_initial_ms: 1_000,
+            database_retry_max_ms: 10_000,
+            database_retry_max_attempts: 5,
             notify_poll_interval_ms: 3_000,
         };
         let json = serde_json::to_string(&config).unwrap();
         let restored: WorkerResilienceConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.db_retry_initial_ms, 1_000);
-        assert_eq!(restored.db_retry_max_ms, 10_000);
-        assert_eq!(restored.db_retry_max_attempts, 5);
+        assert_eq!(restored.database_retry_initial_ms, 1_000);
+        assert_eq!(restored.database_retry_max_ms, 10_000);
+        assert_eq!(restored.database_retry_max_attempts, 5);
         assert_eq!(restored.notify_poll_interval_ms, 3_000);
     }
 }

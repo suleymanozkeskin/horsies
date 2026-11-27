@@ -106,7 +106,7 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .expect_err("card decline");
     assert_eq!(
         card_error.code(),
-        &TaskErrorCode::User(AcmeCode::CardDeclined)
+        &TaskErrorCode::Custom(AcmeCode::CardDeclined)
     );
     assert_eq!(reserved(&store, &card_sku).await, 0);
 
@@ -179,7 +179,7 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .expect_err("insufficient stock");
     assert_eq!(
         insufficient.code(),
-        &TaskErrorCode::User(AcmeCode::InsufficientStock)
+        &TaskErrorCode::Custom(AcmeCode::InsufficientStock)
     );
     assert_eq!(reserved(&store, &partial_sku).await, 0);
 

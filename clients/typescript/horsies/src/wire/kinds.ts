@@ -6,6 +6,7 @@ import type { DecodeConversion, EncodeConversion, ValueCheck } from "../codec/co
 import type { JsonText } from "../codec/json-text.ts";
 import type { EncodeRefused } from "../codec/refusal.ts";
 import { isString } from "../codec/values.ts";
+import type { Result } from "./result.ts";
 
 /** `null`. */
 export type NullKind = { readonly node: "null" };
@@ -95,22 +96,57 @@ export type ConversionKind = {
 /** A value of `inner` that a user-side check must accept (a zod refinement). It changes no stored text. */
 export type CheckedKind = { readonly node: "checked"; readonly inner: Kind; readonly check: ValueCheck };
 
+/**
+ * A kind that a getter gives at the first walk: the node of a recursive type, which refers to a kind that is built
+ * later (`h.lazy`, zod's `z.lazy()` and getter members). `target` calls the getter once and then gives the same kind;
+ * `level` tells whether each cycle through this node passes an array or object level (`lazy.ts`). Build it with
+ * `lazyKind`.
+ */
+export type LazyKind = {
+  readonly node: "lazy";
+  readonly target: () => Kind;
+  readonly level: () => LazyLevel;
+};
+
+/**
+ * Whether the stored values of a lazy kind have a finite depth: each path from the node back to itself passes an
+ * array or object level, or it does not (a nullable or a union of itself; `detail` names the cause).
+ */
+export type LazyLevel = { readonly state: "passesLevel" } | { readonly state: "noLevel"; readonly detail: string };
+
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
 
 /** A JSON array of values of one kind. */
 export type ArrayKind = { readonly node: "array"; readonly item: Kind };
 
-/** A JSON array with one value per item kind, in order. */
-export type TupleKind = { readonly node: "tuple"; readonly items: readonly Kind[] };
+/** The items of a tuple after its fixed items: none (a fixed length), or any number of items of one kind. */
+export type TupleRest = { readonly state: "none" } | { readonly state: "items"; readonly item: Kind };
+
+/**
+ * A JSON array with one value per item kind, in order, then the rest items: Python's `tuple[T1, T2]`, or with a rest
+ * item the tuple schema of pydantic-core with a variadic item (`tuple[T, ...]` when there are no fixed items).
+ */
+export type TupleKind = { readonly node: "tuple"; readonly items: readonly Kind[]; readonly rest: TupleRest };
 
 /** A JSON object with any string keys and values of one kind. Stored in the value's own key order. */
 export type RecordKind = { readonly node: "record"; readonly value: Kind };
 
-/** The stored text of a `.default(value)`, or the writer's refusal of that value. */
+/** One call of a default function: the stored text of the value that it gives, or the writer's refusal of it. */
+export type ComputeDefault = () => Result<JsonText, EncodeRefused>;
+
+/** The default of a member: one stored text, the writer's refusal of a fixed value, or a function of each decode. */
 export type DefaultText =
+  /** The stored text of a `.default(value)`. */
   | { readonly state: "stored"; readonly text: JsonText }
-  | { readonly state: "refused"; readonly refusal: EncodeRefused };
+  /** The writer refused the value of a `.default(value)`; `checkKind` refuses the kind. */
+  | { readonly state: "refused"; readonly refusal: EncodeRefused }
+  /**
+   * A default function (`.default(() => value)`, Python's `default_factory`): a reader in worker form calls `compute`
+   * at each decode, so each decode gets a new value. `source` is the function or the schema that holds it: two
+   * computed defaults are alike only when they share it.
+   */
+  | { readonly state: "computed"; readonly source: object; readonly compute: ComputeDefault };
 
 /** How an object member is present in a stored text. */
 export type MemberPresence =
@@ -157,7 +193,8 @@ export type Kind =
   | JsonKind
   | TaskOutcomeKind
   | ConversionKind
-  | CheckedKind;
+  | CheckedKind
+  | LazyKind;
 
 export const NULL_KIND: NullKind = Object.freeze({ node: "null" });
 export const BOOLEAN_KIND: BooleanKind = Object.freeze({ node: "boolean" });
@@ -175,6 +212,7 @@ export const PLAIN_TIME_KIND: PlainTimeKind = Object.freeze({ node: "plainTime" 
 export const JSON_KIND: JsonKind = Object.freeze({ node: "json" });
 export const REQUIRED: MemberPresence = Object.freeze({ mode: "required" });
 export const OPTIONAL: MemberPresence = Object.freeze({ mode: "optional" });
+export const NO_TUPLE_REST: TupleRest = Object.freeze({ state: "none" });
 
 /** `null` or `inner`. A nullable kind stays as it is. Pure. */
 export function nullableKind(inner: Kind): Kind {
@@ -226,4 +264,9 @@ export function conversionKind(stored: Kind, decode: DecodeConversion, encode: E
 /** A kind whose values a user-side check must accept. Pure. */
 export function checkedKind(inner: Kind, check: ValueCheck): CheckedKind {
   return Object.freeze({ node: "checked", inner, check });
+}
+
+/** A tuple kind of the fixed items, in order, then the rest items. Pure. */
+export function tupleKind(items: readonly Kind[], rest: TupleRest): TupleKind {
+  return Object.freeze({ node: "tuple", items: Object.freeze([...items]), rest });
 }

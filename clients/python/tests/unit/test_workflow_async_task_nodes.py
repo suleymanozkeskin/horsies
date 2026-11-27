@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.unit]
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused'
                 ),
@@ -51,7 +51,7 @@ class TestAsyncTaskNodes:
 
         node = spec.nodes[0]
         assert isinstance(node, TaskNode)
-        assert node.fn is double
+        assert node.function is double
         assert stored_kwargs(node) == {'value': 3}
 
     def test_args_from_flows_between_def_and_async_def_tasks(self) -> None:
@@ -118,7 +118,7 @@ class TestAsyncTaskNodes:
                 definition_key='mismatch.v1',
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_workflow_context_from_needs_the_parameter_on_an_async_task(self) -> None:
         app = _app()
@@ -141,7 +141,7 @@ class TestAsyncTaskNodes:
                 definition_key='ctx_missing.v1',
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING
 
     def test_workflow_context_from_is_accepted_on_an_async_task_that_declares_it(
         self,
@@ -155,7 +155,7 @@ class TestAsyncTaskNodes:
         @app.task('async_with_ctx')
         async def with_ctx(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)
 
@@ -169,6 +169,6 @@ class TestAsyncTaskNodes:
 
         node = spec.nodes[1]
         assert isinstance(node, TaskNode)
-        assert node.fn is with_ctx
+        assert node.function is with_ctx
         assert node.workflow_context_from is not None
         assert len(node.workflow_context_from) == 1

@@ -9,8 +9,8 @@ serves every route, guard and event of the web UI, so a TypeScript app, a
 Python app and a Rust app answer alike.
 
 Every call in this file returns a `Result`: `{ ok: true, value }` or
-`{ ok: false, error }`. Each error is a closed union told apart by `code`,
-with `retryable`. A process-state refusal of the core throws `CoreError`; a
+`{ ok: false, error }`. Each error is a closed union told apart by `kind`
+(the variant name, named after its code), with `code` and `retryable`. A process-state refusal of the core throws `CoreError`; a
 defect of the package throws `CoreDefect` (see `SKILL.md`).
 
 ## Health Reads on the App
@@ -31,15 +31,15 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   const pongs = await app.pingWorkers({ waitMs: 2_000, minResponses: { kind: "atLeast", count: 1 } });
 
   if (!pongs.ok) {
-    switch (pongs.error.code) {
-      case "INVALID_INPUT":
-      case "LISTENER_DISABLED":
-      case "WORKER_PING_FAILED":
-      case "SEAT_RELAY_FULL":
-        console.error(`workers: ${pongs.error.message}`);
+    switch (pongs.error.kind) {
+      case "invalidInput":
+        // `subject` is the read; `cause` names the argument and the rule.
+        console.error(`workers: ${pongs.error.subject}: ${pongs.error.cause}`);
         break;
-      case "QUERY_REFUSED":
-        console.error(`workers: ${pongs.error.field}: ${pongs.error.reason}`);
+      case "listenerDisabled":
+      case "workerPingFailed":
+      case "seatRelayFull":
+        console.error(`workers: ${pongs.error.message}`);
         break;
       default: {
         const unknownError: never = pongs.error;
@@ -59,15 +59,15 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 
 | Method | Returns |
 |---|---|
-| `app.pingDatabase()` | `DatabasePing` (`latencyMs`): a timed `SELECT 1` round trip. Error: `DB_PING_FAILED` |
+| `app.pingDatabase()` | `DatabasePing` (`latencyMs`): a timed `SELECT 1` round trip. Error: `DATABASE_PING_FAILED` |
 | `app.pingWorkers(options?)` | `readonly WorkerPong[]` (`workerId`, `hostname`, `pid`, `roundTripMs`), the distinct replies by worker id |
 | `app.monitoring.listWorkerStates()` | `readonly WorkerStateSnapshot[]`: the latest snapshot of each worker that wrote one |
 | `app.monitoring.getWorkerState(workerId)` | `WorkerStateRead`: `{ kind: "found", snapshot }` or `{ kind: "notFound", workerId }` |
 | `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }` |
 | `app.monitoring.getStaleTasks({ thresholdMinutes })` | `BoundedTaskList<StaleTaskRow>`: `RUNNING` tasks with no beat for `thresholdMinutes` (whole minutes, 0 to 525,600) |
 | `app.monitoring.getExpiredTasks()` | `BoundedTaskList<ExpiredTaskRow>`: `PENDING` tasks past their `goodUntil`, oldest deadline first |
-| `app.monitoring.getExecutionClassCoverage()` | `ClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
-| `app.monitoring.getExecutionClassReport()` | `ClassReport`: the pending streams and the budget load of each live worker |
+| `app.monitoring.getExecutionClassCoverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
+| `app.monitoring.getExecutionClassReport()` | `ExecutionClassReport`: the pending streams, the budget load of each live worker, and `liveWindow` (how recent a snapshot of a live worker is) |
 
 - `PingWorkersOptions`: `target` (`{ kind: "everyWorker" }`, the default, or
   `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0,
@@ -76,14 +76,16 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   The ping returns at the first of: the target worker replied, `count`
   workers replied, the window ended. A worker of `listWorkerStates()` that is not
   in the answer did not reply.
-- `pingWorkers` errors: `INVALID_INPUT` (a `waitMs` or a `count` that is
-  not a whole number above 0, answered before any connect),
-  `LISTENER_DISABLED` (the core handle of this process runs no listener),
-  `WORKER_PING_FAILED`, and `QUERY_REFUSED` (a worker id that holds a lone
-  surrogate).
-- The other health reads give `MONITORING_QUERY_FAILED`; `getWorkerState` and
-  `getWorkerStateHistory` add `QUERY_REFUSED`; `getStaleTasks` and `getWorkerStateHistory` add
-  `INVALID_INPUT` for a threshold or a count outside its rule.
+- `pingWorkers` errors: `INVALID_INPUT`, `LISTENER_DISABLED` (the core
+  handle of this process runs no listener) and `WORKER_PING_FAILED`.
+- The other health reads give `MONITORING_QUERY_FAILED`; `getWorkerState`,
+  `getWorkerStateHistory` and `getStaleTasks` add `INVALID_INPUT`.
+- `INVALID_INPUT` of a health read is one variant, `HealthInputRefused`
+  (`kind: "invalidInput"`): `subject` is the read (`pingWorkers`, `worker`,
+  `workerHistory`, `staleTasks`) and `cause` names the argument and the
+  rule: a worker id that holds a lone surrogate, or a `waitMs`, a `count`
+  or a threshold outside its rule. It is answered before any connect, and
+  nothing ran.
 - Each health read connects the app's handle and installs the schema once
   per handle, as a send does; then it reads only. The database ping reads
   only.
@@ -94,6 +96,16 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   build before schema migration 1004). A value that the worker could not
   measure is `{ kind: "notMeasured" }`; a 64-bit count is a `bigint`; an
   instant is a `Temporal.Instant`.
+- `WorkerStateSnapshot` also gives `childCount`, `claimLimits`
+  (`ClaimLimits`: `perQueuePerPass` and `claimedPerWorker`, each a
+  `TaskLimit`; `claimedPerWorker` is the limit that the worker resolved,
+  the seat count when its profile sets none), `clusterWideCap`
+  (`ClusterCapSetting`) and `executionClassBudgets`
+  (`ExecutionClassBudget[]`). `StaleTaskRow` and `ExpiredTaskRow` name the
+  task `taskId`; `StaleTaskRow.lastHeartbeatAt` is a `LastBeat`.
+- A pending stream names its `queue`, its `execution` and its `coverage`.
+  Its `wait` is `{ kind: "due", oldestDueAt, wait }` or
+  `{ kind: "noneDue", nextDueAt }`.
 - The meaning of each read is on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/monitoring/worker-health/`.
 
@@ -179,12 +191,12 @@ Errors:
 
 | Code | When |
 |---|---|
-| `QUERY_REFUSED` | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`, `workerId`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
-| `DB_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `exception` holds the cause |
+| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `nodeIndex`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
+| `DATABASE_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `cause` holds the cause |
 | `HISTORY_CONTRACT_VIOLATION` | A history row does not decode. Not retryable |
 
 `taskDetail`, `workflowNames`, `workflowRun` and `schedules` take no query,
-so their error is `MonitoringQueryCoreError` (no `QUERY_REFUSED`).
+so their error is `MonitoringQueryError` (no `invalidInput`).
 
 Phase timing (the lifecycle record of migration 1001):
 
@@ -226,14 +238,14 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
     return true;
   }
 
-  switch (cancelled.error.code) {
-    case "TASK_NOT_FOUND":
-    case "TASK_NOT_CANCELLABLE":
+  switch (cancelled.error.kind) {
+    case "notFound":
+    case "notCancellable":
       return false;
-    case "TASK_IS_WORKFLOW_TASK":
-    case "DB_OPERATION_FAILED":
-    case "STORED_DATA_INVALID":
-    case "SEAT_RELAY_FULL":
+    case "workflowTask":
+    case "databaseOperationFailed":
+    case "storedDataInvalid":
+    case "seatRelayFull":
       console.error(cancelled.error.message);
 
       return false;
@@ -270,7 +282,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
 | `TASK_NOT_FOUND` | No live or history row has the id. Nothing changed |
 | `TASK_NOT_CANCELLABLE` | Terminal, or `RUNNING` with `pendingOrClaimedOnly`; `currentStatus` is the status found. Nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | The task belongs to a workflow; `currentStatus` is the status found. Nothing changed |
-| `DB_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DATABASE_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 | `STORED_DATA_INVALID` | Stored data does not parse. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (Rerun, below).
@@ -572,13 +584,14 @@ nothing):
 | `keyConflict` | `taskId`, `ownerTaskId` | The idempotency key holds another command; `ownerTaskId` holds it |
 | `keyReplay` | `existingTaskId` | The idempotency key holds this command already |
 
-Errors (each with `code`, `message`; `RerunErrorCode` names the codes):
+Errors (each with `kind`, the code in camelCase, `code` and `message`;
+`RerunErrorCode` names the codes):
 
 | Code | Union | When |
 |---|---|---|
 | `INVALID_COMMAND`, `INVALID_POLICY` | both | A field breaks its rule. Nothing ran |
 | `CLASS_NOT_REGISTERED` | both | The retention class of the new task has no class row (`classKey`). Nothing is written |
-| `CALLER_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
+| `IDEMPOTENCY_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
 | `ID_MINT_REFUSED` | both | The task id source refused to mint the new id |
 | `CLIENT_FAMILY_MISMATCH`, `UNKNOWN_STORED_FAMILY` | both | Another client family installed the database, or its family row is not a family |
 | `CONTRACT_VIOLATION` | both | A row or stored data broke the rerun's contract. Nothing committed |
@@ -711,9 +724,10 @@ import {
   DEFAULT_PING_WAIT_MS,
   type DatabasePing, type WorkerPong, type PingTarget, type PingWorkersOptions, type MinResponses,
   type WorkerHistoryLimit, type WorkerStateSnapshot, type WorkerStateRead, type SnapshotProfile,
-  type StaleTaskRow, type ExpiredTaskRow, type BoundedTaskList, type ClassCoverage, type ClassReport,
+  type StaleTaskRow, type ExpiredTaskRow, type BoundedTaskList, type ExecutionClassCoverage, type ExecutionClassReport,
   type PingDatabaseError, type PingWorkersError, type HealthReadError, type HealthInputError,
-  type WorkerReadError, type WorkerHistoryError, type StaleTasksQuery,
+  type WorkerReadError, type WorkerHistoryError, type HealthInputRefused, type HealthInputSubject,
+  type StaleTasksQuery,
   // Monitoring reads
   type Monitoring, MONITORING_WINDOW_DEFAULT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_BREAKDOWN_LIMIT,
   MAX_WORKFLOW_RUNS_LIMIT, MonitoringQueryRefusalCode, TaskStatus,

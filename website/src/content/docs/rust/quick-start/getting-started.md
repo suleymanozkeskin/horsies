@@ -51,7 +51,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url(DATABASE_URL)
+        ..AppConfig::from_database_url(DATABASE_URL)
     };
     let mut app = Horsies::new(config)?;
     let _greet = greet::register(&mut app)?;
@@ -62,7 +62,7 @@ async fn send_greeting(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> 
     let handle = greet::send(app, "world".to_owned()).await?;
     match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
-        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().as_str()),
     }
     Ok(())
 }

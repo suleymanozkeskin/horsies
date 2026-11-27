@@ -76,7 +76,7 @@ pub fn child_handle_setup(init: &InitFrame) -> Result<ChildHandleSetup, HandlerC
                 pool_pre_ping: pool.check,
                 pool_size: connections,
                 max_overflow: no_overflow,
-                pool_timeout: WholeSeconds::from_secs(CHILD_POOL_CHECKOUT_WAIT_SECONDS),
+                pool_timeout_seconds: WholeSeconds::from_secs(CHILD_POOL_CHECKOUT_WAIT_SECONDS),
                 pool_recycle: CHILD_POOL_MAX_AGE,
                 echo: false,
                 tcp_keepalives: init.connection.tcp_keepalives,
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(database.pool_size.get(), 3);
         assert_eq!(database.max_overflow.get(), 0);
         assert_eq!(
-            database.pool_timeout.get(),
+            database.pool_timeout_seconds.get(),
             CHILD_POOL_CHECKOUT_WAIT_SECONDS
         );
         assert_eq!(database.pool_recycle, CHILD_POOL_MAX_AGE);

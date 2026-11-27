@@ -176,7 +176,7 @@ def _tracing(fault: TelemetryFault) -> OtelTracing | NoTracing:
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(DB_URL),
         pool_size=5,
         max_overflow=5,
@@ -187,7 +187,7 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker  # pyright: ignore[reportPrivateUsage]
 broker.app = app
 
@@ -199,19 +199,19 @@ match FAULT:
     case TelemetryFault.HANDLER_BLOCKS:
         _ = app.on_event(AttemptEnded)(block_handler)
     case TelemetryFault.EXPORTER_HANGS:
-        _ = app.on_child_process_start(install_hanging_exporter)
+        _ = app.on_child_start(install_hanging_exporter)
     case TelemetryFault.COLLECTOR_ABSENT:
-        _ = app.on_child_process_start(install_absent_collector_exporter)
+        _ = app.on_child_start(install_absent_collector_exporter)
     case _ as unreachable:
         assert_never(unreachable)
 
 
-@app.task(task_name='e2e_telemetry_faults_healthcheck')
+@app.task(name='e2e_telemetry_faults_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_telemetry_faults_add')
+@app.task(name='e2e_telemetry_faults_add')
 def add(*, left: int, right: int) -> Result[int, TaskError]:
     return Ok(left + right)
 

@@ -1,8 +1,8 @@
-//! Renders integer constants of horsies-core as modules of the catalog
-//! folder: `monitoring_bounds.ts`, `exit_codes.ts`, `event_bounds.ts` and
-//! `broker_bounds.ts`.
+//! Renders constants of horsies-core as modules of the catalog folder:
+//! `monitoring_bounds.ts`, `exit_codes.ts`, `event_bounds.ts`,
+//! `broker_bounds.ts`, `codec_bounds.ts` and `send_bounds.ts`.
 //!
-//! `CONSTANT_MODULES` is the list of the core constants that the
+//! `constant_modules` is the list of the core constants that the
 //! TypeScript package publishes. The list is a choice of this renderer. Each
 //! entry names the core constant itself, so the value comes from the core:
 //! `check` fails when a core value changes and the module is not written
@@ -10,31 +10,44 @@
 //!
 //! Each constant is one statement, `export const NAME = <literal>;`. An
 //! integer in the safe range of a `number` is a number literal; another
-//! integer is a `bigint` literal.
+//! integer is a `bigint` literal. A text is a string literal, and a list of
+//! texts is a frozen array of string literals.
 
 use std::time::Duration;
 
+use horsies_core::core::codec::user_value::{BUILTIN_CODE_KEY, ENGINE_KEY_PREFIXES};
+use horsies_core::core::codec::{
+    UserValueRefused, MAX_INT_DIGITS, MAX_JSON_DEPTH, MAX_VALUE_JSON_DEPTH,
+};
+use horsies_core::core::task::error::{
+    DATA_REFUSED_KEY, ERROR_DATA_DEPTH_LIMIT, SUMMARY_OUTPUT_DEPTH_LIMIT,
+};
+use horsies_core::core::task::result::TASK_RESULT_ENVELOPE_KEY;
 use horsies_core::events::{
-    MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
-    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_EVENT_WORKER_ID_CHARS,
+    MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
+    MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
     MAX_RETRY_COUNT,
 };
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
-    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
-    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
-    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MAX_EVENT_HANDLERS,
+    MAX_HANDLER_NAME_CHARS, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
+    REPARENT_FAILED_EXIT_CODE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use horsies_core::monitoring::{
     LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
+use horsies_core::telemetry::labels::DeclaredSource;
 use horsies_core::{
-    LIVENESS_LOCK_LOST_EXIT_CODE, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+    TASK_LIST_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
-use crate::ts_text::{bigint_literal, integer_literal, is_safe_integer, module_text};
+use crate::ts_text::{
+    bigint_literal, integer_literal, is_safe_integer, module_text, string_literal,
+};
 
 /// The suffix of the name of a span that a module publishes in whole
 /// seconds.
@@ -54,15 +67,27 @@ enum PublishedConstant {
     /// A span of the core, published in whole seconds under
     /// `<name>_SECONDS`.
     WholeSeconds { name: &'static str, span: Duration },
+    /// A text of the core, published under `name` as a string literal: its
+    /// TypeScript type is the literal type of the text.
+    Text {
+        name: &'static str,
+        value: &'static str,
+    },
+    /// A list of texts of the core, in core order, published under `name` as
+    /// a frozen `ReadonlyArray<string>`.
+    TextList {
+        name: &'static str,
+        values: &'static [&'static str],
+    },
 }
 
 /// One generated module of core constants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ConstantModule {
     /// The stem of the module in the catalog folder.
     stem: &'static str,
     /// The constants, in module order.
-    constants: &'static [PublishedConstant],
+    constants: Vec<PublishedConstant>,
 }
 
 const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
@@ -102,11 +127,8 @@ const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
     },
 ];
 
-/// The bounds of the monitoring reads. The window spans are whole seconds.
-const MONITORING_BOUNDS: ConstantModule = ConstantModule {
-    stem: "monitoring_bounds",
-    constants: &MONITORING_CONSTANTS,
-};
+/// The stem of the module of the monitoring bounds.
+const MONITORING_BOUNDS_MODULE: &str = "monitoring_bounds";
 
 const EXIT_CODE_CONSTANTS: [PublishedConstant; 11] = [
     PublishedConstant::Integer {
@@ -155,11 +177,8 @@ const EXIT_CODE_CONSTANTS: [PublishedConstant; 11] = [
     },
 ];
 
-/// The exit codes of the worker process and of its children, in code order.
-const EXIT_CODES: ConstantModule = ConstantModule {
-    stem: "exit_codes",
-    constants: &EXIT_CODE_CONSTANTS,
-};
+/// The stem of the module of the exit codes.
+const EXIT_CODES_MODULE: &str = "exit_codes";
 
 const EVENT_CONSTANTS: [PublishedConstant; 7] = [
     PublishedConstant::Integer {
@@ -179,8 +198,8 @@ const EVENT_CONSTANTS: [PublishedConstant; 7] = [
         value: MAX_EVENT_QUEUE_NAME_CHARS as i128,
     },
     PublishedConstant::Integer {
-        name: "MAX_EVENT_USER_CODE_CHARS",
-        value: MAX_EVENT_USER_CODE_CHARS as i128,
+        name: "MAX_EVENT_CUSTOM_CODE_CHARS",
+        value: MAX_EVENT_CUSTOM_CODE_CHARS as i128,
     },
     PublishedConstant::Integer {
         name: "MAX_EVENT_TRACE_CARRIER_CHARS",
@@ -192,34 +211,183 @@ const EVENT_CONSTANTS: [PublishedConstant; 7] = [
     },
 ];
 
-/// The bounds of the values of an event: the attempt number, the retry
-/// count, and the most characters of each text.
-const EVENT_BOUNDS: ConstantModule = ConstantModule {
-    stem: "event_bounds",
-    constants: &EVENT_CONSTANTS,
-};
+/// The stem of the module of the event bounds.
+const EVENT_BOUNDS_MODULE: &str = "event_bounds";
+
+/// The constants of the event registration of an app, after the bounds of
+/// the values of an event: the most handlers, the most characters of a
+/// handler name, and the `handler` label value of a name outside the
+/// declared handlers (no handler may take it). The label value is the
+/// return value of a core function, so the list is built at render time.
+/// Pure.
+fn event_handler_constants() -> [PublishedConstant; 3] {
+    [
+        PublishedConstant::Integer {
+            name: "MAX_EVENT_HANDLERS",
+            value: MAX_EVENT_HANDLERS as i128,
+        },
+        PublishedConstant::Integer {
+            name: "MAX_HANDLER_NAME_CHARS",
+            value: MAX_HANDLER_NAME_CHARS as i128,
+        },
+        PublishedConstant::Text {
+            name: "UNKNOWN_HANDLER_NAME",
+            value: DeclaredSource::HandlerNames.fallback(),
+        },
+    ]
+}
 
 const BROKER_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
     name: "TASK_LIST_BOUND",
     value: TASK_LIST_BOUND as i128,
 }];
 
-/// The bound of the stale and expired task reads of the broker. The name is
-/// the name of the core's constant.
-const BROKER_BOUNDS: ConstantModule = ConstantModule {
-    stem: "broker_bounds",
-    constants: &BROKER_CONSTANTS,
-};
+/// The stem of the module of the broker bound. The constant name is the
+/// name of the core's constant.
+const BROKER_BOUNDS_MODULE: &str = "broker_bounds";
 
-/// Every generated module of core constants, in file order.
-const CONSTANT_MODULES: [ConstantModule; 4] =
-    [MONITORING_BOUNDS, EXIT_CODES, EVENT_BOUNDS, BROKER_BOUNDS];
+/// The stem of the module of the bounds and spellings of the stored forms.
+const CODEC_BOUNDS_MODULE: &str = "codec_bounds";
+
+/// The constant of the `data_refused` cause of a refused user value.
+///
+/// The match has no wildcard: a new refusal of the core fails the build
+/// here, and the codec module names its cause. Pure.
+fn data_refused_cause_constant(refusal: &UserValueRefused) -> &'static str {
+    match refusal {
+        UserValueRefused::EngineKey { .. } | UserValueRefused::DeeperThanTextBound => {
+            "DATA_REFUSED_STRICT_JSON_CAUSE"
+        }
+        UserValueRefused::DeeperThanValueBound { .. } => "DATA_REFUSED_VALUE_VALIDATION_CAUSE",
+        UserValueRefused::IntegerTooLong => "DATA_REFUSED_SERIALIZATION_CAUSE",
+    }
+}
+
+/// One refusal of each `data_refused` cause, in module order. Pure.
+fn data_refused_cause_refusals() -> [UserValueRefused; 3] {
+    [
+        UserValueRefused::DeeperThanTextBound,
+        UserValueRefused::DeeperThanValueBound {
+            limit: ERROR_DATA_DEPTH_LIMIT,
+        },
+        UserValueRefused::IntegerTooLong,
+    ]
+}
+
+/// The bounds and spellings of the core's stored forms: the depth and digit
+/// bounds of a stored text and of a user value, the depth limits of the
+/// `data` of a task error and of a sub-workflow summary output, the keys
+/// that only the engine writes, the envelope marker key, the key of the
+/// replacement `data` and its causes (`UserValueRefused::stored_cause`).
+/// Pure.
+fn codec_constants() -> Vec<PublishedConstant> {
+    let mut constants = vec![
+        PublishedConstant::Integer {
+            name: "MAX_JSON_DEPTH",
+            value: MAX_JSON_DEPTH as i128,
+        },
+        PublishedConstant::Integer {
+            name: "MAX_INT_DIGITS",
+            value: MAX_INT_DIGITS as i128,
+        },
+        PublishedConstant::Integer {
+            name: "MAX_VALUE_JSON_DEPTH",
+            value: MAX_VALUE_JSON_DEPTH as i128,
+        },
+        PublishedConstant::Integer {
+            name: "ERROR_DATA_DEPTH_LIMIT",
+            value: ERROR_DATA_DEPTH_LIMIT as i128,
+        },
+        PublishedConstant::Integer {
+            name: "SUMMARY_OUTPUT_DEPTH_LIMIT",
+            value: SUMMARY_OUTPUT_DEPTH_LIMIT as i128,
+        },
+        PublishedConstant::TextList {
+            name: "ENGINE_KEY_PREFIXES",
+            values: &ENGINE_KEY_PREFIXES,
+        },
+        PublishedConstant::Text {
+            name: "BUILTIN_CODE_KEY",
+            value: BUILTIN_CODE_KEY,
+        },
+        PublishedConstant::Text {
+            name: "TASK_RESULT_ENVELOPE_KEY",
+            value: TASK_RESULT_ENVELOPE_KEY,
+        },
+        PublishedConstant::Text {
+            name: "DATA_REFUSED_KEY",
+            value: DATA_REFUSED_KEY,
+        },
+    ];
+    constants.extend(
+        data_refused_cause_refusals()
+            .iter()
+            .map(|refusal| PublishedConstant::Text {
+                name: data_refused_cause_constant(refusal),
+                value: refusal.stored_cause(),
+            }),
+    );
+    constants
+}
+
+/// The stem of the module of the send and wait bounds.
+const SEND_BOUNDS_MODULE: &str = "send_bounds";
+
+const SEND_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
+    name: "MAX_WAIT_LIMIT_MS",
+    value: MAX_WAIT_LIMIT_MS as i128,
+}];
+
+/// Every generated module of core constants, in file order:
+///
+/// - the bounds of the monitoring reads (the window spans in whole seconds);
+/// - the exit codes of the worker process and of its children, in code
+///   order;
+/// - the bounds of the values of an event, then of the event registration;
+/// - the bound of the stale and expired task reads of the broker;
+/// - the bounds and spellings of the stored forms;
+/// - the longest result wait.
+///
+/// Pure.
+fn constant_modules() -> [ConstantModule; 6] {
+    let mut event_constants = EVENT_CONSTANTS.to_vec();
+    event_constants.extend(event_handler_constants());
+    [
+        ConstantModule {
+            stem: MONITORING_BOUNDS_MODULE,
+            constants: MONITORING_CONSTANTS.to_vec(),
+        },
+        ConstantModule {
+            stem: EXIT_CODES_MODULE,
+            constants: EXIT_CODE_CONSTANTS.to_vec(),
+        },
+        ConstantModule {
+            stem: EVENT_BOUNDS_MODULE,
+            constants: event_constants,
+        },
+        ConstantModule {
+            stem: BROKER_BOUNDS_MODULE,
+            constants: BROKER_CONSTANTS.to_vec(),
+        },
+        ConstantModule {
+            stem: CODEC_BOUNDS_MODULE,
+            constants: codec_constants(),
+        },
+        ConstantModule {
+            stem: SEND_BOUNDS_MODULE,
+            constants: SEND_CONSTANTS.to_vec(),
+        },
+    ]
+}
 
 /// The modules of core constants, in file order. Pure.
 ///
 /// Panics: a core span is not whole seconds (see `constant_statement`).
 pub fn generated_files() -> Vec<GeneratedFile> {
-    CONSTANT_MODULES.iter().map(constant_module_file).collect()
+    constant_modules()
+        .iter()
+        .map(constant_module_file)
+        .collect()
 }
 
 /// The file of one module: one statement per constant, in list order. Pure.
@@ -228,27 +396,40 @@ fn constant_module_file(module: &ConstantModule) -> GeneratedFile {
     catalog_file(module.stem, module_text(&sections))
 }
 
-/// The statement of one constant: `export const NAME = <literal>;`. Pure.
+/// The statement of one constant: `export const NAME = <literal>;`, or for
+/// a list of texts
+/// `export const NAME: ReadonlyArray<string> = Object.freeze([...]);`. Pure.
 ///
 /// Panics: a span has a fraction of a second. The module cannot publish it
 /// in whole seconds without loss; a core change that the list does not
 /// follow is a defect.
 fn constant_statement(constant: &PublishedConstant) -> String {
-    let (name, value) = match *constant {
-        PublishedConstant::Integer { name, value } => (name.to_owned(), value),
+    match *constant {
+        PublishedConstant::Integer { name, value } => {
+            format!("export const {name} = {};", integer_value_literal(value))
+        }
         PublishedConstant::WholeSeconds { name, span } => {
             assert_eq!(
                 span.subsec_nanos(),
                 0,
                 "the span {name} ({span:?}) is not whole seconds"
             );
-            (
-                format!("{name}{SECONDS_SUFFIX}"),
-                i128::from(span.as_secs()),
+            format!(
+                "export const {name}{SECONDS_SUFFIX} = {};",
+                integer_value_literal(i128::from(span.as_secs()))
             )
         }
-    };
-    format!("export const {name} = {};", integer_value_literal(value))
+        PublishedConstant::Text { name, value } => {
+            format!("export const {name} = {};", string_literal(value))
+        }
+        PublishedConstant::TextList { name, values } => {
+            let literals: Vec<String> = values.iter().map(|value| string_literal(value)).collect();
+            format!(
+                "export const {name}: ReadonlyArray<string> = Object.freeze([{}]);",
+                literals.join(", ")
+            )
+        }
+    }
 }
 
 /// A number literal when a `number` holds `value` exactly, else a `bigint`
@@ -284,21 +465,25 @@ mod tests {
             .expect("the module is generated")
     }
 
+    /// The statement of a text constant as the modules hold it.
+    fn text_statement(name: &str, value: &str) -> String {
+        format!("\nexport const {name} = {};\n", string_literal(value))
+    }
+
     #[test]
     fn a_module_has_the_header_and_one_statement_per_constant() {
-        static SAMPLE_CONSTANTS: [PublishedConstant; 2] = [
-            PublishedConstant::Integer {
-                name: "MAX_ROWS",
-                value: 1_000,
-            },
-            PublishedConstant::WholeSeconds {
-                name: "SPAN",
-                span: Duration::from_secs(86_400),
-            },
-        ];
         let module = ConstantModule {
             stem: "bounds",
-            constants: &SAMPLE_CONSTANTS,
+            constants: vec![
+                PublishedConstant::Integer {
+                    name: "MAX_ROWS",
+                    value: 1_000,
+                },
+                PublishedConstant::WholeSeconds {
+                    name: "SPAN",
+                    span: Duration::from_secs(86_400),
+                },
+            ],
         };
 
         let file = constant_module_file(&module);
@@ -346,6 +531,28 @@ mod tests {
                 value: -MAX_SAFE_INTEGER - 1,
             }),
             "export const UNDER = -9_007_199_254_740_992n;"
+        );
+    }
+
+    #[test]
+    fn a_text_is_a_string_literal() {
+        assert_eq!(
+            constant_statement(&PublishedConstant::Text {
+                name: "KEY",
+                value: "say \"hi\"",
+            }),
+            "export const KEY = \"say \\\"hi\\\"\";"
+        );
+    }
+
+    #[test]
+    fn a_list_of_texts_is_a_frozen_array_of_string_literals() {
+        assert_eq!(
+            constant_statement(&PublishedConstant::TextList {
+                name: "PREFIXES",
+                values: &["__a_", "__b_"],
+            }),
+            "export const PREFIXES: ReadonlyArray<string> = Object.freeze([\"__a_\", \"__b_\"]);"
         );
     }
 
@@ -435,17 +642,18 @@ mod tests {
     /// once, and the two codes of the worker process.
     #[test]
     fn the_exit_codes_are_every_code_of_the_core_and_distinct() {
-        let values: BTreeSet<i128> = EXIT_CODES
-            .constants
+        let values: BTreeSet<i128> = EXIT_CODE_CONSTANTS
             .iter()
             .map(|constant| match *constant {
                 PublishedConstant::Integer { value, .. } => value,
-                PublishedConstant::WholeSeconds { name, .. } => {
-                    panic!("the exit code {name} is not a span")
+                PublishedConstant::WholeSeconds { name, .. }
+                | PublishedConstant::Text { name, .. }
+                | PublishedConstant::TextList { name, .. } => {
+                    panic!("the exit code {name} is not an integer")
                 }
             })
             .collect();
-        assert_eq!(values.len(), EXIT_CODES.constants.len());
+        assert_eq!(values.len(), EXIT_CODE_CONSTANTS.len());
         let mut expected: BTreeSet<i128> = ChildExitCode::ALL
             .into_iter()
             .map(|code| i128::from(code.code()))
@@ -470,8 +678,8 @@ mod tests {
                 MAX_EVENT_QUEUE_NAME_CHARS as i128,
             ),
             (
-                "MAX_EVENT_USER_CODE_CHARS",
-                MAX_EVENT_USER_CODE_CHARS as i128,
+                "MAX_EVENT_CUSTOM_CODE_CHARS",
+                MAX_EVENT_CUSTOM_CODE_CHARS as i128,
             ),
             (
                 "MAX_EVENT_TRACE_CARRIER_CHARS",
@@ -484,7 +692,98 @@ mod tests {
         ] {
             assert!(text.contains(&integer_statement(name, value)), "{name}");
         }
-        assert_eq!(text.matches("export const ").count(), 7);
+        assert_eq!(text.matches("export const ").count(), 10);
+    }
+
+    #[test]
+    fn the_event_bounds_hold_the_handler_rules_of_the_core() {
+        let text = module_of("event_bounds");
+        assert!(text.contains(&integer_statement(
+            "MAX_EVENT_HANDLERS",
+            MAX_EVENT_HANDLERS as i128
+        )));
+        assert!(text.contains(&integer_statement(
+            "MAX_HANDLER_NAME_CHARS",
+            MAX_HANDLER_NAME_CHARS as i128
+        )));
+        assert!(text.contains(&text_statement(
+            "UNKNOWN_HANDLER_NAME",
+            DeclaredSource::HandlerNames.fallback()
+        )));
+    }
+
+    #[test]
+    fn the_codec_bounds_hold_the_core_values() {
+        let text = module_of("codec_bounds");
+        for (name, value) in [
+            ("MAX_JSON_DEPTH", MAX_JSON_DEPTH as i128),
+            ("MAX_INT_DIGITS", MAX_INT_DIGITS as i128),
+            ("MAX_VALUE_JSON_DEPTH", MAX_VALUE_JSON_DEPTH as i128),
+            ("ERROR_DATA_DEPTH_LIMIT", ERROR_DATA_DEPTH_LIMIT as i128),
+            (
+                "SUMMARY_OUTPUT_DEPTH_LIMIT",
+                SUMMARY_OUTPUT_DEPTH_LIMIT as i128,
+            ),
+        ] {
+            assert!(text.contains(&integer_statement(name, value)), "{name}");
+        }
+        for (name, value) in [
+            ("BUILTIN_CODE_KEY", BUILTIN_CODE_KEY),
+            ("TASK_RESULT_ENVELOPE_KEY", TASK_RESULT_ENVELOPE_KEY),
+            ("DATA_REFUSED_KEY", DATA_REFUSED_KEY),
+        ] {
+            assert!(text.contains(&text_statement(name, value)), "{name}");
+        }
+        let prefixes: Vec<String> = ENGINE_KEY_PREFIXES
+            .iter()
+            .map(|prefix| string_literal(prefix))
+            .collect();
+        assert!(text.contains(&format!(
+            "\nexport const ENGINE_KEY_PREFIXES: ReadonlyArray<string> = Object.freeze([{}]);\n",
+            prefixes.join(", ")
+        )));
+        assert_eq!(text.matches("export const ").count(), 12);
+    }
+
+    /// Each refusal of a user value has its stored cause under the constant
+    /// of its cause, and the three cause constants are distinct texts.
+    #[test]
+    fn the_codec_bounds_hold_the_stored_cause_of_each_refusal() {
+        let text = module_of("codec_bounds");
+        for refusal in [
+            UserValueRefused::EngineKey {
+                key: "__h_x".to_owned(),
+            },
+            UserValueRefused::DeeperThanTextBound,
+            UserValueRefused::DeeperThanValueBound {
+                limit: ERROR_DATA_DEPTH_LIMIT,
+            },
+            UserValueRefused::IntegerTooLong,
+        ] {
+            assert!(
+                text.contains(&text_statement(
+                    data_refused_cause_constant(&refusal),
+                    refusal.stored_cause()
+                )),
+                "{refusal:?}"
+            );
+        }
+        let causes: BTreeSet<&str> = data_refused_cause_refusals()
+            .iter()
+            .map(UserValueRefused::stored_cause)
+            .collect();
+        assert_eq!(causes.len(), 3);
+    }
+
+    #[test]
+    fn the_send_bounds_hold_the_longest_wait() {
+        assert_eq!(
+            module_of("send_bounds"),
+            format!(
+                "{GENERATED_HEADER}\n{}",
+                integer_statement("MAX_WAIT_LIMIT_MS", i128::from(MAX_WAIT_LIMIT_MS))
+            )
+        );
     }
 
     #[test]
@@ -499,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn the_files_are_the_four_modules_in_order_with_distinct_names() {
+    fn the_files_are_the_six_modules_in_order_with_distinct_names() {
         let paths: Vec<String> = generated_files()
             .iter()
             .map(|file| file.relative_path().display().to_string())
@@ -511,15 +810,19 @@ mod tests {
                 "src/_catalog/exit_codes.ts",
                 "src/_catalog/event_bounds.ts",
                 "src/_catalog/broker_bounds.ts",
+                "src/_catalog/codec_bounds.ts",
+                "src/_catalog/send_bounds.ts",
             ]
         );
-        for module in &CONSTANT_MODULES {
+        for module in &constant_modules() {
             let names: BTreeSet<&str> = module
                 .constants
                 .iter()
                 .map(|constant| match *constant {
                     PublishedConstant::Integer { name, .. }
-                    | PublishedConstant::WholeSeconds { name, .. } => name,
+                    | PublishedConstant::WholeSeconds { name, .. }
+                    | PublishedConstant::Text { name, .. }
+                    | PublishedConstant::TextList { name, .. } => name,
                 })
                 .collect();
             assert_eq!(names.len(), module.constants.len(), "{}", module.stem);

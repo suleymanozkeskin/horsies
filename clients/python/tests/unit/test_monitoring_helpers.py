@@ -16,7 +16,7 @@ import pytest
 
 from horsies.core.models.tasks import (
     ContractCode,
-    OperationalErrorCode,
+    OperationalCode,
     OutcomeCode,
     RetrievalCode,
 )
@@ -154,7 +154,7 @@ class TestCategorizeErrorCode:
     @pytest.mark.parametrize(
         'family,expected',
         [
-            (OperationalErrorCode, ErrorCategory.OPERATIONAL),
+            (OperationalCode, ErrorCategory.OPERATIONAL),
             (ContractCode, ErrorCategory.CONTRACT),
             (RetrievalCode, ErrorCategory.RETRIEVAL),
             (OutcomeCode, ErrorCategory.OUTCOME),
@@ -162,7 +162,7 @@ class TestCategorizeErrorCode:
     )
     def test_every_builtin_member_maps_to_its_family(
         self,
-        family: type[OperationalErrorCode]
+        family: type[OperationalCode]
         | type[ContractCode]
         | type[RetrievalCode]
         | type[OutcomeCode],
@@ -171,15 +171,15 @@ class TestCategorizeErrorCode:
         for member in family:
             assert categorize_error_code(member.value) is expected
 
-    def test_unknown_code_is_domain(self) -> None:
-        assert categorize_error_code('MY_BUSINESS_ERROR') is ErrorCategory.DOMAIN
+    def test_unknown_code_is_custom(self) -> None:
+        assert categorize_error_code('MY_BUSINESS_ERROR') is ErrorCategory.CUSTOM
 
-    def test_former_hydration_code_is_domain(self) -> None:
+    def test_former_hydration_code_is_custom(self) -> None:
         """``PYDANTIC_HYDRATION_ERROR`` is not a built-in code, so a
-        stored row with it is a domain error, not a contract error."""
+        stored row with it has a custom code, not a contract code."""
         assert (
             categorize_error_code('PYDANTIC_HYDRATION_ERROR')
-            is ErrorCategory.DOMAIN
+            is ErrorCategory.CUSTOM
         )
 
     def test_whitespace_is_stripped_before_lookup(self) -> None:
@@ -190,7 +190,7 @@ class TestCategorizeErrorCode:
         values = [
             member.value
             for family in (
-                OperationalErrorCode,
+                OperationalCode,
                 ContractCode,
                 RetrievalCode,
                 OutcomeCode,

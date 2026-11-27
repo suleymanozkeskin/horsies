@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from horsies._core import SchemaStatusRecord, TooManyPendingCalls
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.web.schema import (
     EXPECTED_SCHEMA_VERSION,
     SchemaProbe,
@@ -150,7 +151,8 @@ class TestProbeRead:
         """A probe, its broker, and the broker's core handle, which answers
         ``answer``: a record, or an exception that the call raises."""
         broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True,
+            PostgresConfig(database_url=SecretStr(DB_URL)),
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
         handle = MagicMock()
         match answer:

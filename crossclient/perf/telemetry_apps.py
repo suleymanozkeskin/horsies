@@ -107,14 +107,14 @@ def _with_hooks(app: Horsies, app_telemetry: AppTelemetry) -> Horsies:
         case AppTelemetry.NONE:
             raise AssertionError('an app with no telemetry is not built here')
         case AppTelemetry.TRACING:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             return app
         case AppTelemetry.TRACING_AND_HANDLER:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             _ = app.on_event(AttemptEnded)(perf_attempt_ended)
             return app
         case AppTelemetry.TRACING_HANDLER_AND_WORKER_ENDED_SPANS:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             _ = app.on_event(AttemptEnded)(perf_attempt_ended)
             _ = app.on_handler_child_start(install_discarding_providers)
             return app
@@ -129,7 +129,7 @@ def telemetry_drain_app(dsn: str, app_telemetry: AppTelemetry) -> DrainApp:
     providers in each child. No I/O."""
     app = Horsies(
         AppConfig(
-            broker=drain_broker(dsn),
+            database=drain_broker(dsn),
             worker_profiles=DRAIN_WORKER_PROFILES,
             tracing=tracing_setting(app_telemetry),
         ),
@@ -152,7 +152,7 @@ def telemetry_public_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
     install_discarding_providers()
     return Horsies(
         AppConfig(
-            broker=public_call_broker(dsn),
+            database=public_call_broker(dsn),
             tracing=tracing_setting(app_telemetry),
         ),
     )

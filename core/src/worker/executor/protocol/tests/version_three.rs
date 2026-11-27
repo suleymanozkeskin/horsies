@@ -862,7 +862,7 @@ fn a_batch_holds_one_to_the_most_events() {
 /// with the largest numbers, the longest names of each closed set, a task name of 255, a queue name of 52 and a worker id of 255
 /// characters that JSON writes as 6 bytes each, and the internal carrier
 /// `text`.
-fn largest_attempt_ended(text: &str) -> crate::events::Event {
+fn largest_attempt_ended(text: &str) -> crate::events::AnyEvent {
     let wire = json!([
         "AttemptEnded",
         i64::MAX,

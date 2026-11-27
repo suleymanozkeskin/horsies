@@ -6,7 +6,7 @@
 // - `none`: the API is never loaded; every observer is the one that does nothing.
 // - `otel`: the API is loaded once; a failed load is the refusal `CONFIG_OTEL_API_MISSING` (`HRS-220`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
 import type { AppContext } from "../app/context.ts";
 import { type BodyObserver, NO_BODY_OBSERVER, setBodyObserver } from "../child/body-observer.ts";
@@ -154,7 +154,7 @@ export function tracingPartsOfApp(context: AppContext): TracingParts {
 /** The refusal of `otel` with no API: the cause of the failed load, and the two fixes. Pure. */
 function apiMissing(cause: string): HorsiesError {
   return refusal(
-    ErrorCode.CONFIG_OTEL_API_MISSING,
+    HorsiesErrorCode.CONFIG_OTEL_API_MISSING,
     TRACING_PATH,
     `{ kind: "otelTracing" } needs the OpenTelemetry API: the module ${OTEL_API_MODULE} does not load (${cause})`,
     [`install the peer dependency ${OTEL_API_MODULE} (1.7 or later, before 2.0)`, 'or set tracing: { kind: "noTracing" }'],

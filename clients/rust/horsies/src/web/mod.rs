@@ -38,7 +38,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use horsies_core::db::Transience;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::monitoring::database_failure_status;
 use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded};
@@ -127,7 +127,7 @@ fn fleet_labels_of(app: &Horsies) -> FleetLabels {
 
 /// What every request of one mount reads.
 struct Mount<P> {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     workflows: Arc<WorkflowRegistry>,
     settings: MonitoringHandlerConfig,
     policy: P,

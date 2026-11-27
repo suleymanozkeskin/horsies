@@ -338,8 +338,8 @@ fn claimed_row(
 }
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {
-    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "max_retries": 2, "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 /// A reported result of a shared run completes its row.
 #[tokio::test]
@@ -558,8 +558,8 @@ async fn a_loop_kill_fails_the_row_with_its_code() {
 fn retrying(code: &str) -> String {
     format!(
         r#"{{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {{
-    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["{code}"]}}}}"#
+    "max_retries": 2, "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["{code}"]}}}}"#
     )
 }
 
@@ -734,7 +734,8 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
 #[tokio::test]
 async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
     let pool = crate::test_support::migrated_pool().await;
-    let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
+    let error =
+        TaskError::custom("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
     let returned = || {
         reported_result(ResultEnvelopeText::new(
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))

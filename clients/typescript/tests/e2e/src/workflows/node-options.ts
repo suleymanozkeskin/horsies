@@ -1,7 +1,7 @@
 // The options of the nodes of the end-to-end workflows. The builds name what a node does in the words of `NodePlan`;
 // only this module names the option fields of the workflow API.
 
-import type { AnyNode, DefaultJoin, JoinType } from "../../../../horsies/src/index.ts";
+import type { AnyNode, DefaultJoin, JoinType } from "#horsies";
 
 /** What a node does besides its input. Each field left out takes the API's default. */
 export type NodePlan<J extends JoinType> = {

@@ -52,28 +52,36 @@ function fixtureText(name: string): string {
 const CASES: ReadonlyArray<PatternCase> = [
   {
     name: "interval",
-    pattern: { type: "interval", seconds: 30, minutes: null, hours: null, days: null },
+    pattern: { kind: "interval", every: Temporal.Duration.from({ seconds: 30 }) },
+  },
+  {
+    name: "interval_days_and_time",
+    pattern: { kind: "interval", every: Temporal.Duration.from({ days: 1, hours: 2, minutes: 30, seconds: 15 }) },
+  },
+  {
+    name: "interval_365_days",
+    pattern: { kind: "interval", every: Temporal.Duration.from({ days: 365 }) },
   },
   {
     name: "hourly",
-    pattern: { type: "hourly", minute: 15, second: HOURLY_SCHEDULE_SECOND_DEFAULT },
+    pattern: { kind: "hourly", minute: 15, second: HOURLY_SCHEDULE_SECOND_DEFAULT },
   },
   {
     name: "daily",
-    pattern: { type: "daily", time: Temporal.PlainTime.from("09:00") },
+    pattern: { kind: "daily", time: Temporal.PlainTime.from("09:00") },
   },
   {
     name: "weekly",
-    pattern: { type: "weekly", days: ["monday", "friday"], time: Temporal.PlainTime.from("09:30") },
+    pattern: { kind: "weekly", weekdays: ["monday", "friday"], time: Temporal.PlainTime.from("09:30") },
   },
   {
     name: "monthly",
-    pattern: { type: "monthly", day: 15, time: Temporal.PlainTime.from("08:00:00") },
+    pattern: { kind: "monthly", day_of_month: 15, time: Temporal.PlainTime.from("08:00:00") },
   },
   {
     name: "cron_every_day",
     pattern: {
-      type: "cron",
+      kind: "cron",
       minute: [{ kind: "every" }],
       hour: [{ kind: "values", values: [9, 17] }],
       month: [{ kind: "every" }],
@@ -83,7 +91,7 @@ const CASES: ReadonlyArray<PatternCase> = [
   {
     name: "cron_by_month_day",
     pattern: {
-      type: "cron",
+      kind: "cron",
       minute: [{ kind: "step", step: 15 }],
       hour: [{ kind: "range", start: 9, end: 17, step: 2 }],
       month: [{ kind: "enum_values", values: ["january", "july"] }],
@@ -93,7 +101,7 @@ const CASES: ReadonlyArray<PatternCase> = [
   {
     name: "cron_by_weekday",
     pattern: {
-      type: "cron",
+      kind: "cron",
       minute: [{ kind: "values", values: [0] }],
       hour: [{ kind: "every" }],
       month: [
@@ -121,7 +129,7 @@ const CASES: ReadonlyArray<PatternCase> = [
   {
     name: "cron_either_day",
     pattern: {
-      type: "cron",
+      kind: "cron",
       minute: [{ kind: "values", values: [30] }],
       hour: [{ kind: "values", values: [12] }],
       month: [{ kind: "enum_step", step: 3 }],
@@ -135,7 +143,7 @@ const CASES: ReadonlyArray<PatternCase> = [
   {
     name: "cron_both_days",
     pattern: {
-      type: "cron",
+      kind: "cron",
       minute: [{ kind: "values", values: [0] }],
       hour: [{ kind: "values", values: [8] }],
       month: [{ kind: "every" }],
@@ -166,27 +174,21 @@ void describe("schedulePatternToWire", () => {
 
   void test("keeps the fraction of a second of a time of day, which the core refuses", () => {
     const pattern: SchedulePattern = {
-      type: "daily",
+      kind: "daily",
       time: Temporal.PlainTime.from("09:30:00.5"),
     };
 
     assert.equal(
       wireText(schedulePatternToWire(pattern)),
-      String.raw`{"type":"daily","time":"09:30:00.5"}`,
+      String.raw`{"kind":"daily","time":"09:30:00.5"}`,
     );
   });
 
   void test("throws a defect for a number that is not a safe integer, with its field", () => {
-    const pattern: SchedulePattern = {
-      type: "interval",
-      seconds: 1.5,
-      minutes: null,
-      hours: null,
-      days: null,
-    };
+    const pattern: SchedulePattern = { kind: "hourly", minute: 1.5, second: 0 };
 
     assert.throws(() => schedulePatternToWire(pattern), {
-      message: "integerToWire: IntervalSchedule.seconds is 1.5, not a safe integer",
+      message: "integerToWire: HourlySchedule.minute is 1.5, not a safe integer",
     });
   });
 });

@@ -4,7 +4,7 @@
 //! Python client validates it into its Pydantic model with one
 //! `model_validate_json`, and the web handler writes the same text. An
 //! expected failure is the generated class of the core's
-//! `MonitoringQueryError` (`MonitoringQueryDbOperationFailed` or
+//! `MonitoringQueryError` (`MonitoringQueryDatabaseOperationFailed` or
 //! `MonitoringQueryHistoryContractViolation` of
 //! `horsies._catalog.monitoring_errors`), built in Rust (`catalog_errors`)
 //! with the read as the subject of its exception. The task detail of an id
@@ -705,8 +705,8 @@ mod tests {
         let refused = task_statuses(&["pending".to_owned()]).expect_err("the wire value is upper");
         assert!(refused.contains("\"pending\""), "{refused}");
         assert_eq!(
-            error_categories_of(&["DOMAIN".to_owned(), "OUTCOME".to_owned()]),
-            Ok(vec![ErrorCategory::Domain, ErrorCategory::Outcome])
+            error_categories_of(&["CUSTOM".to_owned(), "OUTCOME".to_owned()]),
+            Ok(vec![ErrorCategory::Custom, ErrorCategory::Outcome])
         );
         assert!(error_categories_of(&["OTHER".to_owned()]).is_err());
     }
@@ -759,7 +759,7 @@ mod tests {
         assert_eq!(failed.subject, "task list query");
         assert_eq!(
             failed.error.code(),
-            horsies_core::monitoring::MonitoringQueryErrorCode::DbOperationFailed
+            horsies_core::monitoring::MonitoringQueryErrorCode::DatabaseOperationFailed
         );
         assert_eq!(
             failed.error.message(),

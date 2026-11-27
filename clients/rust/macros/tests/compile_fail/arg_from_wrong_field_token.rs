@@ -25,11 +25,11 @@ fn main() {
     let produced = builder.task(produce_number::node()).unwrap();
     let _ = consume_number::node()
         .node_id("consume")
-        .arg_from(other_number::params::value(), produced);
+        .arg_from(other_number::fields::value(), produced);
 }
 
 fn app() -> Horsies {
-    Horsies::new(AppConfig::for_database_url(
+    Horsies::new(AppConfig::from_database_url(
         "postgresql://localhost/horsies",
     ))
     .unwrap()

@@ -63,7 +63,7 @@ def fleet_label_names(app: Horsies) -> FleetLabelNames:
 
 
 def listen_address(text: str) -> ListenAddress:
-    """The `--listen` argument: `HOST:PORT` or `[IPV6]:PORT`, the port 1 to
+    """The `--metrics-listen` argument: `HOST:PORT` or `[IPV6]:PORT`, the port 1 to
     65535. Pure.
 
     Raises `argparse.ArgumentTypeError` with the refusal, which argparse

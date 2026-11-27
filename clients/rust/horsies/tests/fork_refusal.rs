@@ -24,7 +24,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action, CancelPolicy};
-use horsies::rerun::{RerunEnqueuePolicy, RerunTask};
+use horsies::rerun::{RerunCommand, RerunEnqueuePolicy};
 use horsies::{
     task, AppConfig, Horsies, TaskError, TaskInfoParts, WaitLimit, WorkflowHandle, WorkflowSpec,
 };
@@ -103,7 +103,7 @@ fn one_node_spec(app: &mut Horsies) -> WorkflowSpec {
 fn child_report(app: &mut Horsies) -> Vec<String> {
     let echo_function = echo::register(app).expect("register the task");
     let spec = one_node_spec(app);
-    let task_handle = app.task_handle_of::<u32, Infallible>(TASK_ID);
+    let task_handle = app.task_handle::<u32, Infallible>(TASK_ID);
     let workflow: WorkflowHandle<u32> = app.workflow_handle(WORKFLOW_ID);
     let app = &*app;
     let calls: [Option<String>; 18] = [
@@ -164,7 +164,7 @@ fn child_report(app: &mut Horsies) -> Vec<String> {
         }),
         refusal_of("Horsies::rerun_task", || {
             let _never = first_poll(app.rerun_task(
-                RerunTask::new(TASK_ID, None, None),
+                RerunCommand::new(TASK_ID, None, None),
                 RerunEnqueuePolicy::standard(false),
             ));
         }),
@@ -183,7 +183,7 @@ fn run_child(mut app: Horsies, mut report: UnixStream) -> i32 {
 
 #[test]
 fn every_call_family_panics_in_a_fork() {
-    let app = Horsies::new(AppConfig::for_database_url(
+    let app = Horsies::new(AppConfig::from_database_url(
         "postgresql://127.0.0.1:1/fork_refusal",
     ))
     .expect("build the app");

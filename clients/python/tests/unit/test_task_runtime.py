@@ -16,7 +16,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -46,7 +46,7 @@ from horsies.core.codec.kwargs import (
 )
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     TaskDefinitionError,
     WorkflowValidationError,
 )
@@ -92,7 +92,7 @@ STARTED = StartedRunning(
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:password@localhost/unused'),
             ),
         ),
@@ -368,7 +368,7 @@ class TestRegistration:
         with pytest.raises(TaskDefinitionError) as refused:
             app.task('runtime.refused')(fn)
 
-        assert refused.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert refused.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert subject in str(refused.value)
         assert 'TaskRuntime' in str(refused.value)
         assert 'runtime.refused' not in app.tasks
@@ -400,7 +400,7 @@ class TestProducerPaths:
     def test_a_workflow_node_does_not_miss_the_runtime(self) -> None:
         spec: WorkflowSpec[Any] = WorkflowSpec(
             name='runtime_node',
-            nodes=[TaskNode(fn=token_task, kwargs={'order_id': 'o-1'})],
+            nodes=[TaskNode(function=token_task, kwargs={'order_id': 'o-1'})],
         )
 
         assert len(spec.nodes) == 1
@@ -410,17 +410,17 @@ class TestProducerPaths:
             WorkflowSpec(
                 name='runtime_node_kwarg',
                 nodes=[
-                    TaskNode(fn=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
+                    TaskNode(function=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
                 ],
             )
 
-        assert refused.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_schedule_binds_without_the_runtime(self) -> None:
         schedule = TaskSchedule(
             name='runtime_schedule',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1'},
         )
 
@@ -430,14 +430,14 @@ class TestProducerPaths:
         schedule = TaskSchedule(
             name='runtime_schedule_kwarg',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1', 'runtime': 1},
         )
 
         error = _signature_error(APP, schedule)
 
         assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
 
 # =============================================================================

@@ -33,15 +33,15 @@ fn refused_for_its_spec(error: &ClientStartError) -> bool {
 
 /// The stored task options of a task with a fixed retry policy of
 /// `max_retries` retries (Python `RetryPolicy.fixed([60] * n,
-/// auto_retry_for=['TASK_EXCEPTION'])`).
+/// retry_for=['TASK_EXCEPTION'])`).
 fn retry_options(max_retries: usize) -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
-            "intervals": vec![60; max_retries],
+            "intervals_seconds": vec![60; max_retries],
             "backoff_strategy": "fixed",
             "jitter": true,
-            "auto_retry_for": ["TASK_EXCEPTION"],
+            "retry_for": ["TASK_EXCEPTION"],
         }
     })
     .to_string()

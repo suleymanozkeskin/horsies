@@ -101,7 +101,7 @@ WEB_PROCESS_CHECK: Final = textwrap.dedent(
     from horsies.web.schema import SchemaProbe
 
     async def serve():
-        app = Horsies(AppConfig(broker=PostgresConfig(
+        app = Horsies(AppConfig(database=PostgresConfig(
             database_url=SecretStr({UNREACHABLE_URL!r}),
         )))
         web = create_monitoring_app(app, authorization_policy=AllowAll())

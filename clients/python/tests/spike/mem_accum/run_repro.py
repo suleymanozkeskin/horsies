@@ -60,7 +60,7 @@ def _wait_ready(deadline: float) -> bool:
     while time.monotonic() < deadline:
         r = healthcheck.send()
         if not is_err(r):
-            match r.ok_value.get(timeout_ms=2000):
+            match r.ok_value.get(wait_ms=2000):
                 case Ok(Succeeded()):
                     return True
                 case _:
@@ -89,7 +89,7 @@ def _run_mode(mode: str) -> Result:
     worker = subprocess.Popen(
         [
             *worker_cmd, 'worker', LOCATOR,
-            f'--profile={mode}', '--loglevel=warning',
+            f'--profile={mode}', '--log-level=warning',
         ],
         start_new_session=True,
     )
@@ -121,7 +121,7 @@ def _run_mode(mode: str) -> Result:
         pids: set[int] = set()
         completed = 0
         for handle in handles:
-            match handle.get(timeout_ms=GET_TIMEOUT_MS):
+            match handle.get(wait_ms=GET_TIMEOUT_MS):
                 case Ok(Succeeded(pid)):
                     pids.add(pid)
                     completed += 1

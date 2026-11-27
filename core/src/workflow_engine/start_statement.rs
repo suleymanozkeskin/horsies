@@ -24,7 +24,7 @@ use crate::broker::core_rows::RowDecodeError;
 use crate::broker::workflow_start::{ClientStartOutcome, ExistingRun, IdHolder};
 use crate::broker::PostgresBroker;
 use crate::core::workflow::node::SubWorkflowParameters;
-use crate::core::{AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
+use crate::core::{AnyNode, OnError, OperationalCode, TaskError, TaskResult, WorkflowSpec};
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::telemetry::trace_carrier::StoredTrace;
 use crate::workflow_engine::args_merge::{
@@ -607,7 +607,7 @@ fn child_input_error(request: &ChildSpecRequest, message: String) -> TaskError {
                 "task_index": request.task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalCode::WorkerSerializationError, message)
     }
 }
 
@@ -684,7 +684,7 @@ pub fn params_refused_error(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalCode::WorkerSerializationError, message)
     }
 }
 
@@ -745,8 +745,8 @@ fn child_build_failure(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(
-            OperationalErrorCode::WorkflowEnqueueFailed,
+        ..TaskError::built_in(
+            OperationalCode::WorkflowEnqueueFailed,
             format!("Subworkflow build failed: {failure} (workflow {workflow_name}:{task_index})"),
         )
     }
@@ -784,8 +784,8 @@ pub fn subworkflow_load_failed_error(
         data: Some(crate::core::codec::JsonText::of_engine_value(
             &serde_json::json!({ "definition_key": definition_key }),
         )),
-        ..TaskError::builtin(
-            OperationalErrorCode::SubworkflowLoadFailed,
+        ..TaskError::built_in(
+            OperationalCode::SubworkflowLoadFailed,
             format!(
                 "Failed to load subworkflow definition for {parent_workflow_name}:{task_index}"
             ),

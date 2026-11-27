@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies._catalog.broker_bounds import TASK_LIST_ROW_BOUND
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.health_reads import BoundedTaskListTruncated
 from horsies.core.types.result import is_ok
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -63,36 +64,34 @@ async def test_expired_list_stops_at_the_bound_in_deadline_then_id_order(
     session: AsyncSession,
     broker: PostgresBroker,
     clean_workflow_tables: None,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     seeded = await _seed(session, 'PENDING')
 
-    with caplog.at_level('WARNING'):
-        result = await broker.get_expired_tasks()
+    result = await broker.get_expired_tasks()
 
     assert is_ok(result), result
-    assert [str(row['id']) for row in result.ok_value] == sorted(seeded)[:TASK_LIST_ROW_BOUND]
-    assert (
-        f'get_expired_tasks returned the first {TASK_LIST_ROW_BOUND} rows; more rows match'
-        in caplog.text
-    )
+    match result.ok_value:
+        case BoundedTaskListTruncated(rows=rows, bound=bound):
+            assert bound == TASK_LIST_ROW_BOUND
+            assert [str(row.task_id) for row in rows] == sorted(seeded)[:TASK_LIST_ROW_BOUND]
+        case complete:
+            raise AssertionError(f'expected a truncated list, got {type(complete).__name__}')
 
 
 async def test_stale_list_stops_at_the_bound_in_heartbeat_then_id_order(
     session: AsyncSession,
     broker: PostgresBroker,
     clean_workflow_tables: None,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """RUNNING rows with no runner heartbeat tie on the first key."""
     seeded = await _seed(session, 'RUNNING')
 
-    with caplog.at_level('WARNING'):
-        result = await broker.get_stale_tasks(stale_threshold_minutes=0)
+    result = await broker.get_stale_tasks(threshold_minutes=0)
 
     assert is_ok(result), result
-    assert [str(row['id']) for row in result.ok_value] == sorted(seeded)[:TASK_LIST_ROW_BOUND]
-    assert (
-        f'get_stale_tasks returned the first {TASK_LIST_ROW_BOUND} rows; more rows match'
-        in caplog.text
-    )
+    match result.ok_value:
+        case BoundedTaskListTruncated(rows=rows, bound=bound):
+            assert bound == TASK_LIST_ROW_BOUND
+            assert [str(row.task_id) for row in rows] == sorted(seeded)[:TASK_LIST_ROW_BOUND]
+        case complete:
+            raise AssertionError(f'expected a truncated list, got {type(complete).__name__}')

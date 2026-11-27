@@ -11,7 +11,7 @@ variant.
 minted for the start when the caller gave none.
 
 The resend methods ``WorkflowSpec.resend_start`` / ``resend_start_async`` take a
-``WorkflowStartRetryable`` and start the workflow again with its id.
+``WorkflowStartResendable`` and start the workflow again with its id.
 
 The classes of the core's start catalog are generated from horsies-core into
 ``horsies._catalog.workflow_start_errors`` and re-exported here.
@@ -35,6 +35,7 @@ from horsies._catalog.workflow_start_errors import (
     WorkflowStartIdConflict as WorkflowStartIdConflict,
     WorkflowStartValidationFailed as WorkflowStartValidationFailed,
 )
+from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
 
@@ -52,13 +53,21 @@ class WorkflowStartBrokerNotConfigured:
     workflow_name: str
     workflow_id: str
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 type WorkflowStartError = WorkflowStartCoreError | WorkflowStartBrokerNotConfigured
 """Every failure of a workflow start: one variant per ``WorkflowStartErrorCode``.
 The classes of the core's catalog, and ``WorkflowStartBrokerNotConfigured``,
 which only this client produces."""
 
-type WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext
+type WorkflowStartResendable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext
 """The variants that the retry methods accept. Each carries the id of its start."""
 
 type WorkflowStartResult[T] = Result[T, WorkflowStartError]

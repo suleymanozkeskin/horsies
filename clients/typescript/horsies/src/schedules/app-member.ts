@@ -1,6 +1,6 @@
-// `app.schedules`: the declaration of the schedules of an app. It records the list and returns nothing. Each refusal
-// goes to the schedules area of the refusal sink, which `check` and the scheduler start read; the worker start skips
-// it. A second call is a refusal, and the first declaration stays.
+// The declaration of the `schedule` section of an app: `Horsies.create` records it once, after the checks of the config
+// and of the contracts passed. Each refusal goes to the schedules area of the refusal sink, which `check` and the
+// scheduler start read; the worker start skips it, so a schedule refusal never refuses `Horsies.create`.
 //
 // The section's check interval and each schedule's catch-up count and name are checked here, at their own field, in
 // every thread. On a main thread the declaration also runs the core's checks, with no I/O and with no throw: the rules
@@ -12,8 +12,7 @@
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { AppContext } from "../app/context.ts";
 import { taskOptionsFacts } from "../app/core-checks.ts";
-import { refusal, type HorsiesError } from "../app/refusal.ts";
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import type { HorsiesError } from "../app/refusal.ts";
 import { CHECK_INTERVAL_SECONDS_MAX, CHECK_INTERVAL_SECONDS_MIN } from "../_catalog/scheduler_manifest.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { raiseDefect } from "../native/call/defect.ts";
@@ -61,10 +60,18 @@ export type DeclaredScheduler =
   | { readonly kind: "refused" }
   | { readonly kind: "notPrepared" };
 
-/** The schedules of an app: none declared, or the declaration of the first `app.schedules` call. */
+/**
+ * The schedules of an app: none (the config has no `schedule` section), or the declaration of the section with the
+ * name of each schedule in order.
+ */
 export type ScheduleDeclaration =
   | { readonly kind: "notDeclared" }
-  | { readonly kind: "declared"; readonly section: SectionSettings; readonly scheduler: DeclaredScheduler };
+  | {
+      readonly kind: "declared";
+      readonly section: SectionSettings;
+      readonly scheduler: DeclaredScheduler;
+      readonly names: readonly string[];
+    };
 
 const NOT_DECLARED: ScheduleDeclaration = Object.freeze({ kind: "notDeclared" });
 
@@ -84,11 +91,14 @@ export const NATIVE_SCHEDULE_CALLS: ScheduleCoreCalls = Object.freeze({
   prepare: prepareScheduler,
 });
 
-/** The core access of a declaration of `context`: the addon on a main thread, none in a worker thread. */
-export function scheduleCoreAccess(context: AppContext): ScheduleCoreAccess {
+/**
+ * The core access of a declaration of `context`: the core's calls that `calls` gives on a main thread (called only
+ * there), none in a worker thread.
+ */
+export function scheduleCoreAccess(context: AppContext, calls: () => ScheduleCoreCalls): ScheduleCoreAccess {
   switch (context.core.kind) {
     case "addon":
-      return { kind: "core", calls: NATIVE_SCHEDULE_CALLS };
+      return { kind: "core", calls: calls() };
     case "seatRelay":
     case "noCore":
       return { kind: "noCore" };
@@ -97,31 +107,39 @@ export function scheduleCoreAccess(context: AppContext): ScheduleCoreAccess {
   }
 }
 
-/** Record the schedules of `entries` and `section` for `context`, and each refusal in the sink. Calls no I/O. */
-export function declareSchedules(
-  context: AppContext,
-  entries: readonly DeclaredEntry[],
-  section: ScheduleSection,
-  access: ScheduleCoreAccess,
-): void {
+/**
+ * Record the schedules of `section` for `context`, and each refusal in the sink. Calls no I/O. `Horsies.create` calls it
+ * once per app: a second declaration of one context is a defect, `ClientDefect`.
+ */
+export function declareSchedules(context: AppContext, section: ScheduleSection, access: ScheduleCoreAccess): void {
   if (declarations.has(context)) {
-    context.refusals.record(
-      "schedules",
-      refusal(ErrorCode.CONFIG_INVALID_SCHEDULE, "app.schedules", "app.schedules is called a second time; the schedules of the first call stay", [
-        "declare every schedule of the app in one app.schedules call",
-      ]),
-    );
-
-    return;
+    raiseDefect(new ClientDefect({ subject: "declareSchedules", rule: "the schedule section of an app is declared once" }));
   }
 
+  const entries = declaredEntries(section);
   const declared = declarationOf(context, entries, section, access);
 
   for (const refused of declared.refusals) {
     context.refusals.record("schedules", refused);
   }
 
-  declarations.set(context, Object.freeze({ kind: "declared", section: declared.section, scheduler: declared.scheduler }));
+  declarations.set(
+    context,
+    Object.freeze({
+      kind: "declared",
+      section: declared.section,
+      scheduler: declared.scheduler,
+      names: Object.freeze(entries.map((entry) => entry.name)),
+    }),
+  );
+}
+
+/**
+ * The entries of `section` as the declaration reads them, in order: an input that is not an object (a caller with no
+ * type check) is read as `Object(input)`, so the read-back check of the input refuses it. Pure.
+ */
+function declaredEntries(section: ScheduleSection): readonly DeclaredEntry[] {
+  return section.schedules.map((entry): DeclaredEntry => ({ ...entry, input: Object(entry.input) }));
 }
 
 /** A declaration and its refusals, in order: the section, then each schedule, then the manifest. */
@@ -227,7 +245,7 @@ function sectionSettings(section: ScheduleSection): Result<SectionSettings, Hors
 
   return interval.ok
     ? ok(settings)
-    : err(scheduleRefusal("schedules section", `checkIntervalSeconds: ${interval.error.rule}`, interval.error.help));
+    : err(scheduleRefusal("schedule section", `checkIntervalSeconds: ${interval.error.rule}`, interval.error.help));
 }
 
 /** Whether an entry before `index` has `name`, the name of the entry at `index`. Pure. */
@@ -265,7 +283,7 @@ function nativeOptionsText(task: ListedTask): string {
       return storedOptionsText(checked.options);
     case "refused":
       return raiseDefect(
-        new ClientDefect({ subject: "app.schedules", rule: `the core accepts the options of ${task.compiled.record.name} again` }),
+        new ClientDefect({ subject: "schedule section", rule: `the core accepts the options of ${task.compiled.record.name} again` }),
       );
     default:
       return unreachable(checked, "nativeOptionsText");

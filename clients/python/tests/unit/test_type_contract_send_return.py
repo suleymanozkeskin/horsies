@@ -35,10 +35,10 @@ from horsies.core.codec.kwargs import (
 from horsies.core.codec.signature_check import _DOCS_URL
 from horsies.core.codec.typed import conform_to_target, encode_task_result
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
-from horsies.core.models.tasks import ContractCode, OperationalErrorCode
+from horsies.core.models.tasks import ContractCode, OperationalCode
 from horsies.core.models.workflow import TaskNode, WorkflowContext, WorkflowSpec
 from horsies.core.models.workflow.typing_utils import _is_ok_type_compatible
 from horsies.core.task_decorator import create_task_wrapper
@@ -60,19 +60,19 @@ Upper = Annotated[str, AfterValidator(str.upper)]
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),
@@ -90,7 +90,7 @@ class TestMissingRequiredKwargs:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'amount' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -113,14 +113,14 @@ class TestMissingRequiredKwargs:
         assert missing_required_kwargs(charge, ()) == MissingKwargs((), ())
 
     def test_a_required_workflow_ctx_needs_a_workflow(self) -> None:
-        def step(*, workflow_ctx: WorkflowContext) -> Result[int, TaskError]:
+        def step(*, workflow_context: WorkflowContext) -> Result[int, TaskError]:
             return Ok(1)
 
         app = _mock_app()
         result = create_task_wrapper(step, app, 'test.step').send()
 
         assert is_err(result)
-        assert 'workflow_ctx' in result.err_value.message
+        assert 'workflow_context' in result.err_value.message
         assert 'workflow node' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -176,7 +176,7 @@ class TestReturnThatIsNotAResult:
 
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert err.code == ContractCode.RETURN_TYPE_MISMATCH
         assert err.data is not None
         assert err.data['variant'] == 'not_a_task_result'
         assert err.data['actual_type'] == name
@@ -186,12 +186,12 @@ class TestReturnThatIsNotAResult:
 
     def test_a_returned_task_error_names_its_code(self) -> None:
         def task() -> Result[int, TaskError]:
-            return TaskError(error_code='RATE_LIMITED')  # type: ignore[return-value]
+            return TaskError(code='RATE_LIMITED')  # type: ignore[return-value]
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'RATE_LIMITED' in (result.err_value.message or '')
 
     def test_a_copy_of_the_class_is_named_with_its_module(self) -> None:
@@ -227,7 +227,7 @@ class TestReturnThatIsNotAResult:
         result = create_task_wrapper(task, app, 'test.task')()
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_the_default_unhandled_code_does_not_apply(self) -> None:
         app = _mock_app()
@@ -239,7 +239,7 @@ class TestReturnThatIsNotAResult:
         result = create_task_wrapper(task, app, 'test.task')()
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_an_exception_from_the_body_still_maps(self) -> None:
         app = _mock_app()
@@ -251,7 +251,7 @@ class TestReturnThatIsNotAResult:
         result = create_task_wrapper(task, app, 'test.task')()
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == 'MAPPED'
+        assert result.err_value.code == 'MAPPED'
 
     def test_a_generator_function_is_refused_at_definition(self) -> None:
         def task() -> Result[int, TaskError]:
@@ -260,7 +260,7 @@ class TestReturnThatIsNotAResult:
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 class _KindA(BaseModel):
@@ -287,7 +287,7 @@ class TestAnnotatedReturn:
         assert wrapper(n=5) == Ok(5)
         refused = wrapper(n=-1)
         assert isinstance(refused, Err)
-        assert refused.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert refused.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_a_validator_on_the_return_runs(self) -> None:
         def task() -> Result[Upper, TaskError]:
@@ -312,7 +312,7 @@ class TestAnnotatedReturn:
         with pytest.raises(TaskDefinitionError) as refused:
             create_task_wrapper(task, _mock_app(), 'test.task')
 
-        assert refused.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert refused.value.code == HorsiesErrorCode.TASK_INVALID_RETURN_TYPE
 
 
 @pytest.mark.unit
@@ -361,8 +361,8 @@ class TestWiringCompare:
         def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(1)
 
-        first = TaskNode(fn=source)
-        second = TaskNode(fn=target, waits_for=[first], args_from={'value': first})
+        first = TaskNode(function=source)
+        second = TaskNode(function=target, waits_for=[first], args_from={'value': first})
 
         spec = WorkflowSpec(name='wiring', nodes=[first, second])
 
@@ -419,7 +419,7 @@ class TestConformToTarget:
 
     def test_a_failed_outcome_passes_unchanged(self) -> None:
         failed: TaskOutcome[Any, TaskError] = Failed(
-            TaskError(error_code='FAILED'),
+            TaskError(code='FAILED'),
         )
 
         result = conform_to_target(failed, Positive)
@@ -568,7 +568,7 @@ class TestReceiverOfArgsFrom:
         assert reason is None
         code = json.loads(payload)['err']['error_code']
         assert code == {
-            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+            '__builtin_task_code__': OperationalCode.WORKER_SERIALIZATION_ERROR.value,
         }
 
     def test_a_value_inside_the_constraint_runs(self) -> None:

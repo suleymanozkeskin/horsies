@@ -32,7 +32,7 @@
 //! The attempt span reaches OpenTelemetry through a `tracing-opentelemetry`
 //! layer in the process's `tracing` subscriber:
 //! - `horsies::cli::run` adds [`layer`] to the subscriber that it installs,
-//!   and keeps the attempt span at every `--loglevel`.
+//!   and keeps the attempt span at every `--log-level`.
 //! - A binary that installs its own subscriber adds [`layer`] to it, and
 //!   lets its filter pass the target [`ATTEMPT_SPAN_TARGET`] at `INFO`. A
 //!   layer of another `tracing-opentelemetry` version records the span, but

@@ -1,5 +1,5 @@
 //! The rerun as three pure steps for a transaction that the caller owns
-//! (Python `rerun_task(connection, command, policy)`). The core builds each
+//! (Python `rerun_task_in_async(connection, command, policy)`). The core builds each
 //! statement and decides the outcome; the caller's connection runs the
 //! statements, so the rerun commits or rolls back with the caller's own
 //! writes. No step does I/O or starts a runtime.
@@ -29,15 +29,17 @@ use crate::core::history::identity::keys::IdempotencyKeyError;
 use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::python_text::python_repr;
+use crate::core::task::BuiltInTaskCode;
 use crate::core::types::status::TaskStatus;
+use crate::worker::retry::{read_stored_options, StoredOptions, StoredRetry};
 
 use super::caller::{
     CallerColumn, CallerRow, CallerRowRefused, CallerStatement, CallerType, StatementValue,
 };
 use super::input_envelope::{decode_framed_rerun_input, InputEnvelopeDecodeError};
 use super::operations::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunOutcome, RerunTask, RERUN_ENQUEUE,
-    RERUN_SOURCE_READ,
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunOutcome, RERUN_ENQUEUE, RERUN_SOURCE_READ,
 };
 
 /// The result columns of the source read, in the order of its statement.
@@ -176,9 +178,20 @@ pub enum RerunPreparation {
     /// The family row holds a value that is not a client family: corrupt
     /// stored data, not retryable. Nothing is written.
     UnknownStoredFamily(UnknownStoredFamily),
-    /// The caller key is not a valid idempotency key (Python raises
-    /// `ValueError`). Nothing is written.
-    CallerKeyRefused(IdempotencyKeyError),
+    /// The idempotency key is not valid (Python raises `ValueError`).
+    /// Nothing is written.
+    IdempotencyKeyRefused(IdempotencyKeyError),
+    /// The stored retry list of the source names the custom code `retry_code`,
+    /// and the task `task_name` of the calling app does not declare it.
+    /// Nothing is written.
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the
+    /// calling app does not register the task `task_name`. Nothing is
+    /// written.
+    TaskNotRegistered { task_name: String },
     /// The task id source refused to mint (the millisecond clock is outside
     /// the 48-bit range; Python raises `ValueError`). Nothing is written.
     IdMintRefused(Uuid7Error),
@@ -194,13 +207,11 @@ pub enum RerunWriteOutcome {
         source_task_id: Uuid,
         rerun_root_task_id: Uuid,
     },
-    /// The caller key holds this rerun command already, as `existing_task_id`.
+    /// The idempotency key holds this rerun command already, as `existing_task_id`.
     KeyReplay { existing_task_id: Uuid },
-    /// The caller key holds another command (the source's own included).
-    KeyConflict {
-        task_id: Uuid,
-        reserved_by_task_id: Uuid,
-    },
+    /// The idempotency key holds another command (the source's own included),
+    /// as `owner_task_id`.
+    KeyConflict { task_id: Uuid, owner_task_id: Uuid },
 }
 
 impl From<RerunWriteOutcome> for RerunOutcome {
@@ -220,10 +231,10 @@ impl From<RerunWriteOutcome> for RerunOutcome {
             }
             RerunWriteOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             } => RerunOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             },
         }
     }
@@ -247,12 +258,12 @@ pub enum RerunRowError {
 /// id, `$2` the retention class key of the new task (Python
 /// `_RERUN_SOURCE_SQL`). Reads only; the detail reader keeps ACCESS SHARE
 /// on the source leaf until the caller's transaction ends. Pure.
-pub fn rerun_read(command: &RerunTask, policy: &RerunEnqueuePolicy) -> CallerStatement {
+pub fn rerun_read(command: &RerunCommand, policy: &RerunEnqueuePolicy) -> CallerStatement {
     CallerStatement::new(
         &RERUN_SOURCE_READ,
         vec![
             StatementValue::Uuid(command.source_task_id()),
-            StatementValue::Text(policy.retention_class_key().to_owned()),
+            StatementValue::Text(policy.retention_class_key()),
         ],
         &RERUN_READ_COLUMNS,
     )
@@ -282,20 +293,23 @@ enum SourceRead {
     History(RerunSource),
 }
 
-/// Decide the rerun from the row of `read` (Python `rerun_task` after its
+/// Decide the rerun from the row of `read` (Python `rerun_task_in_async` after its
 /// read): the client family (refused unless it is `own`, and refused as
 /// corrupt when it is not a client family), the class check,
 /// the location, the eligibility (workflow task, completed source), the
-/// input envelope, the stored options; then the write with a minted task
-/// id, sent at `sent_at`. Pure apart from the id mint.
+/// input envelope, the stored options, the codes of the stored retry list
+/// against `codes` (the declared custom codes of the calling app's tasks);
+/// then the write with a minted task id, sent at `sent_at`. Pure apart from
+/// the id mint.
 ///
 /// Errors: [`RerunRowError`] when the row does not fit the read's columns,
 /// or holds `NULL` where the function always sets a value.
 pub fn prepare_rerun_write(
     read: &CallerStatement,
     row: &CallerRow,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     own: ClientFamily,
     sent_at: DateTime<Utc>,
 ) -> Result<RerunPreparation, RerunRowError> {
@@ -317,7 +331,7 @@ pub fn prepare_rerun_write(
         true => {}
         false => {
             return Ok(RerunPreparation::ClassNotRegistered {
-                class_key: policy.retention_class_key().to_owned(),
+                class_key: policy.retention_class_key(),
             });
         }
     }
@@ -325,7 +339,7 @@ pub fn prepare_rerun_write(
         SourceRead::Refused(refusal) => return Ok(RerunPreparation::Refused(refusal)),
         SourceRead::History(source) => source,
     };
-    Ok(prepare_write(source, command, policy, sent_at))
+    Ok(prepare_write(source, command, policy, codes, sent_at))
 }
 
 /// The location of the source and, for a history source, its facts.
@@ -452,11 +466,12 @@ fn history_source(
 }
 
 /// The eligibility ladder and the write of a history source (Python
-/// `rerun_task` after `read_rerun_source`).
+/// `rerun_task_in_async` after `read_rerun_source`).
 fn prepare_write(
     source: RerunSource,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     sent_at: DateTime<Utc>,
 ) -> RerunPreparation {
     let source_task_id = command.source_task_id();
@@ -508,18 +523,18 @@ fn prepare_write(
         &source.queue_name,
         source.priority,
         &framed.input,
-        command.deadline(),
+        command.good_until(),
         None,
         framed.options.as_deref(),
-        Some(policy.retention_class_key()),
+        Some(policy.retention_class_key().as_str()),
         policy.retain_rerun_input(),
-        command.caller_key(),
+        command.idempotency_key(),
         Some(source.task_id),
         Some(root_task_id),
     ) {
         Ok(facts) => facts,
         Err(EnqueuePreparationError::Idempotency(refused)) => {
-            return RerunPreparation::CallerKeyRefused(refused);
+            return RerunPreparation::IdempotencyKeyRefused(refused);
         }
         Err(EnqueuePreparationError::InvalidExecution(invalid)) => {
             return input_corrupt(
@@ -537,6 +552,20 @@ fn prepare_write(
             return input_corrupt(source_task_id, &format!("stored input: {other}"));
         }
     };
+    match check_retry_codes(&source.task_name, framed.options.as_deref(), codes) {
+        Ok(()) => {}
+        Err(RetryCodeRefusal::NotDeclared { code }) => {
+            return RerunPreparation::RetryCodeNotDeclared {
+                task_name: source.task_name,
+                retry_code: code,
+            };
+        }
+        Err(RetryCodeRefusal::TaskNotRegistered) => {
+            return RerunPreparation::TaskNotRegistered {
+                task_name: source.task_name,
+            };
+        }
+    }
     let new_task_id = match mint_task_id() {
         Ok(task_id) => task_id,
         Err(refused) => return RerunPreparation::IdMintRefused(refused),
@@ -561,7 +590,7 @@ fn prepare_write(
         StatementValue::Text(facts.retention_class_key),
         StatementValue::Bool(facts.retain_rerun_input),
         StatementValue::Int4(source.max_retries),
-        optional_instant(command.deadline()),
+        optional_instant(command.good_until()),
         StatementValue::Timestamptz(sent_at),
         StatementValue::Int2(facts.command_fingerprint_version),
         StatementValue::Bytea(facts.command_fingerprint.to_vec()),
@@ -590,6 +619,59 @@ fn prepare_write(
         source_task_id: source.task_id,
         rerun_root_task_id: root_task_id,
     })
+}
+
+/// Why the stored retry list of a source does not pass
+/// [`check_retry_codes`].
+enum RetryCodeRefusal {
+    /// The app registers the task, and the task does not declare the custom
+    /// code `code`.
+    NotDeclared { code: String },
+    /// The list names a custom code, and the app does not register the task.
+    TaskNotRegistered,
+}
+
+/// Check the codes of the stored retry list in `options` against the
+/// declared custom codes of the calling app. Pure.
+///
+/// A built-in code passes for every task. A custom code passes when the app
+/// registers the task `task_name` and the task declares the code. Options
+/// with no retry policy hold no list to check, and neither does a policy
+/// that does not fit its rule: the worker refuses that policy when it runs
+/// the task (`WORKER_SERIALIZATION_ERROR`).
+///
+/// Errors: [`RetryCodeRefusal`] for the first custom code of the list that
+/// does not pass.
+fn check_retry_codes(
+    task_name: &str,
+    options: Option<&str>,
+    codes: &RegisteredTaskCodes,
+) -> Result<(), RetryCodeRefusal> {
+    let rule = match read_stored_options(options) {
+        StoredOptions::Readable {
+            retry: StoredRetry::Policy(rule),
+            ..
+        } => rule,
+        StoredOptions::Readable {
+            retry: StoredRetry::NoPolicy | StoredRetry::Invalid { .. },
+            ..
+        }
+        | StoredOptions::Unreadable { .. } => return Ok(()),
+    };
+    let declared = codes.of(task_name);
+    for code in rule.retry_for() {
+        match (BuiltInTaskCode::parse(code), declared) {
+            (Some(_), _) => {}
+            (None, DeclaredCodes::Registered { custom }) if custom.get(code).is_some() => {}
+            (None, DeclaredCodes::Registered { .. }) => {
+                return Err(RetryCodeRefusal::NotDeclared { code: code.clone() });
+            }
+            (None, DeclaredCodes::TaskNotRegistered) => {
+                return Err(RetryCodeRefusal::TaskNotRegistered);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn input_corrupt(task_id: Uuid, detail: &str) -> RerunPreparation {
@@ -670,7 +752,7 @@ fn rerun_write_outcome(
         },
         EnqueueTaskOutcome::KeyConflict { owner } => RerunWriteOutcome::KeyConflict {
             task_id: source_task_id,
-            reserved_by_task_id: owner,
+            owner_task_id: owner,
         },
         EnqueueTaskOutcome::PayloadMismatch | EnqueueTaskOutcome::ConflictUnverifiable => panic!(
             "the rerun write of the minted task id {new_task_id} answered {written:?}: \

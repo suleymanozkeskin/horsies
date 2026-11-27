@@ -12,19 +12,23 @@
 //! commits. The functions do no I/O and start no core; the fork and stop
 //! rules apply, as for every core call. The client family of every rerun
 //! here is `TYPESCRIPT`, and the new task is sent at the core's clock when
-//! `prepareRerunWrite` runs.
+//! `prepareRerunWrite` runs. The stored retry list of the source is checked
+//! against the declared custom codes of the calling app's tasks, which the
+//! caller passes to `prepareRerunWrite`.
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
     decode_rerun_write, prepare_rerun_write as prepare_core_write, rerun_read, ClientFamily,
-    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunPreparation, RerunTask, RerunWrite,
+    RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy, RerunError, RerunOutcome,
+    RerunPreparation, RerunWrite,
 };
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::facades::rerun::arguments::{
-    rerun_command, rerun_policy, RerunCommandArg, RerunPolicyArg,
+    registered_task_codes, rerun_command, rerun_policy, RegisteredTaskCodesArg, RerunCommandArg,
+    RerunPolicyArg,
 };
 use crate::facades::rerun::caller_values::{
     caller_row, statement_record, CallerRowArg, CallerStatementRecord,
@@ -47,7 +51,7 @@ pub struct PreparedRerunWrite {
 #[napi]
 impl PreparedRerunWrite {
     /// The write: `horsies_enqueue_task` with the lineage `RERUN`, which
-    /// holds the caller key of a keyed rerun first.
+    /// holds the idempotency key of a keyed rerun first.
     #[napi(ts_return_type = "NativeEnvelope<CallerStatementRecord>")]
     pub fn statement(&self) -> Envelope<CallerStatementRecord> {
         sync_call("rerun_write_statement", || {
@@ -102,7 +106,7 @@ pub enum WriteDecodeRecord {
 
 /// The command and the policy of one rerun, as the core takes them.
 struct StepRequest {
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
 }
 
@@ -130,7 +134,9 @@ pub fn rerun_read_statement(
 
 /// Decide the rerun from `read_row`, the row of the source read of
 /// `command` and `policy`. The new task stores the carrier of `trace`.
-/// Pure apart from the id mint and the clock.
+/// `codes` are the declared custom codes of the calling app's tasks: the
+/// stored retry list of the source is checked against them. Pure apart from
+/// the id mint and the clock.
 #[napi(ts_return_type = "NativeEnvelope<RerunPreparationRecord>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -141,16 +147,22 @@ pub fn prepare_rerun_write(
     policy: RerunPolicyArg,
     trace: TraceArgument,
     read_row: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
 ) -> Envelope<RerunPreparationRecord> {
     sync_call("prepare_rerun_write", || {
         let request = match step_request(command, &policy) {
             Ok(request) => request,
             Err(thrown) => return Envelope::Thrown(thrown),
         };
+        let codes = match registered_task_codes(&codes) {
+            Ok(codes) => codes,
+            Err(refusal) => return Envelope::Thrown(refusal.into()),
+        };
         match trace.send_trace() {
             Ok(trace) => Envelope::Value(preparation_of_row(
                 &request.command.with_trace(trace),
                 &request.policy,
+                &codes,
                 read_row,
                 Utc::now(),
             )),
@@ -180,8 +192,9 @@ fn step_request(
 /// What the source read's row decides for `command`, with the new task sent
 /// at `sent_at`. Pure apart from the id mint.
 fn preparation_of_row(
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     read_row: CallerRowArg,
     sent_at: DateTime<Utc>,
 ) -> RerunPreparationRecord {
@@ -190,7 +203,7 @@ fn preparation_of_row(
         Ok(row) => row,
         Err(refused) => return row_refused(refused.to_string()),
     };
-    match prepare_core_write(&read, &row, command, policy, OWN_FAMILY, sent_at) {
+    match prepare_core_write(&read, &row, command, policy, codes, OWN_FAMILY, sent_at) {
         Ok(preparation) => preparation_record(preparation),
         Err(refused) => row_refused(RerunError::CallerRow(refused).to_string()),
     }
@@ -233,8 +246,29 @@ fn preparation_record(preparation: RerunPreparation) -> RerunPreparationRecord {
             message: RerunError::UnknownStoredFamily(unknown.clone()).to_string(),
             stored: unknown.stored,
         },
-        RerunPreparation::CallerKeyRefused(refused) => CallerStepRefusal::CallerKeyRefused {
-            message: RerunError::Idempotency(refused).to_string(),
+        RerunPreparation::IdempotencyKeyRefused(refused) => {
+            CallerStepRefusal::IdempotencyKeyRefused {
+                message: RerunError::Idempotency(refused).to_string(),
+            }
+        }
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => CallerStepRefusal::RetryCodeNotDeclared {
+            message: RerunError::RetryCodeNotDeclared {
+                task_name: task_name.clone(),
+                retry_code: retry_code.clone(),
+            }
+            .to_string(),
+            task_name,
+            retry_code,
+        },
+        RerunPreparation::TaskNotRegistered { task_name } => CallerStepRefusal::TaskNotRegistered {
+            message: RerunError::TaskNotRegistered {
+                task_name: task_name.clone(),
+            }
+            .to_string(),
+            task_name,
         },
         RerunPreparation::IdMintRefused(refused) => CallerStepRefusal::IdMintRefused {
             message: RerunError::Identity(refused).to_string(),
@@ -269,7 +303,8 @@ fn decode_write_row(write: &RerunWrite, row: CallerRowArg) -> WriteDecodeRecord 
 mod tests {
     use chrono::Duration;
     use horsies_core::{
-        CallerStatement, IdempotencyKeyError, RecordedFamily, UnknownStoredFamily, Uuid7Error,
+        CallerStatement, EnqueueRetention, IdempotencyKeyError, RecordedFamily, RetentionDays,
+        UnknownStoredFamily, Uuid7Error,
     };
     use uuid::Uuid;
 
@@ -279,12 +314,19 @@ mod tests {
 
     const SOURCE: Uuid = Uuid::from_u128(0x0189_0a5d_ac96_774b_bcce_b302_099a_8057);
 
-    fn command() -> RerunTask {
-        RerunTask::new(SOURCE, None, None)
+    fn command() -> RerunCommand {
+        RerunCommand::new(SOURCE, None, None)
     }
 
-    fn policy(class_key: &str) -> RerunEnqueuePolicy {
-        RerunEnqueuePolicy::new(class_key, true, Duration::hours(24)).expect("a valid policy")
+    fn policy(retention: EnqueueRetention) -> RerunEnqueuePolicy {
+        RerunEnqueuePolicy::new(retention, true, Duration::hours(24)).expect("a valid policy")
+    }
+
+    /// The retention of 8 days, whose class `standard_8d` has no class row.
+    fn eight_days() -> EnqueueRetention {
+        EnqueueRetention::Period(
+            RetentionDays::parse_period(Duration::days(8)).expect("8 days is a retention period"),
+        )
     }
 
     /// A row of `statement` with the text of each named column; every other
@@ -306,17 +348,23 @@ mod tests {
         }
     }
 
-    fn prepared(class_key: &str, values: &[(&str, &str)]) -> RerunPreparationRecord {
-        let policy = policy(class_key);
+    fn prepared(retention: EnqueueRetention, values: &[(&str, &str)]) -> RerunPreparationRecord {
+        let policy = policy(retention);
         let read = rerun_read(&command(), &policy);
-        preparation_of_row(&command(), &policy, row_of(&read, values), Utc::now())
+        preparation_of_row(
+            &command(),
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            row_of(&read, values),
+            Utc::now(),
+        )
     }
 
     #[test]
     fn an_absent_source_answers_source_absent_and_writes_nothing() {
         assert_eq!(
             prepared(
-                "forever",
+                EnqueueRetention::Forever,
                 &[
                     ("class_registered", "t"),
                     ("client_family", "TYPESCRIPT"),
@@ -337,7 +385,7 @@ mod tests {
     fn a_live_source_answers_source_live() {
         assert!(matches!(
             prepared(
-                "forever",
+                EnqueueRetention::Forever,
                 &[
                     ("class_registered", "t"),
                     ("client_family", "TYPESCRIPT"),
@@ -353,7 +401,7 @@ mod tests {
     #[test]
     fn a_database_of_another_family_is_refused_before_the_write() {
         match prepared(
-            "forever",
+            EnqueueRetention::Forever,
             &[("class_registered", "t"), ("client_family", "PYTHON")],
         ) {
             RerunPreparationRecord::Refused {
@@ -376,7 +424,7 @@ mod tests {
     fn a_family_value_that_is_no_client_family_is_refused() {
         assert_eq!(
             prepared(
-                "forever",
+                EnqueueRetention::Forever,
                 &[("class_registered", "t"), ("client_family", "GO")]
             ),
             RerunPreparationRecord::Refused {
@@ -395,7 +443,7 @@ mod tests {
     fn an_unregistered_class_is_refused_with_its_key() {
         assert_eq!(
             prepared(
-                "standard_8d",
+                eight_days(),
                 &[("class_registered", "f"), ("client_family", "TYPESCRIPT")],
             ),
             RerunPreparationRecord::Refused {
@@ -411,7 +459,7 @@ mod tests {
     #[test]
     fn a_row_with_null_where_the_function_sets_a_value_is_a_contract_violation() {
         assert!(matches!(
-            prepared("forever", &[("client_family", "TYPESCRIPT")]),
+            prepared(EnqueueRetention::Forever, &[("client_family", "TYPESCRIPT")]),
             RerunPreparationRecord::Refused {
                 error: CallerStepRefusal::ContractViolation { ref message }
             } if message.contains("class_registered")
@@ -420,10 +468,11 @@ mod tests {
 
     #[test]
     fn a_row_of_another_cell_count_is_a_contract_violation() {
-        let policy = policy("forever");
+        let policy = policy(EnqueueRetention::Forever);
         let refused = preparation_of_row(
             &command(),
             &policy,
+            &RegisteredTaskCodes::NONE,
             CallerRowArg {
                 cells: vec![SqlTextValue::Null],
             },
@@ -440,13 +489,13 @@ mod tests {
     #[test]
     fn a_refused_key_and_a_refused_mint_carry_the_core_text() {
         assert_eq!(
-            preparation_record(RerunPreparation::CallerKeyRefused(
+            preparation_record(RerunPreparation::IdempotencyKeyRefused(
                 IdempotencyKeyError::OverBound {
                     label: "idempotency key"
                 }
             )),
             RerunPreparationRecord::Refused {
-                error: CallerStepRefusal::CallerKeyRefused {
+                error: CallerStepRefusal::IdempotencyKeyRefused {
                     message: "rerun idempotency key failed: idempotency key must be at most \
                               255 UTF-8 bytes"
                         .to_owned()
@@ -461,6 +510,45 @@ mod tests {
                 error: CallerStepRefusal::IdMintRefused {
                     message: "rerun identity mint failed: entropy source exceeded 62 bits"
                         .to_owned()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn an_undeclared_retry_code_is_refused_with_the_task_and_the_code() {
+        assert_eq!(
+            preparation_record(RerunPreparation::RetryCodeNotDeclared {
+                task_name: "charge".to_owned(),
+                retry_code: "CARD_DECLINED".to_owned(),
+            }),
+            RerunPreparationRecord::Refused {
+                error: CallerStepRefusal::RetryCodeNotDeclared {
+                    message: RerunError::RetryCodeNotDeclared {
+                        task_name: "charge".to_owned(),
+                        retry_code: "CARD_DECLINED".to_owned(),
+                    }
+                    .to_string(),
+                    task_name: "charge".to_owned(),
+                    retry_code: "CARD_DECLINED".to_owned(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn an_unlisted_task_is_refused_with_its_name() {
+        assert_eq!(
+            preparation_record(RerunPreparation::TaskNotRegistered {
+                task_name: "charge".to_owned(),
+            }),
+            RerunPreparationRecord::Refused {
+                error: CallerStepRefusal::TaskNotRegistered {
+                    message: RerunError::TaskNotRegistered {
+                        task_name: "charge".to_owned(),
+                    }
+                    .to_string(),
+                    task_name: "charge".to_owned(),
                 }
             }
         );

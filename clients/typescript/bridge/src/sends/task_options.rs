@@ -14,7 +14,7 @@
 //!   (`DeclaredOptionRefusal::error_code`); this file writes its text with
 //!   the names of `defineTask`.
 //! - A `SHARED_ASYNC` task that sets no grace gets the core's default grace
-//!   (`CancelGraceMs::DEFAULT`), stored as resolved.
+//!   (`DEFAULT_CANCEL_GRACE_MS`), stored as resolved.
 //! - The accepted options give the stored options text that a send writes
 //!   (`TaskOptions::stored_options_text`).
 
@@ -23,7 +23,9 @@ use horsies_core::core::task::declared_options::{
     DeclaredRetry, DeclaredTaskOptions, RetryCodeScope,
 };
 use horsies_core::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
-use horsies_core::{ErrorCode, Execution, TaskOptions, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+use horsies_core::{
+    Execution, HorsiesErrorCode, TaskOptions, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS,
+};
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
@@ -38,7 +40,7 @@ const TIMEOUT_FIELD: &str = "timeoutMs";
 const GRACE_FIELD: &str = "cancelGraceMs";
 
 /// The field name of the retry codes in the refusal texts.
-const AUTO_RETRY_FOR_FIELD: &str = "retryPolicy.retryFor";
+const RETRY_FOR_FIELD: &str = "retryPolicy.retryFor";
 
 /// The help line of a refusal with `HRS-102`.
 const OPTIONS_HELP: &str = "check the options of defineTask";
@@ -87,8 +89,8 @@ pub enum MaxDelayFact {
     Seconds { seconds: f64 },
 }
 
-/// The retry policy of a task. Each code of `auto_retry_for` is a user code
-/// or a library code, as its text.
+/// The retry policy of a task. Each code of `retry_for` is a custom code
+/// or a built-in code, as its text.
 #[napi(
     discriminant = "kind",
     discriminant_case = "camelCase",
@@ -100,14 +102,14 @@ pub enum RetryFacts {
     Fixed {
         intervals_seconds: Vec<f64>,
         jitter: bool,
-        auto_retry_for: Vec<String>,
+        retry_for: Vec<String>,
     },
     Exponential {
         base_seconds: f64,
         max_retries: f64,
         jitter: bool,
         max_delay: MaxDelayFact,
-        auto_retry_for: Vec<String>,
+        retry_for: Vec<String>,
     },
 }
 
@@ -128,7 +130,7 @@ pub enum DeclaredCodesFact {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskOptionsFacts {
     pub task_name: String,
-    pub queue_name: String,
+    pub queue: String,
     pub execution: ExecutionName,
     pub timeout: MillisecondsFact,
     pub cancel_grace: MillisecondsFact,
@@ -221,13 +223,13 @@ fn declared_options(facts: &TaskOptionsFacts) -> Result<DeclaredTaskOptions, Vec
     match (retry, timeout, grace) {
         (Ok(retry), Ok(timeout_ms), Ok(cancel_grace_ms)) => Ok(DeclaredTaskOptions {
             task_name: facts.task_name.clone(),
-            queue_name: facts.queue_name.clone(),
+            queue: facts.queue.clone(),
             execution: facts.execution.execution(),
             timeout_ms,
             cancel_grace_ms,
             retry,
             retry_codes: match &facts.declared_codes {
-                DeclaredCodesFact::Open => RetryCodeScope::AnyUserCode,
+                DeclaredCodesFact::Open => RetryCodeScope::AnyCustomCode,
                 DeclaredCodesFact::Declared { codes } => RetryCodeScope::Declared(codes.clone()),
             },
         }),
@@ -264,7 +266,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
         RetryFacts::Fixed {
             intervals_seconds,
             jitter,
-            auto_retry_for,
+            retry_for,
         } => intervals_seconds
             .iter()
             .map(|seconds| u32_of_number("retryPolicy.intervalsSeconds", *seconds))
@@ -272,7 +274,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
             .map(|intervals| DeclaredRetry::Fixed {
                 intervals_seconds: intervals,
                 jitter: *jitter,
-                auto_retry_for: auto_retry_for.clone(),
+                retry_for: retry_for.clone(),
             })
             .map_err(|refusal| vec![refusal]),
         RetryFacts::Exponential {
@@ -280,7 +282,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
             max_retries,
             jitter,
             max_delay,
-            auto_retry_for,
+            retry_for,
         } => {
             let base = u32_of_number("retryPolicy.baseSeconds", *base_seconds);
             let retries = u32_of_number("retryPolicy.maxRetries", *max_retries);
@@ -298,7 +300,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
                         max_retries,
                         jitter: *jitter,
                         max_delay,
-                        auto_retry_for: auto_retry_for.clone(),
+                        retry_for: retry_for.clone(),
                     })
                 }
                 (base, retries, cap) => Err(base
@@ -315,7 +317,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
 /// The refusal of a number that is not a `u32` (`HRS-102`). Pure.
 fn number_refusal(name: &str, refusal: &BoundaryRefusal) -> CoreRefusal {
     CoreRefusal::coded(
-        ErrorCode::TaskInvalidOptions,
+        HorsiesErrorCode::TaskInvalidOptions,
         format!("{}: {}", refusal.subject, refusal.rule),
         vec![format!("task '{name}'")],
         RefusalHelp::Help {
@@ -366,17 +368,17 @@ fn rule_text(refusal: &DeclaredOptionRefusal) -> RuleText {
             RuleText::option(format!("invalid retry policy: {error}"))
         }
         DeclaredOptionRefusal::NoRetryCode => {
-            RuleText::option(format!("{AUTO_RETRY_FOR_FIELD} must not be empty"))
+            RuleText::option(format!("{RETRY_FOR_FIELD} must not be empty"))
         }
         DeclaredOptionRefusal::RetryCodeText { code, refusal } => {
-            RuleText::option(refusal.message(AUTO_RETRY_FOR_FIELD, code))
+            RuleText::option(refusal.message(RETRY_FOR_FIELD, code))
         }
-        DeclaredOptionRefusal::RetryCodeNotUserCode { refused } => {
+        DeclaredOptionRefusal::RetryCodeNotCustomCode { refused } => {
             RuleText::option(refused.to_string())
         }
         DeclaredOptionRefusal::RetryCodeNotDeclared { code } => RuleText::option(format!(
-            "{AUTO_RETRY_FOR_FIELD} code '{code}' is not a declared error code of the task; a \
-             user code that retries the task is one of its errors"
+            "{RETRY_FOR_FIELD} code '{code}' is not a declared error code of the task; a \
+             custom code that retries the task is one of its errors"
         )),
         DeclaredOptionRefusal::TimeoutBelowMinimum => RuleText::option(format!(
             "{TIMEOUT_FIELD} must be a whole number from {MIN_TASK_TIMEOUT_MS} to \
@@ -430,7 +432,7 @@ mod tests {
     fn facts() -> TaskOptionsFacts {
         TaskOptionsFacts {
             task_name: "charge_payment".to_owned(),
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             execution: ExecutionName::Isolated,
             timeout: MillisecondsFact::NotSet,
             cancel_grace: MillisecondsFact::NotSet,
@@ -478,13 +480,13 @@ mod tests {
             retry: RetryFacts::Fixed {
                 intervals_seconds: vec![60.0, 300.0, 900.0],
                 jitter: true,
-                auto_retry_for: vec!["TASK_TIMEOUT".to_owned(), "CARD_DECLINED".to_owned()],
+                retry_for: vec!["TASK_TIMEOUT".to_owned(), "CARD_DECLINED".to_owned()],
             },
             ..facts()
         });
         assert_eq!(
             text,
-            r#"{"retry_policy":{"max_retries":3,"intervals":[60,300,900],"backoff_strategy":"fixed","jitter":true,"auto_retry_for":["TASK_TIMEOUT","CARD_DECLINED"]},"good_until":null,"timeout_ms":30000,"execution":"ISOLATED","cancel_grace_ms":null}"#
+            r#"{"retry_policy":{"max_retries":3,"intervals_seconds":[60,300,900],"backoff_strategy":"fixed","jitter":true,"retry_for":["TASK_TIMEOUT","CARD_DECLINED"]},"good_until":null,"timeout_ms":30000,"execution":"ISOLATED","cancel_grace_ms":null}"#
         );
     }
 
@@ -496,12 +498,12 @@ mod tests {
                 max_retries: 5.0,
                 jitter: false,
                 max_delay: MaxDelayFact::Seconds { seconds: 600.0 },
-                auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                retry_for: vec!["WORKER_CRASHED".to_owned()],
             },
             ..facts()
         });
         assert!(
-            text.starts_with(r#"{"retry_policy":{"max_retries":5,"intervals":[30],"backoff_strategy":"exponential","jitter":false,"max_delay_seconds":600,"#),
+            text.starts_with(r#"{"retry_policy":{"max_retries":5,"intervals_seconds":[30],"backoff_strategy":"exponential","jitter":false,"max_delay_seconds":600,"#),
             "{text}"
         );
     }
@@ -589,7 +591,7 @@ mod tests {
                     max_retries: 21.0,
                     jitter: true,
                     max_delay: MaxDelayFact::NoCap,
-                    auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                    retry_for: vec!["WORKER_CRASHED".to_owned()],
                 },
                 ..facts()
             }),
@@ -604,7 +606,7 @@ mod tests {
                 retry: RetryFacts::Fixed {
                     intervals_seconds: vec![60.0],
                     jitter: true,
-                    auto_retry_for: Vec::new(),
+                    retry_for: Vec::new(),
                 },
                 ..facts()
             }),
@@ -619,7 +621,7 @@ mod tests {
                 retry: RetryFacts::Fixed {
                     intervals_seconds: vec![60.0],
                     jitter: true,
-                    auto_retry_for: vec!["CardDeclinedError".to_owned()],
+                    retry_for: vec!["CardDeclinedError".to_owned()],
                 },
                 ..facts()
             }),
@@ -632,7 +634,7 @@ mod tests {
         let retry = RetryFacts::Fixed {
             intervals_seconds: vec![60.0],
             jitter: true,
-            auto_retry_for: vec!["PROVIDER_DOWN".to_owned(), "TASK_TIMEOUT".to_owned()],
+            retry_for: vec!["PROVIDER_DOWN".to_owned(), "TASK_TIMEOUT".to_owned()],
         };
         assert_eq!(
             codes_of(&TaskOptionsFacts {
@@ -734,7 +736,7 @@ mod tests {
                 retry: RetryFacts::Fixed {
                     intervals_seconds: vec![0.0],
                     jitter: true,
-                    auto_retry_for: vec!["WORKER_CRASHED".to_owned()],
+                    retry_for: vec!["WORKER_CRASHED".to_owned()],
                 },
                 ..facts()
             }),

@@ -5,29 +5,41 @@
 //   bun tests/packages/consumer-check.ts --installer bun ...
 //
 // A `publish` row installs `horsies` only: the package manager must choose the platform package from the optional
-// dependencies. A `hold` row is not listed there, so its platform package is installed by name beside `horsies`. Needs
-// `HORSIES_TEST_DATABASE_URL`. Exit status: 0 when every check passes; 1 when a check fails; 2 when the arguments do
-// not read or the install fails.
+// dependencies. A `hold` row is not listed there, so its platform package is installed by name beside `horsies`. A row
+// with `--web-page run` also serves the monitoring page and its script from an app on a refused database URL
+// (`--web-page skip`: no page check). The check resolves each entry point of the exports map, requires the skill files
+// and the file of the `horsies` bin in the installed package, and pings PostgreSQL through `app.pingDatabase()` of the
+// public API. Needs `HORSIES_TEST_DATABASE_URL`. Exit status: 0 when every check passes; 1 when a check fails; 2 when
+// the arguments do not read or the install fails.
 
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-import { isPlainObject } from "../../horsies/src/codec/values.ts";
-import { manifestJson, testDatabaseUrl } from "../runtime/native/manifest.ts";
+import { isPlainObject, isString } from "../../horsies/src/codec/values.ts";
+import type { ParsedJson } from "../public-api/package.ts";
+import { testDatabaseUrl } from "../runtime/native/manifest.ts";
 import { coreStateProblem, testOnlyExportsIn } from "./addon-exports.ts";
 import { commandFailedText, runCommand } from "./command.ts";
+import { entryPointSpecifiers, SKILL_FILES, SKILL_FOLDER } from "./content.ts";
 import type { Installer } from "./matrix.ts";
+import { pageProblems, scriptAssetOf, scriptProblems } from "./web-page.ts";
 
 /** The modules of the installed package that the check calls, typed by their source modules. */
 type LoadModule = typeof import("../../horsies/src/native/load.ts");
 
 type ProcessCoreModule = typeof import("../../horsies/src/native/process-core/addon.ts");
 
-type CoreHandleModule = typeof import("../../horsies/src/native/handle/core-handle.ts");
+type PublicEntry = typeof import("../../horsies/src/index.ts");
+
+/** Whether the row serves the monitoring page in the check. */
+type WebPage = "run" | "skip";
+
+/** A database URL whose connect is refused at once: nothing listens on port 1. The page needs no database. */
+const REFUSED_DATABASE_URL = "postgresql://check:none@127.0.0.1:1/none";
 
 /** The inputs of the check. */
 type Inputs = {
@@ -36,6 +48,8 @@ type Inputs = {
   readonly version: string;
   readonly platformPackage: string;
   readonly release: "publish" | "hold";
+  readonly webPage: WebPage;
+  readonly allPlatformPackages: readonly string[];
 };
 
 /** The inputs from the arguments, or the text of the refusal. Pure. */
@@ -46,6 +60,8 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
     version: { type: "string" },
     "platform-package": { type: "string" },
     release: { type: "string" },
+    "web-page": { type: "string" },
+    "all-platform-packages": { type: "string" },
   } as const;
 
   let values: { readonly [K in keyof typeof options]?: string | undefined };
@@ -58,6 +74,7 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
 
   const { installer, registry, version, release } = values;
   const platformPackage = values["platform-package"];
+  const webPage = values["web-page"];
 
   if ((installer !== "npm" && installer !== "bun") || (release !== "publish" && release !== "hold")) {
     return { refused: "give --installer npm|bun and --release publish|hold" };
@@ -67,7 +84,17 @@ function inputsOf(args: readonly string[]): Inputs | { readonly refused: string 
     return { refused: "give --registry, --version and --platform-package" };
   }
 
-  return { installer, registry, version, platformPackage, release };
+  if (webPage !== "run" && webPage !== "skip") {
+    return { refused: "give --web-page run|skip" };
+  }
+
+  const all = values["all-platform-packages"];
+
+  if (all === undefined || all === "") {
+    return { refused: "give --all-platform-packages <name,name,...>" };
+  }
+
+  return { installer, registry, version, platformPackage, release, webPage, allPlatformPackages: all.split(",") };
 }
 
 /** Write the project in `folder` and install the packages; the failure text, or `installed`. Effects: writes and installs. */
@@ -96,6 +123,40 @@ function install(inputs: Inputs, folder: string): "installed" | { readonly faile
   console.log(`installed ${packages.join(" ")} with ${inputs.installer} in ${folder}`);
 
   return "installed";
+}
+
+/**
+ * The selection check: a project that lists every platform package as an optional dependency (as the `horsies`
+ * manifest of a release does) installs, and the installer keeps exactly the package of this host (`os`, `cpu` and
+ * `libc` of each manifest). Effects: writes and installs in `folder`; prints the installed packages.
+ */
+function selectionProblems(inputs: Inputs, folder: string): readonly string[] {
+  const optional = Object.fromEntries(inputs.allPlatformPackages.map((name) => [name, inputs.version]));
+
+  writeFileSync(join(folder, "package.json"), `${JSON.stringify({ name: "horsies-selection-check", private: true, type: "module", optionalDependencies: optional })}\n`);
+
+  let run: ReturnType<typeof runCommand>;
+
+  switch (inputs.installer) {
+    case "npm":
+      writeFileSync(join(folder, ".npmrc"), `registry=${inputs.registry}\n`);
+      run = runCommand("npm", ["install", "--no-audit", "--no-fund", "--no-update-notifier"], folder);
+      break;
+    case "bun":
+      writeFileSync(join(folder, "bunfig.toml"), `[install]\nregistry = "${inputs.registry}"\n`);
+      run = runCommand(process.execPath, ["install"], folder);
+      break;
+  }
+
+  if (!run.ok || run.value.code !== 0) {
+    return [commandFailedText(`${inputs.installer} install of the optional platform packages`, run)];
+  }
+
+  const installed = inputs.allPlatformPackages.filter((name) => existsSync(join(folder, "node_modules", name, "package.json")));
+
+  console.log(`selection: ${inputs.installer} installed [${installed.join(", ")}] of [${inputs.allPlatformPackages.join(", ")}]`);
+
+  return installed.join(" ") === inputs.platformPackage ? [] : [`the selection installed [${installed.join(", ")}], not [${inputs.platformPackage}]`];
 }
 
 /** The script that imports `horsies` as a user's module does, and tries one deep import. */
@@ -157,25 +218,104 @@ function candidatePackages(packageDir: string, platformPackage: string): readonl
   return [...new Set([...listed, platformPackage])].toSorted();
 }
 
+/** The `file:` URL of a module of the installed package's `dist` folder. */
+function moduleUrl(packageDir: string, path: string): string {
+  return pathToFileURL(join(packageDir, "dist", path)).href;
+}
+
+/** The problems of the page and the script that the monitoring handler of `app` serves. Effects: runs the handler. */
+async function webPageProblems(entry: PublicEntry): Promise<readonly string[]> {
+  const created = entry.Horsies.create({ database: { databaseUrl: { kind: "value", value: REFUSED_DATABASE_URL } }, tasks: [] });
+
+  if (!created.ok) {
+    return [`Horsies.create refused the app of the page check: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`];
+  }
+
+  const handler = entry.createMonitoringHandler(created.value, { authorizationPolicy: entry.allowAll() });
+
+  try {
+    const page = await handler(new Request("http://check/"));
+    const pageFacts = { status: page.status, text: await page.text() };
+    const asset = scriptAssetOf(pageFacts.text);
+
+    if (asset.kind === "notNamed") {
+      return pageProblems(pageFacts);
+    }
+
+    const script = await handler(new Request(`http://check/${asset.path}`));
+
+    console.log(`page: status ${page.status}, script ${asset.path}: status ${script.status}`);
+
+    return [...pageProblems(pageFacts), ...scriptProblems(asset.path, { status: script.status, text: "" })];
+  } finally {
+    await handler.close();
+  }
+}
+
+/** The problems of `app.pingDatabase()` of an app on the test database. Effects: loads the addon; connects to the database. */
+async function pingProblems(entry: PublicEntry): Promise<readonly string[]> {
+  const created = entry.Horsies.create({ database: { databaseUrl: { kind: "value", value: testDatabaseUrl() } }, tasks: [] });
+
+  if (!created.ok) {
+    return [`Horsies.create refused the app of the ping: ${created.error.refusals.map((refusal) => refusal.message).join("; ")}`];
+  }
+
+  const ping = await created.value.pingDatabase();
+
+  console.log(`ping: ${ping.ok ? `${ping.value.latencyMs} ms` : JSON.stringify(ping.error)}`);
+
+  return ping.ok ? [] : [`the ping failed: ${JSON.stringify(ping.error)}`];
+}
+
+/**
+ * The problems of the files of the installed package: each entry point of the exports map resolves, the five skill
+ * files are there, and the file of the `horsies` bin is there. Effects: resolves modules; reads the folder.
+ */
+function installedFileProblems(packageDir: string): readonly string[] {
+  const requireFromProject = createRequire(join(packageDir, "package.json"));
+  // SAFETY: JSON.parse gives a parsed JSON document.
+  const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as ParsedJson;
+  // SAFETY: a member of a parsed JSON object is parsed JSON.
+  const exportsMap = isPlainObject(manifest) ? (manifest["exports"] as ParsedJson | undefined) : undefined;
+  const bin = isPlainObject(manifest) ? manifest["bin"] : undefined;
+  const binTarget = isPlainObject(bin) ? bin["horsies"] : undefined;
+
+  const unresolved = entryPointSpecifiers(exportsMap).filter((specifier) => {
+    try {
+      requireFromProject.resolve(specifier);
+
+      return false;
+    } catch {
+      return true;
+    }
+  });
+
+  return [
+    ...unresolved.map((specifier) => `the entry point ${specifier} does not resolve`),
+    ...SKILL_FILES.filter((name) => !existsSync(join(packageDir, SKILL_FOLDER, name))).map((name) => `the installed package has no skill file ${name}`),
+    ...(isString(binTarget) && existsSync(join(packageDir, binTarget)) ? [] : ["the installed package has no file for the bin horsies"]),
+  ];
+}
+
 /**
  * The problems of the installed package: exactly the row's platform package is installed, the package loader loads it,
- * it has no test-only export, the core has not started, and a core handle pings the database. Effects: loads the
- * addon; connects to the database.
+ * it has no test-only export, the core has not started, the entry points and files are there, the public API pings the
+ * database, and, for a row that runs it, the monitoring page is served. Effects: loads the addon; connects to the
+ * database.
  */
-async function packageProblems(packageDir: string, platformPackage: string): Promise<readonly string[]> {
+async function packageProblems(packageDir: string, platformPackage: string, webPage: WebPage): Promise<readonly string[]> {
   const installed = installedPlatformPackages(packageDir, candidatePackages(packageDir, platformPackage));
 
   if (installed.join(" ") !== platformPackage) {
     return [`the installed platform packages are [${installed.join(", ")}], not [${platformPackage}]`];
   }
 
-  const module = (path: string): string => pathToFileURL(join(packageDir, "dist", path)).href;
   // SAFETY: each module is the build of the source module that names its type.
-  const load = (await import(module("native/load.js"))) as LoadModule;
+  const load = (await import(moduleUrl(packageDir, "native/load.js"))) as LoadModule;
   // SAFETY: as above.
-  const processCore = (await import(module("native/process-core/addon.js"))) as ProcessCoreModule;
+  const processCore = (await import(moduleUrl(packageDir, "native/process-core/addon.js"))) as ProcessCoreModule;
   // SAFETY: as above.
-  const coreHandle = (await import(module("native/handle/core-handle.js"))) as CoreHandleModule;
+  const entry = (await import(moduleUrl(packageDir, "index.js"))) as PublicEntry;
   const loaded = load.loadAddon();
 
   if (loaded.kind !== "loaded") {
@@ -187,16 +327,17 @@ async function packageProblems(packageDir: string, platformPackage: string): Pro
   }
 
   const state = coreStateProblem(processCore.processCoreView(loaded.exports).coreState());
-  const handle = coreHandle.buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
-  const ping = await handle.pingDatabase();
+  const ping = await pingProblems(entry);
+  const page = webPage === "run" ? await webPageProblems(entry) : [];
 
-  void (await handle.close());
-  console.log(`loaded ${platformPackage}; ping: ${ping.kind === "done" ? `${ping.record.latencyMs} ms` : JSON.stringify(ping.error)}`);
+  console.log(`loaded ${platformPackage}; page check: ${webPage}`);
 
   return [
     ...testOnlyExportsIn(loaded.exports).map((name) => `the addon exports the test-only ${name}`),
     ...(state === "none" ? [] : [state]),
-    ...(ping.kind === "done" ? [] : [`the ping failed: ${JSON.stringify(ping.error)}`]),
+    ...installedFileProblems(packageDir),
+    ...ping,
+    ...page,
   ];
 }
 
@@ -224,7 +365,14 @@ async function main(args: readonly string[]): Promise<number> {
       return 2;
     }
 
-    const problems = [...importProblems(folder), ...(await packageProblems(installedPackageDir(folder), inputs.platformPackage))];
+    const problems = [...importProblems(folder), ...(await packageProblems(installedPackageDir(folder), inputs.platformPackage, inputs.webPage))];
+    const selectionFolder = mkdtempSync(join(tmpdir(), "horsies-selection-check-"));
+
+    try {
+      problems.push(...selectionProblems(inputs, selectionFolder));
+    } finally {
+      rmSync(selectionFolder, { recursive: true, force: true });
+    }
 
     for (const problem of problems) {
       console.error(`FAIL (${inputs.installer}): ${problem}`);

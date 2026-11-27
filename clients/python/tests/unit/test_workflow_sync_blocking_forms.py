@@ -33,9 +33,9 @@ from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleDbOperationFailed,
-    HandleResumeRecoveryFailed,
-    HandleStoredDataInvalid,
+    WorkflowHandleDatabaseOperationFailed,
+    WorkflowHandleResumeRecoveryFailed,
+    WorkflowHandleStoredDataInvalid,
 )
 from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
@@ -69,12 +69,12 @@ CORE_REFUSAL: Final = core.TooManyPendingCalls('CoreHandle.call', 65_536)
 APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+        database=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
     ),
 )
 
 
-@APP.task(task_name=TASK_NAME)
+@APP.task(name=TASK_NAME)
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -88,35 +88,35 @@ def _record(record_class: type, **fields: object) -> MagicMock:
     return record
 
 
-def _db_operation_failed() -> HandleDbOperationFailed:
+def _db_operation_failed() -> WorkflowHandleDatabaseOperationFailed:
     """The core's answer of a read or write whose connection was lost."""
-    return HandleDbOperationFailed(
+    return WorkflowHandleDatabaseOperationFailed(
         message=f'Status failed for workflow {WORKFLOW_ID}: connection lost',
         retryable=True,
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
-def _stored_data_invalid() -> HandleStoredDataInvalid:
+def _stored_data_invalid() -> WorkflowHandleStoredDataInvalid:
     """The core's answer of a stored value that does not parse."""
-    return HandleStoredDataInvalid(
+    return WorkflowHandleStoredDataInvalid(
         message=f'Status failed for workflow {WORKFLOW_ID}: invalid status: BOGUS',
         workflow_id=WORKFLOW_ID,
-        exception=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
+        cause=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
     )
 
 
-def _recovery_failed() -> HandleResumeRecoveryFailed:
+def _recovery_failed() -> WorkflowHandleResumeRecoveryFailed:
     """The core's answer of a resume whose recovery pass failed after the
     commit."""
-    return HandleResumeRecoveryFailed(
+    return WorkflowHandleResumeRecoveryFailed(
         message=(
             f'Workflow {WORKFLOW_ID} resumed; the recovery pass for its tree failed: '
             'connection lost'
         ),
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
@@ -188,8 +188,8 @@ FACADES: Final[dict[str, Facade]] = {
         },
     ),
     'WorkflowHandle.get': Facade(
-        blocking=lambda handle: handle.get(timeout_ms=250),
-        awaited=lambda handle: handle.get_async(timeout_ms=250),
+        blocking=lambda handle: handle.get(wait_ms=250),
+        awaited=lambda handle: handle.get_async(wait_ms=250),
         blocking_form='wait_workflow_result',
         arguments=(WORKFLOW_KEY,),
         keywords={'timeout_ms': 250},
@@ -430,8 +430,8 @@ def test_get_refuses_a_timeout_as_get_async_refuses_it() -> None:
     """A refused timeout is INVALID_INPUT before any core call, in both forms."""
     answers = _answering('wait_workflow_result', _record(core.WaitTimedOut))
 
-    blocking = _workflow_handle().get(timeout_ms=-1)
-    awaited = asyncio.run(_workflow_handle().get_async(timeout_ms=-1))
+    blocking = _workflow_handle().get(wait_ms=-1)
+    awaited = asyncio.run(_workflow_handle().get_async(wait_ms=-1))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     answers.handle.wait_workflow_result.assert_not_called()
@@ -446,9 +446,9 @@ def test_get_with_no_limit_passes_no_limit() -> None:
 
 
 def test_result_for_refuses_a_node_without_an_id_as_its_async_form() -> None:
-    """A node with no node_id is WORKFLOW_CTX_MISSING_ID before any core call."""
+    """A node with no node_id is WORKFLOW_CONTEXT_MISSING_ID before any core call."""
     answers = _answering('workflow_node_result', _record(core.NodeResultNotStored))
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
 
     blocking = _workflow_handle().result_for(node)
     awaited = asyncio.run(_workflow_handle().result_for_async(node))
@@ -466,7 +466,7 @@ def _spec(
     name: str = 'blocking_forms.flow',
     definition_key: str = 'blocking_forms.flow.v1',
 ) -> WorkflowSpec[int]:
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     return APP.workflow(name, [node], output=node, definition_key=definition_key)
 
 
@@ -496,7 +496,7 @@ START_ANSWERS: Final[dict[str, object]] = {
         retryable=True,
         workflow_name='blocking_forms.flow',
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     ),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }
@@ -509,20 +509,20 @@ def test_start_workflow_gives_the_outcome_of_start_workflow_async(answer: str) -
 
     with patch('horsies._core.WorkflowStartRequest') as request_class:
         blocking = start_workflow(
-            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+            _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
         )
         blocking_request = request_class.call_args
         answers.handle.start_workflow_async.assert_not_called()
         awaited = asyncio.run(
             start_workflow_async(
-                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
             ),
         )
         awaited_request = request_class.call_args
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     assert blocking_request == awaited_request
-    assert blocking_request.kwargs['resend_on_transient_err'] is True
+    assert blocking_request.kwargs['resend_on_transient_error'] is True
     assert blocking_request.kwargs['workflow_id'] == WORKFLOW_KEY
     answers.handle.start_workflow.assert_called_once_with(request_class.return_value)
 

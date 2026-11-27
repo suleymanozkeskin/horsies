@@ -2,9 +2,10 @@
 
 import type {
   BudgetLoadRecord,
-  ClassCoverageRecord,
-  ClassReportRecord,
+  ClaimLimitsRecord,
   DownSlotRecord,
+  ExecutionClassCoverageRecord,
+  ExecutionClassReportRecord,
   ExpiredTaskList,
   ExpiredTaskRecord,
   LastBeatRecord,
@@ -16,7 +17,7 @@ import type {
   StaleTaskRecord,
   StreamStateRecord,
   StreamWaitRecord,
-  WorkerClassLoadRecord,
+  WorkerExecutionClassLoadRecord,
   WorkerStateRecord,
 } from "../native/facades/health.ts";
 import { raiseDefect } from "../native/call/defect.ts";
@@ -25,9 +26,10 @@ import { ClientDefect } from "../thrown-errors.ts";
 import type {
   BoundedTaskList,
   BudgetLoad,
-  ClassCoverage,
-  ClassReport,
+  ClaimLimits,
   DownSlot,
+  ExecutionClassCoverage,
+  ExecutionClassReport,
   ExpiredTaskRow,
   LastBeat,
   Measure,
@@ -36,7 +38,7 @@ import type {
   StaleTaskRow,
   StreamCoverageState,
   StreamWait,
-  WorkerClassLoad,
+  WorkerExecutionClassLoad,
   WorkerStateSnapshot,
 } from "./health-types.ts";
 import { taskIdFromCore } from "../contract/ids.ts";
@@ -69,9 +71,8 @@ export function workerStateSnapshot(record: WorkerStateRecord): WorkerStateSnaps
     snapshotAt: instantOfMicros(record.snapshotAtMicros),
     hostname: record.hostname,
     pid: record.pid,
-    processes: record.processes,
-    maxClaimBatch: record.maxClaimBatch,
-    maxClaimPerWorker: record.maxClaimPerWorker,
+    childCount: record.childCount,
+    claimLimits: claimLimits(record.claimLimits),
     clusterWideCap: Object.freeze({ ...record.clusterWideCap }),
     queues: Object.freeze([...record.queues]),
     queuePriorities: queueMap(record.queuePriorities),
@@ -85,8 +86,8 @@ export function workerStateSnapshot(record: WorkerStateRecord): WorkerStateSnaps
     childrenMemoryMb: measure(record.childrenMemoryMb),
     workerStartedAt: instantOfMicros(record.workerStartedAtMicros),
     slotHealth: slotHealth(record.slotHealth),
-    classCapacity: Object.freeze(
-      record.classCapacity.map((budget) =>
+    executionClassBudgets: Object.freeze(
+      record.executionClassBudgets.map((budget) =>
         Object.freeze({ budget: budget.budget, capacity: budget.capacity, serves: Object.freeze([...budget.serves]) }),
       ),
     ),
@@ -104,23 +105,24 @@ export function expiredTaskList(list: ExpiredTaskList): BoundedTaskList<ExpiredT
   return boundedList(list, expiredTaskRow);
 }
 
-/** The class coverage of a record. */
-export function classCoverage(record: ClassCoverageRecord): ClassCoverage {
+/** The execution class coverage of a record. */
+export function executionClassCoverage(record: ExecutionClassCoverageRecord): ExecutionClassCoverage {
   return Object.freeze({
     checkedAt: instantOfMicros(record.checkedAtMicros),
     liveWorkers: record.liveWorkers,
     streams: Object.freeze(
       record.streams.map((stream) =>
-        Object.freeze({ queueName: stream.queueName, execution: stream.execution, state: streamState(stream.state) }),
+        Object.freeze({ queue: stream.queue, execution: stream.execution, coverage: streamState(stream.coverage) }),
       ),
     ),
   });
 }
 
-/** The class report of a record. */
-export function classReport(record: ClassReportRecord): ClassReport {
+/** The execution class report of a record. */
+export function executionClassReport(record: ExecutionClassReportRecord): ExecutionClassReport {
   return Object.freeze({
     checkedAt: instantOfMicros(record.checkedAtMicros),
+    liveWindow: durationOfMicros(record.liveWindowMicros),
     streams: Object.freeze(record.streams.map(pendingStream)),
     workers: Object.freeze(record.workers.map(workerClassLoad)),
   });
@@ -149,19 +151,19 @@ function boundedList<Row, Out>(
 
 function staleTaskRow(record: StaleTaskRecord): StaleTaskRow {
   return Object.freeze({
-    id: taskIdFromCore(record.id, "staleTasks"),
+    taskId: taskIdFromCore(record.taskId, "staleTasks"),
     taskName: record.taskName,
     workerHostname: recorded(record.workerHostname),
     workerPid: recorded(record.workerPid),
     workerProcessName: recorded(record.workerProcessName),
     startedAt: instantOfMicros(record.startedAtMicros),
-    lastHeartbeat: lastBeat(record.lastHeartbeat),
+    lastHeartbeatAt: lastBeat(record.lastHeartbeatAt),
   });
 }
 
 function expiredTaskRow(record: ExpiredTaskRecord): ExpiredTaskRow {
   return Object.freeze({
-    id: taskIdFromCore(record.id, "expiredTasks"),
+    taskId: taskIdFromCore(record.taskId, "expiredTasks"),
     taskName: record.taskName,
     queueName: record.queueName,
     priority: record.priority,
@@ -207,6 +209,13 @@ function slotHealth(record: SlotHealthRecord): SlotHealth {
   }
 }
 
+function claimLimits(record: ClaimLimitsRecord): ClaimLimits {
+  return Object.freeze({
+    perQueuePerPass: Object.freeze({ ...record.perQueuePerPass }),
+    claimedPerWorker: Object.freeze({ ...record.claimedPerWorker }),
+  });
+}
+
 function measure(record: MeasureRecord): Measure {
   return Object.freeze({ ...record });
 }
@@ -245,10 +254,10 @@ function streamState(record: StreamStateRecord): StreamCoverageState {
 
 function streamWait(record: StreamWaitRecord): StreamWait {
   switch (record.kind) {
-    case "oldestWaiting":
+    case "due":
       return Object.freeze({
-        kind: "oldestWaiting",
-        enqueuedAt: instantOfMicros(record.enqueuedAtMicros),
+        kind: "due",
+        oldestDueAt: instantOfMicros(record.oldestDueAtMicros),
         wait: durationOfMicros(record.waitMicros),
       });
     case "noneDue":
@@ -260,10 +269,10 @@ function streamWait(record: StreamWaitRecord): StreamWait {
 
 function pendingStream(record: PendingStreamRecord): PendingStream {
   return Object.freeze({
-    queueName: record.queueName,
+    queue: record.queue,
     execution: record.execution,
     wait: streamWait(record.wait),
-    state: streamState(record.state),
+    coverage: streamState(record.coverage),
   });
 }
 
@@ -276,7 +285,7 @@ function budgetLoad(record: BudgetLoadRecord): BudgetLoad {
   });
 }
 
-function workerClassLoad(record: WorkerClassLoadRecord): WorkerClassLoad {
+function workerClassLoad(record: WorkerExecutionClassLoadRecord): WorkerExecutionClassLoad {
   return Object.freeze({
     workerId: record.workerId,
     snapshotAt: instantOfMicros(record.snapshotAtMicros),

@@ -38,8 +38,8 @@ Server-paginated, server-sorted, server-filtered task list, plus:
 - Scoped facet filters for worker, task name, queue, and error code. Values OR
   within a dimension and AND across dimensions.
 - An error-code rollup by taxonomy family (`OPERATIONAL`, `CONTRACT`,
-  `RETRIEVAL`, `OUTCOME`, `DOMAIN`). It counts tasks carrying an error code,
-  which includes completed tasks that returned a domain error, so it is not a
+  `RETRIEVAL`, `OUTCOME`, `CUSTOM`). It counts tasks carrying an error code,
+  which includes completed tasks that returned a custom code, so it is not a
   failure count.
 - A grouping pivot by worker, task name, or queue, with a `TOTAL` rollup row.
 - The `Queued` and `Exec` columns write their durations with the rule in
@@ -477,7 +477,7 @@ Every duration in the UI follows one rule:
 - A time with no end yet has the suffix `so far` (`5m 43.9s so far`).
 - The monitoring API sends its durations (`queue_seconds`,
   `execution_seconds`, `wall_seconds`, `uptime_seconds`,
-  `snapshot_age_seconds`, `wait_s`) as seconds with microsecond
+  `snapshot_age_seconds`, `wait_seconds`) as seconds with microsecond
   detail. The digits that the UI shows come from the record.
 - An axis label is a round time: `0`, `0.1ms`, `100ms`, `1s`, `30s`,
   `1m 30s`, `1h`.
@@ -550,7 +550,7 @@ unfiltered view and exact under any active filter.
 When the listener loses its connection, it reconnects, and each stream then
 gets one event with no ids per topic: notifications sent during the gap may
 be lost, so the browser re-reads every surface. If the app's broker has no
-listener (a broker built with `assume_initialized=True`) or the listener
+listener (a broker of `SchemaMode.ASSUME_INITIALIZED`) or the listener
 stopped, the stream emits a `degraded` event and closes; the client falls
 back to polling and keeps retrying. The server never fabricates events.
 
