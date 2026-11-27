@@ -2090,7 +2090,6 @@ mod tests {
 
     #[test]
     fn the_schedule_defaults_are_the_exported_constants() {
-        assert!(DEFAULT_SCHEDULE_ENABLED);
         assert_eq!(DEFAULT_SCHEDULE_TIMEZONE, "UTC");
         assert_eq!(DEFAULT_MAX_CATCH_UP_RUNS, 100);
         assert_eq!(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, 1);
@@ -2106,6 +2105,7 @@ mod tests {
             }),
         );
         assert_eq!(built.enabled, DEFAULT_SCHEDULE_ENABLED);
+        assert!(built.enabled);
         assert_eq!(built.timezone, DEFAULT_SCHEDULE_TIMEZONE);
         assert_eq!(built.max_catch_up_runs, DEFAULT_MAX_CATCH_UP_RUNS);
     }
