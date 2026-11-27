@@ -89,7 +89,7 @@ export function fakeCore(script: CoreScript = {}): FakeCore {
 
       return record("waitEnd", script.wait ?? { kind: "timedOut" });
     },
-    nodeResult: async () => record("nodeResult", script.nodeResult ?? { kind: "notReady" }),
+    nodeResult: async () => record("nodeResult", script.nodeResult ?? { kind: "notStored" }),
     processRole: async () => record("processRole", script.role ?? "RUNS_NO_TASK_BODIES"),
   };
 }

@@ -173,11 +173,11 @@ describe("the workflow reads of a workflow that does not exist, with a database"
     await handle.close();
   });
 
-  test("the result of a node is notReady", async () => {
+  test("the result of a node is workflowAbsent", async () => {
     const handle = testHandle();
     const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, randomUUID(), "charge"));
 
-    assert.deepEqual(read, { kind: "notReady" });
+    assert.deepEqual(read, { kind: "workflowAbsent" });
     await handle.close();
   });
 
@@ -238,6 +238,63 @@ async function startedChildResult(
 
   return { text: read.result.text, calls };
 }
+
+/** Start the workflow of the spec data vector `name` on `handle`; its id. */
+async function startedVectorWorkflow(handle: CoreHandle, name: string): Promise<string> {
+  const vector = specDataFile().vectors.find((candidate) => candidate.name === name);
+
+  assert(vector !== undefined, `the vector file has no vector ${name}`);
+
+  assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled, [])), "registered");
+
+  const prepared = envelopeValue(workflowsAddon().prepareClientSpec(vector.text));
+
+  assert(prepared.kind === "prepared");
+
+  const workflowId = randomUUID();
+
+  const started = envelopeValue(
+    await workflowsAddon().startWorkflow(
+      handle.native,
+      prepared.spec,
+      workflowId,
+      1_795_687_200_000_000n,
+      { kind: "noCarrier" },
+      false,
+    ),
+  );
+
+  assert.deepEqual(started, { kind: "started" });
+
+  return workflowId;
+}
+
+describe("the node result read of a started workflow, with a database", () => {
+  test("a node that exists and stores no result is notStored", async () => {
+    const handle = testHandle();
+    const workflowId = await startedVectorWorkflow(handle, "one_task_node");
+    const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, workflowId, "charge"));
+
+    assert.deepEqual(read, { kind: "notStored" });
+    await handle.close();
+  });
+
+  test("a workflow with no node of the id is nodeAbsent", async () => {
+    const handle = testHandle();
+    const workflowId = await startedVectorWorkflow(handle, "one_task_node");
+    const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, workflowId, "no_such_node"));
+
+    assert.deepEqual(read, { kind: "nodeAbsent" });
+    await handle.close();
+  });
+
+  test("a stored err-only result is stored, with the err slot and no ok value", async () => {
+    // The sub-workflow node of an unlisted child fails at the start: its stored result holds an error only.
+    const { text } = await startedChildResult('{"n":1}', []);
+    assert.match(text, /"ok":null/u);
+    assert.match(text, /"err":\{/u);
+  });
+});
 
 describe("the child spec source and the core's strict check, with a database", () => {
   test("a stored input that the core's strict read refuses fails the node and never calls the build", async () => {

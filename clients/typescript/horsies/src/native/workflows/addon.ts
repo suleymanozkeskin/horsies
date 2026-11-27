@@ -164,10 +164,19 @@ export type WorkflowWaitRead =
   | { readonly kind: "notFound" }
   | { readonly kind: "failed"; readonly error: RawCatalogError };
 
-/** The stored result of one node by its id: the envelope, or none yet (or no node of the id). Not a wait. */
+/**
+ * The stored result of one node by its id. Not a wait:
+ * - `stored`: the node stores a result envelope;
+ * - `notStored`: the node exists and stores no result yet;
+ * - `nodeAbsent`: the workflow has no node of the id;
+ * - `workflowAbsent`: no workflow has the id;
+ * - `failed`: a class of the handle catalog.
+ */
 export type NodeResultRead =
   | { readonly kind: "stored"; readonly result: CheckedText }
-  | { readonly kind: "notReady" }
+  | { readonly kind: "notStored" }
+  | { readonly kind: "nodeAbsent" }
+  | { readonly kind: "workflowAbsent" }
   | { readonly kind: "failed"; readonly error: RawCatalogError };
 
 /** The functions of the `workflows` area. */

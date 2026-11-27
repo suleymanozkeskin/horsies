@@ -21,8 +21,8 @@ describe("task codes", () => {
       ...Object.values(RetrievalCode),
       ...Object.values(OutcomeCode),
     ]);
-    expect(BUILT_IN_TASK_CODES).toHaveLength(37);
-    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(37);
+    expect(BUILT_IN_TASK_CODES).toHaveLength(38);
+    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(38);
     expect(Object.isFrozen(BUILT_IN_TASK_CODES)).toBe(true);
   });
 

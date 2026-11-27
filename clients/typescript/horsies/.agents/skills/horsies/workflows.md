@@ -514,8 +514,9 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 | `WorkflowReadError` `kind` | `code` | Fields | When |
 |---|---|---|---|
 | `waitTimeout` | `WAIT_TIMEOUT` | - | The workflow had not ended when the wait ended |
-| `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
-| `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
+| `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id (also the answer of a `resultFor` of an id that no workflow has) |
+| `nodeNotFound` | `NODE_NOT_FOUND` | - | `resultFor`: the workflow has no node of the id |
+| `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node exists and stores no result yet |
 | `storedResultUnreadable` | `RESULT_DESERIALIZATION_ERROR` | `cause` | The stored value does not read with the handle's types |
 | `unknownCustomCode` | `UNKNOWN_CUSTOM_CODE` | `storedCode` | The stored custom code is not in the node contract's `errorCodes` |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
