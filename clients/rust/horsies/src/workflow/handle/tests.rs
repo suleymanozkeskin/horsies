@@ -716,3 +716,38 @@ fn a_workflow_handle_is_debug_send_and_sync() {
     assert_debug_send_sync::<WorkflowHandle<serde_json::Value>>();
     assert_debug_send_sync::<WorkflowHandle<std::rc::Rc<u8>>>();
 }
+
+/// The core stores `Ok(null)` for the node of a sub-workflow that has no
+/// output. A sub-workflow node of an outputless definition is typed
+/// `OutputlessResults`, which reads a map of node ids: the stored `null`
+/// does not read. DEFECT: Python reads this as `Succeeded(None)`. The test
+/// pins the current refusal; it changes with the fix.
+#[test]
+fn defect_an_outputless_child_node_result_does_not_read_as_outputless_results() {
+    let text = json!({"__h_task_result__": true, "ok": null, "err": null}).to_string();
+    // The read of a downstream node's input (`arg_from`) and the read of
+    // `WorkflowContext::result_for` both decode with `read_stored_result`.
+    let input = serde_json::from_str::<TaskOutcome<OutputlessResults, Infallible>>(&text);
+    assert!(input.is_err(), "current behaviour: {input:?}");
+    let context_read = read_stored_result::<OutputlessResults>(&text);
+    assert!(context_read.is_err());
+    // A read as `serde_json::Value` holds the null, so the stored form is valid.
+    assert_eq!(
+        envelope_outcome::<serde_json::Value, Infallible>(workflow(), &text).unwrap(),
+        TaskOutcome::Succeeded(serde_json::Value::Null)
+    );
+}
+
+/// A parent workflow whose output node is the outputless sub-workflow node
+/// stores `Ok(null)` as its own result. A handle typed `OutputlessResults`
+/// (the node's type) refuses it. DEFECT, as above.
+#[test]
+fn defect_a_handle_read_of_an_outputless_child_node_is_unreadable() {
+    let end = completed(Some(
+        json!({"__h_task_result__": true, "ok": null, "err": null}),
+    ));
+    assert!(matches!(
+        end_outcome::<OutputlessResults>(workflow(), end),
+        Err(WorkflowReadError::StoredResultUnreadable { .. })
+    ));
+}
