@@ -15,6 +15,8 @@ import {
   exportTargets,
   horsiesFileProblems,
   horsiesManifestProblems,
+  lintFileProblems,
+  lintManifestProblems,
   platformFileProblems,
   platformManifestProblems,
 } from "./content.ts";
@@ -151,4 +153,11 @@ export function platformProblems(tarball: PackedTarball, packageDir: string, exp
     ...testOnly,
     ...floor,
   ];
+}
+
+/** The problems of the unpacked lint tarball: its files, and its manifest at the version of the release. Effects: reads the manifest. */
+export function lintProblems(tarball: PackedTarball, packageDir: string, version: string): readonly string[] {
+  const manifest = unpackedManifest(packageDir);
+
+  return [...lintFileProblems(tarball.files, exportTargets(manifest["exports"])), ...lintManifestProblems(manifest, version)];
 }
