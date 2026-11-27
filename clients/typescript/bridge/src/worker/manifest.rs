@@ -303,6 +303,111 @@ mod tests {
     /// The change of one case of the bound test below.
     type ConfigChange = Box<dyn Fn(&mut AppConfig)>;
 
+    /// The bound cases of the fields that the first list of the bound test
+    /// leaves out: together they refuse every kind of `ConfigField`.
+    fn more_bound_cases() -> Vec<(ConfigChange, &'static str)> {
+        let recovery = |path, change: fn(&mut horsies_core::RecoveryConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.recovery));
+            (change, path)
+        };
+        let retention = |path, change: fn(&mut horsies_core::RetentionConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.retention));
+            (change, path)
+        };
+        let resilience = |path, change: fn(&mut horsies_core::WorkerResilienceConfig)| {
+            let change: ConfigChange =
+                Box::new(move |config: &mut AppConfig| change(&mut config.resilience));
+            (change, path)
+        };
+        vec![
+            (
+                Box::new(|config: &mut AppConfig| config.max_claim_renew_age_ms = 0),
+                "maxClaimRenewAgeMs",
+            ),
+            (
+                Box::new(|config: &mut AppConfig| {
+                    config.queue_mode = QueueMode::Custom;
+                    config.custom_queues = Some(vec![horsies_core::CustomQueueConfig {
+                        name: "critical".to_owned(),
+                        priority: 1,
+                        max_concurrency: Some(u32::MAX),
+                    }]);
+                }),
+                "customQueues[0].maxConcurrency.tasks",
+            ),
+            recovery("recovery.claimedStaleThresholdMs", |c| {
+                c.claimed_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.runningStaleThresholdMs", |c| {
+                c.running_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.finalizingStaleThresholdMs", |c| {
+                c.finalizing_stale_threshold_ms = u64::MAX;
+            }),
+            recovery("recovery.crashedWorkerRecoveryGraceMs", |c| {
+                c.crashed_worker_recovery_grace_ms = u64::MAX;
+            }),
+            recovery("recovery.finalizationQuarantineAfterAttempts", |c| {
+                c.finalization_quarantine_after_attempts = u32::MAX;
+            }),
+            recovery("recovery.workflowRecoveryFailureLimit", |c| {
+                c.workflow_recovery_failure_limit = u32::MAX;
+            }),
+            recovery("recovery.orphanTaskAuditIntervalMs", |c| {
+                c.orphan_task_audit_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.runnerHeartbeatIntervalMs", |c| {
+                c.runner_heartbeat_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.claimerHeartbeatIntervalMs", |c| {
+                c.claimer_heartbeat_interval_ms = u64::MAX;
+            }),
+            recovery("recovery.workerStateSnapshotIntervalMs", |c| {
+                c.worker_state_snapshot_interval_ms = u64::MAX;
+            }),
+            retention("retention.workerStateRetention.hours", |c| {
+                c.worker_state_retention_hours = Some(u32::MAX);
+            }),
+            retention("retention.terminalRecordRetention.hours", |c| {
+                c.terminal_record_retention_hours = Some(u32::MAX);
+            }),
+            retention("retention.historyLeafHorizonDays", |c| {
+                c.history_leaf_horizon_days = u32::MAX;
+            }),
+            retention("retention.heartbeatLeafHorizonHours", |c| {
+                c.heartbeat_leaf_horizon_hours = u32::MAX;
+            }),
+            retention(r#"retention.queueRetention["bulk"].days"#, |c| {
+                c.queue_retention
+                    .insert("bulk".to_owned(), Some(chrono::Duration::hours(36)));
+            }),
+            retention("retention.partitionMaintenanceIntervalSeconds", |c| {
+                c.partition_maintenance_interval_seconds = u64::MAX;
+            }),
+            retention("retention.retentionSweepIntervalSeconds", |c| {
+                c.retention_sweep_interval_seconds = u64::MAX;
+            }),
+            retention("retention.retentionDeleteBatchSize", |c| {
+                c.retention_delete_batch_size = u32::MAX;
+            }),
+            resilience("resilience.databaseRetryInitialMs", |c| {
+                c.database_retry_initial_ms = u64::MAX;
+            }),
+            resilience("resilience.databaseRetryMaxMs", |c| {
+                c.database_retry_max_ms = u64::MAX;
+            }),
+            resilience("resilience.databaseRetryMaxAttempts.attempts", |c| {
+                c.database_retry_max_attempts = u64::MAX;
+            }),
+            (
+                Box::new(|config: &mut AppConfig| config.payload.reject_bytes = Some(0)),
+                "payload.rejectBytes.bytes",
+            ),
+        ]
+    }
+
     /// Each value outside its manifest bound is refused with its path as the
     /// TypeScript config writes it and the bound of its field, never the
     /// value. The config is changed after its check, as a value that the
@@ -359,6 +464,10 @@ mod tests {
                 "payload.warnBytes.bytes",
             ),
         ];
+        let cases = cases
+            .into_iter()
+            .chain(more_bound_cases())
+            .collect::<Vec<_>>();
         for (change, path) in cases {
             let (mut config, producer) = read(&config_text(""));
             change(&mut config);
@@ -366,6 +475,139 @@ mod tests {
             assert_eq!(refused.path, path);
             assert!(refused.min <= refused.max, "{refused:?}");
         }
+    }
+
+    /// The profile JSON of a recycle of `after` and `above`, in the config
+    /// text's forms.
+    fn recycle_text(after_key: &str, after: &str, above: &str) -> String {
+        format!(r#"{{"{after_key}": {after}, "above": {above}}}"#)
+    }
+
+    /// The four recycle forms: each task limit with each memory limit.
+    fn recycle_forms() -> [(&'static str, &'static str); 4] {
+        [
+            (
+                r#"{"kind": "no_task_limit"}"#,
+                r#"{"kind": "no_memory_limit"}"#,
+            ),
+            (
+                r#"{"kind": "no_task_limit"}"#,
+                r#"{"kind": "memory_limit", "mb": 512}"#,
+            ),
+            (
+                r#"{"kind": "task_limit", "tasks": 7}"#,
+                r#"{"kind": "no_memory_limit"}"#,
+            ),
+            (
+                r#"{"kind": "task_limit", "tasks": 7}"#,
+                r#"{"kind": "memory_limit", "mb": 512}"#,
+            ),
+        ]
+    }
+
+    /// The task and memory limit that `form` of `recycle_forms` gives, as
+    /// whether each one is set.
+    fn is_limited(after: &wire::TaskLimit, above: &wire::MemoryLimit) -> (bool, bool) {
+        (
+            matches!(after, wire::TaskLimit::Tasks { .. }),
+            matches!(above, wire::MemoryLimit::Megabytes { .. }),
+        )
+    }
+
+    #[test]
+    fn each_recycle_form_of_an_isolated_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"io": {{"isolated": {{"kind": "isolated_children", "count": 1, "recycle": {recycle}}}}}}}"#
+                ),
+                "io",
+            );
+            let wire::Isolated::Children { recycle, .. } = built.isolated else {
+                panic!("the profile has isolated children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_recycle_form_of_a_shared_async_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after_per_seat", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"io": {{"isolated": {{"kind": "no_isolated_children"}}, "shared_async": {{"kind": "shared_async_children", "count": 1, "seats": 2, "recycle": {recycle}}}}}}}"#
+                ),
+                "io",
+            );
+            let wire::SharedAsync::Children { recycle, .. } = built.shared_async else {
+                panic!("the profile has shared async children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after_per_seat, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_recycle_form_of_a_shared_thread_child_is_kept() {
+        for (after, above) in recycle_forms() {
+            let recycle = recycle_text("after_per_seat", after, above);
+            let built = profile(
+                &format!(
+                    r#", "worker_profiles": {{"cpu": {{"isolated": {{"kind": "no_isolated_children"}}, "shared_thread": {{"kind": "shared_thread_children", "count": 1, "seats": 2, "recycle": {recycle}}}}}}}"#
+                ),
+                "cpu",
+            );
+            let wire::SharedThread::Children { recycle, .. } = built.shared_thread else {
+                panic!("the profile has shared thread children");
+            };
+            assert_eq!(
+                is_limited(&recycle.after_per_seat, &recycle.above),
+                (
+                    after.contains("\"task_limit\""),
+                    above.contains("\"memory_limit\"")
+                ),
+                "{after} {above}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_profile_kind_is_with_children_where_it_is_given_and_without_where_it_is_not() {
+        let built = sections(
+            r#", "worker_profiles": {
+                "only_isolated": {"isolated": {"kind": "isolated_children", "count": 1}},
+                "only_async": {"isolated": {"kind": "no_isolated_children"}, "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 2}},
+                "only_thread": {"isolated": {"kind": "no_isolated_children"}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 2}}
+            }"#,
+        )
+        .expect("the sections are inside their bounds")
+        .profiles;
+        let kinds = |name: &str| {
+            let profile = built.get(name).expect("the profile is in the manifest");
+            (
+                matches!(profile.isolated, wire::Isolated::Children { .. }),
+                matches!(profile.shared_async, wire::SharedAsync::Children { .. }),
+                matches!(profile.shared_thread, wire::SharedThread::Children { .. }),
+            )
+        };
+        assert_eq!(kinds("only_isolated"), (true, false, false));
+        assert_eq!(kinds("only_async"), (false, true, false));
+        assert_eq!(kinds("only_thread"), (false, false, true));
     }
 
     #[test]
