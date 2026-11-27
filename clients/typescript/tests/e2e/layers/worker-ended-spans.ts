@@ -393,6 +393,7 @@ describe("the carrier of a rerun", () => {
       await failedCode(source, RESULT_WAIT_MS);
 
       const caller = otel.trace.getTracer("e2e").startSpan("rerun caller");
+
       const rerun = await otel.context.with(otel.trace.setSpan(otel.context.active(), caller), async () =>
         suite.app.rerunTask({ sourceTaskId: source.taskId, goodUntil: { kind: "none" } }, RERUN_POLICY),
       );

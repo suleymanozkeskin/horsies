@@ -44,6 +44,7 @@ const COMMAND_FACTS: { readonly [Name in CommandName]: CommandFacts } = {
 export function cliReportText(): string {
   const blocks = COMMAND_NAMES.toSorted().map((name) => {
     const { usage, flags } = COMMAND_FACTS[name];
+
     const flagLines = Object.entries(flags)
       .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([flag, option]) => `  --${flag} (${option.type})`);
@@ -84,6 +85,7 @@ function main(command: string | undefined): number {
 
       return 1;
     }
+
     default:
       console.error("usage: bun tests/public-api/cli-report.ts check|write");
 
