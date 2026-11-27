@@ -35,7 +35,19 @@ import {
   MONITORING_WINDOW_DEFAULT_SECONDS,
   MONITORING_WINDOW_MAX_SECONDS,
 } from "../../../horsies/src/_catalog/monitoring_bounds.ts";
-import { MAX_WAIT_LIMIT_MS } from "../../../horsies/src/_catalog/send_bounds.ts";
+import {
+  DEFAULT_MAX_CATCH_UP_RUNS,
+  DEFAULT_SCHEDULE_ENABLED,
+  DEFAULT_SCHEDULE_TIMEZONE,
+} from "../../../horsies/src/_catalog/schedule_defaults.ts";
+import {
+  DEFAULT_QUEUE_NAME,
+  DEFAULT_QUEUE_PRIORITY,
+  IDEMPOTENCY_KEY_MAX_BYTES,
+  MAX_WAIT_LIMIT_MS,
+} from "../../../horsies/src/_catalog/send_bounds.ts";
+import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
+import * as scheduleEntry from "../../../horsies/src/schedules/entry.ts";
 import * as sendBounds from "../../../horsies/src/send/bounds.ts";
 
 // The largest exit status that a process reports to its parent.
@@ -74,6 +86,9 @@ const bounds = [
   MAX_EVENT_HANDLERS,
   MAX_HANDLER_NAME_CHARS,
   MAX_WAIT_LIMIT_MS,
+  IDEMPOTENCY_KEY_MAX_BYTES,
+  DEFAULT_QUEUE_PRIORITY,
+  DEFAULT_MAX_CATCH_UP_RUNS,
 ];
 
 describe("generated constant modules", () => {
@@ -99,6 +114,35 @@ describe("generated constant modules", () => {
   test("the longest result wait is the largest u32 of milliseconds, and the send bounds hold no copy", () => {
     expect(MAX_WAIT_LIMIT_MS).toBe(2 ** 32 - 1);
     expect(Object.keys(sendBounds)).not.toContain("MAX_WAIT_LIMIT_MS");
+  });
+
+  test("the idempotency key bound is 255 bytes, and the send bounds hold no copy", () => {
+    expect(IDEMPOTENCY_KEY_MAX_BYTES).toBe(255);
+    expect(Object.keys(sendBounds)).not.toContain("IDEMPOTENCY_KEY_MAX_BYTES");
+  });
+
+  test("the default queue is named default, and the app routes to that name", () => {
+    expect(DEFAULT_QUEUE_NAME).toBe("default");
+    expect(DEFAULT_QUEUE_ROUTE.queueName).toBe(DEFAULT_QUEUE_NAME);
+  });
+
+  test("the default queue priority is 100, the priority of the default queue mode, and the send bounds hold no copy", () => {
+    expect(DEFAULT_QUEUE_PRIORITY).toBe(100);
+    expect(Object.keys(sendBounds)).not.toContain("DEFAULT_QUEUE_PRIORITY");
+  });
+
+  test("a schedule is enabled by default", () => {
+    expect(DEFAULT_SCHEDULE_ENABLED).toBe(true);
+  });
+
+  test("the default schedule zone is UTC, and the schedule entry holds no copy", () => {
+    expect(DEFAULT_SCHEDULE_TIMEZONE).toBe("UTC");
+    expect(Object.keys(scheduleEntry)).not.toContain("DEFAULT_SCHEDULE_TIMEZONE");
+  });
+
+  test("the default catch-up bound is 100, and the schedule entry holds no copy", () => {
+    expect(DEFAULT_MAX_CATCH_UP_RUNS).toBe(100);
+    expect(Object.keys(scheduleEntry)).not.toContain("DEFAULT_MAX_CATCH_UP_RUNS");
   });
 
   test("the label value of an unknown handler fits the length rule of a handler name", () => {

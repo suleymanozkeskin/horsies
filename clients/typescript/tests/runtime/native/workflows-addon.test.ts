@@ -18,7 +18,7 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import type { NativeSendRules } from "../../../horsies/src/native/sends/addon.ts";
 import { checkAppConfig } from "../../../horsies/src/native/sends/sends.ts";
 import { type ChildSpecSourceFunction, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
-import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/send/bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/_catalog/send_bounds.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";

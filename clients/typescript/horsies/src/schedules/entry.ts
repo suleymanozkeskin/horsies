@@ -70,15 +70,9 @@ export interface ScheduleSection {
   readonly checkIntervalSeconds?: number;
 }
 
-// The defaults below are the core's (`core/src/core/config/schedule.rs`: `default_timezone`,
-// `default_max_catch_up_runs`, `default_check_interval`), the same as Python's `TaskSchedule` and `ScheduleConfig`.
-// The generated catalog holds no constant for them yet; issue #2494 moves them to the codegen output.
-
-/** The zone of a schedule that names none. */
-export const DEFAULT_SCHEDULE_TIMEZONE = "UTC";
-
-/** The most slots per check of a catch-up schedule that names no count. */
-export const DEFAULT_MAX_CATCH_UP_RUNS = 100;
+// The defaults of a schedule and of its zone and catch-up bound are the core's, in `_catalog/schedule_defaults.ts`.
+// The core exports no constant for the check interval; its default is the core's `default_check_interval`
+// (`core/src/core/config/schedule.rs`), the same as Python's `ScheduleConfig`.
 
 /** The wait between two checks of a section that names none, in seconds. */
 export const DEFAULT_CHECK_INTERVAL_SECONDS = 1;

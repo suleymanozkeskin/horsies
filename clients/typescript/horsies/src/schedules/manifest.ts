@@ -16,7 +16,7 @@ import {
 import type { QueueSendFacts, SchedulerConfigFacts } from "../native/scheduler/addon.ts";
 import type { SendPriority } from "../native/sends/addon.ts";
 import { raiseDefect } from "../native/call/defect.ts";
-import { DEFAULT_QUEUE_PRIORITY } from "../send/bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../_catalog/send_bounds.ts";
 import type { ListedTask } from "../send/send.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";

@@ -13,6 +13,7 @@ import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { AppContext } from "../app/context.ts";
 import { taskOptionsFacts } from "../app/core-checks.ts";
 import type { HorsiesError } from "../app/refusal.ts";
+import { DEFAULT_SCHEDULE_ENABLED } from "../_catalog/schedule_defaults.ts";
 import { CHECK_INTERVAL_SECONDS_MAX, CHECK_INTERVAL_SECONDS_MIN } from "../_catalog/scheduler_manifest.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { raiseDefect } from "../native/call/defect.ts";
@@ -257,7 +258,7 @@ function nameUse(entries: readonly DeclaredEntry[], name: string, index: number)
 
 function defaultSettings(section: ScheduleSection): SectionSettings {
   return Object.freeze({
-    enabled: section.enabled !== false,
+    enabled: section.enabled ?? DEFAULT_SCHEDULE_ENABLED,
     checkIntervalSeconds: section.checkIntervalSeconds ?? DEFAULT_CHECK_INTERVAL_SECONDS,
   });
 }
