@@ -120,6 +120,28 @@ describe("the worker area of the addon", () => {
     assert.equal(coreState(), "not_started");
   });
 
+  test("the core's parser accepts each form of the metrics endpoint, the handler list, the spans switch and the task facts", () => {
+    const config = configText("postgresql://127.0.0.1:55432/horsies");
+    const base: Record<string, unknown> = JSON.parse(startText({ kind: "NAMED", name: "io" }));
+
+    const forms: readonly (readonly [string, unknown])[] = [
+      ["metrics_endpoint", { kind: "LISTEN_ADDRESS", host: "127.0.0.1", port: 9464 }],
+      ["metrics_endpoint", { kind: "NO_METRICS_ENDPOINT" }],
+      ["handlers", { kind: "HANDLERS", handlers: [{ name: "alerts", event_type: "AttemptEnded" }] }],
+      ["handlers", { kind: "NO_HANDLERS" }],
+      ["worker_ended_spans", "MAKE_SPANS"],
+      ["worker_ended_spans", "NO_SPANS"],
+      ["tasks", { ping: { execution: "SHARED_ASYNC", error_codes: ["CARD_DECLINED"] } }],
+      ["tasks", { ping: { execution: "SHARED_THREAD", error_codes: [] } }],
+    ];
+
+    for (const [member, form] of forms) {
+      const prepared = prepareWorker(config, JSON.stringify({ ...base, [member]: form }), "CAPPED");
+
+      assert.equal(prepared.kind, "prepared", `${member} ${JSON.stringify(form)}`);
+    }
+  });
+
   test("a start member that the core's parser refuses throws ManifestRefused", () => {
     const config = configText("postgresql://127.0.0.1:55432/horsies");
     const start = startText({ kind: "NAMED", name: "io" }).replace('"ISOLATED"', '"FORKED"');
