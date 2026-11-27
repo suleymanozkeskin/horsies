@@ -67,13 +67,13 @@ const PRODUCER_SAMPLE: ProducerManifest = {
 
 /** One pattern of each kind of the generated pattern union. */
 const PATTERNS: readonly SchedulePattern[] = [
-  { type: "interval", seconds: null, minutes: 5, hours: null, days: null },
-  { type: "hourly", minute: 15, second: 0 },
-  { type: "daily", time: Temporal.PlainTime.from("09:00:00") },
-  { type: "weekly", days: ["monday", "friday"], time: Temporal.PlainTime.from("18:30:00") },
-  { type: "monthly", day: 28, time: Temporal.PlainTime.from("02:00:00") },
+  { kind: "interval", every: Temporal.Duration.from({ minutes: 5 }) },
+  { kind: "hourly", minute: 15, second: 0 },
+  { kind: "daily", time: Temporal.PlainTime.from("09:00:00") },
+  { kind: "weekly", weekdays: ["monday", "friday"], time: Temporal.PlainTime.from("18:30:00") },
+  { kind: "monthly", day_of_month: 28, time: Temporal.PlainTime.from("02:00:00") },
   {
-    type: "cron",
+    kind: "cron",
     minute: [{ kind: "values", values: [0, 30] }],
     hour: [{ kind: "range", start: 9, end: 17, step: 2 }],
     month: [{ kind: "every" }],
@@ -89,7 +89,7 @@ function schedulerSample(): SchedulerManifest {
     check_interval_seconds: 1,
     schedules: [
       ...PATTERNS.map((pattern, position) => ({
-        name: `${pattern.type}-schedule-${String(position)}`,
+        name: `${pattern.kind}-schedule-${String(position)}`,
         activation: {
           kind: "ENABLED" as const,
           pattern_json: textOf(schedulePatternToWire(pattern)),
@@ -98,7 +98,7 @@ function schedulerSample(): SchedulerManifest {
           max_catch_up_runs: 100,
           send: {
             task_name: "ping",
-            queue_name: "default",
+            queue: "default",
             priority: 100,
             input_json: "{}",
             task_options: position === 0 ? { kind: "ENCODED" as const, json: '{"timeout_ms":5000}' } : { kind: "NO_OPTIONS" as const },

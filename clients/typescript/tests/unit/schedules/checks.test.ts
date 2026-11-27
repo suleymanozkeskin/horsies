@@ -412,7 +412,7 @@ describe("Horsies.create declares the schedule section of the config", () => {
       scheduler: { kind: "refused" },
       names: ["nightly", "ghost"],
     });
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":0,"second":0}', '{"type":"hourly","minute":0,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":0,"second":0}', '{"kind":"hourly","minute":0,"second":0}']);
   });
 
   test("in a worker thread with no core call", () => {
