@@ -103,7 +103,7 @@ log = "0.4"
 rand = "0.10"
 gethostname = "0.4"
 owo-colors = "4"
-toml = "1"
+toml = { version = "1", features = ["preserve_order"] }
 sysinfo = "0.40"
 libc = "0.2"
 
