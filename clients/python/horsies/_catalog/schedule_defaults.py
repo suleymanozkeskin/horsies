@@ -11,6 +11,7 @@ __all__ = [
     'DEFAULT_SCHEDULE_ENABLED',
     'DEFAULT_SCHEDULE_TIMEZONE',
     'DEFAULT_MAX_CATCH_UP_RUNS',
+    'DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS',
 ]
 
 DEFAULT_SCHEDULE_ENABLED: Final = True
@@ -21,3 +22,6 @@ DEFAULT_SCHEDULE_TIMEZONE: Final = 'UTC'
 
 DEFAULT_MAX_CATCH_UP_RUNS: Final = 100
 """The default of `TaskSchedule.max_catch_up_runs`."""
+
+DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS: Final = 1
+"""The default of `ScheduleConfig.check_interval_seconds`."""

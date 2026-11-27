@@ -1261,6 +1261,9 @@ pub const DEFAULT_SCHEDULE_ENABLED: bool = true;
 /// The default of [`TaskSchedule::timezone`].
 pub const DEFAULT_SCHEDULE_TIMEZONE: &str = "UTC";
 
+/// The default of [`ScheduleConfig::check_interval_seconds`].
+pub const DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS: u32 = 1;
+
 fn default_max_catch_up_runs() -> u32 {
     DEFAULT_MAX_CATCH_UP_RUNS
 }
@@ -1400,7 +1403,7 @@ pub const MAX_CATCH_UP_RUNS_MIN: u32 = 1;
 pub const MAX_CATCH_UP_RUNS_MAX: u32 = 10_000;
 
 fn default_check_interval() -> u32 {
-    1
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
 }
 
 #[cfg(test)]
@@ -2090,6 +2093,11 @@ mod tests {
         assert!(DEFAULT_SCHEDULE_ENABLED);
         assert_eq!(DEFAULT_SCHEDULE_TIMEZONE, "UTC");
         assert_eq!(DEFAULT_MAX_CATCH_UP_RUNS, 100);
+        assert_eq!(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, 1);
+        assert_eq!(
+            ScheduleConfig::default().check_interval_seconds,
+            DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
+        );
         let built = TaskSchedule::new(
             "daily-task",
             "my_task",

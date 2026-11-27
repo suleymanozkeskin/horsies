@@ -19,9 +19,9 @@ use horsies_core::monitoring::{
 };
 use horsies_core::{
     CANCELLED_WRITE_END, DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
-    DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE, IDEMPOTENCY_KEY_MAX_BYTES,
-    LIVENESS_LOCK_LOST_EXIT_CODE, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS,
-    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -299,7 +299,7 @@ pub const QUEUE_DEFAULTS: ConstantModule = ConstantModule {
     constants: &QUEUE_DEFAULT_CONSTANTS,
 };
 
-const SCHEDULE_DEFAULT_CONSTANTS: [CoreConstant; 3] = [
+const SCHEDULE_DEFAULT_CONSTANTS: [CoreConstant; 4] = [
     CoreConstant {
         name: "DEFAULT_SCHEDULE_ENABLED",
         doc: "The default of `TaskSchedule.enabled`.",
@@ -314,6 +314,11 @@ const SCHEDULE_DEFAULT_CONSTANTS: [CoreConstant; 3] = [
         name: "DEFAULT_MAX_CATCH_UP_RUNS",
         doc: "The default of `TaskSchedule.max_catch_up_runs`.",
         value: CoreValue::Integer(DEFAULT_MAX_CATCH_UP_RUNS as i64),
+    },
+    CoreConstant {
+        name: "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+        doc: "The default of `ScheduleConfig.check_interval_seconds`.",
+        value: CoreValue::Integer(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i64),
     },
 ];
 

@@ -17,6 +17,7 @@ from typing_extensions import Self
 from enum import Enum
 from horsies._catalog.schedule_defaults import (
     DEFAULT_MAX_CATCH_UP_RUNS,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
     DEFAULT_SCHEDULE_ENABLED,
     DEFAULT_SCHEDULE_TIMEZONE,
 )
@@ -918,7 +919,10 @@ class ScheduleConfig(BaseModel):
         default_factory=list, description='List of scheduled tasks'
     )
     check_interval_seconds: int = Field(
-        default=1, ge=1, le=60, description='Scheduler check interval (1-60 seconds)'
+        default=DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+        ge=1,
+        le=60,
+        description='Scheduler check interval (1-60 seconds)',
     )
 
     @model_validator(mode='after')
