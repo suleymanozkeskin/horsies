@@ -341,7 +341,13 @@ pub async fn refusal_by_policy(grant: AccessGrant) -> Option<ResponseParts> {
     match (grant.view, grant.act) {
         (Verdict::Refused, _) | (_, Verdict::Refused) => {
             let refused = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
-            Some(response_parts(refused.into_response()).await)
+            let mut answer = response_parts(refused.into_response()).await;
+            // The router's answer carries its length; so does this one.
+            answer.headers.push((
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from(answer.body.len()),
+            ));
+            Some(answer)
         }
         (Verdict::Allowed | Verdict::NotAsked, Verdict::Allowed | Verdict::NotAsked) => None,
     }

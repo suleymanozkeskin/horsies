@@ -3496,12 +3496,14 @@ fn unknown_parameter_refusal(name: &str, input: &str, known: &[&str]) -> serde_j
 /// A route that reads a query refuses a parameter that it does not declare
 /// with 422 `extra_forbidden` naming the parameter and the known ones, and
 /// still accepts every known parameter: the answer then comes from the
-/// first statement (503, the pool is lazy and unreachable), not from the
+/// first statement (`accepted_status`: 503, the pool is lazy and unreachable;
+/// 500 for the worker ping, whose test broker has no listener), not from the
 /// validation. `query` holds one value for each known parameter.
 async fn assert_unknown_parameter_refused_and_known_accepted(
     path: &str,
     known: &[&str],
     query: &str,
+    accepted_status: StatusCode,
 ) {
     let router = test_router(
         Arc::new(AllowAll),
@@ -3528,7 +3530,7 @@ async fn assert_unknown_parameter_refused_and_known_accepted(
         .oneshot(request(Method::GET, &format!("{path}?{query}")))
         .await
         .unwrap();
-    assert_eq!(accepted.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    assert_eq!(accepted.status(), accepted_status, "{path}");
 }
 
 #[tokio::test]
@@ -3545,7 +3547,8 @@ async fn the_task_stats_route_refuses_an_unknown_query_parameter() {
             "error_category",
             "retried_only",
         ],
-        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true",
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&task_name=a&queue=b&worker=c&error_code=d&error_category=OPERATIONAL&retried_only=true",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
@@ -3555,7 +3558,8 @@ async fn the_task_facets_route_refuses_an_unknown_query_parameter() {
     assert_unknown_parameter_refused_and_known_accepted(
         "/api/tasks/facets",
         &["since", "until", "status", "error_category", "retried_only"],
-        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&error_category=TASK_ERROR&retried_only=true",
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&error_category=OPERATIONAL&retried_only=true",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
@@ -3577,7 +3581,8 @@ async fn the_task_breakdown_route_refuses_an_unknown_query_parameter() {
             "retried_only",
             "limit",
         ],
-        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&group_by=queue&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true&limit=10",
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&group_by=queue&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=OPERATIONAL&retried_only=true&limit=10",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
@@ -3601,7 +3606,8 @@ async fn the_task_list_route_refuses_an_unknown_query_parameter() {
             "offset",
             "limit",
         ],
-        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=TASK_ERROR&retried_only=true&sort_field=enqueued_at&sort_direction=ASCENDING&offset=0&limit=10",
+        "since=2026-08-13T12%3A00%3A00Z&until=2026-08-14T12%3A00%3A00Z&status=FAILED&task_name=a&queue=b&worker=c&error_code=d&error_category=OPERATIONAL&retried_only=true&sort_field=enqueued_at&sort_direction=ASCENDING&offset=0&limit=10",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
@@ -3612,6 +3618,7 @@ async fn the_workflow_list_route_refuses_an_unknown_query_parameter() {
         "/api/workflows",
         &["workflow_name", "status", "limit"],
         "workflow_name=a&status=RUNNING&limit=10",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
@@ -3622,6 +3629,7 @@ async fn the_worker_ping_route_refuses_an_unknown_query_parameter() {
         "/api/workers/ping",
         &["timeout_seconds"],
         "timeout_seconds=1.5",
+        StatusCode::INTERNAL_SERVER_ERROR,
     )
     .await;
 }
@@ -3632,6 +3640,7 @@ async fn the_worker_history_route_refuses_an_unknown_query_parameter() {
         "/api/workers/worker-1/history",
         &["limit"],
         "limit=10",
+        StatusCode::SERVICE_UNAVAILABLE,
     )
     .await;
 }
