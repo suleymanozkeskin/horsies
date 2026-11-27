@@ -82,16 +82,9 @@ describe("the reads of an installed database", () => {
     const page = await monitoring.listTasks({ statuses: ["FAILED"], limit: 50 });
 
     assert.ok(page.ok && page.value.total === 0);
-
-    // The database is shared with the other native test files (on Node they run at the same time), so these reads
-    // can hold their rows: the test checks the model of each answer, not its length.
-    const names = await monitoring.listWorkflowNames();
-    const runs = await monitoring.listWorkflowRuns();
-    const schedules = await monitoring.listSchedules();
-
-    assert.ok(names.ok && Array.isArray(names.value), JSON.stringify(names));
-    assert.ok(runs.ok && Array.isArray(runs.value), JSON.stringify(runs));
-    assert.ok(schedules.ok && Array.isArray(schedules.value), JSON.stringify(schedules));
+    assert.deepEqual(await monitoring.listWorkflowNames(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listWorkflowRuns(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listSchedules(), { ok: true, value: [] });
   });
 
   test("each health read answers its value", async () => {
