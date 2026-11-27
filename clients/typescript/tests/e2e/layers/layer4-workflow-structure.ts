@@ -3,8 +3,7 @@
 //
 // The test process starts each workflow with `app.start`; its build runs here, and the worker runs its nodes. The
 // workflows are the ones of `src/workflows/structure.ts`. Each node runs at least 50 ms, so the start of a node is
-// strictly after the end of the nodes it waits for. A workflow has an output node in the TypeScript client, so the
-// Python case of the results of the terminal nodes (`test_default_terminal_results`) waits for #2459.
+// strictly after the end of the nodes it waits for.
 
 import assert from "node:assert/strict";
 import { describe } from "node:test";
@@ -217,6 +216,20 @@ describe("layer 4: workflow structure", () => {
     const handle = await startedHandle("explicit_output", suite.app.start(structure.explicitOutput, {}));
 
     assert.deepEqual(await workflowValue(handle), { final: "result", count: 42 });
+  });
+
+  e2eTest("a workflow with no output node completes with the outcome of each terminal node, by node id", "default", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const handle = await startedHandle("fanout_without_output", suite.app.start(structure.fanoutWithoutOutput, {}));
+    const results = await workflowValue(handle);
+
+    assert.equal(results.kind, "terminalResults");
+    assert.deepEqual([...results.byNodeId.keys()].toSorted(), ["b", "c", "d"]);
+
+    for (const [nodeId, outcome] of results.byNodeId) {
+      assert.deepEqual(outcome, { kind: "succeeded", value: `completed_${nodeId}` }, `terminal node ${nodeId}`);
+    }
   });
 
   e2eTest("a workflow of one node completes with the node's result", "default", async (suite) => {

@@ -66,6 +66,7 @@ describe("the memory cap of a seat isolate", () => {
       settle: (runKey, _taskName, outcome) => {
         outcomes.set(runKey, outcome);
       },
+      isolateEnded: () => undefined,
       serve: async () => assert.fail("the case runs no operation"),
       endChild: (code) => ends.push(code),
       writeLine: () => undefined,

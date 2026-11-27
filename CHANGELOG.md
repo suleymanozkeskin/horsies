@@ -421,6 +421,15 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Python: the signature check refuses a tuple with an unpacked item.**
+  A parameter or return annotation such as `tuple[int, *tuple[bool, ...]]`
+  is refused at registration with `SignatureValidationError`. The error names
+  the task, the position and the supported forms. pydantic stores the unpacked
+  item as a nested array (`[1, [true, false]]`). It has no flat form for it.
+  The TypeScript client stores a tuple with a rest item as one flat array.
+  Use `tuple[T, ...]`, `tuple[T1, T2]`, or a dataclass or `BaseModel` with a
+  `tuple[T, ...]` field.
+
 - **A schema install of the `TYPESCRIPT` client family into an empty
   database records its family row.** The install writes the family row in
   the transaction of the first migration whose `CHECK`

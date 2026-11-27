@@ -30,12 +30,16 @@ use horsies_core::frame_protocol::{WireEvent, MAX_EVENT_HANDLERS};
 use horsies_core::{EventHandlerRefused, EventHandlerSet, HandlerError};
 use napi_derive::napi;
 
-use crate::call::callback::{CallbackFailure, JsCallback, NotRunCause};
+use crate::call::callback::{CallbackFailure, CallbackWait, JsCallback, NotRunCause};
 
 /// The calls of the dispatcher that wait for the JavaScript thread at once:
 /// each handler waits for its call before it takes its next event, so at
 /// most one call per handler waits.
 pub const HANDLER_CALL_QUEUE_BOUND: usize = MAX_EVENT_HANDLERS;
+
+/// The wait of a dispatcher call. A handler is user code of any duration; the
+/// call ends at its answer or at the end of the environment.
+const HANDLER_CALL_WAIT: CallbackWait = CallbackWait::NoBound;
 
 /// One call of the dispatcher: the handler at `index` of the plan takes the
 /// event of the wire text `wire_json` (`WireEvent::of`).
@@ -171,7 +175,7 @@ where
     async move |event: E| -> Result<(), HandlerError> {
         let event: Event = event.into();
         let call = call_of(index, &event)?;
-        answer_of(dispatcher.call(call).await)
+        answer_of(dispatcher.call(call, HANDLER_CALL_WAIT).await)
     }
 }
 
@@ -207,6 +211,9 @@ fn call_failure_text(failure: &CallbackFailure) -> String {
         CallbackFailure::NotRun {
             cause: NotRunCause::EnvClosing,
         } => "the handler did not run: the JavaScript environment is closing".to_owned(),
+        CallbackFailure::NoAnswer { bound } => {
+            format!("the dispatcher gave no answer within {bound:?}")
+        }
         CallbackFailure::Threw { name, message, .. } => {
             format!("the dispatcher threw {name}: {message}")
         }
@@ -285,6 +292,12 @@ mod tests {
                     cause: NotRunCause::EnvClosing,
                 },
                 "closing",
+            ),
+            (
+                CallbackFailure::NoAnswer {
+                    bound: std::time::Duration::from_secs(3),
+                },
+                "no answer within 3s",
             ),
             (
                 CallbackFailure::Threw {

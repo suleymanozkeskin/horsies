@@ -336,6 +336,40 @@ export const deepMixedPaths = defineWorkflow({ ...layer7("deep_mixed_paths"), pa
   };
 });
 
+/** A required task and an optional child that fails; no output node, so `get` reads the outcome of each terminal node. */
+export const outputlessOptionalFailedChild = defineWorkflow({ ...layer7("outputless_optional_failed_child"), parameters: {} }, (w) => {
+  const required = w.task(mark, { value: "required_ok" }, node("e2e_sub_outputless_ok"));
+  const optional = w.subWorkflow(subFail, {}, node("e2e_sub_outputless_fail_child"));
+
+  return { successPolicy: { cases: [{ required: [required] }], optional: [optional] } };
+});
+
+/** A required task, and an optional child whose own child fails; no output node. */
+export const outputlessDeepOptionalFailure = defineWorkflow({ ...layer7("outputless_deep_optional_failure"), parameters: {} }, (w) => {
+  const required = w.task(mark, { value: "required_ok" }, node("l7_deep_outputless_required"));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_outputless_nested_fail"));
+
+  return { successPolicy: { cases: [{ required: [required] }], optional: [nested] } };
+});
+
+/** Two required children that fail: one directly, one through its own child; no output node. */
+export const outputlessDeepRequiredFailures = defineWorkflow({ ...layer7("outputless_deep_required_failures"), parameters: {} }, (w) => {
+  const direct = w.subWorkflow(subFail, {}, node("l7_deep_all_failed_a"));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_all_failed_b"));
+
+  return { successPolicy: { cases: [{ required: [direct, nested] }] } };
+});
+
+/** The paths of `deepMixedPaths`, with no output node: the terminal nodes are the two required children and the optional nested child. */
+export const outputlessDeepMixedPaths = defineWorkflow({ ...layer7("outputless_deep_mixed_paths"), parameters: {} }, (w) => {
+  const ok = w.subWorkflow(subOk, {}, node("l7_deep_mixed_ok_sub"));
+  const source = w.task(failWith, { errorCode: "E2E_UPSTREAM_FAIL" }, node("l7_deep_mixed_failed_source"));
+  const afterFailure = w.subWorkflow(subFailedInput, { value: source }, node("l7_deep_mixed_allow_failed_sub", { runsAfterFailure: true }));
+  const nested = w.subWorkflow(subNestedFailMiddle, {}, node("l7_deep_mixed_nested_optional_fail"));
+
+  return { successPolicy: { cases: [{ required: [ok, afterFailure] }], optional: [source, nested] } };
+});
+
 /** The workflows of this module. */
 export const SUBWORKFLOW_PARENTS = [
   successSurface,
@@ -373,4 +407,8 @@ export const SUBWORKFLOW_PARENTS = [
   deepOptionalFailure,
   deepRequiredFailures,
   deepMixedPaths,
+  outputlessOptionalFailedChild,
+  outputlessDeepOptionalFailure,
+  outputlessDeepRequiredFailures,
+  outputlessDeepMixedPaths,
 ] as const;

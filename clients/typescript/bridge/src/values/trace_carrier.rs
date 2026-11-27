@@ -39,10 +39,6 @@ pub enum TraceArgument {
 impl TraceArgument {
     /// The core's trace of the call, or the refusal of a trace id that is not
     /// lower-case hexadecimal text. Pure.
-    #[allow(
-        dead_code,
-        reason = "the send, workflow and rerun operations of later areas call it"
-    )]
     pub fn send_trace(self) -> Result<SendTrace, BoundaryRefusal> {
         match self {
             Self::NoCarrier => Ok(SendTrace::NoCarrier),

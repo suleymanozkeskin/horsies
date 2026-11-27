@@ -12,8 +12,9 @@
 //   no isolate ended.
 // - A cancel writes the cause into the cell of the run's seat, then posts `cancel`. A cancel of a run that is not on a
 //   seat and not waiting is left: the run ended and the cancel crossed it.
-// - An isolate that ends during a run: the run ends `WORKER_CRASHED` (`isolate-end.ts`), and a new isolate takes the
-//   seat; it runs the providers before it takes a run. A run that comes while no isolate is free waits for that
+// - An isolate that ends during a run: the run ends `WORKER_CRASHED` (`isolate-end.ts`), the seat body observer of the
+//   main thread gets the run's facts and times (`isolateEnded`: the isolate's own span never ends), and a new isolate
+//   takes the seat; it runs the providers before it takes a run. A run that comes while no isolate is free waits for that
 //   isolate; the pool logs the length of each wait. A new isolate that fails its providers, ends before `ready`, does
 //   not start, or is not ready within the start-hook bound ends the child with 173.
 // - Once the pool ends the child, it is `ending`: the child ends after its exit flush, so a run or a cancel that the
@@ -32,6 +33,7 @@ import type { SeatBounds } from "../native/seats/addon.ts";
 import { CHILD_HOOK_FAILED_EXIT_CODE } from "../_catalog/exit_codes.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import type { EndedSeatRun } from "./body-observer.ts";
 import { clearCancel, newCancelCells, requestCancel } from "./cancel-cells.ts";
 import { type IsolateEnd, isolateEndOutcome, isolateEndRecord } from "./isolate-end.ts";
 import {
@@ -87,6 +89,8 @@ export interface SeatHost {
 export interface SeatPoolDeps extends SeatHost {
   /** Settle the run `runKey` of `taskName` with `outcome` (the settle call of the core's seat thread). */
   readonly settle: (runKey: bigint, taskName: string, outcome: SeatOutcome) => void;
+  /** Report a run whose isolate ended before its result, for its span: the seat body observer's `isolateEnded`. It never throws. */
+  readonly isolateEnded: (run: EndedSeatRun) => void;
   /** Run one operation of an isolate on the main thread. Rejects only with a defect of the package. */
   readonly serve: (request: SeatRequest) => Promise<SeatAnswer>;
   /** End the child with `code` through the exit rule. */
@@ -166,7 +170,7 @@ export type SeatStage = "booting" | "free" | "running" | "ended";
 type SeatState =
   | { readonly kind: "booting"; readonly isolate: StartedIsolate; readonly boot: Boot }
   | { readonly kind: "free"; readonly isolate: StartedIsolate }
-  | { readonly kind: "running"; readonly isolate: StartedIsolate; readonly run: SeatRun }
+  | { readonly kind: "running"; readonly isolate: StartedIsolate; readonly run: SeatRun; readonly startedAt: Temporal.Instant }
   | { readonly kind: "ended" };
 
 /** A run that waits for a free isolate, since `since` (the clock). */
@@ -515,6 +519,7 @@ export class SeatPool {
         );
         this.#seats[seat] = { kind: "ended" };
         this.#deps.settle(post.runKey, post.taskName, isolateEndOutcome({ seat, taskId: post.taskId, end }));
+        this.#deps.isolateEnded({ facts: post.facts, startedAt: state.startedAt, endedAt: this.#deps.now() });
         this.#replace(seat);
 
         return;
@@ -603,7 +608,7 @@ export class SeatPool {
     }
 
     clearCancel(this.#cells, seat);
-    this.#seats[seat] = { kind: "running", isolate: state.isolate, run };
+    this.#seats[seat] = { kind: "running", isolate: state.isolate, run, startedAt: this.#deps.now() };
 
     const { runKey, taskName, inputJson, taskId, attempt, facts } = run.post;
 

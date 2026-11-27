@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { horsiesManifestOf, manifestRefusedText, optionalDependenciesOf, packedManifestOf, readHorsiesManifest } from "./manifest.ts";
+import { horsiesManifestOf, manifestRefusedText, optionalDependenciesOf, packedManifestOf, readHorsiesManifest, lintManifestOf, withoutPrivate } from "./manifest.ts";
 import { readPlatformList } from "./platforms.ts";
 import type { ReleasePlatform } from "./platforms.ts";
 
@@ -73,5 +73,19 @@ describe("optionalDependenciesOf and packedManifestOf", () => {
 
     assert.ok(rows.ok);
     assert.equal("private" in packedManifestOf(read.value, rows.value), false);
+  });
+});
+
+describe("withoutPrivate and lintManifestOf", () => {
+  test("withoutPrivate drops the field private and keeps the others", () => {
+    assert.deepEqual(withoutPrivate({ name: "x", private: true, version: "1.0.0" }), { name: "x", version: "1.0.0" });
+  });
+
+  test("lintManifestOf: a JSON object is the manifest", () => {
+    assert.deepEqual(lintManifestOf({ name: "x" }), { name: "x" });
+  });
+
+  test("lintManifestOf: a document that is not an object is no manifest", () => {
+    assert.equal(lintManifestOf([]), undefined);
   });
 });

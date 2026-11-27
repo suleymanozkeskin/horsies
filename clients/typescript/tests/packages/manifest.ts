@@ -76,7 +76,16 @@ export function optionalDependenciesOf(rows: readonly ReleasePlatform[], version
  * the packed tarball is the publishable form that the checks read. Pure.
  */
 export function packedManifestOf(manifest: HorsiesManifest, rows: readonly ReleasePlatform[]): JsonObject {
-  const publishable = Object.fromEntries(Object.entries(manifest.document).filter(([field]) => field !== "private"));
+  return { ...withoutPrivate(manifest.document), optionalDependencies: optionalDependenciesOf(rows, manifest.version) };
+}
 
-  return { ...publishable, optionalDependencies: optionalDependenciesOf(rows, manifest.version) };
+/** The manifest without the field `private`: the publishable form of a committed manifest. Pure. */
+export function withoutPrivate(document: JsonObject): JsonObject {
+  return Object.fromEntries(Object.entries(document).filter(([field]) => field !== "private"));
+}
+
+/** The manifest of the lint package: a JSON object, or `undefined`. Pure. */
+export function lintManifestOf(document: ParsedJson): JsonObject | undefined {
+  // SAFETY: the members of a parsed JSON object are parsed JSON.
+  return isPlainObject(document) ? (document as JsonObject) : undefined;
 }

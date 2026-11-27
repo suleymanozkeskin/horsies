@@ -1,6 +1,6 @@
 // The workflows of the structure layer (Rust `clients/rust/tests/worker/tests/layer4_workflow_structure.rs`, Python
 // `clients/python/tests/e2e/tasks/workflows.py`, the `spec_*` of layer 4): chains, fan-out, fan-in, a diamond, a DAG of
-// seven nodes, an output node, deadlines, failures and a cancel.
+// seven nodes, an output node, a workflow with no output node, deadlines, failures and a cancel.
 
 import { defineWorkflow, h } from "../../../../horsies/src/index.ts";
 import { fail, FinalResult, finalResult, slowStep, step } from "../tasks/workflow-nodes.ts";
@@ -58,6 +58,17 @@ export const fanout = defineWorkflow({ ...named("fanout"), parameters: {}, outpu
   w.task(slowStep, { step: "d", delayMs: FANOUT_BRANCH_MS }, node("d", { after: [root] }));
 
   return { output: b };
+});
+
+/** Python `spec_fanout` as it is (no output): a root, then the terminal nodes b, c, d. */
+export const fanoutWithoutOutput = defineWorkflow({ ...named("fanout_without_output"), parameters: {} }, (w) => {
+  const root = w.task(step, { step: "root" }, node("root"));
+
+  for (const branch of ["b", "c", "d"]) {
+    w.task(step, { step: branch }, node(branch, { after: [root] }));
+  }
+
+  return {};
 });
 
 /** Python `spec_fanin`: the sources a, b, c of `FANIN_SOURCE_MS`, then the aggregate that waits for all three. */
@@ -154,6 +165,7 @@ export const STRUCTURE_WORKFLOWS = [
   linearFailFirst,
   linearFailMid,
   fanout,
+  fanoutWithoutOutput,
   fanin,
   diamond,
   complexDag,
