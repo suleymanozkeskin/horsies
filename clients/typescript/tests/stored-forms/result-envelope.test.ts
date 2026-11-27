@@ -1,6 +1,7 @@
 // result_envelope.json: the text of each `ok` value and of the `data` of each user error that this client writes,
 // and the read of every envelope through the codec's envelope reader and through an `h.taskOutcome` parameter (the
-// envelope that a workflow node gets from its upstream node). The core writes the envelope around the client's text;
+// envelope that a workflow node gets from its upstream node), `TaskHandle.get` and `resultFor` of a workflow handle.
+// The core writes the envelope around the client's text;
 // these tests stand in for it. The named cases are separate tests beside the loops.
 
 import assert from "node:assert/strict";
@@ -18,6 +19,7 @@ import type { RequiredWire } from "../../horsies/src/wire/infer.ts";
 import type { TaskOutcome } from "../../horsies/src/wire/task-error.ts";
 import { kindOf } from "../../horsies/src/wire/wire-type.ts";
 import { sameValue, show } from "../support/values.ts";
+import { taskHandleOutcome, workflowResultForOutcome } from "./read-paths.ts";
 import {
   declaredWires,
   type ErrorNotation,
@@ -128,6 +130,18 @@ describe("result_envelope.json ok values", () => {
 
         assert(sameValue(outcome, { kind: "succeeded", value }), show(outcome));
       });
+
+      test(`${vector.name} [${declared.label}]: TaskHandle.get gives the ok value`, async () => {
+        const outcome = await taskHandleOutcome(declared.wire, vector.text, "COMPLETED");
+
+        assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
+      });
+
+      test(`${vector.name} [${declared.label}]: resultFor of a workflow handle gives the ok value`, async () => {
+        const outcome = await workflowResultForOutcome(declared.wire, vector.text);
+
+        assert(outcome.kind === "succeeded" && sameValue(outcome.value, value), show(outcome));
+      });
     }
   }
 });
@@ -176,6 +190,14 @@ describe("result_envelope.json errors", () => {
 
     test(`${vector.name}: an h.taskOutcome parameter gives the error`, () => {
       assert.deepEqual(taskOutcomeOf(h.json(), vector.text), { kind: "failed", error: expected });
+    });
+
+    test(`${vector.name}: TaskHandle.get gives the error`, async () => {
+      assert.deepEqual(await taskHandleOutcome(h.json(), vector.text, "FAILED"), { kind: "failed", error: expected });
+    });
+
+    test(`${vector.name}: resultFor of a workflow handle gives the error`, async () => {
+      assert.deepEqual(await workflowResultForOutcome(h.json(), vector.text), { kind: "failed", error: expected });
     });
   }
 });

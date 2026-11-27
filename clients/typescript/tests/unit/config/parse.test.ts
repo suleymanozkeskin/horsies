@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 import type { HorsiesError } from "../../../horsies/src/app/refusal.ts";
 import { type AppConfigInput, parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import type { EnvironmentRead } from "../../../horsies/src/config/secret.ts";
+import type { LogFormat, SchemaMode } from "../../../horsies/src/config/process-settings.ts";
 import type { WorkerProfileInput } from "../../../horsies/src/config/worker-profiles.ts";
 
 const DATABASE_URL = "postgresql://horsies:secret@127.0.0.1:55432/horsies";
@@ -279,6 +280,41 @@ describe("parseAppConfig", () => {
     );
   });
 
+  test("the schema mode and the log format have their defaults, and stay out of the core's text", () => {
+    const parsed = parseAppConfig(configWith({}), NO_ENVIRONMENT);
+
+    assert.ok(parsed.ok);
+    assert.equal(parsed.value.schemaMode, "MIGRATE_AND_VALIDATE");
+    assert.deepEqual(parsed.value.logFormat, { kind: "textLogs" });
+    assert.deepEqual(Object.keys(coreObjectOf(configWith({ schemaMode: "OBSERVE_ONLY", logFormat: { kind: "jsonLogs" } }))), [
+      "database",
+      "resend_on_transient_error",
+    ]);
+  });
+
+  test("each schema mode and each log format is kept", () => {
+    for (const schemaMode of ["MIGRATE_AND_VALIDATE", "OBSERVE_ONLY", "ASSUME_INITIALIZED"] as const) {
+      const parsed = parseAppConfig(configWith({ schemaMode }), NO_ENVIRONMENT);
+
+      assert.equal(parsed.ok ? parsed.value.schemaMode : "", schemaMode);
+    }
+
+    for (const kind of ["textLogs", "jsonLogs"] as const) {
+      const parsed = parseAppConfig(configWith({ logFormat: { kind } }), NO_ENVIRONMENT);
+
+      assert.deepEqual(parsed.ok ? parsed.value.logFormat : {}, { kind });
+    }
+  });
+
+  test("a schema mode or a log format outside its union (a caller with no type check) is a TypeError", () => {
+    // A JavaScript caller can pass values that the types refuse.
+    const schemaMode: SchemaMode = Object("MIGRATE");
+    const logFormat: LogFormat = Object({ kind: "xmlLogs" });
+
+    assert.throws(() => parseAppConfig(configWith({ schemaMode }), NO_ENVIRONMENT), TypeError);
+    assert.throws(() => parseAppConfig(configWith({ logFormat }), NO_ENVIRONMENT), TypeError);
+  });
+
   test("a parsed config is frozen, and neither its keys nor its JSON hold the database URL", () => {
     const parsed = parseAppConfig(configWith({}), NO_ENVIRONMENT);
 
@@ -289,7 +325,7 @@ describe("parseAppConfig", () => {
     }
 
     assert.equal(Object.isFrozen(parsed.value), true);
-    assert.deepEqual(Object.keys(parsed.value), ["queues", "resendOnTransientError"]);
+    assert.deepEqual(Object.keys(parsed.value), ["queues", "resendOnTransientError", "schemaMode", "logFormat"]);
     assert.equal(JSON.stringify(parsed.value).includes("secret"), false);
     assert.match(parsed.value.coreConfigJson, /secret/);
   });

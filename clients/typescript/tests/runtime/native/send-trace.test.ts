@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import * as otel from "@opentelemetry/api";
+import pg from "pg";
 
 import { TaskId } from "../../../horsies/src/contract/ids.ts";
 import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
@@ -34,6 +35,32 @@ const OVER_BOUND_PROPAGATOR: otel.TextMapPropagator = {
   extract: (context) => context,
   fields: () => ["traceparent", "baggage"],
 };
+
+/** The stored carrier text of task `taskId`: `null` when the row has none. Effects: one connection to the test database. */
+async function storedCarrier(taskId: string): Promise<string | null> {
+  const client = new pg.Client({ connectionString: testDatabaseUrl() });
+
+  await client.connect();
+
+  try {
+    const result = await client.query<{ trace_carrier: string | null }>("SELECT trace_carrier FROM horsies_tasks WHERE id = $1", [taskId]);
+
+    assert.equal(result.rows.length, 1, `one row for task ${taskId}`);
+
+    return result.rows[0]?.trace_carrier ?? null;
+  } finally {
+    await client.end();
+  }
+}
+
+/** The trace id that the detail read of `taskId` gives: `null` for a task with no trace. */
+async function detailTraceId(app: Horsies, taskId: TaskId): Promise<string | null> {
+  const read = await app.monitoring.getTaskDetail(taskId);
+
+  assert.ok(read.ok && read.value.kind === "found", `the detail of task ${taskId}`);
+
+  return read.value.taskDetail.leaf.traceId;
+}
 
 function tracedApp(): Horsies {
   const created = Horsies.create({
@@ -67,12 +94,31 @@ describe("the trace carrier of a send with a database", () => {
     assert.equal(onlySpan(sdk.spans(), "send send_trace_ping").status.code, otel.SpanStatusCode.UNSET);
   });
 
+  test("the task detail traceId of a send in a span equals the trace id of the send span", async () => {
+    const app = tracedApp();
+    const sent = await app.send(ping, { n: 4 }, { delaySeconds: 3_600 });
+
+    assert.ok(sent.ok);
+    assert.equal(await detailTraceId(app, sent.value.taskId), onlySpan(sdk.spans(), "send send_trace_ping").spanContext().traceId);
+  });
+
+  test("a send with a propagator under the bounds stores the carrier", async () => {
+    const app = tracedApp();
+    const sent = await app.send(ping, { n: 5 }, { delaySeconds: 3_600 });
+
+    assert.ok(sent.ok);
+    assert.match(String(await storedCarrier(sent.value.taskId)), /"traceparent"/u);
+  });
+
   test("a carrier over the core's bounds is not stored, and the send succeeds", async () => {
-    otel.propagation.setGlobalPropagator(OVER_BOUND_PROPAGATOR);
+    // The installed SDK registered a propagator; the API keeps the first one, so remove it before the next.
+    otel.propagation.disable();
+    assert.equal(otel.propagation.setGlobalPropagator(OVER_BOUND_PROPAGATOR), true, "the over-bound propagator is the global one");
 
     const sent = await tracedApp().send(ping, { n: 2 }, { delaySeconds: 3_600 });
 
-    assert.equal(sent.ok, true);
+    assert.ok(sent.ok);
+    assert.equal(await storedCarrier(sent.value.taskId), null);
   });
 });
 
@@ -125,5 +171,21 @@ describe("an SDK that gives upper-case hex ids, with a database", () => {
 
     caller.end();
     assert.deepEqual(answer, { ok: true, value: { kind: "sourceAbsent", taskId: sourceTaskId, reason: "WITHIN_RETAINED_HISTORY" } });
+  });
+});
+
+describe("a send with no SDK, with a database", () => {
+  beforeEach(() => {
+    otel.propagation.disable();
+    otel.trace.disable();
+  });
+
+  test("the task detail gives traceId null and no carrier is stored", async () => {
+    const app = tracedApp();
+    const sent = await app.send(ping, { n: 6 }, { delaySeconds: 3_600 });
+
+    assert.ok(sent.ok);
+    assert.equal(await detailTraceId(app, sent.value.taskId), null);
+    assert.equal(await storedCarrier(sent.value.taskId), null);
   });
 });

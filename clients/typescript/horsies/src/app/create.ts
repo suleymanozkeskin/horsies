@@ -3,6 +3,9 @@
 // Order of the refusals: the config (the TypeScript parse, the tracing step, then the core's check), then the
 // contracts in list order (the list, the queue, the wire types, then the core's checks of the codes and the options).
 //
+// An accepted create then declares the `schedule` section (`schedules/app-member.ts`): its refusals go to the
+// schedules area of the refusal sink, which `check` and the scheduler start read, and never refuse the create.
+//
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
 // checks call the addon's pure check functions, which start no core. On a worker thread only the checks that are
 // TypeScript code run, and no addon loads: a seat isolate reaches the core through the relay of its seat, another
@@ -56,14 +59,24 @@ import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreC
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
 import type { HorsiesError } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
+import { declareSchedules, NATIVE_SCHEDULE_CALLS, type ScheduleCoreCalls, scheduleCoreAccess } from "../schedules/app-member.ts";
+import type { ScheduleSection } from "../schedules/entry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
-/** The config of `Horsies.create`: the app config and the contract lists. */
+/** The config of `Horsies.create`: the app config, the contract lists and the schedules. */
 export type HorsiesConfig = AppConfigInput & {
   /** Every task contract of the app. A send of a contract that is not listed is refused. */
   readonly tasks: readonly AnyTaskContract[];
   /** Every workflow contract of the app. A start, or a sub-workflow node, of an unlisted workflow is refused. */
   readonly workflows?: readonly AnyWorkflowContract[];
+  /**
+   * The schedules of the app and the switches of the scheduler; the `scheduler` command runs them. Each refusal of the
+   * section (a contract that the app does not list, a queue that it does not admit, an input that does not fit the task
+   * or is over the payload bound, a zone that the runtime does not know, a pattern that breaks a rule, a repeated name,
+   * a check interval outside its bound) reaches the check of `check` and of the scheduler start; the worker start skips
+   * them. Left out: no scheduler runs.
+   */
+  readonly schedule?: ScheduleSection;
 };
 
 /** Why `Horsies.create` gives no app: every refusal, in order. */
@@ -87,6 +100,8 @@ export interface CreateEnvironment {
   ) => AddonCore;
   /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otelTracing" }`, on every thread. */
   readonly otelApi: OtelApiLoader;
+  /** The core's checks of a schedule declaration. Called on a main thread only, for a config with a `schedule` section. */
+  readonly scheduleCalls: () => ScheduleCoreCalls;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -98,6 +113,7 @@ export function processEnvironment(): CreateEnvironment {
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
     addonCore: addonCoreOf,
     otelApi: requireOtelApi,
+    scheduleCalls: () => NATIVE_SCHEDULE_CALLS,
   };
 }
 
@@ -125,11 +141,11 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
   if (!environment.mainThread) {
     return !tracing.ok || list.refusals.length > 0 || workflows.refusals.length > 0
       ? refused([...tracingRefusals, ...inListOrder(list.refusals), ...workflows.refusals])
-      : ok(contextOf(parsed.value, list.entries, workerThreadCore(), environment, tracing.value, workflows.registry));
+      : ok(scheduledContext(contextOf(parsed.value, list.entries, workerThreadCore(), environment, tracing.value, workflows.registry), config, environment));
   }
 
   const checks = environment.coreChecks();
-  const accepted = checkConfigWithCore(checks, parsed.value.coreConfigJson);
+  const accepted = checkConfigWithCore(checks, parsed.value.coreConfigJson, parsed.value.schemaMode);
   const options = coreCheckedOptions(checks, list.entries);
 
   const refusals = [
@@ -151,7 +167,19 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
 
   const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options, onMainThread) };
 
-  return ok(contextOf(parsed.value, list.entries, core, environment, tracing.value, workflows.registry));
+  return ok(scheduledContext(contextOf(parsed.value, list.entries, core, environment, tracing.value, workflows.registry), config, environment));
+}
+
+/**
+ * `context` with the declaration of the `schedule` section of `config`, when it has one: the core's checks on a main
+ * thread, the checks that are TypeScript code in a worker thread. Each refusal goes to the refusal sink.
+ */
+function scheduledContext(context: AppContext, config: HorsiesConfig, environment: CreateEnvironment): AppContext {
+  if (config.schedule !== undefined) {
+    declareSchedules(context, config.schedule, scheduleCoreAccess(context, environment.scheduleCalls));
+  }
+
+  return context;
 }
 
 /** The core checks of each listed contract, in list order, and the checked options by task name. */

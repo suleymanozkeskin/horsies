@@ -460,7 +460,7 @@ def _run_fleet_metrics(
             'horsies',
             'metrics',
             instance_path,
-            f'--listen={listen}',
+            f'--metrics-listen={listen}',
             '--log-level=warning',
         ],
         stdout=log_handle,

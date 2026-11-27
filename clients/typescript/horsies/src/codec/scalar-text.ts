@@ -1,7 +1,7 @@
 // The stored text of the scalar values that more than one writer writes: strings, integers of any size, floats.
 
 import { err, ok, type Result } from "../wire/result.ts";
-import { MAX_INT_DIGITS } from "./bounds.ts";
+import { MAX_INT_DIGITS } from "../_catalog/codec_bounds.ts";
 import { pythonFloatText } from "./float-text.ts";
 
 /** Why a scalar value has no stored text. */

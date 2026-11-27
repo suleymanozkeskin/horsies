@@ -7,11 +7,11 @@
 
 import { isMainThread, threadId } from "node:worker_threads";
 
-import { type AnyTaskContract, defineTask, h, Horsies } from "../../../horsies/src/index.ts";
+import { type AnyTaskContract, defineTask, h, Horsies } from "#horsies";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
-import { addInstanceMembers, instanceWorkflows } from "./instance-members.ts";
+import { addInstanceMembers, instanceSchedule, instanceWorkflows } from "./instance-members.ts";
 import { type DefaultTaskInstance, type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
@@ -72,7 +72,12 @@ const DEFAULT_CONTRACTS = [
 
 /** The app of `instance` on `connection`, with its tasks and start members. No I/O: the app connects at its first use. */
 export function buildApp(instance: Instance, connection: Connection): Result<Horsies, string> {
-  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks: instanceTasks(instance), workflows: instanceWorkflows(instance) });
+  const created = Horsies.create({
+    ...instanceConfig(instance, connection),
+    tasks: instanceTasks(instance),
+    workflows: instanceWorkflows(instance),
+    ...instanceSchedule(instance),
+  });
 
   if (!created.ok) {
     return err(created.error.refusals.map((refused) => `${refused.code} ${refused.path}: ${refused.message}`).join("; "));
@@ -101,6 +106,8 @@ export function buildApp(instance: Instance, connection: Connection): Result<Hor
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       implementDefault(app, instance);
   }
@@ -129,6 +136,8 @@ function instanceTasks(instance: Instance): readonly AnyTaskContract[] {
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return DEFAULT_CONTRACTS;
   }
@@ -200,6 +209,8 @@ function addFailingStartMember(app: Horsies, instance: DefaultTaskInstance): voi
     case "scheduler_invalid_rules":
     case "scheduler_invalid_task":
     case "handlers":
+    case "handler_hook_throws":
+    case "handler_hook_past_bound":
     case "worker_ended_spans":
       return;
   }

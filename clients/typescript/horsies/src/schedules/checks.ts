@@ -1,5 +1,5 @@
-// The checks of one schedule at `app.schedules`, in the order of the Python client; the first failing check of a
-// schedule wins:
+// The checks of one schedule of the `schedule` section, in the order of the Python client; the first failing check of
+// a schedule wins:
 //
 // 1. Every schedule, the checks of its fields (Python's `TaskSchedule` and `ScheduleConfig`): the pattern has a
 //    stored text and, on a main thread, keeps the core's rules; `maxCatchUpRuns` is a whole number inside its bound;

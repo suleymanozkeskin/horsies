@@ -8,8 +8,8 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import { TaskId } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { TaskId } from "#horsies";
+import { loadAddon } from "#horsies";
 import * as scheduled from "../src/tasks/scheduled.ts";
 import { succeeded } from "../support/outcome.ts";
 import { found, NOT_YET, pollFor } from "../support/poll.ts";
@@ -17,8 +17,8 @@ import { exitText, type TestProcess } from "../support/process.ts";
 import { type RowTime, sqlText } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for a schedule to fire and its task to run. */
 const FIRE_WAIT_MS = 20_000;

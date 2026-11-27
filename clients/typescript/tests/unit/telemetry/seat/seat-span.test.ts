@@ -59,9 +59,9 @@ function apiWithBrokenSpans(member: "end" | "recordException"): OtelApi {
     ...api,
     trace: {
       ...api.trace,
-      getTracer: (name) => ({
+      getTracer: (name, version) => ({
         startSpan: (spanName, options, context) => {
-          const span = api.trace.getTracer(name).startSpan(spanName, options, context);
+          const span = api.trace.getTracer(name, version).startSpan(spanName, options, context);
 
           const broken = (): never => {
             throw new Error(`the SDK is broken at ${member}`);

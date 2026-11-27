@@ -24,6 +24,7 @@ import {
   type HorsiesConfig,
   type TaskSchedule,
   type ScheduleSection,
+  taskSchedule,
   type TaskOutcome,
   type WorkerProfileInput,
 } from "../../../horsies/src/index.ts";
@@ -270,7 +271,7 @@ export const PROFILES: { readonly [Name in ProfileName]: WorkerProfileInput } = 
 };
 
 /** The schedule `parity_slots`: each slot sends `parity.add` with 2 and 3 (Python `TaskSchedule` of `app.py`). */
-export const PARITY_SCHEDULE: TaskSchedule<typeof add> = {
+export const PARITY_SCHEDULE: TaskSchedule = taskSchedule({
   name: SCHEDULE_NAME,
   task: add,
   input: { a: 2, b: 3 },
@@ -278,10 +279,10 @@ export const PARITY_SCHEDULE: TaskSchedule<typeof add> = {
   timezone: "UTC",
   catchUpMissed: true,
   maxCatchUpRuns: SCHEDULE_MAX_CATCH_UP_RUNS,
-};
+});
 
-/** The schedule section of the parity app (Python `ScheduleConfig(check_interval_seconds=1)`). */
-export const SCHEDULE_SECTION: ScheduleSection = { checkIntervalSeconds: SCHEDULE_CHECK_INTERVAL_S };
+/** The schedule section of the parity app (Python `ScheduleConfig(schedules=[...], check_interval_seconds=1)`). */
+export const SCHEDULE_SECTION: ScheduleSection = { schedules: [PARITY_SCHEDULE], checkIntervalSeconds: SCHEDULE_CHECK_INTERVAL_S };
 
 /** The config of the parity app on `databaseUrl`. Pure. */
 export function parityConfig(databaseUrl: string): HorsiesConfig {
@@ -295,6 +296,7 @@ export function parityConfig(databaseUrl: string): HorsiesConfig {
     workerProfiles: PROFILES,
     tasks: TASKS,
     workflows: WORKFLOWS,
+    schedule: SCHEDULE_SECTION,
   };
 }
 
@@ -321,7 +323,6 @@ export function buildApp(databaseUrl: string): Result<Horsies, string> {
   }
 
   implementTasks(created.value);
-  created.value.schedules([PARITY_SCHEDULE], SCHEDULE_SECTION);
 
   return ok(created.value);
 }

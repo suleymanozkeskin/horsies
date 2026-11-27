@@ -2,7 +2,7 @@
 name = "horsies"
 version = "0.8.1"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.95"
 description = "Rust client of the horsies task queue and workflow engine"
 license = "MIT"
 repository = "https://github.com/suleymanozkeskin/horsies"
@@ -78,7 +78,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 # body.
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",
     "uuid",
@@ -90,7 +90,7 @@ tokio-postgres = { version = "=0.7.18", features = [
     "with-uuid-1",
     "with-chrono-0_4",
 ], optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
     "fmt",

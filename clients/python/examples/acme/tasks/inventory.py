@@ -40,6 +40,7 @@ from ..domain import (
     StockReservation,
     StocktakeSummary,
     SupplierFeed,
+    SupplierRetryCode,
 )
 from . import store_failure
 
@@ -183,9 +184,10 @@ def _feed_window() -> str:
 @app.task(
     'sync_supplier_feed',
     queue=QUEUE_ANALYTICS,
+    error_codes=SupplierRetryCode,
     retry_policy=RetryPolicy.fixed(
         tuning.SUPPLIER_RETRY_INTERVALS_SECONDS,
-        retry_for=[SUPPLIER_TIMEOUT, OperationalCode.WORKER_CRASHED],
+        retry_for=[SupplierRetryCode.SUPPLIER_TIMEOUT, OperationalCode.WORKER_CRASHED],
     ),
     exception_mapper={TimeoutError: SUPPLIER_TIMEOUT},
 )

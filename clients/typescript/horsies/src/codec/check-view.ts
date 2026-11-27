@@ -10,7 +10,7 @@ import type { DefaultText, Kind, MemberPresence, ObjectKind, TaggedUnionKind } f
 import { err, ok, type Result } from "../wire/result.ts";
 import { lazyTarget } from "../wire/lazy.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import type { JsonText } from "./json-text.ts";
 import { decodeValue } from "./reader.ts";
 import { encodeRefused, type EncodeRefused, entryPath, itemPath, memberPath, refusalText } from "./refusal.ts";

@@ -1127,6 +1127,9 @@ function readSample(
             "StreamWait",
             "SlotHealth",
             "DatabaseLiveness",
+            "DownSlot",
+            "ErrorFacet",
+            "ExecutionClassReport",
             "TerminalNodeStatus",
         ] {
             assert!(names.iter().any(|name| name == expected), "{expected}");

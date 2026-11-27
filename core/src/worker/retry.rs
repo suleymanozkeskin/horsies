@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use serde_json::value::RawValue;
 
 mod stored_policy;
@@ -531,7 +531,7 @@ impl RetryRule {
         };
         let floored = base.max(MIN_RETRY_DELAY_SECONDS);
         let jittered = match self.jitter {
-            true => floored + rand::thread_rng().gen_range(0.0..=floored * JITTER_FRACTION),
+            true => floored + rand::rng().random_range(0.0..=floored * JITTER_FRACTION),
             false => floored,
         };
         match self.delay_cap {

@@ -7,7 +7,7 @@
 // and `err` of its contract in its second argument (`ResultConstructors`), so a wrong value or code fails typecheck
 // at its own line.
 
-import { BUILT_IN_TASK_CODES, RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
+import { BUILT_IN_TASK_CODES, RESERVED_NON_TASK_CODES } from "../_catalog/task_code.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import type { Execution } from "../_catalog/monitoring_models.ts";

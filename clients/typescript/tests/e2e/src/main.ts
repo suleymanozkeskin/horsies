@@ -18,8 +18,8 @@ import "./addon-loads.ts";
 
 import { isMainThread } from "node:worker_threads";
 
-import { cli, type Horsies } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { cli, type Horsies } from "#horsies";
+import { loadAddon } from "#horsies";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { buildApp } from "./app.ts";
 import { connectionFromEnv } from "./connection.ts";
@@ -39,8 +39,8 @@ function processSteps(): void {
     process.stderr.write(`horsies e2e entry: the entry marker: ${markerErrorText(marked.error)}\n`);
   }
 
-  // The addon of these processes is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-  void requireDevAddon();
+  // The addon of these processes is the one that the entry of the lane loads (`entry/`).
+  void loadAddon();
 }
 
 void runProcessSteps(entryThread(isMainThread), processSteps);

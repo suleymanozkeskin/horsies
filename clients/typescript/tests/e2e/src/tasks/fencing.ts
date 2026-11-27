@@ -2,7 +2,7 @@
 // `clients/python/tests/e2e/test_fencing_token.py`): one per execution class that the TypeScript worker runs, one that
 // reads it twice and in work that it started, and one that a retry runs again.
 
-import { defineTask, h, type Horsies, type TaskRuntime } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies, type TaskRuntime } from "#horsies";
 import { markerErrorText, nextAttempt } from "../markers.ts";
 
 /** A fencing token that a body read: the task id and the value. */

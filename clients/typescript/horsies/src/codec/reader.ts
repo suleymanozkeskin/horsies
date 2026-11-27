@@ -28,7 +28,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
 import { outcomeValueKind } from "../wire/task-outcome.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import { issuesText } from "./conversion.ts";
 import { readEnvelopeSlots } from "./envelope.ts";

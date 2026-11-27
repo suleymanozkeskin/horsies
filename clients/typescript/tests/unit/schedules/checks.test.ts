@@ -1,7 +1,7 @@
-// The checks of `app.schedules`: each check of a schedule, of the section and of the whole declaration lands in the
-// schedules refusal list with its code and its place; the first failing check of a schedule wins; a disabled
+// The checks of the `schedule` section: each check of a schedule, of the section and of the whole declaration lands in
+// the schedules refusal list with its code and its place; the first failing check of a schedule wins; a disabled
 // schedule needs no listed task; the worker start skips the list and `check` reads it; a worker thread runs no core
-// check.
+// check; `Horsies.create` declares the section of the config once.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -10,8 +10,12 @@ import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { areaScopes, staticCheck } from "../../../horsies/src/check/static-check.ts";
 import { scheduleDeclaration } from "../../../horsies/src/schedules/app-member.ts";
 import { zoneReading } from "../../../horsies/src/schedules/zone.ts";
-import { fakeChecks } from "../app/support.ts";
+import { createHorsies } from "../../../horsies/src/app.ts";
+import { taskSchedule } from "../../../horsies/src/schedules/entry.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
+import { DATABASE_URL, fakeChecks, fakeEnvironment } from "../app/support.ts";
 import {
+  appOf,
   customModeApp,
   declare,
   defaultModeApp,
@@ -26,7 +30,7 @@ import {
   upstreamOnly,
 } from "./support.ts";
 
-describe("app.schedules: each check lands in the schedules refusal list", () => {
+describe("the schedule section: each check lands in the schedules refusal list", () => {
   test("a contract that is not in the tasks list", () => {
     const context = declare(defaultModeApp(), [{ name: "ghost", task: unlisted, input: {}, pattern: HOURLY }], {
       kind: "core",
@@ -217,7 +221,7 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
     );
 
     assert.deepEqual(scheduleRefusals(context), [
-      ["HRS-205", "schedules section", "schedules section: checkIntervalSeconds: 0.5 is not a whole number from 1 to 60"],
+      ["HRS-205", "schedule section", "schedule section: checkIntervalSeconds: 0.5 is not a whole number from 1 to 60"],
       ["HRS-205", "schedules[0] a", "schedules[0] a: maxCatchUpRuns: 2.5 is not a whole number from 1 to 10000"],
       ["HRS-205", "schedules[1] b", "schedules[1] b: maxCatchUpRuns: 0 is not a whole number from 1 to 10000"],
       ["HRS-205", "schedules[2] c", "schedules[2] c: maxCatchUpRuns: 10001 is not a whole number from 1 to 10000"],
@@ -228,7 +232,7 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
     const over = declare(defaultModeApp(), [], { kind: "core", calls: fakeCore() }, { checkIntervalSeconds: 61 });
 
     assert.deepEqual(scheduleRefusals(over), [
-      ["HRS-205", "schedules section", "schedules section: checkIntervalSeconds: 61 is not a whole number from 1 to 60"],
+      ["HRS-205", "schedule section", "schedule section: checkIntervalSeconds: 61 is not a whole number from 1 to 60"],
     ]);
 
     for (const checkIntervalSeconds of [1, 60]) {
@@ -278,24 +282,21 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
       kind: "declared",
       section: { enabled: true, checkIntervalSeconds: 1 },
       scheduler: { kind: "refused" },
+      names: ["a", "b"],
     });
   });
 
-  test("a second app.schedules call; the first declaration stays", () => {
+  test("a second declaration of one app is a defect; the first declaration stays", () => {
     const app = defaultModeApp();
     const first = declare(app, [{ name: "a", task: ping, input: {}, pattern: HOURLY }], { kind: "core", calls: fakeCore() });
     const kept = scheduleDeclaration(first);
 
-    declare(app, [{ name: "b", task: ping, input: {}, pattern: HOURLY }], { kind: "core", calls: fakeCore() });
-
-    assert.deepEqual(scheduleRefusals(first), [
-      ["HRS-205", "app.schedules", "app.schedules: app.schedules is called a second time; the schedules of the first call stay"],
-    ]);
+    assert.throws(() => declare(app, [{ name: "b", task: ping, input: {}, pattern: HOURLY }], { kind: "core", calls: fakeCore() }), ClientDefect);
     assert.equal(scheduleDeclaration(first), kept);
   });
 });
 
-describe("app.schedules: the order, the disabled schedules and the threads", () => {
+describe("the schedule section: the order, the disabled schedules and the threads", () => {
   test("the first failing check of a schedule wins, in Python's order; every schedule is checked", () => {
     const context = declare(
       defaultModeApp(),
@@ -332,6 +333,7 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
       kind: "declared",
       section: { enabled: true, checkIntervalSeconds: 1 },
       scheduler: { kind: "prepared", scheduler: FAKE_SCHEDULER },
+      names: ["paused"],
     });
   });
 
@@ -369,12 +371,75 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
       kind: "declared",
       section: { enabled: true, checkIntervalSeconds: 1 },
       scheduler: { kind: "notPrepared" },
+      names: ["nightly"],
     });
   });
 
-  test("an app with no app.schedules call has no declaration; an empty list is a declaration", () => {
+  test("an app with no schedule section has no declaration; an empty list is a declaration", () => {
     assert.deepEqual(scheduleDeclaration(appInternals(defaultModeApp())), { kind: "notDeclared" });
     assert.equal(scheduleDeclaration(declare(defaultModeApp(), [], { kind: "noCore" })).kind, "declared");
+  });
+});
+
+describe("Horsies.create declares the schedule section of the config", () => {
+  test("on a main thread with the schedule calls of the environment; a refusal does not refuse the create", () => {
+    const core = fakeCore();
+
+    const app = appOf(
+      {
+        database: { databaseUrl: DATABASE_URL },
+        tasks: [report, ping, upstreamOnly],
+        schedule: {
+          enabled: false,
+          checkIntervalSeconds: 5,
+          schedules: [
+            taskSchedule({ name: "nightly", task: report, input: { format: "pdf" }, pattern: HOURLY }),
+            taskSchedule({ name: "ghost", task: unlisted, input: {}, pattern: HOURLY }),
+          ],
+        },
+      },
+      core,
+    );
+
+    const context = appInternals(app);
+
+    assert.deepEqual(scheduleRefusals(context), [
+      ["HRS-300", "schedules[1] ghost", "schedules[1] ghost: the task unlisted is not in the tasks list of this app"],
+    ]);
+    assert.deepEqual(scheduleDeclaration(context), {
+      kind: "declared",
+      section: { enabled: false, checkIntervalSeconds: 5 },
+      scheduler: { kind: "refused" },
+      names: ["nightly", "ghost"],
+    });
+    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":0,"second":0}', '{"type":"hourly","minute":0,"second":0}']);
+  });
+
+  test("in a worker thread with no core call", () => {
+    const created = createHorsies(
+      {
+        database: { databaseUrl: DATABASE_URL },
+        tasks: [report],
+        schedule: { schedules: [taskSchedule({ name: "nightly", task: report, input: { format: "pdf" }, pattern: HOURLY })] },
+      },
+      fakeEnvironment({ mainThread: false }),
+    );
+
+    assert.ok(created.ok);
+    assert.deepEqual(scheduleDeclaration(appInternals(created.value)), {
+      kind: "declared",
+      section: { enabled: true, checkIntervalSeconds: 1 },
+      scheduler: { kind: "notPrepared" },
+      names: ["nightly"],
+    });
+  });
+
+  test("an entry keeps its fields, and its input is the object that it was given", () => {
+    const input = { format: "pdf" };
+    const entry = taskSchedule({ name: "nightly", task: report, input, pattern: HOURLY, timezone: "UTC", enabled: false });
+
+    assert.deepEqual({ ...entry }, { name: "nightly", task: report, input, pattern: HOURLY, timezone: "UTC", enabled: false });
+    assert.ok(Object.isFrozen(entry));
   });
 });
 

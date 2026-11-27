@@ -11,7 +11,11 @@ import { appInternals } from "../../../horsies/src/app/internals.ts";
 import type { CoreChecks } from "../../../horsies/src/app/core-checks.ts";
 import { staticCheck } from "../../../horsies/src/check/static-check.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
-import { MAX_EVENT_HANDLERS } from "../../../horsies/src/events/bounds.ts";
+import {
+  MAX_EVENT_HANDLERS,
+  MAX_HANDLER_NAME_CHARS,
+  UNKNOWN_HANDLER_NAME,
+} from "../../../horsies/src/_catalog/event_bounds.ts";
 import { onEventFor, registeredHandlers, servedEventMembers } from "../../../horsies/src/events/register.ts";
 import type { EventHandlerOptions, HandlerChildStartHook } from "../../../horsies/src/events/types.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
@@ -57,10 +61,10 @@ describe("app.onEvent", () => {
     assert.deepEqual(context.refusals.recorded(), []);
   });
 
-  test("a name of 255 characters outside the Basic Multilingual Plane is taken: the rule counts characters", () => {
+  test("a name of the most characters outside the Basic Multilingual Plane is taken: the rule counts characters", () => {
     const hub = app();
 
-    hub.onEvent("SlotDown", { name: "\u{1F40E}".repeat(255) }, noop);
+    hub.onEvent("SlotDown", { name: "\u{1F40E}".repeat(MAX_HANDLER_NAME_CHARS) }, noop);
     assert.deepEqual(refusalCodes(appInternals(hub)), []);
   });
 
@@ -73,8 +77,8 @@ describe("app.onEvent", () => {
     onEventFor(context, "AttemptFinished", { name: "unknown_type" }, noop);
     onEventFor(context, "TaskClaimed", { name: "not_a_function" }, { handle: noop });
     hub.onEvent("TaskClaimed", { name: "" }, noop);
-    hub.onEvent("TaskClaimed", { name: "x".repeat(256) }, noop);
-    hub.onEvent("TaskClaimed", { name: "(unknown)" }, noop);
+    hub.onEvent("TaskClaimed", { name: "x".repeat(MAX_HANDLER_NAME_CHARS + 1) }, noop);
+    hub.onEvent("TaskClaimed", { name: UNKNOWN_HANDLER_NAME }, noop);
     hub.onEvent("TaskClaimed", { name: "first" }, noop);
 
     assert.deepEqual(refusalCodes(context), [

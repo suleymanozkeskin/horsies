@@ -40,7 +40,7 @@ export const SCHEDULER_USAGE = "<entry> scheduler [--log-level LEVEL]";
 export const SCHEDULER_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `scheduler`. */
-const SCHEDULER_FLAGS = {
+export const SCHEDULER_FLAGS = {
   "log-level": { type: "string" },
 } as const;
 

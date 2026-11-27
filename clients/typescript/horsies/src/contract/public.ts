@@ -21,7 +21,7 @@ export {
 
 export { type IdRefused, TaskId, WorkflowId } from "./ids.ts";
 
-export { RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
+export { RESERVED_NON_TASK_CODES } from "../_catalog/task_code.ts";
 
 export type { RoleOf } from "../wire/infer.ts";
 

@@ -97,7 +97,7 @@ describe("the scheduler run", () => {
     assert.equal(staticCheck(context, fakeChecks(), "withSchedules", "check").kind, "refused");
   });
 
-  test("no app.schedules call: notConfigured, and nothing starts", async () => {
+  test("no schedule section: notConfigured, and nothing starts", async () => {
     const deps = runDeps({ kind: "stopped" });
 
     assert.deepEqual(await runSchedulerOf(appInternals(schedulerApp()), { logLevel: "INFO" }, deps), err({ kind: "notConfigured" }));
@@ -243,8 +243,8 @@ describe("the scheduler command", () => {
     assert.deepEqual(
       ERRORS.map((error) => schedulerRunErrorText(error)),
       [
-        "no schedules: the app makes no app.schedules call before cli.run",
-        "the scheduler is disabled: the app.schedules section has enabled: false",
+        "no schedules: the app config has no schedule section",
+        "the scheduler is disabled: the schedule section has enabled: false",
         "error[HRS-205]: schedules[0] a: a rule\nerror: aborting due to 1 previous errors",
         "schedule 'a' cannot be sent",
         "the scheduler start failed: connection refused",

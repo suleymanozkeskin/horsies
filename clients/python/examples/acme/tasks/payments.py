@@ -36,6 +36,7 @@ from ..domain import (
     PaymentCapture,
     PaymentIntent,
     PaymentRefund,
+    PaymentRetryCode,
     ReconciliationReport,
 )
 from . import store_failure
@@ -72,10 +73,11 @@ def _stored_authorization(
 @app.task(
     'authorize_payment',
     queue=QUEUE_PAYMENTS,
+    error_codes=PaymentRetryCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.PSP_RETRY_BASE_SECONDS,
         max_retries=tuning.PSP_MAX_RETRIES,
-        retry_for=[PSP_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
+        retry_for=[PaymentRetryCode.PSP_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def authorize_payment(

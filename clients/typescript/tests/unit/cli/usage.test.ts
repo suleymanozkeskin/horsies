@@ -54,4 +54,23 @@ describe("the flag parse", () => {
       "horsies worker: error: bad",
     ]);
   });
+
+  test("a valid parse gives the values of the flags", () => {
+    const parsed = parseFlags(["--profile", "a", "--live"], FLAGS);
+
+    assert.deepEqual(parsed.ok && { ...parsed.value }, { profile: "a", live: true });
+  });
+
+  test("each refusal is a usage error with the message of the rule", () => {
+    const refusals: readonly (readonly [readonly string[], string])[] = [
+      [["--unknown"], "Unknown option '--unknown'"],
+      [["--profile"], "Option '--profile <value>' argument missing"],
+      [["--live=yes"], "Option '--live' does not take an argument"],
+      [["extra"], "Unexpected argument 'extra'. This command does not take positional arguments"],
+    ];
+
+    for (const [args, message] of refusals) {
+      assert.deepEqual(parseFlags(args, FLAGS), { ok: false, error: { kind: "usageError", message } }, args.join(" "));
+    }
+  });
 });

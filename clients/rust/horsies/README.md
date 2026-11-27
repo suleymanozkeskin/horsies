@@ -116,7 +116,7 @@ cargo run -- check                      # checks the app without a database
 | `tokio-postgres` | off | Rerun of a task in the caller's `tokio_postgres::Transaction`. |
 | `sqlx` | off | Rerun of a task in the caller's `sqlx::Transaction<'_, Postgres>`. |
 
-Minimum Rust version: 1.91.
+Minimum Rust version: 1.95.
 
 ## Documentation
 

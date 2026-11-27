@@ -257,7 +257,7 @@ class TestValueThatIsTooDeep:
             )
 
         assert raised.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-        assert 'Circular reference detected (depth exceeded)' in ' '.join(
+        assert 'Maximum serialization depth exceeded' in ' '.join(
             raised.value.notes,
         )
 

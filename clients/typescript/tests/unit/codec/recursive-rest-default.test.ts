@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/_catalog/codec_bounds.ts";
 import { checkView } from "../../../horsies/src/codec/check-view.ts";
 import type { CheckFailure } from "../../../horsies/src/codec/conversion.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";

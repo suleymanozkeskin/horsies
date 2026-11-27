@@ -14,7 +14,7 @@
 // - `e2e_core_panic_then_send`: on its first run the panic comes while the body waits before a send. Later runs
 //   return their process id.
 
-import { defineTask, h, type Horsies } from "../../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies } from "#horsies";
 import type { Result } from "../../../../horsies/src/wire/result.ts";
 import { armForwarderPanic, type ForwarderPanicAddon, forwarderPanicAddon, type ProbeRefused, probeRefusedText } from "../forwarder-panic.ts";
 import { appendLine, createOnce, markerErrorText } from "../markers.ts";

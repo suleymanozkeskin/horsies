@@ -78,7 +78,8 @@ const app = created.value;
 
 ## `HorsiesConfig`
 
-`HorsiesConfig` is `AppConfigInput` plus the contract lists. Only
+`HorsiesConfig` is `AppConfigInput` plus the contract lists and the
+`schedule` section. Only
 `database.databaseUrl` is required. A field that the config leaves out takes
 the core's default: the package holds no copy of a default.
 
@@ -86,6 +87,7 @@ the core's default: the package holds no copy of a default.
 |---|---|---|
 | `tasks` | `readonly AnyTaskContract[]` | `tasks.md` |
 | `workflows` | `readonly AnyWorkflowContract[]` | `workflows.md` |
+| `schedule` | `ScheduleSection`: `enabled?`, `schedules: readonly TaskSchedule[]`, `checkIntervalSeconds?` (1 to 60, default 1) | `scheduling/schedule-config` |
 | `queueMode`, `customQueues` | `"default"`, or `"custom"` with a non-empty `CustomQueueInput[]` | `concepts/queue-modes` |
 | `database` | `DatabaseConfigInput` | `configuration/broker-config` |
 | `clusterWideCap` | `ClusterCapSetting`: `{ kind: "clusterCap", tasks }` or `{ kind: "noClusterCap" }` (the default) | `workers/concurrency` |
@@ -97,6 +99,8 @@ the core's default: the package holds no copy of a default.
 | `resilience` | `ResilienceConfigInput` | `workers/worker-architecture` |
 | `workerProfiles` | `Readonly<Record<string, WorkerProfileInput>>` | `workers/concurrency` |
 | `resendOnTransientError` | `boolean`, default `false` | `operations/atomic-enqueue-and-topology` |
+| `schemaMode` | `SchemaMode`: `"MIGRATE_AND_VALIDATE"` (the default), `"OBSERVE_ONLY"` or `"ASSUME_INITIALIZED"` | `configuration/broker-config` |
+| `logFormat` | `LogFormat`: `{ kind: "textLogs" }` (the default) or `{ kind: "jsonLogs" }` | `configuration/app-config` |
 
 The shared pages are under `https://suleymanozkeskin.github.io/horsies/`,
 for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-config/`.
@@ -107,6 +111,51 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
   does not compile.
 - `resendOnTransientError: true` sends again, up to 3 times, after a send
   fails with a transient database error.
+- `schemaMode` is the mode of the app's core handle: the producer, the
+  scheduler, `web` and the task sends of each worker child use it.
+  `"OBSERVE_ONLY"` runs no schema statement; `"ASSUME_INITIALIZED"` runs no
+  schema statement and uses no listener. The worker's own connection always
+  migrates and validates, and `check --live` reads through a connection of
+  its own with `"OBSERVE_ONLY"`.
+
+### `schedule`
+
+Each entry of `schedules` comes from `taskSchedule`, which checks the input
+against the input type of the entry's task contract. A plain object is no
+entry: it does not compile.
+
+<!-- ts-check: alone -->
+```ts
+import { defineTask, h, Horsies, taskSchedule } from "horsies";
+
+const buildReport = defineTask({ name: "build_report", input: { format: h.string() }, output: h.null() });
+
+const created = Horsies.create({
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  tasks: [buildReport],
+  schedule: {
+    schedules: [
+      taskSchedule({
+        name: "daily-report",
+        task: buildReport,
+        input: { format: "pdf" },
+        pattern: { kind: "daily", time: Temporal.PlainTime.from("09:00") },
+        timezone: "Europe/Berlin",
+      }),
+    ],
+    checkIntervalSeconds: 5,
+  },
+});
+```
+
+- `Horsies.create` records the section once. A refusal of an entry (a
+  contract that the app does not list, a queue that it does not admit, an
+  input that does not fit or is over the payload bound, an unknown zone, a
+  pattern that breaks a rule, a repeated name) or of the check interval goes
+  to the report of `check` and of the scheduler start; the worker start
+  skips them, and the create is not refused.
+- `enabled: false` on the section stops the `scheduler` command at its start;
+  on an entry it keeps the entry's name known and sends nothing.
 
 ### `database`
 
@@ -352,6 +401,13 @@ configureLogging({
 - Each command of `cli.run` sets every logger to the threshold of its
   `--log-level`, so the thresholds that the entry set before `cli.run` do not
   stay. The sink stays.
+- The worker, the scheduler, `check` and each worker child write the stderr
+  lines in the app's `logFormat`. `{ kind: "jsonLogs" }` writes one JSON
+  object per line with the same keys in every record: `ts` (ISO 8601 in UTC,
+  in microseconds), `level`, `logger`, `message`, `process`, `task_id`,
+  `task_name`, `attempt`, `trace_id`, `span_id` (`null` when the record has no
+  field of that name) and `exc` (`null`). The output is ASCII. A sink
+  function gets the records, so the format does not apply to it.
 
 ## The Check
 
@@ -515,6 +571,9 @@ import {
   type TaskCap, type CustomQueueInput, type QueueConfigInput, type PayloadPolicyInput, type PayloadBound,
   type RecoveryConfigInput, type RetentionConfigInput, type HoursRetention, type PausedWorkflowExpiry,
   type RetentionPeriod, type QueueRetention, type ResilienceConfigInput, type RetryAttempts,
+  type SchemaMode, type LogFormat,
+  // Schedules
+  taskSchedule, type ScheduleSection, type TaskSchedule, type TaskScheduleOptions, type SchedulePattern,
   // Worker profiles
   type WorkerProfileInput, type IsolatedChildren, type IsolatedRecycleInput, type IsolatedPoolInput,
   type SharedAsyncChildren, type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,

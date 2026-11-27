@@ -30,6 +30,7 @@ from ..domain import (
     SHIPMENT_NOT_FOUND,
     CourierBooking,
     ShippingLabel,
+    ShippingRetryCode,
     TrackingSeed,
 )
 from . import store_failure
@@ -38,10 +39,11 @@ from . import store_failure
 @app.task(
     'book_courier',
     queue=QUEUE_FULFILLMENT,
+    error_codes=ShippingRetryCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.COURIER_RETRY_BASE_SECONDS,
         max_retries=tuning.COURIER_MAX_RETRIES,
-        retry_for=[COURIER_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
+        retry_for=[ShippingRetryCode.COURIER_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def book_courier(

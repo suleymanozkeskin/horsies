@@ -1,7 +1,7 @@
 // The checks of a kind tree that the static types cannot make. `Horsies.create` reports each refusal with the code
 // of a task signature refusal.
 
-import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import type { JsonText } from "../codec/json-text.ts";
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { type EncodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";

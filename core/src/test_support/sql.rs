@@ -1266,14 +1266,12 @@ impl TestListener {
             while let Some(Ok(message)) =
                 std::future::poll_fn(|context| connection.poll_message(context)).await
             {
-                match message {
-                    AsyncMessage::Notification(notification) => {
-                        if sender.send(notification).await.is_err() {
-                            break;
-                        }
-                    }
-                    // A notice, or a message of a later driver version.
-                    _ => {}
+                // A notice, or a message of a later driver version, is skipped.
+                let AsyncMessage::Notification(notification) = message else {
+                    continue;
+                };
+                if sender.send(notification).await.is_err() {
+                    break;
                 }
             }
         }));

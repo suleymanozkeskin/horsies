@@ -6,16 +6,11 @@
 // The error: `exception`, `error_code`, `data`, `message`; a sub-workflow error adds `sub_workflow_id` and
 // `sub_workflow_summary`.
 
+import { BUILTIN_CODE_KEY, ERROR_DATA_DEPTH_LIMIT, TASK_RESULT_ENVELOPE_KEY } from "../_catalog/codec_bounds.ts";
+import { BUILT_IN_TASK_CODES, RESERVED_NON_TASK_CODES } from "../_catalog/task_code.ts";
 import type { BuiltInTaskCode, ExceptionRecord, SubWorkflowFailure, TaskError } from "../wire/task-error.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import {
-  BUILTIN_CODE_KEY,
-  BUILT_IN_TASK_CODES,
-  ERROR_DATA_DEPTH_LIMIT,
-  RESERVED_NON_TASK_CODES,
-  TASK_RESULT_ENVELOPE_KEY,
-} from "./bounds.ts";
 import type { JsonText } from "./json-text.ts";
 import { decodeJsonNode, type JsonValue } from "./json-value.ts";
 import { isTreeObject, readTree, type TreeObject, type TreeValue } from "./number-text.ts";

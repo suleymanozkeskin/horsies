@@ -29,7 +29,7 @@ import {
 } from "./attributes.ts";
 import { NO_CARRIER, sendTraceOf } from "./carrier.ts";
 import type { SpansNotMade } from "./not-made.ts";
-import { INSTRUMENTATION_SCOPE, type OtelApi, type OtelSpan } from "./otel-api.ts";
+import { INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION, type OtelApi, type OtelSpan } from "./otel-api.ts";
 import { recordSendPoint, type SendPoint, type SendResultLabel } from "./producer-metrics.ts";
 import type { TelemetryWarnings } from "./warnings.ts";
 
@@ -101,7 +101,7 @@ function openSendSpan(deps: SendTelemetryDeps, facts: SendSpanFacts): OpenedSend
   try {
     const parent = api.context.active();
 
-    const span = api.trace.getTracer(INSTRUMENTATION_SCOPE).startSpan(
+    const span = api.trace.getTracer(INSTRUMENTATION_SCOPE, INSTRUMENTATION_SCOPE_VERSION).startSpan(
       `send ${facts.taskName}`,
       {
         kind: api.SpanKind.PRODUCER,

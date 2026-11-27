@@ -1,5 +1,5 @@
-// The schedule patterns of `app.schedules`: typed patterns told apart by `kind`, with no cron strings (the model of
-// `SchedulePattern`, `CronSchedule` and `DaySelector` of the Python and Rust clients), and their stored text.
+// The schedule patterns of the `schedule` section: typed patterns told apart by `kind`, with no cron strings (the
+// model of `SchedulePattern`, `CronSchedule` and `DaySelector` of the Python and Rust clients), and their stored text.
 //
 // - The stored text is the core's pattern text, the form of Python's `pattern.model_dump(mode="json")`. The generated
 //   `schedulePatternToWire` gives the wire value and the manifest text writer writes it.
@@ -7,7 +7,7 @@
 //   weeks), a duration part below a second, and a number that is not a safe integer (a whole number from
 //   -(2^53 - 1) to 2^53 - 1, the integers that a JavaScript number holds exactly). Every other rule of a pattern
 //   (the bounds, a repeated day, the cron domains, a cron pattern that never fires, a time of day with a fraction of
-//   a second) is the core's rule (`SchedulePattern::validate`): `app.schedules` asks the core on a main thread, and the
+//   a second) is the core's rule (`SchedulePattern::validate`): the declaration asks the core on a main thread, and the
 //   core's manifest parser applies it again at the scheduler start.
 
 import {

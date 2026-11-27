@@ -52,7 +52,7 @@ use crate::handle::core_handle::CoreHandle;
 use crate::logging::bridge::{running_log, DrainOutcome};
 use crate::logging::levels::RecordLevel;
 use crate::process_core::runtime::{pure_call_refusal, Core};
-use crate::sends::checks::{check_app_config, AppConfigCheck};
+use crate::sends::checks::{check_app_config, AppConfigCheck, AppSchemaMode};
 use crate::sends::refusals::{CoreRefusal, RefusalHelp};
 use crate::values::boundary::bigint_of_u64;
 use crate::worker::manifest::{config_sections, ConfigSections, ManifestBoundRefused};
@@ -60,6 +60,11 @@ use crate::worker::start::StartPart;
 
 /// The subject of `prepareWorker` in its refusals.
 const PREPARE_SUBJECT: &str = "prepare_worker";
+
+/// The schema mode of the producer manifest that `prepareWorker` reads. The
+/// worker manifest takes only the database section of that manifest; the
+/// worker's own connection installs the schema in the core.
+const WORKER_READ_SCHEMA_MODE: AppSchemaMode = AppSchemaMode::MigrateAndValidate;
 
 /// The subject of the run, in its refusals and records.
 const RUN_SUBJECT: &str = "run_worker";
@@ -233,9 +238,11 @@ fn thread_seats(plan: &WorkerPlan) -> ThreadSeats {
 
 /// The core's config of `text` and the producer manifest of its broker
 /// settings. `Horsies.create` accepted the same text, so a refusal here is a
-/// defect of the package: `CLIENT_DEFECT`. Pure.
+/// defect of the package: `CLIENT_DEFECT`. The worker manifest reads only
+/// the database section of the producer manifest, not its schema mode
+/// ([`WORKER_READ_SCHEMA_MODE`]). Pure.
 fn accepted_config(text: &str) -> Result<(AppConfig, ProducerManifest), NativeThrown> {
-    let manifest_json = match check_app_config(text.to_owned()) {
+    let manifest_json = match check_app_config(text.to_owned(), WORKER_READ_SCHEMA_MODE) {
         Envelope::Value(AppConfigCheck::Accepted { manifest_json, .. }) => manifest_json,
         Envelope::Value(AppConfigCheck::Refused { refusals }) => {
             return Err(config_defect(&format!(

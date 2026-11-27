@@ -7,7 +7,7 @@ error[E0308]: mismatched types
    |          arguments to this method are incorrect
    |
    = note: expected struct `TypedNodeRef<i64>`
-              found struct `TypedNodeRef<std::string::String>`
+              found struct `TypedNodeRef<String>`
 note: method defined here
   --> $WORKSPACE/clients/rust/horsies/src/workflow/node.rs
    |

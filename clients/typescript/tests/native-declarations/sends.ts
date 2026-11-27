@@ -58,10 +58,13 @@ import type {
   NativeProbeChildProducer,
   ProbeClose,
 } from "../runtime/native/child-producer-probe.ts";
+import type { SchemaMode } from "../../horsies/src/_catalog/manifest.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const checkAppConfigMatches: SameFunction<typeof Generated.checkAppConfig, SendsAddon["checkAppConfig"]> =
   true;
+
+export const schemaModeMatches: Mutual<Generated.AppSchemaMode, SchemaMode> = true;
 
 export const parseDeclaredErrorCodesMatches: SameFunction<
   typeof Generated.parseDeclaredErrorCodes,

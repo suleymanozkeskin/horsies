@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { describe } from "node:test";
 
-import type { TaskHandle, TaskId } from "../../../horsies/src/index.ts";
-import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import type { TaskHandle, TaskId } from "#horsies";
+import { loadAddon } from "#horsies";
 import { CLUSTER_WIDE_CAP, CUSTOM_QUEUES, type Profile } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as custom from "../src/tasks/custom.ts";
@@ -15,8 +15,8 @@ import { pause, type TestProcess } from "../support/process.ts";
 import { maxDuring, pollUntil, setTime, sqlText } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
-// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
-void requireDevAddon();
+// The addon of these tests is the one that the entry of the lane loads (`entry/`).
+void loadAddon();
 
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 30_000;

@@ -1882,7 +1882,7 @@ class TestCreateTaskWrapperSend:
         assert isinstance(result.err_value.cause, ValueValidationError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: serialization failed: '
-            'Circular reference detected (depth exceeded)'
+            'Maximum serialization depth exceeded'
         )
         app.get_broker.assert_not_called()
 

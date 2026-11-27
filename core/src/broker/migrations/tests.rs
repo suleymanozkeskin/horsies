@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha384};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::Client;
@@ -126,7 +126,7 @@ impl MigrationTestDatabase {
 /// A lock with a key of the test's own and a short wait.
 fn test_lock() -> InstallLockPlan {
     InstallLockPlan {
-        key: rand::thread_rng().gen_range(1..i64::MAX),
+        key: rand::rng().random_range(1..i64::MAX),
         wait: Duration::from_millis(200),
     }
 }
@@ -1458,7 +1458,7 @@ async fn a_busy_lock_refuses_after_its_wait_and_changes_nothing() {
 async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeated() {
     let database = MigrationTestDatabase::create().await;
     let lock = InstallLockPlan {
-        key: rand::thread_rng().gen_range(1..i64::MAX),
+        key: rand::rng().random_range(1..i64::MAX),
         wait: Duration::from_secs(60),
     };
     let holder = database.hold_lock(lock.key).await;
@@ -1498,7 +1498,7 @@ async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeate
 async fn an_installer_of_another_family_that_waits_for_the_lock_is_refused_after_the_wait() {
     let database = MigrationTestDatabase::create().await;
     let lock = InstallLockPlan {
-        key: rand::thread_rng().gen_range(1..i64::MAX),
+        key: rand::rng().random_range(1..i64::MAX),
         wait: Duration::from_secs(60),
     };
     let holder = database.hold_lock(lock.key).await;
@@ -1589,7 +1589,7 @@ async fn wait_for_a_lock_try(observer: &Client, holder_pid: i32) -> bool {
 async fn an_installer_that_waits_for_the_lock_does_not_block_a_concurrent_index_build() {
     let database = MigrationTestDatabase::create().await;
     let lock = InstallLockPlan {
-        key: rand::thread_rng().gen_range(1..i64::MAX),
+        key: rand::rng().random_range(1..i64::MAX),
         wait: Duration::from_secs(60),
     };
     let holder = database.hold_lock(lock.key).await;

@@ -5,7 +5,7 @@
 // stop at the core's bound of a user value (`TooDeep`). A cycle with no such level (a nullable or a union of itself)
 // has no stored value of a finite depth: `level` finds it with a walk of bounded length, and `checkKind` refuses it.
 
-import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
 import type { Kind, LazyKind, LazyLevel } from "./kinds.ts";
 import { unreachable } from "./unreachable.ts";
 

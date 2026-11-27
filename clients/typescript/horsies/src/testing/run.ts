@@ -7,7 +7,8 @@
 // 3. the stored outcome reads as a task read gives it: the value, or the task error.
 // A custom code that the core's rules would refuse is not checked here: that check needs the addon.
 
-import { BUILT_IN_TASK_CODES, MAX_JSON_DEPTH } from "../codec/bounds.ts";
+import { MAX_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
+import { BUILT_IN_TASK_CODES } from "../_catalog/task_code.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { decodeValue } from "../codec/reader.ts";
 import { decodeJsonNode } from "../codec/json-value.ts";

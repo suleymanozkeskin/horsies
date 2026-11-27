@@ -9,7 +9,7 @@ import {
   type RuntimeWorkflowContext,
   type TaskError,
   type TaskOutcome,
-} from "../../../../horsies/src/index.ts";
+} from "#horsies";
 import { err, ok, type Result } from "../../../../horsies/src/wire/result.ts";
 import { errorCode } from "../../support/outcome.ts";
 import { markerErrorText, nextAttempt } from "../markers.ts";
