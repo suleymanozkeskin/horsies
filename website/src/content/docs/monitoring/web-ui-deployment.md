@@ -133,6 +133,8 @@ stream cannot hold the broker's result waiters. The stream's subscriptions
 start on the first SSE subscriber and are held for the app's lifetime, so
 there is no per-request LISTEN churn.
 
+A handler serves at most 256 open event streams (`MAX_OPEN_EVENT_STREAMS`). A stream requested past the bound gets one `degraded` frame and ends, and the handler logs a warning. The dashboard falls back to polling for that viewer. A stream that ends frees its place.
+
 Size the pool for the number of concurrent dashboard viewers, and read
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the
 monitoring app at a transaction-pooled URL.

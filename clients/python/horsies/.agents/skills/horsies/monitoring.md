@@ -415,7 +415,8 @@ cancel_task(app, task_id: uuid.UUID, *, policy=CancelPolicy.PENDING_OR_CLAIMED_O
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id; nothing changed |
 | `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` with `CancelPolicy.PENDING_OR_CLAIMED_ONLY`; nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | `TaskActionIsWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
-| `DATABASE_OPERATION_FAILED` | `TaskActionDatabaseOperationFailed` | `cause` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DATABASE_OPERATION_FAILED` | `TaskActionDatabaseOperationFailed` | `cause` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel failed before the server committed it: the statement was not sent, or the server refused it. Nothing changed |
+| `OUTCOME_UNKNOWN` | `TaskActionOutcomeUnknown` | `cause` (the core's class of the cause) | the core's classification | 503 when `retryable`, else 500 | The cancel statement was sent and its reply was lost: the cancel may have committed. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`, and a cancel that did not commit cancels the task |
 | `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `cause` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
 `cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
@@ -430,6 +431,9 @@ of its own; subscriptions start at the first stream) to `horsies_task_status`,
 (250 ms), and fans out over `GET /api/events` (SSE). After a listener
 reconnect each stream gets one event with no ids per topic; a broker with
 `SchemaMode.ASSUME_INITIALIZED` has no listener, and its stream sends `degraded`.
+A handler serves at most 256 open event streams (`MAX_OPEN_EVENT_STREAMS`); a stream
+requested past the bound gets one `degraded` frame and ends, and the handler logs a warning.
+A stream that ends frees its place.
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
 schedules table always polls (its table has no trigger). A task's start
@@ -458,7 +462,7 @@ from horsies.monitoring import (
     cancel_task, CancelPolicy, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
     TaskActionNotFound, TaskActionNotCancellable, TaskActionIsWorkflowTask,
-    TaskActionDatabaseOperationFailed, TaskActionStoredDataInvalid,
+    TaskActionDatabaseOperationFailed, TaskActionOutcomeUnknown, TaskActionStoredDataInvalid,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,
     MonitoringQueryDatabaseOperationFailed, MonitoringQueryHistoryContractViolation,

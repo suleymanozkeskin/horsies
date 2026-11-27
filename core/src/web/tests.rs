@@ -1894,7 +1894,7 @@ async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_b
         crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
-    let mut subscription = broadcaster.subscribe().await;
+    let mut subscription = broadcaster.subscribe().await.expect("under the bound");
 
     let mut transaction = pool.begin().await.unwrap();
     for (channel, payload) in [
@@ -1945,7 +1945,7 @@ async fn a_listener_gap_sends_one_refresh_per_topic() {
         crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
-    let mut subscription = broadcaster.subscribe().await;
+    let mut subscription = broadcaster.subscribe().await.expect("under the bound");
 
     let terminated: i64 = sql::query_scalar(
         "SELECT count(*) FROM (
@@ -1987,7 +1987,7 @@ async fn a_listener_that_cannot_start_degrades_the_stream() {
         crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(25));
-    let mut subscription = broadcaster.subscribe().await;
+    let mut subscription = broadcaster.subscribe().await.expect("under the bound");
 
     let item = tokio::time::timeout(Duration::from_secs(5), subscription.recv())
         .await
@@ -3456,6 +3456,27 @@ async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
     }
     assert!(!body.contains("\nhorsies_queue_tasks{"), "{body}");
     assert!(!body.contains("\nhorsies_schema_version "), "{body}");
+}
+
+/// A refused subscription is the degraded frame and the end.
+#[tokio::test]
+async fn a_refused_event_stream_is_the_degraded_frame_and_the_end() {
+    let mut frames = super::events::EventFrames::degraded(Duration::from_secs(15));
+
+    assert_eq!(
+        frames.next().await,
+        super::events::EventStreamItem::Frame("data: {\"topic\": \"degraded\"}\n\n".to_owned())
+    );
+    assert_eq!(frames.next().await, super::events::EventStreamItem::Ended);
+}
+
+/// A handler under its bound of open streams gives the stream that
+/// [`MonitoringHandler::try_subscribe_events`] returns.
+#[tokio::test]
+async fn a_handler_under_its_bound_subscribes_an_event_stream() {
+    let handler = granted_handler(Actions::Enabled);
+
+    assert!(handler.try_subscribe_events().await.is_ok());
 }
 
 /// A broker without a session URL has no listener: the stream sends the

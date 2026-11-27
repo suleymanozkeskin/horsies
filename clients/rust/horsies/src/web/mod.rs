@@ -45,7 +45,7 @@ use horsies_core::telemetry::declared::{warn_folded_names, Folded};
 use horsies_core::web::{
     refusal_by_policy, route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem,
     MonitoringHandler, MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict,
-    HEARTBEAT, MAX_REQUEST_BODY_BYTES,
+    DEGRADED_FRAME, HEARTBEAT, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
@@ -191,9 +191,14 @@ where
         Err(error) => return handler_build_failed(&error),
     };
     match (access.form, grant.view) {
-        (ResponseForm::EventStream, Verdict::Allowed) => {
-            event_stream(handler.subscribe_events().await)
-        }
+        (ResponseForm::EventStream, Verdict::Allowed) => match handler.try_subscribe_events().await
+        {
+            Ok(frames) => event_stream(frames),
+            Err(refused) => {
+                tracing::warn!("the monitoring handler refused an event stream: {refused}");
+                degraded_event_stream()
+            }
+        },
         (ResponseForm::OneResponse, _)
         | (ResponseForm::EventStream, Verdict::Refused | Verdict::NotAsked) => {
             let body = match read_body(body).await {
@@ -326,7 +331,18 @@ fn event_stream(frames: EventFrames) -> Response {
             EventStreamItem::Ended => None,
         }
     });
-    let mut response = Response::new(Body::from_stream(stream));
+    event_stream_response(Body::from_stream(stream))
+}
+
+/// The event stream response of a refused subscription: the degraded frame,
+/// then the end. Pure.
+fn degraded_event_stream() -> Response {
+    event_stream_response(Body::from(DEGRADED_FRAME))
+}
+
+/// `body` with the headers of Python's `/api/events`. Pure.
+fn event_stream_response(body: Body) -> Response {
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
     let _previous = headers.insert(
         CONTENT_TYPE,

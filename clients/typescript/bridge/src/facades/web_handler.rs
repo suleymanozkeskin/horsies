@@ -647,9 +647,10 @@ impl MonitoringHandler {
 
     /// Subscribe one event stream, after the user's policy allowed the view.
     /// A broker without a listener, a stopped listener, a handler whose
-    /// broker cannot be built (logged as one WARNING record), or a handler
-    /// that closed its events gives a stream whose first frame is the
-    /// degraded frame. Reads only.
+    /// broker cannot be built or that serves `MAX_OPEN_EVENT_STREAMS` open
+    /// streams (each logged as one WARNING record), or a handler that closed
+    /// its events gives a stream whose first frame is the degraded frame.
+    /// Reads only.
     #[napi(ts_return_type = "Promise<NativeEnvelope<MonitoringEventStream>>")]
     pub fn subscribe_events<'env>(&self, env: &'env Env) -> napi::Result<Object<'env>> {
         let state = Arc::clone(&self.state);
@@ -705,7 +706,16 @@ async fn subscribe_operation(state: Arc<HandlerState>) -> MonitoringEventStream 
         return MonitoringEventStream::of_slot(FrameSlot::DegradedFrameNext);
     }
     let frames = match state.built().await {
-        Ok(handler) => handler.subscribe_events().await,
+        Ok(handler) => match handler.try_subscribe_events().await {
+            Ok(frames) => frames,
+            Err(refused) => {
+                tracing::warn!(
+                    target: "horsies.web",
+                    "the event stream is refused and answers the degraded frame: {refused}"
+                );
+                return MonitoringEventStream::of_slot(FrameSlot::DegradedFrameNext);
+            }
+        },
         Err(error) => {
             tracing::warn!(
                 target: "horsies.web",

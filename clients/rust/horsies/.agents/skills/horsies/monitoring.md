@@ -49,9 +49,13 @@ async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
   Each read connects the app's handle and installs the schema once per
   handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
-  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait` is
-  `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
+  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait`, or a `wait` above
+  `WORKER_PING_WAIT_BOUND` (60 s), is `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
   gets `LISTENER_DISABLED`.
+- `get_worker_state_history` returns at most `WORKER_HISTORY_ROW_BOUND`
+  (10,000) snapshots. A `Newest` count above the bound is `INVALID_INPUT`;
+  `AllRetained` is `INVALID_INPUT` for a worker that holds more than the
+  bound, and returns no snapshots in part.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
   most `TASK_LIST_BOUND` (10,000) rows.
 - `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
@@ -185,6 +189,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
         Err(
             error @ (TaskActionError::IsWorkflowTask { .. }
             | TaskActionError::DatabaseOperationFailed { .. }
+            | TaskActionError::OutcomeUnknown { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
     }

@@ -3991,7 +3991,7 @@ export const TaskAbsenceReason: {
 export type TaskAbsenceReason = (typeof TaskAbsenceReason)[keyof typeof TaskAbsenceReason];
 
 // @public (undocumented)
-export type TaskActionCoreError = TaskActionNotFound | TaskActionNotCancellable | TaskActionIsWorkflowTask | TaskActionDatabaseOperationFailed | TaskActionStoredDataInvalid;
+export type TaskActionCoreError = TaskActionNotFound | TaskActionNotCancellable | TaskActionIsWorkflowTask | TaskActionDatabaseOperationFailed | TaskActionOutcomeUnknown | TaskActionStoredDataInvalid;
 
 // @public (undocumented)
 export interface TaskActionDatabaseOperationFailed {
@@ -4051,6 +4051,22 @@ export interface TaskActionNotFound {
     readonly message: string;
     // (undocumented)
     readonly retryable: false;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskActionOutcomeUnknown {
+    // (undocumented)
+    readonly cause: CoreCause;
+    // (undocumented)
+    readonly code: "OUTCOME_UNKNOWN";
+    // (undocumented)
+    readonly kind: "outcomeUnknown";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
     // (undocumented)
     readonly taskId: string;
 }

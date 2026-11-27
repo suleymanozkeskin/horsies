@@ -10,6 +10,33 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Cancel: the unknown outcome has its own error.** `TaskActionError` has the
+  new variant `OutcomeUnknown` (code `OUTCOME_UNKNOWN`; Python class
+  `TaskActionOutcomeUnknown`, member `TaskActionErrorCode.OUTCOME_UNKNOWN`),
+  with `message`, `retryable`, `task_id` and `cause`. The cancel statement
+  was sent and its reply was lost: the cancel may have committed. A cancel
+  again tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with
+  `CANCELLED`. `DATABASE_OPERATION_FAILED` now means that nothing changed:
+  the statement was not sent, the server refused it, or the connect failed.
+  The web route answers both with 503 when the cause may clear, else 500. In
+  the core, `CancelTaskError::OutcomeUnknown(StatementFailure)` is the new
+  variant, and `TaskActionError::cancel_outcome_unknown` builds the error.
+- **Monitoring reads and waits have bounds, in the core.** A call past a
+  bound is refused with `INVALID_INPUT` (`DatabaseInvalidInput` in Python,
+  `DatabaseOperationError::InvalidInput` in Rust), and nothing runs:
+  - `WORKER_PING_WAIT_BOUND` (60 s): `ping_workers` with a longer wait. The
+    upper bound of Python's `wait_ms` was `2**64 - 1`; it is 60,000.
+  - `WORKER_HISTORY_ROW_BOUND` (10,000): `get_worker_state_history` with a
+    `WorkerHistoryLimitNewest` / `WorkerHistoryLimit::Newest` count above the
+    bound. `WorkerHistoryLimitAllRetained` / `WorkerHistoryLimit::AllRetained`
+    reads at most the bound and is refused for a worker that holds more
+    retained snapshots: no snapshots are returned in part.
+  - `MAX_OPEN_EVENT_STREAMS` (256): `MonitoringHandler::subscribe_events`
+    keeps at most this many event streams open. A stream requested past the
+    bound is the degraded frame and the end, with a warning in the log; the
+    core's `try_subscribe_events` returns `EventStreamsRefused { open, bound }`.
+    Python's `subscribe_events_async` answers `EventStreamRefused`. A stream
+    that ends frees its place.
 - **Core: public constants for the client checks.**
   `horsies_core` exports the idempotency key bound
   (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of

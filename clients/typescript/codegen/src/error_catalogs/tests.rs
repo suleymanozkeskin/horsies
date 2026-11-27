@@ -877,7 +877,7 @@ fn the_model_s_modules_convert_every_rendered_class_and_name_no_other() {
             }
         }
     }
-    assert_eq!(rendered_classes, 30);
+    assert_eq!(rendered_classes, 31);
 }
 
 #[test]

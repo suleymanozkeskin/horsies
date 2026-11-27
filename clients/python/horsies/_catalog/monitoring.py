@@ -42,6 +42,12 @@ class TaskActionErrorCode(str, Enum):
 
     DATABASE_OPERATION_FAILED = 'DATABASE_OPERATION_FAILED'
 
+    OUTCOME_UNKNOWN = 'OUTCOME_UNKNOWN'
+    """The cancel statement went to the server and its reply was lost: the
+    cancel may have committed. A repeated cancel tells which, because a
+    committed cancel answers `TaskNotCancellable` with `CANCELLED`.
+    """
+
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task
     status, or a cancel outcome row that does not decode. Nothing changed:

@@ -70,9 +70,11 @@ pub use core_rows::RowDecodeError;
 pub use enqueue_task::SendKind;
 pub use error::{is_retryable_statement_failure, BrokerError, EnqueueRefusal, EnqueueRefusalCause};
 pub use health::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
-    worker_history_limit_refused, DatabasePing, SnapshotProfile, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_listener_disabled, ping_min_responses_refused, ping_wait_over_bound, ping_wait_refused,
+    worker_history_limit_over_bound, worker_history_limit_refused, worker_history_over_bound,
+    DatabasePing, SnapshotProfile, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WORKER_HISTORY_ROW_BOUND, WORKER_PING_CHANNEL, WORKER_PING_WAIT_BOUND,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};

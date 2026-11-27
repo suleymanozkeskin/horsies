@@ -23,8 +23,9 @@ pub use auth::{INTENT_HEADER, INTENT_VALUE};
 /// `bytes` crate: no web framework's own type.
 pub use bytes::Bytes;
 pub use events::{
-    EventBroadcaster, EventCoalescer, EventFrames, EventStreamItem, TopicEvent, CHANNEL_TOPICS,
-    DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME, MAX_IDS_PER_EVENT, TOPIC_DEGRADED,
+    EventBroadcaster, EventCoalescer, EventFrames, EventStreamItem, EventStreamsRefused,
+    TopicEvent, CHANNEL_TOPICS, DEBOUNCE, DEGRADED_FRAME, HEARTBEAT, HEARTBEAT_FRAME,
+    MAX_IDS_PER_EVENT, MAX_OPEN_EVENT_STREAMS, TOPIC_DEGRADED,
 };
 pub use handler::{
     refusal_by_policy, route_access, AccessGrant, AccessNeed, Actions, MonitoringHandler,

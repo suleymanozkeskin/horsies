@@ -2453,7 +2453,8 @@ class Horsies:
         min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> 'DatabaseResult[list[WorkerPong]]':
         """Active ping-pong: collect live workers' replies within ``wait_ms``
-        milliseconds.
+        milliseconds. ``wait_ms`` is 1 to 60,000; another value is refused with
+        ``INVALID_INPUT``.
 
         Pass ``min_responses=MinResponsesAtLeast(1)`` for a fast fail-open
         liveness gate — returns on the first reply rather than waiting the
