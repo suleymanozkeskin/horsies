@@ -256,14 +256,14 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `exception` |
 | `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
 | `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
-| `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id`; `retryable` is `True` |
+| `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id`; `retryable` is `False` |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
-| `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `True`, because the conflict clears when the reservation ends |
+| `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `False`, because a repeat of the same send does not complete it |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |
@@ -291,7 +291,7 @@ def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
 
 For a validation failure, the cause names the field, the message and the type, not the value. Text from your own validators is kept as written ([Validation Failure Text](#validation-failure-text)).
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
+`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These two variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
 
 ## Workflow Start Errors (WorkflowStartResult)
 

@@ -1,5 +1,5 @@
 // expect: TS2345 at 15
-// `resend` takes only `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`.
+// `resend` takes only `ENQUEUE_FAILED`.
 
 import { defineTask, type Horsies } from "../../../horsies/src/index.ts";
 import { h } from "../../../horsies/src/wire/public.ts";

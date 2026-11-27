@@ -3383,7 +3383,7 @@ export const RetrievalCode: {
 export type RetrievalCode = (typeof RetrievalCode)[keyof typeof RetrievalCode];
 
 // @public
-export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed | TaskSendIdempotencyKeyConflict, O, E>;
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
 
 // @public
 export type RetryAttempts = {
@@ -4455,7 +4455,7 @@ export interface TaskSendEnqueueFailed {
 }
 
 // @public
-export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | SeatRelayFull | RetryableSendError<O, E>;
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendIdempotencyKeyConflict | SeatRelayFull | RetryableSendError<O, E>;
 
 // @public (undocumented)
 export interface TaskSendIdempotencyKeyConflict {
@@ -4468,7 +4468,7 @@ export interface TaskSendIdempotencyKeyConflict {
     // (undocumented)
     readonly payload: TaskSendPayload;
     // (undocumented)
-    readonly retryable: true;
+    readonly retryable: false;
     // (undocumented)
     readonly taskId: string;
 }

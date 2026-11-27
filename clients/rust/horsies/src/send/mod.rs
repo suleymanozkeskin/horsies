@@ -20,7 +20,7 @@ pub use horsies_core::manifest::WholeSeconds;
 /// A retention period of whole days, for `SendRetention::Period`.
 pub use horsies_core::RetentionDays;
 /// The send catalog of the core: one variant per send code, each with the
-/// facts of its state. `retry_send` accepts the three that carry the
-/// payload (`resend_target`): `AsyncContext`, `EnqueueFailed` and
-/// `IdempotencyKeyConflict`.
+/// facts of its state. `retry_send` accepts the two that are sent again
+/// (`resend_target`): `AsyncContext` and `EnqueueFailed`. It refuses
+/// `IdempotencyKeyConflict`: a repeat of the same send does not complete it.
 pub use horsies_core::{TaskSendError, TaskSendErrorCode, TaskSendPayload};

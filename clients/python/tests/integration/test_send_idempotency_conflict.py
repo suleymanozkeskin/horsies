@@ -38,7 +38,7 @@ def _echo(app: Horsies) -> Any:
 
 
 class TestKeyReservedByAnotherTask:
-    async def test_conflict_names_the_owner_and_retry_is_accepted(
+    async def test_conflict_names_the_owner_and_retry_is_refused(
         self, app: Horsies,
     ) -> None:
         echo = _echo(app)
@@ -52,12 +52,10 @@ class TestKeyReservedByAnotherTask:
         error = conflict.err_value
         assert isinstance(error, TaskSendIdempotencyKeyConflict)
         assert error.owner_task_id == first.ok_value.task_id
-        # The retry is accepted and reaches the broker; the reservation is
-        # still active, so the broker returns the same conflict.
-        retried = await echo.retry_send_async(error)
-        assert is_err(retried)
-        assert isinstance(retried.err_value, TaskSendIdempotencyKeyConflict)
-        assert retried.err_value.owner_task_id == error.owner_task_id
+        assert error.retryable is False
+        # The retry methods refuse the conflict before the broker call.
+        with pytest.raises(AssertionError, match='TaskSendIdempotencyKeyConflict'):
+            await echo.retry_send_async(error)
 
 
 class TestTaskIdBoundToAnotherKey:

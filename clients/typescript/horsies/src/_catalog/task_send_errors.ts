@@ -52,7 +52,7 @@ export interface TaskSendPayloadTooLarge {
 
 export interface TaskSendIdempotencyKeyConflict {
   readonly code: "IDEMPOTENCY_KEY_CONFLICT";
-  readonly retryable: true;
+  readonly retryable: false;
   readonly taskId: string;
   readonly payload: TaskSendPayload;
   readonly message: string;
@@ -262,7 +262,7 @@ export function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): TaskS
     case "TaskSendIdempotencyKeyConflict": {
       const value: TaskSendIdempotencyKeyConflict = {
         code: "IDEMPOTENCY_KEY_CONFLICT",
-        retryable: true,
+        retryable: false,
         taskId: raw.slots.task_id,
         payload: taskSendPayloadFromNative(raw.slots.payload),
         message: raw.slots.message,

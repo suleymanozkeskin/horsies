@@ -97,7 +97,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = True` (the conflict clears when the reservation ends). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = False` (a repeat of the same send does not complete it). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`); another variant, the key conflict included, is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; send the same command, or use another key:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -376,7 +376,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
 - `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `UnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `BrokerError` (adds `retryable` and `exception`), `NoTypeAvailable`, `WorkflowCtxMissingId`
 
-`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = True`; the other send errors have no `retryable`.
+`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = False`; the other send errors have no `retryable`.
 
 `HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 

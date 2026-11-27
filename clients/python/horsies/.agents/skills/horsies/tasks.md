@@ -418,8 +418,10 @@ rows; a resend under the same key with a *different* request returns
 `Err(TaskSendIdempotencyKeyConflict)`. Its `owner_task_id` names the task
 that holds the key. While the owner task is
 live, the key stays reserved. After the owner task finishes, the key clears
-when the reservation window (24 h by default) has passed. The retry methods
-accept the error. A retry that changes the key of a sent task id returns
+when the reservation window (24 h by default) has passed; a send with the key
+after that time starts a new task. A repeat of the same send does not complete
+it, so the error is not retryable: send the same command as the owner task, or
+use another key. The retry methods refuse the error. A retry that changes the key of a sent task id returns
 `PAYLOAD_MISMATCH`. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention`**: how long the terminal record is kept. Precedence,
@@ -568,13 +570,9 @@ type TaskSendError = (
     | TaskSendEnqueueFailed          # task_id, payload, message, retryable, exception
     | TaskSendPayloadMismatch        # task_id, payload, message
     | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
-    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is True
+    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is False
 )
-type TaskSendRetryable = (
-    TaskSendEnqueueFailed
-    | TaskSendAsyncContext
-    | TaskSendIdempotencyKeyConflict
-)
+type TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext
 ```
 
 `exception` is `BaseException | NoCause` on `TaskSendValidationFailed` and `TaskSendEnqueueFailed`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
@@ -591,7 +589,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
 | `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
-| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `True`: a retry after the reservation ends is accepted |
+| `IDEMPOTENCY_KEY_CONFLICT` | Refused | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `False`: a repeat of the same send does not complete it; send the same command, or use another key |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 
 ### `TaskSendPayload`

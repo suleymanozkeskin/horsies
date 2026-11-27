@@ -369,8 +369,8 @@ where
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(&format!(
-                "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
-                 ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
+                "cannot retry a send that failed with {}: only ASYNC_CONTEXT and \
+                 ENQUEUE_FAILED are sent again",
                 error.code()
             )));
         };
@@ -916,6 +916,28 @@ mod tests {
         assert_eq!(retried.input_json, r#"{"id":7,"amount":12.5}"#);
     }
 
+    fn key_conflict() -> TaskSendError {
+        let app = app_with(config());
+        let (task_id, payload) = function(&app)
+            .prepare(&TaskSendOptions::new(), &invoice())
+            .unwrap();
+        TaskSendError::IdempotencyKeyConflict {
+            task_id,
+            payload: Box::new(payload),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(2),
+        }
+    }
+
+    /// Reverting the `IdempotencyKeyConflict` arm of
+    /// `TaskSendError::resend_target` to `Some(..)` fails this test.
+    #[test]
+    fn a_retry_refuses_a_key_conflict_before_any_write() {
+        let app = app_with(config());
+        let message = validation_message(function(&app).retry_target(&key_conflict()).unwrap_err());
+        assert!(message.contains("IDEMPOTENCY_KEY_CONFLICT"), "{message}");
+    }
+
     #[test]
     fn a_retry_refuses_errors_that_carry_no_payload_and_errors_of_another_task() {
         let app = app_with(config());
@@ -1033,6 +1055,7 @@ mod tests {
     async fn a_failure_that_is_not_retryable_is_not_resent() {
         for refusal in [
             failed_enqueue(false),
+            key_conflict(),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
                 cause: FailureCause::PreconditionFailed,

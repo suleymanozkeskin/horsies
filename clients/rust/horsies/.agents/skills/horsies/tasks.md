@@ -496,7 +496,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 | `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
-| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
+| `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
 - `ValidationFailed` with the cause `PreconditionFailed` is also the answer
   of a generated send through an app that does not register the task.
@@ -510,7 +510,10 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `PayloadMismatch`: the task id exists with another command or key.
   Nothing was written.
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
-  with another command. Nothing was written.
+  with another command. Nothing was written. A repeat of the same send does
+  not complete it: send the same command as the owner task, or use another
+  key. The reservation ends `reservation_window` after the owner task
+  finishes; a send with the key after that time starts a new task.
 - `error.code()` returns the `TaskSendErrorCode`.
 - A send in a fork panics, as every call that runs on the core: see
   `SKILL.md`, Result Types.

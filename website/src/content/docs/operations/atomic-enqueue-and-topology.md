@@ -89,4 +89,4 @@ A workflow start has no idempotency key. A start with a fixed workflow id compar
 
 **Don't use a random key.** A key from `uuid4()` differs on each attempt, so it never matches a repeat. Derive the key from data that the attempts share.
 
-**Don't retry an idempotency key conflict in a tight loop.** The retry returns the same error until the reservation ends.
+**Don't retry an idempotency key conflict.** It is not retryable, and the retry methods refuse it. While the owner task is live, a repeat returns the same error. After the reservation ends, a repeat starts a second task under the key, with the other command. Send the same command as the owner task, or use another key.
