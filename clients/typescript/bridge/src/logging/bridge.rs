@@ -30,7 +30,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use horsies_core::frame_protocol::ChildLogLevel;
 use horsies_core::ChildLogSetup;
 
-use super::format::{current_format, line_in, notice_line, LogFormatKind};
+use super::format::{current_format, spill_text};
 use super::forwarder;
 use super::levels::{LogThreshold, RecordLevel, WhenFull, LEVELS};
 use super::names::LoggerName;
@@ -350,14 +350,7 @@ impl LogSink {
             self.dropped_low.load(Ordering::Relaxed),
             self.spilled_high.load(Ordering::Relaxed),
         );
-        let text = match current_format() {
-            LogFormatKind::TextLogs => format!("{} ({counts})", record.stderr_line()),
-            LogFormatKind::JsonLogs => format!(
-                "{}\n{}",
-                line_in(LogFormatKind::JsonLogs, record),
-                notice_line(counts)
-            ),
-        };
+        let text = spill_text(current_format(), record, counts);
         let _write_failure_ignored = writeln!(std::io::stderr(), "{text}");
     }
 

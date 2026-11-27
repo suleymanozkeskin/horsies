@@ -23,8 +23,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 use super::bridge::{CoreLogRecord, DropCounts, LogSink, LOG_CHANNEL_CAPACITY};
-use super::format::{notice_line, record_line};
-use super::js_sink::{self, Handed, SINK_ANSWER_BOUND};
+use super::format::{current_format, notice_line_in, record_line, LogFormatKind};
+use super::js_sink::{self, Handed, NotTaken, SINK_ANSWER_BOUND};
 use super::levels::{RecordLevel, LEVELS};
 use super::names::LoggerName;
 use crate::process_core::panic_rule::{background_task_panicked, take_panic_cause, PanicReport};
@@ -126,14 +126,21 @@ fn settle_batch(sink: &LogSink, batch: &[CoreLogRecord], handed: Handed) {
             let _write_failure_ignored = writeln!(
                 std::io::stderr(),
                 "{}",
-                notice_line(format!(
-                    "horsies: {} log records go to stderr: {reason}",
-                    batch.len()
-                ))
+                not_taken_notice(current_format(), batch.len(), &reason)
             );
             write_stderr(batch);
         }
     }
+}
+
+/// The notice line that `count` records go to stderr because the sink did
+/// not take them for `reason`, in `format`. Pure but for the clock, the
+/// thread name and the process id.
+fn not_taken_notice(format: LogFormatKind, count: usize, reason: &NotTaken) -> String {
+    notice_line_in(
+        format,
+        format!("horsies: {count} log records go to stderr: {reason}"),
+    )
 }
 
 /// Write each record of `batch` to stderr, one line each, in the format of
@@ -190,7 +197,32 @@ fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::js_sink::NotTaken;
+
+    #[test]
+    fn a_batch_that_the_sink_did_not_take_has_a_notice_in_the_format_of_the_process() {
+        assert_eq!(
+            not_taken_notice(LogFormatKind::TextLogs, 3, &NotTaken::SinkThrew),
+            format!(
+                "horsies: 3 log records go to stderr: {}",
+                NotTaken::SinkThrew
+            )
+        );
+        let value: serde_json::Value = serde_json::from_str(&not_taken_notice(
+            LogFormatKind::JsonLogs,
+            3,
+            &NotTaken::SinkThrew,
+        ))
+        .expect("the JSON notice is one JSON object");
+        assert_eq!(value["level"], "WARNING");
+        assert_eq!(value["logger"], "horsies.bridge");
+        assert_eq!(
+            value["message"],
+            format!(
+                "horsies: 3 log records go to stderr: {}",
+                NotTaken::SinkThrew
+            )
+        );
+    }
 
     fn record(message: &str) -> CoreLogRecord {
         CoreLogRecord::bridge(RecordLevel::Error, message.to_owned())

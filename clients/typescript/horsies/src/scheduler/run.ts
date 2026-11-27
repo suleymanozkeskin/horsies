@@ -19,7 +19,7 @@ import { appCoreHandle } from "../app/core-access.ts";
 import type { CoreChecks } from "../app/core-checks.ts";
 import { type CheckReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import { configureCommandLogging } from "../logging.ts";
+import { type CommandLogging, configureCommandLogging } from "../logging.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -188,9 +188,10 @@ export function processSchedulerRunDeps(
   context: AppContext,
   stopOnSignals: (requestStop: () => void) => void,
   native: NativeSchedulerCalls = NATIVE_SCHEDULER_CALLS,
+  commandLogging: CommandLogging = configureCommandLogging,
 ): SchedulerRunDeps {
   return {
-    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
+    setLogLevel: (level) => commandLogging(level, context.config.logFormat),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
     run: async (scheduler) => native.runScheduler(scheduler, appCoreHandle(context.core)),
     requestStop: (scheduler) => native.requestSchedulerStop(scheduler),

@@ -5,6 +5,7 @@
 //! also has the forwarder panic probe.
 
 pub mod bridge;
+pub mod client_record;
 pub mod format;
 pub mod forwarder;
 #[cfg(feature = "test-probes")]

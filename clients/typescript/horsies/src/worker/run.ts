@@ -34,7 +34,7 @@ import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { prepareWorker, requestWorkerStop, runWorker } from "../native/worker/worker.ts";
 import { appCoreHandle } from "../app/core-access.ts";
-import { configureCommandLogging } from "../logging.ts";
+import { type CommandLogging, configureCommandLogging } from "../logging.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import {
@@ -274,9 +274,10 @@ export function processWorkerRunDeps(
   context: AppContext,
   stopOnSignals: (requestStop: () => void) => void,
   native: NativeWorkerCalls = NATIVE_WORKER_CALLS,
+  commandLogging: CommandLogging = configureCommandLogging,
 ): WorkerRunDeps {
   return {
-    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
+    setLogLevel: (level) => commandLogging(level, context.config.logFormat),
     setWorkerPanicRule: () => setPanicRule("ABORT_PROCESS"),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
     launchFacts: processLaunchFacts,

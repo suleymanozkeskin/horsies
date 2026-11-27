@@ -15,13 +15,13 @@ import type { AppContext } from "../app/context.ts";
 import { liveCheckOutcome } from "../check/live-check.ts";
 import { type CheckOutcome, type CheckPassed, passedText, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import { configureCommandLogging } from "../logging.ts";
+import { type CommandLogging, configureCommandLogging, logWarning } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import type { LiveCheckOutcome } from "../native/worker/addon.ts";
 import { checkLive } from "../native/worker/worker.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../native/call/never.ts";
-import { ClientDefect, CoreError } from "../thrown-errors.ts";
+import { ClientDefect, CoreError, RuntimeStartFailed, TooManyPendingCalls } from "../thrown-errors.ts";
 import type { SchemaMode } from "../_catalog/manifest.ts";
 import type { AppConfig } from "../config/app-config.ts";
 import { buildCoreHandle, type CoreHandle } from "../native/handle/core-handle.ts";
@@ -75,13 +75,13 @@ export interface CheckCommandDeps {
   liveCheck(passed: CheckPassed): Promise<LiveStepsOutcome>;
 }
 
-/** The dependencies of `check` for the app of `context` in this process. */
-export function processCheckCommandDeps(context: AppContext): CheckCommandDeps {
+/** The dependencies of `check` for the app of `context` in this process; `commandLogging` sets the log of the command. */
+export function processCheckCommandDeps(context: AppContext, commandLogging: CommandLogging = configureCommandLogging): CheckCommandDeps {
   const checks = { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions };
 
   return {
     output: processOutput(),
-    setLogLevel: (level) => configureCommandLogging(level, context.config.logFormat),
+    setLogLevel: (level) => commandLogging(level, context.config.logFormat),
     staticCheck: () => staticCheck(context, checks, "withSchedules", "check"),
     liveCheck: async (passed) => liveSteps(passed, async () => liveCheckOnOwnHandle(context.config, NATIVE_LIVE_CHECK)),
   };
@@ -97,7 +97,12 @@ export interface LiveCheckNative<H> {
   buildHandle(manifestJson: string): H;
   checkLive(handle: H, appConfigJson: string): Promise<LiveCheckOutcome>;
   close(handle: H): Promise<undefined>;
+  /** Write `message` as a WARNING record of `horsies.app`. */
+  warn(message: string): void;
 }
+
+/** The logger of the warning of a handle that did not close: the app logger, as in the Python client. */
+const LIVE_CHECK_LOGGER = "horsies.app";
 
 /** The addon calls of the live steps in this process. */
 const NATIVE_LIVE_CHECK: LiveCheckNative<CoreHandle> = Object.freeze({
@@ -105,12 +110,15 @@ const NATIVE_LIVE_CHECK: LiveCheckNative<CoreHandle> = Object.freeze({
   buildHandle: (manifestJson: string) => buildCoreHandle(manifestJson, "PRODUCER"),
   checkLive,
   close: async (handle: CoreHandle) => handle.close(),
+  warn: (message: string) => logWarning(LIVE_CHECK_LOGGER, message),
 });
 
 /**
  * The live steps of `config` on a core handle of their own, with `LIVE_CHECK_SCHEMA_MODE`; the handle is closed after
  * the steps, and the app's handle is not used. A config that the core refuses again is a defect: `ClientDefect`. The
- * refusals of `checkLive` and of the close pass on.
+ * refusals of `checkLive` pass on after the close. A close that the core cannot run (`TooManyPendingCalls`,
+ * `RuntimeStartFailed`) is a WARNING record, and the answer of the steps stands (Python `_close_check_handle`); the
+ * process keeps the handle's pools until it ends. `CoreStopped` and `ForkedAfterCoreStart` of the close pass on.
  */
 export async function liveCheckOnOwnHandle<H>(config: AppConfig, native: LiveCheckNative<H>): Promise<LiveCheckOutcome> {
   const checked = native.checkAppConfig(config.coreConfigJson, LIVE_CHECK_SCHEMA_MODE);
@@ -124,12 +132,27 @@ export async function liveCheckOnOwnHandle<H>(config: AppConfig, native: LiveChe
       try {
         return await native.checkLive(handle, config.coreConfigJson);
       } finally {
-        await native.close(handle);
+        await closeOwnHandle(handle, native);
       }
     }
 
     default:
       return unreachable(checked);
+  }
+}
+
+/** Close the handle of the live steps; a close that the core cannot run is a warning record. */
+async function closeOwnHandle<H>(handle: H, native: LiveCheckNative<H>): Promise<void> {
+  try {
+    await native.close(handle);
+  } catch (cause) {
+    if (cause instanceof TooManyPendingCalls || cause instanceof RuntimeStartFailed) {
+      native.warn(`the core handle of the live check did not close: ${cause.name}: ${cause.message}`);
+
+      return;
+    }
+
+    throw cause;
   }
 }
 

@@ -9,6 +9,7 @@ import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const setLogLevelsMatches: SameFunction<typeof Generated.setLogLevels, LoggingAddon["setLogLevels"]> = true;
 export const setLogFormatMatches: SameFunction<typeof Generated.setLogFormat, LoggingAddon["setLogFormat"]> = true;
+export const logClientWarningMatches: SameFunction<typeof Generated.logClientWarning, LoggingAddon["logClientWarning"]> = true;
 export const setLogSinkMatches: SameFunction<typeof Generated.setLogSink, LoggingAddon["setLogSink"]> = true;
 export const resetLogSinkMatches: SameFunction<typeof Generated.resetLogSink, LoggingAddon["resetLogSink"]> = true;
 export const logSpanNotMadeMatches: SameFunction<typeof Generated.logSpanNotMade, LoggingAddon["logSpanNotMade"]> = true;

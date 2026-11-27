@@ -20,7 +20,7 @@ import { parseWorkerStart, runWorkerCommand, type WorkerCommandDeps } from "../.
 import { type CheckOutcome, checkReport } from "../../../horsies/src/check/report.ts";
 import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manifest.ts";
 import type { ListenAddressCheck } from "../../../horsies/src/native/worker/addon.ts";
-import { ClientDefect, RuntimeStartFailed } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect, CoreStopped, RuntimeStartFailed, TooManyPendingCalls } from "../../../horsies/src/thrown-errors.ts";
 import type { SchemaMode } from "../../../horsies/src/_catalog/manifest.ts";
 import type { LiveCheckOutcome } from "../../../horsies/src/native/worker/addon.ts";
 import type { AppConfigCheck } from "../../../horsies/src/native/sends/addon.ts";
@@ -220,7 +220,11 @@ describe("the check command", () => {
 });
 
 /** A fake of the live check calls: each call in order, with the answers that a test sets. */
-function fakeLiveNative(answers: { readonly config: AppConfigCheck["kind"]; readonly live: () => Promise<LiveCheckOutcome> }): LiveCheckNative<string> & {
+function fakeLiveNative(answers: {
+  readonly config: AppConfigCheck["kind"];
+  readonly live: () => Promise<LiveCheckOutcome>;
+  readonly close?: () => Promise<undefined>;
+}): LiveCheckNative<string> & {
   readonly calls: string[];
 } {
   const calls: string[] = [];
@@ -252,7 +256,10 @@ function fakeLiveNative(answers: { readonly config: AppConfigCheck["kind"]; read
     close: async (handle) => {
       calls.push(`close ${handle}`);
 
-      return undefined;
+      return answers.close === undefined ? undefined : answers.close();
+    },
+    warn: (message) => {
+      calls.push(`warn ${message}`);
     },
   };
 }
@@ -285,6 +292,51 @@ describe("the live steps of check", () => {
 
     await assert.rejects(liveCheckOnOwnHandle(contextOf(testApp()).config, native), refusedByCore);
     assert.deepEqual(native.calls.at(-1), "close own-handle");
+  });
+
+  test("a close that the core cannot run after a pass is a warning, and the pass stands", async () => {
+    const native = fakeLiveNative({
+      config: "accepted",
+      live: async () => ({ kind: "passed" }),
+      close: async () => {
+        throw new TooManyPendingCalls({ subject: "close", bound: 4096 });
+      },
+    });
+
+    assert.deepEqual(await liveCheckOnOwnHandle(contextOf(testApp()).config, native), { kind: "passed" });
+    assert.deepEqual(native.calls.slice(-2), [
+      "close own-handle",
+      "warn the core handle of the live check did not close: TooManyPendingCalls: close: the process has 4096 core calls in flight, the most it may have",
+    ]);
+  });
+
+  test("a close that the core cannot run after a refusal is a warning, and the refusal stands", async () => {
+    const refused: LiveCheckOutcome = { kind: "connectivityRefused", step: "MAIN_URL", message: "connection refused" };
+
+    const native = fakeLiveNative({
+      config: "accepted",
+      live: async () => refused,
+      close: async () => {
+        throw new RuntimeStartFailed({ cause: "no threads" });
+      },
+    });
+
+    assert.deepEqual(await liveCheckOnOwnHandle(contextOf(testApp()).config, native), refused);
+    assert.equal(native.calls.at(-1), "warn the core handle of the live check did not close: RuntimeStartFailed: the core could not start: no threads");
+  });
+
+  test("a stopped core at the close passes on", async () => {
+    const stopped = new CoreStopped({ subject: "close", cause: "a background task panicked", stateAfter: "outcomeUnknown" });
+
+    const native = fakeLiveNative({
+      config: "accepted",
+      live: async () => ({ kind: "passed" }),
+      close: async () => {
+        throw stopped;
+      },
+    });
+
+    await assert.rejects(liveCheckOnOwnHandle(contextOf(testApp()).config, native), stopped);
   });
 
   test("a config that the core refuses again is a defect, and no handle is built", async () => {

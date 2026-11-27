@@ -140,6 +140,9 @@ export function configureLogging(options: LoggingOptions): void {
   }
 }
 
+/** The log setup of a command that loads the app: the default threshold `level` and the app's log format. */
+export type CommandLogging = (level: WorkerLogLevel, format: LogFormat) => void;
+
 /**
  * The log setup of a command that loads the app (the worker, the scheduler, `check`): the default threshold `level`,
  * then the format of the app's `logFormat`. Loads the addon. Not exported from an entry point.
@@ -169,6 +172,14 @@ export function applyLogFormat(format: LogFormat): void {
       throw new TypeError(`applyLogFormat: a thread outside its type: ${String(unexpected)}`);
     }
   }
+}
+
+/**
+ * Write `message` as a WARNING record of `logger` in the core log of this process: it reaches the sink in force at the
+ * threshold of that logger. Loads the addon. Not exported from an entry point.
+ */
+export function logWarning(logger: LoggerName, message: string): void {
+  nativeValue("logClientWarning", () => loggingAddon().logClientWarning(logger, message));
 }
 
 /** Where `configureLogging` applies: the core log of the process, or nothing in a seat isolate. */

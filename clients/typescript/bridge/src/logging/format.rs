@@ -36,6 +36,10 @@ pub enum LogFormatKind {
     JsonLogs,
 }
 
+/// U+007F, the one ASCII character that Python's `json.dumps` escapes and
+/// `serde_json` does not.
+const DELETE: char = '\u{7f}';
+
 /// The stored code of [`LogFormatKind::TextLogs`].
 const TEXT_LOGS_CODE: u8 = 0;
 
@@ -104,15 +108,32 @@ pub fn line_in(format: LogFormatKind, record: &CoreLogRecord) -> String {
 }
 
 /// The stderr text of a notice of the bridge that is no core record (for
-/// example, why a batch goes to stderr), with no newline: the text as it is,
-/// or in the JSON format the line of a WARNING record of the bridge logger
-/// with the text as its message.
-pub fn notice_line(text: String) -> String {
-    match current_format() {
+/// example, why a batch goes to stderr) in `format`, with no newline:
+/// the text as it is, or in the JSON format the line of a WARNING record of
+/// the bridge logger with the text as its message. Pure but for the clock,
+/// the thread name and the process id.
+pub fn notice_line_in(format: LogFormatKind, text: String) -> String {
+    match format {
         LogFormatKind::TextLogs => text,
         LogFormatKind::JsonLogs => json_line(
             &CoreLogRecord::bridge(RecordLevel::Warning, text),
             std::process::id(),
+        ),
+    }
+}
+
+/// The stderr text of a record that cannot enter the channel, with the drop
+/// counts `counts`, in `format`, with no newline: in the text format one line
+/// with the counts after the record, in the JSON format the line of the
+/// record and then the notice line of the counts. Pure but for the clock,
+/// the thread name and the process id.
+pub fn spill_text(format: LogFormatKind, record: &CoreLogRecord, counts: String) -> String {
+    match format {
+        LogFormatKind::TextLogs => format!("{} ({counts})", record.stderr_line()),
+        LogFormatKind::JsonLogs => format!(
+            "{}\n{}",
+            line_in(LogFormatKind::JsonLogs, record),
+            notice_line_in(LogFormatKind::JsonLogs, counts)
         ),
     }
 }
@@ -122,8 +143,8 @@ pub fn notice_line(text: String) -> String {
 /// the context keys ([`CONTEXT_KEYS`]), then `exc`. A context key holds the
 /// value of the first record field of its name: a text as a JSON string, an
 /// integer as a JSON number, a flag as a JSON flag, and a float as the
-/// string of its text. `exc` is always `null`: a core record carries no
-/// exception. Pure.
+/// string of Python's `str` of the float ([`python_float_text`]). `exc` is
+/// always `null`: a core record carries no exception. Pure.
 pub fn json_line(record: &CoreLogRecord, process: u32) -> String {
     let mut line = String::with_capacity(256);
     line.push('{');
@@ -166,22 +187,97 @@ fn context_value(record: &CoreLogRecord, key: &str) -> String {
             FieldValue::Signed(value) => value.to_string(),
             FieldValue::Unsigned(value) => value.to_string(),
             FieldValue::Bool(value) => value.to_string(),
-            FieldValue::Float(value) => json_text(&value.to_string()),
+            FieldValue::Float(value) => json_text(&python_float_text(*value)),
         },
     }
 }
 
-/// `text` as an ASCII JSON string: the escapes of `serde_json`, and each
-/// character outside ASCII as one `\u` escape per UTF-16 unit, in lowercase
-/// hex. Pure.
+/// The exponent of a decimal point at or below which, and the one above
+/// which, Python's `repr` of a float takes the exponent form
+/// (`float_repr_style` `short`).
+const PYTHON_EXPONENT_FORM_LOW: i32 = -4;
+const PYTHON_EXPONENT_FORM_HIGH: i32 = 16;
+
+/// The text of `value` as Python's `str` writes it: the shortest digits that
+/// read back as `value`; the exponent form (`1e+16`, `2.5e-07`: a sign and at
+/// least two exponent digits) when the decimal point is at or below
+/// [`PYTHON_EXPONENT_FORM_LOW`] or above [`PYTHON_EXPONENT_FORM_HIGH`]; else
+/// the fixed form with at least one fraction digit (`1.0`, `-0.0`). `nan`,
+/// `inf` and `-inf` for the values that are no number. Pure.
+fn python_float_text(value: f64) -> String {
+    match (
+        value.is_nan(),
+        value.is_infinite(),
+        value.is_sign_negative(),
+    ) {
+        (true, _, _) => "nan".to_owned(),
+        (false, true, true) => "-inf".to_owned(),
+        (false, true, false) => "inf".to_owned(),
+        (false, false, _) => finite_float_text(value),
+    }
+}
+
+/// The text of a finite `value` ([`python_float_text`]). Pure.
+fn finite_float_text(value: f64) -> String {
+    let shortest = format!("{value:e}");
+    let (mantissa, exponent) = shortest
+        .split_once('e')
+        .expect("the exponent form of a finite float has an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("the exponent of a finite float is a small integer");
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => ("-", unsigned),
+        None => ("", mantissa),
+    };
+    let point = exponent + 1;
+    match point <= PYTHON_EXPONENT_FORM_LOW || point > PYTHON_EXPONENT_FORM_HIGH {
+        true => {
+            let exponent_sign = match exponent < 0 {
+                true => '-',
+                false => '+',
+            };
+            format!(
+                "{sign}{mantissa}e{exponent_sign}{:02}",
+                exponent.unsigned_abs()
+            )
+        }
+        false => format!("{sign}{}", fixed_digits(&mantissa.replace('.', ""), point)),
+    }
+}
+
+/// The digits `digits` with the decimal point after `point` digits, and at
+/// least one digit on each side of the point. Pure.
+fn fixed_digits(digits: &str, point: i32) -> String {
+    let count = i32::try_from(digits.len()).expect("a float has at most 17 digits");
+    match (point <= 0, point >= count) {
+        (true, _) => format!("0.{}{digits}", "0".repeat(point.unsigned_abs() as usize)),
+        (false, true) => format!(
+            "{digits}{}.0",
+            "0".repeat((point - count).unsigned_abs() as usize)
+        ),
+        (false, false) => {
+            let (whole, fraction) = digits.split_at(point.unsigned_abs() as usize);
+            format!("{whole}.{fraction}")
+        }
+    }
+}
+
+/// `text` as an ASCII JSON string, as Python's `json.dumps` writes it: the
+/// escapes of `serde_json` (the short escapes and `\u00xx` below U+0020), and
+/// U+007F and each character outside ASCII as one `\u` escape per UTF-16
+/// unit, in lowercase hex. Pure.
 fn json_text(text: &str) -> String {
     let escaped = serde_json::to_string(text).expect("a str always writes as a JSON string");
-    match escaped.is_ascii() {
+    match escaped
+        .chars()
+        .all(|character| character.is_ascii() && character != DELETE)
+    {
         true => escaped,
         false => {
             let mut ascii = String::with_capacity(escaped.len() + 16);
             for character in escaped.chars() {
-                match character.is_ascii() {
+                match character.is_ascii() && character != DELETE {
                     true => ascii.push(character),
                     false => {
                         let mut units = [0_u16; 2];
@@ -321,6 +417,85 @@ mod tests {
         assert_eq!(
             keys_of(&line_in(LogFormatKind::JsonLogs, &logged)),
             JSON_LOG_KEYS.map(str::to_owned).to_vec()
+        );
+    }
+
+    /// Python's `str` of each float, from `json.dumps(str(value))` of
+    /// CPython 3.
+    #[test]
+    fn a_float_is_the_text_of_python_str() {
+        let vectors: [(f64, &str); 18] = [
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (-0.0, "-0.0"),
+            (0.1, "0.1"),
+            (100.0, "100.0"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (1.5e16, "1.5e+16"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (123_456_789.123, "123456789.123"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (f64::NAN, "nan"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+            (2.5e-7, "2.5e-07"),
+            (12_345_678_901_234_567.0, "1.2345678901234568e+16"),
+        ];
+        for (value, text) in vectors {
+            assert_eq!(python_float_text(value), text, "{value:e}");
+        }
+    }
+
+    /// The escapes of `json.dumps` of CPython 3 with `ensure_ascii`.
+    #[test]
+    fn a_text_has_the_escapes_of_python_json_dumps() {
+        assert_eq!(
+            json_text("a\u{7f}b\u{1f}\u{0}\u{8}\u{c}\n\r\t\"\\/\u{e9}\u{1f40e}\u{2028}"),
+            r#""a\u007fb\u001f\u0000\b\f\n\r\t\"\\/\u00e9\ud83d\udc0e\u2028""#
+        );
+    }
+
+    #[test]
+    fn a_json_notice_is_a_warning_record_of_the_bridge_and_a_text_notice_is_the_text() {
+        let text = "horsies: 3 log records go to stderr: the JavaScript sink threw".to_owned();
+        assert_eq!(notice_line_in(LogFormatKind::TextLogs, text.clone()), text);
+        let value: serde_json::Value =
+            serde_json::from_str(&notice_line_in(LogFormatKind::JsonLogs, text.clone()))
+                .expect("the notice is JSON");
+        assert_eq!(value["level"], "WARNING");
+        assert_eq!(value["logger"], "horsies.bridge");
+        assert_eq!(value["message"], text.as_str());
+        assert_eq!(
+            value
+                .as_object()
+                .map(|object| object.keys().cloned().collect::<Vec<_>>()),
+            Some(JSON_LOG_KEYS.map(str::to_owned).to_vec())
+        );
+    }
+
+    #[test]
+    fn a_json_spill_is_the_record_line_then_the_notice_line_of_the_counts() {
+        let logged = record("worker ready", Vec::new());
+        let counts = "horsies log channel full or closed; dropped TRACE/DEBUG/INFO records: 2, \
+                      WARNING/ERROR records written to stderr: 1"
+            .to_owned();
+        let text = spill_text(LogFormatKind::JsonLogs, &logged, counts.clone());
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each spill line is JSON"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(lines[0]["message"], "worker ready");
+        assert_eq!(lines[0]["logger"], "horsies.worker");
+        assert_eq!(lines[1]["level"], "WARNING");
+        assert_eq!(lines[1]["logger"], "horsies.bridge");
+        assert_eq!(lines[1]["message"], counts.as_str());
+        assert_eq!(
+            spill_text(LogFormatKind::TextLogs, &logged, counts.clone()),
+            format!("{} ({counts})", logged.stderr_line())
         );
     }
 
