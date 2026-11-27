@@ -85,7 +85,7 @@ export const INSTANCES = [
   "thread_profiles",
   // The default tasks with the schedules of the scheduler tests (Python `instance_scheduler.py`).
   "scheduler",
-  // The default tasks with an interval of no time unit and two schedules of one name.
+  // The default tasks with an interval of zero seconds and two schedules of one name.
   "scheduler_invalid_rules",
   // The default tasks with a schedule of a task that the app does not list (Python `instance_scheduler_invalid.py`).
   "scheduler_invalid_task",

@@ -4,7 +4,7 @@
 //
 // - `scheduler`: five schedules, among them a disabled one, one with an input, one that catches up the missed slots,
 //   and a cron schedule of every minute.
-// - `scheduler_invalid_rules`: an interval with no time unit, and two schedules with one name. The scheduler start
+// - `scheduler_invalid_rules`: an interval of zero seconds, and two schedules with one name. The scheduler start
 //   refuses them.
 // - `scheduler_invalid_task`: a schedule of a contract that the app does not list. The scheduler start refuses it.
 
@@ -24,7 +24,7 @@ export const SCHEDULE_CATCH_UP = "e2e_schedule_catch_up";
 export const SCHEDULE_CRON_EVERY_MINUTE = "e2e_schedule_cron_every_minute";
 
 /** The schedule names of the `scheduler_invalid_rules` instance. */
-export const NO_TIME_UNIT_SCHEDULE = "e2e_interval_without_time_unit";
+export const ZERO_INTERVAL_SCHEDULE = "e2e_interval_of_zero_seconds";
 export const DUPLICATE_SCHEDULE = "duplicate_name";
 
 /** The schedule name of the `scheduler_invalid_task` instance. */
@@ -92,7 +92,7 @@ export const SCHEDULER_SECTION: ScheduleSection = {
 /** The schedule section of the `scheduler_invalid_rules` instance: an interval of zero, and one name twice. */
 export const INVALID_RULE_SECTION: ScheduleSection = {
   schedules: [
-    taskSchedule({ name: NO_TIME_UNIT_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(0) }),
+    taskSchedule({ name: ZERO_INTERVAL_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(0) }),
     taskSchedule({ name: DUPLICATE_SCHEDULE, task: scheduledSimple, input: {}, pattern: everySeconds(5) }),
     taskSchedule({ name: DUPLICATE_SCHEDULE, task: catchUpTask, input: {}, pattern: everySeconds(10) }),
   ],
