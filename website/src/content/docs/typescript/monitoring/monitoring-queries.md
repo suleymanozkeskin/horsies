@@ -290,6 +290,7 @@ async function cancelPending(app: Horsies, taskId: TaskId): Promise<boolean> {
       return false;
     case "isWorkflowTask":
     case "databaseOperationFailed":
+    case "outcomeUnknown":
     case "storedDataInvalid":
     case "seatRelayFull":
       console.error(cancelled.error.message);
@@ -315,7 +316,8 @@ The policy has no default: the caller names whether a running body is cancelled.
 | `notFound` | `TASK_NOT_FOUND` | No live or history row has the id. Nothing changed |
 | `notCancellable` | `TASK_NOT_CANCELLABLE` | The task is terminal, or `RUNNING` with `pendingOrClaimedOnly`; `currentStatus` is the status that the cancel found. Nothing changed |
 | `isWorkflowTask` | `TASK_IS_WORKFLOW_TASK` | The task belongs to a workflow; `currentStatus` is its status. Nothing changed |
-| `databaseOperationFailed` | `DATABASE_OPERATION_FAILED` | The connect or the statement failed; `cause` holds the cause. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `databaseOperationFailed` | `DATABASE_OPERATION_FAILED` | The connect failed, the statement was not sent, or the server refused it; `cause` holds the cause. Nothing changed; `retryable` follows the cause |
+| `outcomeUnknown` | `OUTCOME_UNKNOWN` | The statement was sent and its reply was lost; `cause` holds the cause, and `retryable` follows the cause. A cancel again tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`, and a cancel that did not commit cancels the task |
 | `storedDataInvalid` | `STORED_DATA_INVALID` | Stored data does not parse; `cause` holds the cause. Nothing changed. Not retryable |
 | `seatRelayFull` | `SEAT_RELAY_FULL` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was written. Retryable |
 

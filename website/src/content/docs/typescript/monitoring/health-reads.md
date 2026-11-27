@@ -60,7 +60,7 @@ A value that may be missing is a variant that names the missing state, not `null
 | Field | Type | Default |
 |-------|------|---------|
 | `target` | `PingTarget`: `{ kind: "everyWorker" }` or `{ kind: "worker", workerId }` | `{ kind: "everyWorker" }` |
-| `waitMs` | `number`: the window of the ping, a whole number of milliseconds above 0 | `DEFAULT_PING_WAIT_MS` (2,000) |
+| `waitMs` | `number`: the window of the ping, a whole number of milliseconds above 0 and at most 60,000 | `DEFAULT_PING_WAIT_MS` (2,000) |
 | `minResponses` | `MinResponses`: `{ kind: "fullWindow" }` or `{ kind: "atLeast", count }` (`count` 1 or more) | `{ kind: "fullWindow" }` |
 
 The ping collects replies until the first of these holds:
@@ -76,7 +76,7 @@ The ping collects replies until the first of these holds:
 The checks run in this order, before any connect:
 
 1. A target `workerId` that is not well-formed text (it holds a lone surrogate) is `INVALID_INPUT` with the subject `worker`.
-2. A `waitMs` or a `minResponses.count` that is not a whole number above 0 is `INVALID_INPUT` with the subject `pingWorkers`.
+2. A `waitMs` or a `minResponses.count` that is not a whole number above 0 is `INVALID_INPUT` with the subject `pingWorkers`. A `waitMs` above 60,000 is `INVALID_INPUT` too. Nothing is sent.
 3. A handle with no listener is `LISTENER_DISABLED`. The handle of an app runs the schema mode that installs and validates the schema, and that mode has a listener.
 
 ## Read the Worker States
@@ -123,7 +123,7 @@ async function downSlots(app: Horsies): Promise<void> {
 | `executionClassBudgets` | `readonly ExecutionClassBudget[]`: each claim budget with its `budget` execution class, its `capacity` (`bigint`) and the execution classes it `serves` |
 | `profile` | `SnapshotProfile`: `{ kind: "named", name }`, or `{ kind: "notRecorded" }` for a snapshot that holds no profile name |
 
-`getWorkerStateHistory` takes a `WorkerHistoryLimit`: `{ kind: "allRetained" }` (the default: every retained snapshot) or `{ kind: "newest", count }` (the newest `count`, 1 or more). A `count` that is not a whole number above 0 is `INVALID_INPUT` with the subject `workerHistory`, with no connect.
+`getWorkerStateHistory` takes a `WorkerHistoryLimit`: `{ kind: "allRetained" }` (the default: every retained snapshot) or `{ kind: "newest", count }` (the newest `count`, 1 or more). A `count` that is not a whole number above 0, or a `count` above 10,000, is `INVALID_INPUT` with the subject `workerHistory`, with no connect. `allRetained` is `INVALID_INPUT` when the worker holds more than 10,000 snapshots. No row is returned in part.
 
 ## Stale and Expired Tasks
 
