@@ -8,6 +8,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      record_typecheck_speed:
+        description: Record the typecheck-speed baseline of the runner and print baseline.json
+        type: boolean
+        default: false
 
 concurrency:
   group: unit-tests-${{ github.ref }}
@@ -776,9 +781,11 @@ jobs:
   # (clients/typescript/tests/typecheck-speed/). The statistic is the ratio of
   # the typecheck time of the app project to that of the control project,
   # measured in the same session, so the verdict does not depend on the
-  # runner. baseline.json holds the ratio and its noise for the Bun binary
-  # of this job. The step exits 1 when the ratio is above the baseline
-  # median plus the noise, and 2 when no baseline matches this Bun binary.
+  # runner speed. The ratio still differs per operating system and CPU
+  # architecture, so baseline.json holds one ratio and its noise per
+  # platform, architecture and Bun binary. The step exits 1 when the ratio
+  # is above the baseline median plus the noise, and 2 when no baseline
+  # matches this platform, architecture and Bun binary.
   typescript-typecheck-speed:
     needs: scope
     if: needs.scope.outputs.run_typescript == 'true'
@@ -800,6 +807,18 @@ jobs:
       - name: Install the workspace from bun.lock
         working-directory: clients/typescript
         run: bun install --frozen-lockfile
+
+      # Only on a dispatch with record_typecheck_speed: the record command
+      # measures 5 sessions on this runner, writes its entry into
+      # baseline.json, and the step prints the file. The file is not kept;
+      # a commit adds the printed entry. The check below then compares with
+      # the entry of this run.
+      - name: Record the typecheck-speed baseline of this runner
+        if: inputs.record_typecheck_speed
+        working-directory: clients/typescript
+        run: |
+          bun run typecheck-speed:record
+          cat tests/typecheck-speed/baseline.json
 
       - name: Check the typecheck speed (ratio to the control project)
         working-directory: clients/typescript
@@ -873,10 +892,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Each runtime runs the native tests on its own new, empty database:
+      # the tests of one runtime never see the rows of the other.
+      - name: Create one empty database per runtime
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE horsies_native_bun'
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE horsies_native_node'
+
       - name: Run the native tests on Bun
+        env:
+          HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies_native_bun
         run: bun run --cwd clients/typescript/bridge test:native
 
       - name: Run the native tests on Node
+        env:
+          HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies_native_node
         run: bun run --cwd clients/typescript/bridge test:native:node
 
   # The generated files of the TypeScript client: the renderer check reports
