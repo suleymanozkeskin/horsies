@@ -71,7 +71,7 @@ The reader holds the declared output type (from the task registry):
 2. If `err` is populated, the error decodes first. No output type is required to surface a failed task, also when its task name is unknown locally. The decode refuses a key that the error type does not declare, and an error without `error_code`. The refusal names the cause.
 3. Otherwise the ok slot is read through its JSON text, strictly, against the output type.
 
-A read that cannot decode returns an error with a code. The codes of the Python client are in [Decode Errors](/horsies/tasks/task-types/#decode-errors); the read errors of the Rust client are in [ReadError](/horsies/rust/tasks/retrieving-results/#readerror).
+A read that cannot decode returns an error with a code. The codes of the Python client are in [Decode Errors](/horsies/tasks/task-types/#decode-errors); the read errors of the Rust client are in [ReadError](/horsies/rust/tasks/retrieving-results/#readerror); the read errors of the TypeScript client are in [ReadError](/horsies/typescript/tasks/retrieving-results/#readerror).
 
 ## Strict Values
 

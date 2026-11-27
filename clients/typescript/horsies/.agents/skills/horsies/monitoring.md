@@ -296,7 +296,7 @@ There is no manual retry action. Re-execution is a rerun (Rerun, below).
 `Bun.serve`, Hono, a Next.js route handler, or any server that gives a
 `Request`.
 
-<!-- ts-check: skip partial -- Bun.serve needs the Bun types, and the docs check loads the Node types only -->
+<!-- ts-check: alone -->
 ```ts
 import { createMonitoringHandler, type Horsies, trustedHeader } from "horsies";
 
@@ -596,10 +596,13 @@ Errors (each with `kind`, the code in camelCase, `code` and `message`;
 | `IDEMPOTENCY_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
 | `ID_MINT_REFUSED` | both | The task id source refused to mint the new id |
 | `CLIENT_FAMILY_MISMATCH`, `UNKNOWN_STORED_FAMILY` | both | Another client family installed the database, or its family row is not a family |
+| `RETRY_CODE_NOT_DECLARED` | both | The stored retry list of the source names a custom code that the contract of `taskName` does not declare in `errorCodes` (`retryCode`). Nothing is written |
+| `TASK_NOT_REGISTERED` | both | The stored retry list names a custom code, and the app does not list the contract of `taskName`. Nothing is written |
 | `CONTRACT_VIOLATION` | both | A row or stored data broke the rerun's contract. Nothing committed |
 | `CONNECT_FAILED` | `RerunError` | The app's handle could not connect or install the schema. Nothing ran |
 | `STATEMENT_FAILED` | `RerunError` | A statement failed; `stateAfter` is `"notCommitted"` or `"unknown"` (the `COMMIT` reply was lost: a keyed rerun sent again answers `keyReplay` if the first one committed) |
 | `FAMILY_CHECK_FAILED` | `RerunError` | The family row could not be read |
+| `SEAT_RELAY_FULL` | `RerunError` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing ran |
 | `DRIVER_FAILED` | `CallerRerunError` | A statement failed in the caller's driver: `statement`, `driverError`. The transaction is aborted: roll it back |
 | `NO_OPEN_TRANSACTION` | `CallerRerunError` | The connection had no open transaction, so the statement did not run; `state` tells why (`idle`, `failedTransaction`, `notConnected`, `unrecognized`) |
 | `RESULT_NOT_TEXT` | `CallerRerunError` | The driver gave a column in a format other than text (`column`, `format`), for example a `pg` client with `binary: true`. Roll back |
