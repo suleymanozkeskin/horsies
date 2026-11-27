@@ -269,7 +269,7 @@ class TestPrepareSchedules:
                 assert isinstance(errors[0], ConfigurationError)
                 assert errors[0].code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
                 assert (
-                    'Circular reference detected (depth exceeded)'
+                    'Maximum serialization depth exceeded'
                     in ' '.join(errors[0].notes)
                 )
             case Ok(encoded_kwargs):

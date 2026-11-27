@@ -1099,7 +1099,7 @@ class TestValueThatIsTooDeep:
 
         assert str(raised.value) == (
             'payload: serialization failed: '
-            'Circular reference detected (depth exceeded)'
+            'Maximum serialization depth exceeded'
         )
         assert raised.value.__context__ is None
 
@@ -1129,7 +1129,7 @@ class TestValueErrorThatStaysRaw:
         [
             'defect in a computed field',
             'wrapped: Circular reference detected (id repeated)',
-            'Circular reference detected (depth exceeded): wrapped',
+            'Maximum serialization depth exceeded: wrapped',
             'Circular reference detected',
         ],
         ids=['other-text', 'text-in-front', 'text-behind', 'shared-prefix'],
