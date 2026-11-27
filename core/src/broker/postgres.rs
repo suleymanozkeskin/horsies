@@ -2264,10 +2264,7 @@ impl PostgresBroker {
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        loop {
-            let Some(remaining) = wait.checked_sub(start.elapsed()) else {
-                break;
-            };
+        while let Some(remaining) = wait.checked_sub(start.elapsed()) {
             if remaining.is_zero() {
                 break;
             }

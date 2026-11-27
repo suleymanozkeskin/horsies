@@ -1358,7 +1358,7 @@ class TestRunTaskEntryErrorPaths:
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
         }
         assert (
-            'Circular reference detected (depth exceeded)'
+            'Maximum serialization depth exceeded'
             in parsed['err']['message']
         )
 

@@ -236,6 +236,18 @@ struct ResourceMetrics {
     cpu_percent: Option<f64>,
 }
 
+impl ResourceMetrics {
+    /// No metric could be read.
+    fn unreadable() -> Self {
+        Self {
+            parent_rss: ParentRss::Unreadable,
+            memory_usage_mb: None,
+            memory_percent: None,
+            cpu_percent: None,
+        }
+    }
+}
+
 /// Collect resource metrics (memory and CPU) for the current process.
 ///
 /// Uses the `sysinfo` crate to mirror Python's psutil-based metrics:
@@ -246,7 +258,9 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[pid]),
         true,
-        sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory(),
     );
 
     if let Some(process) = sys.process(pid) {
@@ -269,12 +283,7 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
             cpu_percent: Some((cpu_percent * 100.0).round() / 100.0),
         }
     } else {
-        ResourceMetrics {
-            parent_rss: ParentRss::Unreadable,
-            memory_usage_mb: None,
-            memory_percent: None,
-            cpu_percent: None,
-        }
+        ResourceMetrics::unreadable()
     }
 }
 
@@ -402,7 +411,9 @@ pub(crate) struct SnapshotSource {
     pub handler_child: HandlerChildView,
     /// Where each snapshot sets the worker gauges of the values it writes.
     pub telemetry: WorkerTelemetry,
-    sys: System,
+    /// The process reader; `None` when the host refused to start it, so
+    /// every resource read is unreadable.
+    sys: Option<System>,
     sys_pid: Pid,
 }
 
@@ -441,13 +452,17 @@ impl SnapshotSource {
         telemetry: WorkerTelemetry,
     ) -> Self {
         let sys_pid = Pid::from(pid as usize);
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
-            true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
-        );
-        sys.refresh_memory();
+        let mut sys = System::new().ok();
+        if let Some(reader) = sys.as_mut() {
+            reader.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory(),
+            );
+            reader.refresh_memory();
+        }
         Self {
             worker_id,
             hostname,
@@ -476,7 +491,10 @@ impl SnapshotSource {
             down,
             down_by_kind,
             budgets: budget_columns(&self.children.service()),
-            resources: collect_resource_metrics(&mut self.sys, self.sys_pid),
+            resources: match self.sys.as_mut() {
+                Some(sys) => collect_resource_metrics(sys, self.sys_pid),
+                None => ResourceMetrics::unreadable(),
+            },
             children_rss: children_rss_of(&self.children.child_rss()),
         }
     }
@@ -1720,11 +1738,13 @@ mod tests {
     #[test]
     fn collect_resource_metrics_returns_values() {
         let pid = Pid::from(std::process::id() as usize);
-        let mut sys = System::new();
+        let mut sys = System::new().expect("the process reader starts on a supported host");
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
         sys.refresh_memory();
         let metrics = collect_resource_metrics(&mut sys, pid);

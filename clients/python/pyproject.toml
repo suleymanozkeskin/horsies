@@ -133,7 +133,7 @@ docstring-quotes = "single"
 
 
 [tool.uv]
-exclude-newer = "7 days"
+exclude-newer = "10 days"
 # uv rebuilds the local install when one of these changes: the Rust sources of
 # horsies._core and the files that it compiles in.
 cache-keys = [

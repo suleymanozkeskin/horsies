@@ -142,10 +142,12 @@ start byte`, so a bad decode in a computed field stays a defect."""
 _NOT_SERIALIZABLE_VALUE_TEXTS: Final = frozenset({
     'Circular reference detected (id repeated)',
     'Circular reference detected (depth exceeded)',
+    'Maximum serialization depth exceeded',
 })
 """The texts of the plain `ValueError` from `dump_python` for a value that holds
 itself, and for a value that is nested too deep. The second text says circular,
-but the value can be finite. `_dump` compares all of each text: any other
+but the value can be finite. Pydantic 2.14 writes the third text for the depth
+limit. `_dump` compares all of each text: any other
 `ValueError` propagates."""
 
 

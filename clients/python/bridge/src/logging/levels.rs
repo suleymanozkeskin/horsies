@@ -82,10 +82,7 @@ impl LevelSnapshot {
 
 /// A Python level number as a threshold: below 0 is 0, above 255 is 255.
 fn threshold_of(python_level: i64) -> u8 {
-    match u8::try_from(python_level.clamp(0, i64::from(u8::MAX))) {
-        Ok(threshold) => threshold,
-        Err(_unreachable_after_clamp) => u8::MAX,
-    }
+    u8::try_from(python_level.clamp(0, i64::from(u8::MAX))).unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]

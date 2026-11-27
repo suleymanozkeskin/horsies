@@ -52,6 +52,10 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **The Rust client's `sqlx` feature needs sqlx 0.9, and the minimum Rust
+  is 1.95.** The `sqlx` feature of `horsies` builds against sqlx 0.9 (it was
+  0.8). `rust-version` of `horsies` is `1.95` (it was `1.91`), and the
+  repository pins Rust 1.95.0 in `rust-toolchain.toml`.
 - **Breaking: the connection section of the app config is `database`.**
   `AppConfig.broker` is `AppConfig.database` in Python and Rust. Rust
   `AppConfig::for_database_url` and `PostgresConfig::from_url` are

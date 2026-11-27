@@ -1,5 +1,5 @@
 use crate::core::config::resilience::WorkerResilienceConfig;
-use rand::Rng;
+use rand::RngExt;
 
 /// Stateful exponential backoff tracker with jitter.
 ///
@@ -50,8 +50,8 @@ impl RetryBackoff {
 
         // Apply ±25% jitter.
         let jitter_factor = {
-            let mut rng = rand::thread_rng();
-            rng.gen_range(0.75..=1.25)
+            let mut rng = rand::rng();
+            rng.random_range(0.75..=1.25)
         };
         let jittered_ms = (capped_ms as f64) * jitter_factor;
 
