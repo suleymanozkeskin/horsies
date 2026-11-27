@@ -181,13 +181,13 @@ export function storedPattern(pattern: SchedulePattern): Stored<StoredPattern> {
     case "hourly":
       return storedHourly(pattern);
     case "daily":
-      return ok({ type: "daily", time: pattern.time });
+      return ok({ kind: "daily", time: pattern.time });
     case "weekly":
-      return ok({ type: "weekly", days: [...pattern.weekdays], time: pattern.time });
+      return ok({ kind: "weekly", weekdays: [...pattern.weekdays], time: pattern.time });
     case "monthly": {
       const day = wholeNumber(pattern.dayOfMonth, "dayOfMonth");
 
-      return day.ok ? ok({ type: "monthly", day: day.value, time: pattern.time }) : day;
+      return day.ok ? ok({ kind: "monthly", day_of_month: day.value, time: pattern.time }) : day;
     }
 
     case "cron":
@@ -197,7 +197,10 @@ export function storedPattern(pattern: SchedulePattern): Stored<StoredPattern> {
   }
 }
 
-/** The stored interval: each part the same part of the duration, `null` when it is 0. Pure. */
+/**
+ * The stored interval: the length of `every` in days, hours, minutes and seconds, the largest unit first, so that its
+ * text is the core's text of the same length (`PT90S` is stored as `PT1M30S`). Pure.
+ */
 function storedInterval(every: Temporal.Duration): Stored<StoredPattern> {
   const withoutFixedLength = UNITS_WITHOUT_FIXED_LENGTH.find((unit) => every[unit] !== 0);
 
@@ -211,18 +214,27 @@ function storedInterval(every: Temporal.Duration): Stored<StoredPattern> {
     return err({ kind: "unitBelowSecond", unit: belowSecond });
   }
 
-  return ok({
-    type: "interval",
-    seconds: partOrNull(every.seconds),
-    minutes: partOrNull(every.minutes),
-    hours: partOrNull(every.hours),
-    days: partOrNull(every.days),
-  });
+  // Temporal bounds a duration to fewer than 2^53 seconds, so the sum is exact.
+  const totalSeconds = every.days * SECONDS_PER_DAY + every.hours * SECONDS_PER_HOUR + every.minutes * SECONDS_PER_MINUTE + every.seconds;
+
+  return ok({ kind: "interval", every: balancedDuration(totalSeconds) });
 }
 
-/** A part of a duration as the stored interval holds it: `null` for 0. Pure. */
-function partOrNull(part: number): number | null {
-  return part === 0 ? null : part;
+const SECONDS_PER_MINUTE = 60;
+const SECONDS_PER_HOUR = 3_600;
+const SECONDS_PER_DAY = 86_400;
+
+/** The duration of `totalSeconds` in days, hours, minutes and seconds, each part below its next unit. Pure. */
+function balancedDuration(totalSeconds: number): Temporal.Duration {
+  const sign = totalSeconds < 0 ? -1 : 1;
+  const length = Math.abs(totalSeconds);
+
+  return Temporal.Duration.from({
+    days: sign * Math.floor(length / SECONDS_PER_DAY),
+    hours: sign * Math.floor((length % SECONDS_PER_DAY) / SECONDS_PER_HOUR),
+    minutes: sign * Math.floor((length % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE),
+    seconds: sign * (length % SECONDS_PER_MINUTE),
+  });
 }
 
 function storedHourly(pattern: HourlySchedule): Stored<StoredPattern> {
@@ -234,7 +246,7 @@ function storedHourly(pattern: HourlySchedule): Stored<StoredPattern> {
 
   const second = wholeNumber(pattern.second ?? HOURLY_SCHEDULE_SECOND_DEFAULT, "second");
 
-  return second.ok ? ok({ type: "hourly", minute: minute.value, second: second.value }) : second;
+  return second.ok ? ok({ kind: "hourly", minute: minute.value, second: second.value }) : second;
 }
 
 function storedCron(pattern: CronSchedule): Stored<StoredPattern> {
@@ -258,7 +270,7 @@ function storedCron(pattern: CronSchedule): Stored<StoredPattern> {
 
   const day = storedDay(pattern.day);
 
-  return day.ok ? ok({ type: "cron", minute: minute.value, hour: hour.value, month: month.value, day: day.value }) : day;
+  return day.ok ? ok({ kind: "cron", minute: minute.value, hour: hour.value, month: month.value, day: day.value }) : day;
 }
 
 function storedDay(day: DaySelector): Stored<StoredDaySelector> {

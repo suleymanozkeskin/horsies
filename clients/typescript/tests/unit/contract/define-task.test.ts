@@ -172,7 +172,7 @@ describe("definition refusals", () => {
     const record = contractRecord(
       defineTask({
         name: "t",
-        input: { "first name": h.string(), workflow_ctx: h.json(), __h_x: h.int() },
+        input: { "first name": h.string(), workflow_context: h.json(), __h_x: h.int() },
         output: h.null(),
       }),
     );
@@ -181,7 +181,7 @@ describe("definition refusals", () => {
       record.refusals.map((refused) => [refused.rule, refused.path]),
       [
         ["ParameterName", "input.first name"],
-        ["ParameterName", "input.workflow_ctx"],
+        ["ParameterName", "input.workflow_context"],
         ["ParameterName", "input.__h_x"],
       ],
     );

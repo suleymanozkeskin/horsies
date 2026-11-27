@@ -197,7 +197,7 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
       calls: core,
     });
 
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":60,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":60,"second":0}']);
     assert.deepEqual(scheduleRefusals(context), [
       ["HRS-205", "schedules[0] a", "schedules[0] a: pattern: the pattern breaks its rules: minute 60"],
     ]);
@@ -327,7 +327,7 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
     );
 
     assert.deepEqual(scheduleRefusals(context), []);
-    assert.deepEqual(core.patterns, ['{"type":"hourly","minute":0,"second":0}']);
+    assert.deepEqual(core.patterns, ['{"kind":"hourly","minute":0,"second":0}']);
     assert.deepEqual(scheduleDeclaration(context), {
       kind: "declared",
       section: { enabled: true, checkIntervalSeconds: 1 },

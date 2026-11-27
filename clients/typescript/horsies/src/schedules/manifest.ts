@@ -80,7 +80,7 @@ function sendManifest(activation: CheckedActivation, facts: ManifestFacts): Sche
 
   return {
     task_name: activation.task.compiled.record.name,
-    queue_name: activation.queueName,
+    queue: activation.queueName,
     priority: queuePriority(queue.priority),
     input_json: activation.inputJson,
     task_options: { kind: "ENCODED", json: facts.optionsText(activation.task) },

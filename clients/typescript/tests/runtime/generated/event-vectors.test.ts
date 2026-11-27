@@ -117,7 +117,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
       queue: "default",
       execution: "SHARED_ASYNC",
       attempt: 1,
-      childKind: "ISOLATED",
+      childExecution: "ISOLATED",
       childPid: 4242,
       slotWait: Temporal.Duration.from({ microseconds: 250 }),
     },
@@ -255,7 +255,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "ChildStarted",
       at: AT,
-      childKind: "SHARED_THREAD",
+      childExecution: "SHARED_THREAD",
       slot: 3,
       childPid: 4243,
       bootDuration: Temporal.Duration.from({ milliseconds: 850 }),
@@ -266,7 +266,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "ChildReplaced",
       at: AT,
-      childKind: "ISOLATED",
+      childExecution: "ISOLATED",
       slot: 0,
       childPid: 4242,
       reason: "MEMORY_LIMIT",
@@ -277,12 +277,12 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
     {
       kind: "SlotDown",
       at: AT,
-      childKind: "SHARED_ASYNC",
+      childExecution: "SHARED_ASYNC",
       slot: 1,
       cause: { kind: "resourceShortage", errno: "EMFILE" },
     },
   ],
-  ["slot_recovered", { kind: "SlotRecovered", at: AT, childKind: "SHARED_ASYNC", slot: 1 }],
+  ["slot_recovered", { kind: "SlotRecovered", at: AT, childExecution: "SHARED_ASYNC", slot: 1 }],
 ]);
 
 /**

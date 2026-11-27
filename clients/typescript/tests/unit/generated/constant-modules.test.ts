@@ -3,10 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { TASK_LIST_BOUND } from "../../../horsies/src/_catalog/broker_bounds.ts";
 import {
   MAX_ATTEMPT,
+  MAX_EVENT_CUSTOM_CODE_CHARS,
   MAX_EVENT_QUEUE_NAME_CHARS,
   MAX_EVENT_TASK_NAME_CHARS,
   MAX_EVENT_TRACE_CARRIER_CHARS,
-  MAX_EVENT_USER_CODE_CHARS,
   MAX_EVENT_WORKER_ID_CHARS,
   MAX_RETRY_COUNT,
 } from "../../../horsies/src/_catalog/event_bounds.ts";
@@ -62,7 +62,7 @@ const bounds = [
   MAX_RETRY_COUNT,
   MAX_EVENT_TASK_NAME_CHARS,
   MAX_EVENT_QUEUE_NAME_CHARS,
-  MAX_EVENT_USER_CODE_CHARS,
+  MAX_EVENT_CUSTOM_CODE_CHARS,
   MAX_EVENT_TRACE_CARRIER_CHARS,
   MAX_EVENT_WORKER_ID_CHARS,
   TASK_LIST_BOUND,

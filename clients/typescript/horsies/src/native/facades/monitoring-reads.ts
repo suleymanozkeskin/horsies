@@ -21,7 +21,7 @@ export interface WindowArg {
 export type RetriedArg = "any" | "retriedOnly";
 
 /** An error category, by its wire value. */
-export type ErrorCategoryArg = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
+export type ErrorCategoryArg = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "CUSTOM";
 
 /** A count of a query: the core's default (of the core's query `new`), or a value. */
 export type CountArg = { readonly kind: "coreDefault" } | { readonly kind: "set"; readonly value: number };

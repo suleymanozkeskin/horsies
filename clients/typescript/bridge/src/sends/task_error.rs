@@ -1,6 +1,6 @@
 //! The core's task error of a body, built from its parts.
 //!
-//! - The code: a custom code that `UserCode::parse` accepts (a built-in or
+//! - The code: a custom code that `CustomCode::parse` accepts (a built-in or
 //!   a reserved name is refused, as Python and Rust refuse it when the error
 //!   is built), or a built-in code.
 //! - The data: none, the codec's stored `data` text, or data that the codec
@@ -16,7 +16,9 @@
 use horsies_core::core::codec::{UserValueRefused, STRICT_JSON_ERROR_CAUSE};
 use horsies_core::core::task::error::DATA_REFUSED_KEY;
 use horsies_core::core::task::ExceptionRecord;
-use horsies_core::{BuiltInTaskCode, JsonText, TaskError, TaskErrorCode, TaskErrorKind, UserCode};
+use horsies_core::{
+    BuiltInTaskCode, CustomCode, JsonText, TaskError, TaskErrorCode, TaskErrorKind,
+};
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
@@ -195,8 +197,8 @@ fn task_error_build(
     log: &LogBridge,
 ) -> Result<TaskErrorBuild, BoundaryRefusal> {
     let error_code = match parts.code {
-        ErrorCodePart::Custom { code } => match UserCode::parse(code) {
-            Ok(custom) => TaskErrorCode::User(custom),
+        ErrorCodePart::Custom { code } => match CustomCode::parse(code) {
+            Ok(custom) => TaskErrorCode::Custom(custom),
             Err(refused) => {
                 return Ok(TaskErrorBuild::Refused {
                     cause: refused.to_string(),

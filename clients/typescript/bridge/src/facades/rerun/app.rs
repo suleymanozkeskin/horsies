@@ -7,7 +7,7 @@
 //! transaction on the main core pool, and commits it.
 
 use horsies_core::telemetry::trace_carrier::SendTrace;
-use horsies_core::{RegisteredTaskCodes, RerunEnqueuePolicy, RerunTask};
+use horsies_core::{RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy};
 use napi::bindgen_prelude::Object;
 use napi::Env;
 use napi_derive::napi;
@@ -41,7 +41,7 @@ pub enum AppRerunAnswer {
 /// The command, the policy, the trace and the declared custom codes of one
 /// rerun, as the core takes them.
 struct AppRequest {
-    command: RerunTask,
+    command: RerunCommand,
     policy: RerunEnqueuePolicy,
     trace: SendTrace,
     codes: RegisteredTaskCodes,

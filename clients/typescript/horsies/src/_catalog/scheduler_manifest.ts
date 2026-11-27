@@ -31,7 +31,7 @@ export type ScheduleTaskOptions =
 
 export interface ScheduleSendManifest {
   readonly task_name: string;
-  readonly queue_name: string;
+  readonly queue: string;
   readonly priority: number;
   readonly input_json: string;
   readonly task_options: ScheduleTaskOptions;
@@ -96,7 +96,7 @@ export function scheduleTaskOptionsToWire(value: ScheduleTaskOptions): ReadonlyM
 export function scheduleSendManifestToWire(value: ScheduleSendManifest): ReadonlyMap<string, WireJson> {
   return new Map<string, WireJson>([
     ["task_name", value.task_name],
-    ["queue_name", value.queue_name],
+    ["queue", value.queue],
     ["priority", integerToWire(value.priority, "ScheduleSendManifest.priority")],
     ["input_json", value.input_json],
     ["task_options", scheduleTaskOptionsToWire(value.task_options)],

@@ -62,7 +62,7 @@ function enabledSchedule(name: string, patternJson: string, timezone = "UTC"): o
       max_catch_up_runs: 100,
       send: {
         task_name: "ping",
-        queue_name: "default",
+        queue: "default",
         priority: 100,
         input_json: "{}",
         task_options: { kind: "NO_OPTIONS" },
@@ -108,8 +108,8 @@ async function stateRowsOf(handle: CoreHandle, name: string, when: "now" | "writ
 
 /** The patterns that the stored form holds and that break a rule of the core, by the rule. */
 const RULE_BREAKERS: readonly (readonly [string, SchedulePattern])[] = [
-  ["an interval with no part", { kind: "interval", every: Temporal.Duration.from({ seconds: 0 }) }],
-  ["an interval part above its bound", { kind: "interval", every: Temporal.Duration.from({ seconds: 86_401 }) }],
+  ["an interval of zero", { kind: "interval", every: Temporal.Duration.from({ seconds: 0 }) }],
+  ["an interval longer than 365 days", { kind: "interval", every: Temporal.Duration.from({ days: 365, seconds: 1 }) }],
   ["a negative interval", { kind: "interval", every: Temporal.Duration.from({ minutes: -5 }) }],
   ["an hourly minute of 60", { kind: "hourly", minute: 60 }],
   ["a daily time with a fraction of a second", { kind: "daily", time: Temporal.PlainTime.from("09:30:00.5") }],

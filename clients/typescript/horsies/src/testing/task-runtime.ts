@@ -33,7 +33,7 @@ export type TestStateEntry<K extends AnyStateKey> = readonly [key: K, value: Sta
 export type TestStateEntries<Keys extends readonly AnyStateKey[]> = { readonly [I in keyof Keys]: TestStateEntry<Keys[I]> };
 
 /**
- * The stored form of a workflow context: the `workflow_ctx` member that the core writes into the input of a task with
+ * The stored form of a workflow context: the `workflow_context` member that the core writes into the input of a task with
  * `workflowContext: true`.
  */
 export interface StoredWorkflowContext {

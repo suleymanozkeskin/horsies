@@ -38,7 +38,7 @@ export interface MonitoringWindow {
 }
 
 /** An error category, by its wire value. */
-export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
+export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "CUSTOM";
 
 /** The sort field of the task list. */
 export type TaskSortField =

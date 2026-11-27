@@ -43,11 +43,11 @@ const UNUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 /** The retry policy of a vector, as Python's `RetryPolicy` stores it. */
 type RetryNotation = {
   readonly max_retries: number;
-  readonly intervals: readonly number[];
+  readonly intervals_seconds: readonly number[];
   readonly backoff_strategy: "fixed" | "exponential";
   readonly jitter: boolean;
   readonly max_delay_seconds: number | null;
-  readonly auto_retry_for: readonly string[];
+  readonly retry_for: readonly string[];
 };
 
 /** One vector: the facts of the options, the deadline of a send or a node, and Python's text. */
@@ -71,15 +71,15 @@ function vectors(): readonly OptionsVector[] {
 
 /** The `retryPolicy` field of `defineTask` of a vector's policy. */
 function retryOf(policy: RetryNotation): object {
-  const [base] = policy.intervals;
+  const [base] = policy.intervals_seconds;
 
   switch (policy.backoff_strategy) {
     case "fixed":
       return {
         kind: "fixed",
-        intervalsSeconds: policy.intervals,
+        intervalsSeconds: policy.intervals_seconds,
         jitter: policy.jitter,
-        retryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     case "exponential":
       return {
@@ -88,7 +88,7 @@ function retryOf(policy: RetryNotation): object {
         maxRetries: policy.max_retries,
         jitter: policy.jitter,
         ...(policy.max_delay_seconds === null ? {} : { maxDelaySeconds: policy.max_delay_seconds }),
-        retryFor: policy.auto_retry_for,
+        retryFor: policy.retry_for,
       };
     default: {
       const unexpected: never = policy.backoff_strategy;

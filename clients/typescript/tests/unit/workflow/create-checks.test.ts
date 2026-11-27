@@ -148,8 +148,8 @@ describe("checkWorkflowsAtCreate", () => {
         name: "e",
         definitionKey: "tests.e.v1",
         outputType: h.int(),
-        parameters: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
       (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
@@ -164,8 +164,8 @@ describe("checkWorkflowsAtCreate", () => {
         name: "params",
         definitionKey: "tests.params.v1",
         outputType: h.int(),
-        parameters: { workflow_ctx: h.int() },
-        checkCases: [{ workflow_ctx: 1 }],
+        parameters: { workflow_context: h.int() },
+        checkCases: [{ workflow_context: 1 }],
       },
       (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
@@ -179,7 +179,7 @@ describe("checkWorkflowsAtCreate", () => {
     const [params] = checkedAtCreate([badParams]).refusals;
     const [output] = checkedAtCreate([badOutput]).refusals;
 
-    assert.match(params?.message ?? "", /^workflows\[0\] params: parameters\.workflow_ctx: /u);
+    assert.match(params?.message ?? "", /^workflows\[0\] params: parameters\.workflow_context: /u);
     assert.match(output?.message ?? "", /^workflows\[0\] out: outputType: .*\[WireKind\]$/u);
   });
 

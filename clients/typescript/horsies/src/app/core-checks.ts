@@ -104,7 +104,7 @@ function codeRefusals(checks: CoreChecks, record: ContractRecord, path: string):
 export function taskOptionsFacts(record: ContractRecord, route: QueueRoute): TaskOptionsFacts {
   return {
     taskName: record.name,
-    queueName: route.queueName,
+    queue: route.queueName,
     execution: record.execution,
     timeout: millisecondsFact(record.timeout),
     cancelGrace: millisecondsFact(record.cancelGrace),
@@ -126,7 +126,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         kind: "fixed",
         intervalsSeconds: [...retry.intervalsSeconds],
         jitter: retry.jitter,
-        autoRetryFor: [...retry.retryFor],
+        retryFor: [...retry.retryFor],
       };
     case "exponential":
       return {
@@ -135,7 +135,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         maxRetries: retry.maxRetries,
         jitter: retry.jitter,
         maxDelay: retry.maxDelay.kind === "seconds" ? { kind: "seconds", seconds: retry.maxDelay.seconds } : { kind: "noCap" },
-        autoRetryFor: [...retry.retryFor],
+        retryFor: [...retry.retryFor],
       };
     default: {
       const unexpected: never = retry;

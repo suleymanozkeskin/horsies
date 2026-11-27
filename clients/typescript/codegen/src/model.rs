@@ -159,6 +159,9 @@ pub enum ItemType {
     Named(&'static str),
     /// A time of day in whole seconds, as the text `HH:MM:SS`.
     TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
 }
 
 /// The type of a manifest field.
@@ -178,6 +181,9 @@ pub enum ValueType {
     Optional(ItemType),
     /// A time of day in whole seconds, as the text `HH:MM:SS`.
     TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
 }
 
 /// The item type of the model's `item`. Pure.
@@ -188,6 +194,7 @@ pub fn item_type(item: PythonItem) -> ItemType {
         PythonItem::Int(bound) => ItemType::Int(bound),
         PythonItem::Named(name) => ItemType::Named(name),
         PythonItem::TimeOfDay => ItemType::TimeOfDay,
+        PythonItem::Duration(bound) => ItemType::Duration(bound),
     }
 }
 
@@ -202,6 +209,7 @@ pub fn field_value_type(field: &ManifestField) -> ValueType {
         PythonValue::Map(item) => ValueType::Map(item_type(item)),
         PythonValue::Optional(item) => ValueType::Optional(item_type(item)),
         PythonValue::TimeOfDay => ValueType::TimeOfDay,
+        PythonValue::Duration(bound) => ValueType::Duration(bound),
     }
 }
 
@@ -390,6 +398,7 @@ mod tests {
                 ValueType::Optional(ItemType::Str),
             ),
             (PythonValue::TimeOfDay, ValueType::TimeOfDay),
+            (PythonValue::Duration(BOUND), ValueType::Duration(BOUND)),
         ];
         for (value, expected) in cases {
             assert_eq!(field_value_type(&field(value)), expected);
@@ -404,6 +413,7 @@ mod tests {
             (PythonItem::Int(BOUND), ItemType::Int(BOUND)),
             (PythonItem::Named("Weekday"), ItemType::Named("Weekday")),
             (PythonItem::TimeOfDay, ItemType::TimeOfDay),
+            (PythonItem::Duration(BOUND), ItemType::Duration(BOUND)),
         ];
         for (item, expected) in cases {
             assert_eq!(item_type(item), expected);

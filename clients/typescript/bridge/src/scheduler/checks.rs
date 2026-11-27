@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn a_pattern_that_breaks_a_rule_is_refused_with_the_rule() {
         let PatternCheck::Refused { cause } =
-            pattern_check(r#"{"type":"hourly","minute":60,"second":0}"#.to_owned())
+            pattern_check(r#"{"kind":"hourly","minute":60,"second":0}"#.to_owned())
         else {
             panic!("minute 60 breaks the hourly rule");
         };
@@ -287,14 +287,14 @@ mod tests {
     #[test]
     fn a_time_with_a_fraction_of_a_second_is_refused() {
         assert!(matches!(
-            pattern_check(r#"{"type":"daily","time":"09:30:00.5"}"#.to_owned()),
+            pattern_check(r#"{"kind":"daily","time":"09:30:00.5"}"#.to_owned()),
             PatternCheck::Refused { .. }
         ));
     }
 
     #[test]
     fn a_text_that_is_not_a_pattern_is_refused() {
-        let PatternCheck::Refused { cause } = pattern_check(r#"{"type":"yearly"}"#.to_owned())
+        let PatternCheck::Refused { cause } = pattern_check(r#"{"kind":"yearly"}"#.to_owned())
         else {
             panic!("yearly is not a pattern of the core");
         };

@@ -271,7 +271,7 @@ arguments.
 | `{ limit: h.int().default(10) }` | `{}` | `{}`; the body gets `limit: 10` |
 
 - A parameter name is a letter or `_`, then letters, digits and `_`
-  (`HRS-105`). The names `workflow_ctx` and `workflow_meta`, and names that
+  (`HRS-105`). The names `workflow_context` and `workflow_meta`, and names that
   only the engine writes (`__h_...`, `__horsies_...`), are refused.
 - A sender may leave out an `.optional()` or defaulted parameter. A body
   gets every parameter: a default is filled, an optional one may be absent.

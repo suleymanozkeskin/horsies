@@ -48,13 +48,13 @@ function record(recorded: boolean, execution: TaskInfoRecord["execution"]): Task
     taskId: TASK_ID,
     taskName: "validate_order",
     status: recorded ? "FAILED" : "PENDING",
-    queueName: "default",
+    queue: "default",
     priority: 100,
     retryCount: recorded ? 2 : 0,
     maxRetries: 3,
     nextRetryAt: instant(10n),
     sentAt: instant(1n),
-    enqueuedAtMicros: AT + 2n,
+    dueAtMicros: AT + 2n,
     claimedAt: instant(3n),
     startedAt: instant(4n),
     completedAt: instant(5n),
@@ -76,11 +76,11 @@ describe("taskInfoOf", () => {
     assert.equal(info.taskId, TASK_ID);
     assert.equal(info.taskName, "validate_order");
     assert.equal(info.status, "FAILED");
-    assert.equal(info.queueName, "default");
+    assert.equal(info.queue, "default");
     assert.equal(info.priority, 100);
     assert.equal(info.retryCount, 2);
     assert.equal(info.maxRetries, 3);
-    assert.equal(info.enqueuedAt.toString(), "2023-11-14T22:13:20.123458Z");
+    assert.equal(info.dueAt.toString(), "2023-11-14T22:13:20.123458Z");
     assert.deepEqual(info.sentAt, { kind: "recorded", value: instantOfMicros(AT + 1n) });
     assert.deepEqual(info.claimedAt, { kind: "recorded", value: instantOfMicros(AT + 3n) });
     assert.deepEqual(info.startedAt, { kind: "recorded", value: instantOfMicros(AT + 4n) });

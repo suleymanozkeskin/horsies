@@ -48,7 +48,7 @@ describe("the producer with a database", () => {
     assert.equal(info.value.taskId, sent.value.taskId);
     assert.equal(info.value.taskName, "producer_end_to_end_ping");
     assert.equal(info.value.status, "PENDING");
-    assert.equal(info.value.queueName, "default");
+    assert.equal(info.value.queue, "default");
     assert.deepEqual(info.value.attempts, []);
 
     assert.deepEqual(await sent.value.get({ waitMs: 200 }), {

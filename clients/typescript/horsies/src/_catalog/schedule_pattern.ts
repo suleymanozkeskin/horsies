@@ -4,17 +4,8 @@ import type { WireJson } from "./wire_json.ts";
 
 export const MANIFEST_VERSION = 1;
 
-export const INTERVAL_SECONDS_MIN = 1;
-export const INTERVAL_SECONDS_MAX = 86_400;
-
-export const INTERVAL_MINUTES_MIN = 1;
-export const INTERVAL_MINUTES_MAX = 1440;
-
-export const INTERVAL_HOURS_MIN = 1;
-export const INTERVAL_HOURS_MAX = 168;
-
-export const INTERVAL_DAYS_MIN = 1;
-export const INTERVAL_DAYS_MAX = 365;
+export const INTERVAL_EVERY_SECONDS_MIN = 1;
+export const INTERVAL_EVERY_SECONDS_MAX = 31_536_000;
 
 export const HOURLY_MINUTE_MIN = 0;
 export const HOURLY_MINUTE_MAX = 59;
@@ -66,10 +57,7 @@ export type Month =
   | "december";
 
 export interface IntervalSchedule {
-  readonly seconds: number | null;
-  readonly minutes: number | null;
-  readonly hours: number | null;
-  readonly days: number | null;
+  readonly every: Temporal.Duration;
 }
 
 export interface HourlySchedule {
@@ -82,12 +70,12 @@ export interface DailySchedule {
 }
 
 export interface WeeklySchedule {
-  readonly days: ReadonlyArray<Weekday>;
+  readonly weekdays: ReadonlyArray<Weekday>;
   readonly time: Temporal.PlainTime;
 }
 
 export interface MonthlySchedule {
-  readonly day: number;
+  readonly day_of_month: number;
   readonly time: Temporal.PlainTime;
 }
 
@@ -213,27 +201,27 @@ export interface CronSchedule {
 }
 
 export interface SchedulePatternInterval extends IntervalSchedule {
-  readonly type: "interval";
+  readonly kind: "interval";
 }
 
 export interface SchedulePatternHourly extends HourlySchedule {
-  readonly type: "hourly";
+  readonly kind: "hourly";
 }
 
 export interface SchedulePatternDaily extends DailySchedule {
-  readonly type: "daily";
+  readonly kind: "daily";
 }
 
 export interface SchedulePatternWeekly extends WeeklySchedule {
-  readonly type: "weekly";
+  readonly kind: "weekly";
 }
 
 export interface SchedulePatternMonthly extends MonthlySchedule {
-  readonly type: "monthly";
+  readonly kind: "monthly";
 }
 
 export interface SchedulePatternCron extends CronSchedule {
-  readonly type: "cron";
+  readonly kind: "cron";
 }
 
 export type SchedulePattern =
@@ -253,12 +241,7 @@ function integerToWire(value: number, subject: string): bigint {
 }
 
 export function intervalScheduleToWire(value: IntervalSchedule): ReadonlyMap<string, WireJson> {
-  return new Map<string, WireJson>([
-    ["seconds", value.seconds === null ? null : integerToWire(value.seconds, "IntervalSchedule.seconds")],
-    ["minutes", value.minutes === null ? null : integerToWire(value.minutes, "IntervalSchedule.minutes")],
-    ["hours", value.hours === null ? null : integerToWire(value.hours, "IntervalSchedule.hours")],
-    ["days", value.days === null ? null : integerToWire(value.days, "IntervalSchedule.days")],
-  ]);
+  return new Map<string, WireJson>([["every", value.every.toString()]]);
 }
 
 export function hourlyScheduleToWire(value: HourlySchedule): ReadonlyMap<string, WireJson> {
@@ -274,14 +257,14 @@ export function dailyScheduleToWire(value: DailySchedule): ReadonlyMap<string, W
 
 export function weeklyScheduleToWire(value: WeeklySchedule): ReadonlyMap<string, WireJson> {
   return new Map<string, WireJson>([
-    ["days", value.days],
+    ["weekdays", value.weekdays],
     ["time", value.time.toString()],
   ]);
 }
 
 export function monthlyScheduleToWire(value: MonthlySchedule): ReadonlyMap<string, WireJson> {
   return new Map<string, WireJson>([
-    ["day", integerToWire(value.day, "MonthlySchedule.day")],
+    ["day_of_month", integerToWire(value.day_of_month, "MonthlySchedule.day_of_month")],
     ["time", value.time.toString()],
   ]);
 }
@@ -417,35 +400,35 @@ export function cronScheduleToWire(value: CronSchedule): ReadonlyMap<string, Wir
 }
 
 export function schedulePatternToWire(value: SchedulePattern): ReadonlyMap<string, WireJson> {
-  switch (value.type) {
+  switch (value.kind) {
     case "interval":
       return new Map<string, WireJson>([
-        ["type", "interval"],
+        ["kind", "interval"],
         ...intervalScheduleToWire(value),
       ]);
     case "hourly":
       return new Map<string, WireJson>([
-        ["type", "hourly"],
+        ["kind", "hourly"],
         ...hourlyScheduleToWire(value),
       ]);
     case "daily":
       return new Map<string, WireJson>([
-        ["type", "daily"],
+        ["kind", "daily"],
         ...dailyScheduleToWire(value),
       ]);
     case "weekly":
       return new Map<string, WireJson>([
-        ["type", "weekly"],
+        ["kind", "weekly"],
         ...weeklyScheduleToWire(value),
       ]);
     case "monthly":
       return new Map<string, WireJson>([
-        ["type", "monthly"],
+        ["kind", "monthly"],
         ...monthlyScheduleToWire(value),
       ]);
     case "cron":
       return new Map<string, WireJson>([
-        ["type", "cron"],
+        ["kind", "cron"],
         ...cronScheduleToWire(value),
       ]);
     default: {

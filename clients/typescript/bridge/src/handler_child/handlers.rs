@@ -22,9 +22,9 @@
 use std::sync::Arc;
 
 use horsies_core::events::{
-    AttemptEnded, AttemptNotStarted, AttemptPlaced, AttemptRecorded, ChildReplaced, ChildStarted,
-    ClaimReleased, Event, EventTypeName, SlotDown, SlotRecovered, TaskClaimed, TaskRecovered,
-    UnionEvent,
+    AnyEvent, AttemptEnded, AttemptNotStarted, AttemptPlaced, AttemptRecorded, ChildReplaced,
+    ChildStarted, ClaimReleased, EventTypeName, SlotDown, SlotRecovered, TaskClaimed,
+    TaskRecovered, UnionEvent,
 };
 use horsies_core::frame_protocol::{WireEvent, MAX_EVENT_HANDLERS};
 use horsies_core::{EventHandlerRefused, EventHandlerSet, HandlerError};
@@ -173,7 +173,7 @@ where
     E: UnionEvent + Clone + Send + 'static,
 {
     async move |event: E| -> Result<(), HandlerError> {
-        let event: Event = event.into();
+        let event: AnyEvent = event.into();
         let call = call_of(index, &event)?;
         answer_of(dispatcher.call(call, HANDLER_CALL_WAIT).await)
     }
@@ -181,7 +181,7 @@ where
 
 /// The call of the handler `index` for `event`, or the failure of an event
 /// with no wire form. Pure.
-fn call_of(index: u32, event: &Event) -> Result<HandlerEventCall, HandlerError> {
+fn call_of(index: u32, event: &AnyEvent) -> Result<HandlerEventCall, HandlerError> {
     match WireEvent::of(event) {
         Ok(wire) => Ok(HandlerEventCall {
             index,
@@ -249,12 +249,12 @@ mod tests {
 
     #[test]
     fn the_call_of_an_event_holds_the_text_of_wire_event_of() {
-        let event = Event::from(SlotRecovered {
+        let event = AnyEvent::from(SlotRecovered {
             at: Utc
                 .timestamp_opt(1_700_000_000, 0)
                 .single()
                 .expect("a valid instant"),
-            child_kind: Execution::Isolated,
+            child_execution: Execution::Isolated,
             slot: SlotIndex::try_from(2).expect("slot 2 is in range"),
         });
         let call = call_of(4, &event).expect("the event has a wire form");

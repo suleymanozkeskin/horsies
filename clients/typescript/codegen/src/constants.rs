@@ -15,8 +15,8 @@
 use std::time::Duration;
 
 use horsies_core::events::{
-    MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
-    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_EVENT_WORKER_ID_CHARS,
+    MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
+    MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
     MAX_RETRY_COUNT,
 };
 use horsies_core::frame_protocol::{
@@ -179,8 +179,8 @@ const EVENT_CONSTANTS: [PublishedConstant; 7] = [
         value: MAX_EVENT_QUEUE_NAME_CHARS as i128,
     },
     PublishedConstant::Integer {
-        name: "MAX_EVENT_USER_CODE_CHARS",
-        value: MAX_EVENT_USER_CODE_CHARS as i128,
+        name: "MAX_EVENT_CUSTOM_CODE_CHARS",
+        value: MAX_EVENT_CUSTOM_CODE_CHARS as i128,
     },
     PublishedConstant::Integer {
         name: "MAX_EVENT_TRACE_CARRIER_CHARS",
@@ -470,8 +470,8 @@ mod tests {
                 MAX_EVENT_QUEUE_NAME_CHARS as i128,
             ),
             (
-                "MAX_EVENT_USER_CODE_CHARS",
-                MAX_EVENT_USER_CODE_CHARS as i128,
+                "MAX_EVENT_CUSTOM_CODE_CHARS",
+                MAX_EVENT_CUSTOM_CODE_CHARS as i128,
             ),
             (
                 "MAX_EVENT_TRACE_CARRIER_CHARS",
