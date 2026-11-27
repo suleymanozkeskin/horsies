@@ -1174,7 +1174,7 @@ pub struct TaskSchedule {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
     /// Whether this schedule is active.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_schedule_enabled")]
     pub enabled: bool,
     /// Timezone for schedule evaluation.
     #[serde(default = "default_timezone")]
@@ -1202,7 +1202,7 @@ impl TaskSchedule {
             pattern,
             input: None,
             queue: None,
-            enabled: default_true(),
+            enabled: default_schedule_enabled(),
             timezone: default_timezone(),
             catch_up_missed: false,
             max_catch_up_runs: default_max_catch_up_runs(),
@@ -1252,15 +1252,31 @@ impl TaskSchedule {
     }
 }
 
+/// The default of [`TaskSchedule::max_catch_up_runs`].
+pub const DEFAULT_MAX_CATCH_UP_RUNS: u32 = 100;
+
+/// The default of [`TaskSchedule::enabled`].
+pub const DEFAULT_SCHEDULE_ENABLED: bool = true;
+
+/// The default of [`TaskSchedule::timezone`].
+pub const DEFAULT_SCHEDULE_TIMEZONE: &str = "UTC";
+
+/// The default of [`ScheduleConfig::check_interval_seconds`].
+pub const DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS: u32 = 1;
+
 fn default_max_catch_up_runs() -> u32 {
-    100
+    DEFAULT_MAX_CATCH_UP_RUNS
+}
+
+fn default_schedule_enabled() -> bool {
+    DEFAULT_SCHEDULE_ENABLED
 }
 
 fn default_true() -> bool {
     true
 }
 fn default_timezone() -> String {
-    "UTC".to_owned()
+    DEFAULT_SCHEDULE_TIMEZONE.to_owned()
 }
 
 /// Scheduler configuration.
@@ -1387,7 +1403,7 @@ pub const MAX_CATCH_UP_RUNS_MIN: u32 = 1;
 pub const MAX_CATCH_UP_RUNS_MAX: u32 = 10_000;
 
 fn default_check_interval() -> u32 {
-    1
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
 }
 
 #[cfg(test)]
@@ -2070,6 +2086,28 @@ mod tests {
         assert_eq!(sched.max_catch_up_runs, 100);
         assert!(sched.queue.is_none());
         assert_eq!(sched.input, None);
+    }
+
+    #[test]
+    fn the_schedule_defaults_are_the_exported_constants() {
+        assert_eq!(DEFAULT_SCHEDULE_TIMEZONE, "UTC");
+        assert_eq!(DEFAULT_MAX_CATCH_UP_RUNS, 100);
+        assert_eq!(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, 1);
+        assert_eq!(
+            ScheduleConfig::default().check_interval_seconds,
+            DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
+        );
+        let built = TaskSchedule::new(
+            "daily-task",
+            "my_task",
+            SchedulePattern::Interval(IntervalSchedule {
+                every: Duration::from_secs(30),
+            }),
+        );
+        assert_eq!(built.enabled, DEFAULT_SCHEDULE_ENABLED);
+        assert!(built.enabled);
+        assert_eq!(built.timezone, DEFAULT_SCHEDULE_TIMEZONE);
+        assert_eq!(built.max_catch_up_runs, DEFAULT_MAX_CATCH_UP_RUNS);
     }
 
     #[test]

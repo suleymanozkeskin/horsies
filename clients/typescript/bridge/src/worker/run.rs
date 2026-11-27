@@ -132,8 +132,10 @@ pub enum WorkerPreparation {
     /// one that the app does not define (the core's report). Nothing
     /// started.
     ProfileRefused { refusals: Vec<CoreRefusal> },
-    /// The connection settings fail the broker config check (for example
-    /// PgBouncer transaction mode with no session URL). Nothing started.
+    /// The connection settings of the manifest fail the broker config check
+    /// of the plan. The config check of `Horsies.create` makes the same
+    /// check first, so an accepted config does not reach this refusal.
+    /// Nothing started.
     ConnectionSettingsRefused { cause: String },
     /// The profile `profile` starts `SHARED_THREAD` children, and the
     /// runtime of this process does not cap the JavaScript heap of a worker
@@ -707,16 +709,21 @@ mod tests {
     }
 
     #[test]
-    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_a_connection_settings_refusal(
-    ) {
-        // The config check compares the texts as written; the producer
-        // manifest writes `postgres://` as `postgresql://`, so the plan's
-        // connection step sees one URL twice.
+    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_refused_by_the_config_check()
+    {
+        // The config check compares the URLs in the form that the producer
+        // manifest writes (`postgres://` as `postgresql://`), so it refuses
+        // before the plan's connection step.
         let config = r#"{"database": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database": {"kind": "SEPARATE", "url": "postgresql://127.0.0.1:6432/horsies"}, "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
-        assert!(matches!(
-            preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped),
-            Ok(WorkerPreparation::ConnectionSettingsRefused { .. })
-        ));
+        match preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped) {
+            Err(NativeThrown::ClientDefect { rule, .. }) => {
+                assert!(
+                    rule.contains("must not use the transaction-pool URL"),
+                    "{rule}"
+                );
+            }
+            other => panic!("the config check refuses the text first, got {other:?}"),
+        }
     }
 
     /// An app config with the profile `cpu` of `SHARED_THREAD` children.
