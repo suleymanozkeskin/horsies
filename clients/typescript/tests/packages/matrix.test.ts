@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { buildEntryOf, installEntriesOf, runtimeVersionsOf } from "./matrix.ts";
+import { buildEntryOf, installEntriesOf, runtimeVersionsOf, webPageOf } from "./matrix.ts";
 import type { ReleasePlatform } from "./platforms.ts";
 
 const VERSIONS = { node: "26.13.1", bun: "1.4.4" };
@@ -102,6 +102,18 @@ describe("installEntriesOf", () => {
         ["bun", "runner", false],
       ],
     );
+  });
+});
+
+describe("webPageOf", () => {
+  test("run: the Linux x86_64 glibc row", () => {
+    assert.equal(webPageOf(GLIBC_ROW), "run");
+    assert.deepEqual(installEntriesOf(GLIBC_ROW, VERSIONS).map((entry) => entry.web_page), ["run", "run"]);
+  });
+
+  test("skip: the musl row and the macOS row", () => {
+    assert.equal(webPageOf(MUSL_ROW), "skip");
+    assert.equal(webPageOf(MACOS_ROW), "skip");
   });
 });
 

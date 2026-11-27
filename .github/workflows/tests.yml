@@ -773,12 +773,12 @@ jobs:
         run: clients/typescript/ci/unit.sh
 
   # The typecheck-speed check of the TypeScript client
-  # (clients/typescript/tests/typecheck-speed/). Report only: a baseline
-  # compares only with the machine and the Bun binary that recorded it, and
-  # baseline.json holds no runner baseline, so `bun run typecheck-speed`
-  # would give no verdict here. The record command measures this runner and
-  # prints the session times; the file that it writes is not kept. The
-  # verdict on CI comes with the ratio to the control project (#2376).
+  # (clients/typescript/tests/typecheck-speed/). The statistic is the ratio of
+  # the typecheck time of the app project to that of the control project,
+  # measured in the same session, so the verdict does not depend on the
+  # runner. baseline.json holds the ratio and its noise for the Bun binary
+  # of this job. The step exits 1 when the ratio is above the baseline
+  # median plus the noise, and 2 when no baseline matches this Bun binary.
   typescript-typecheck-speed:
     needs: scope
     if: needs.scope.outputs.run_typescript == 'true'
@@ -795,10 +795,15 @@ jobs:
         with:
           bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
 
-      # The check imports no package, so the step needs no install.
-      - name: Measure the typecheck speed of this runner (report only)
+      # The app project type-checks against the source of the package, so the
+      # step installs the workspace (the Node types).
+      - name: Install the workspace from bun.lock
         working-directory: clients/typescript
-        run: bun run typecheck-speed:record
+        run: bun install --frozen-lockfile
+
+      - name: Check the typecheck speed (ratio to the control project)
+        working-directory: clients/typescript
+        run: bun run typecheck-speed
 
   # The dev addon of the TypeScript client for linux-x64-gnu, built once per
   # run, and its native tests on Node and on Bun against PostgreSQL 18. The
