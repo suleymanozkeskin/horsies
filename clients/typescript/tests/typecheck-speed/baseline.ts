@@ -1,6 +1,7 @@
 // The recorded baselines of the typecheck-speed check and the verdict of a measurement against
-// one of them. A baseline is a ratio of the app time to the control time, so it compares on any
-// machine; it compares only with the Bun binary and the two projects that recorded it.
+// one of them. A baseline is a ratio of the app time to the control time, so the speed of the CPU
+// cancels; the ratio still differs per operating system and CPU architecture, so a baseline compares
+// only with the platform, the architecture, the Bun binary and the two projects that recorded it.
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
@@ -8,7 +9,10 @@ import { availableParallelism, cpus } from "node:os";
 import { describeCause } from "./measure.ts";
 import { medianOfRatios, type Ratio, ratioText, spreadOfRatios, sumOfRatios } from "./ratio.ts";
 
-/** The machine that recorded a baseline. It is information only: a baseline is a ratio, so it compares on any machine. */
+/**
+ * The machine that recorded a baseline. `platform` and `arch` are part of the key of the baseline (`findBaseline`);
+ * `cpuModel` and `logicalCores` are information only.
+ */
 export interface MachineIdentity {
   readonly platform: string;
   readonly arch: string;
@@ -17,10 +21,14 @@ export interface MachineIdentity {
 }
 
 /**
- * What a measurement must match to compare with a stored baseline. The ratio depends on the Bun binary that runs
- * `bun check` and on the two projects, not on the machine.
+ * What a measurement must match to compare with a stored baseline. The ratio depends on the operating system, the CPU
+ * architecture, the Bun binary that runs `bun check` and the two projects; it does not depend on the CPU speed.
  */
 export interface BaselineKey {
+  /** The operating system of the measuring process (`process.platform`). */
+  readonly platform: string;
+  /** The CPU architecture of the measuring process (`process.arch`). */
+  readonly arch: string;
   /** The Bun binary: version and revision. */
   readonly bun: string;
   /** SHA-256 of the control project (`projectSha256`). */
@@ -121,10 +129,15 @@ export function projectSha256(files: ReadonlyMap<string, string>): string {
   return hash.digest("hex");
 }
 
-/** The stored baseline with the Bun binary, the two projects, the run count and the session count of `key`. */
+/**
+ * The stored baseline with the platform, the architecture, the Bun binary, the two projects, the run count and the
+ * session count of `key`. A platform with no recorded baseline is `noMatch`: the check gives no verdict there.
+ */
 export function findBaseline(file: StoredBaselineFile, key: BaselineKey): BaselineLookup {
   const stored = file.entries.find(
     (entry) =>
+      entry.recordedOn.platform === key.platform &&
+      entry.recordedOn.arch === key.arch &&
       entry.bun === key.bun &&
       entry.controlSha256 === key.controlSha256 &&
       entry.appSha256 === key.appSha256 &&
@@ -173,9 +186,19 @@ export function storedBaselineOf(key: BaselineKey, recordedOn: MachineIdentity, 
   };
 }
 
-/** The file with `entry` in place of the entry of the same Bun binary. Entries of other Bun binaries stay. */
+/**
+ * The file with `entry` in place of the entry of the same platform, architecture and Bun binary. The entries of other
+ * platforms, architectures and Bun binaries stay.
+ */
 export function withRecordedBaseline(file: StoredBaselineFile, entry: StoredBaseline): StoredBaselineFile {
-  return { entries: [...file.entries.filter((stored) => stored.bun !== entry.bun), entry] };
+  const kept = file.entries.filter((stored) => !sameBaselinePlatform(stored, entry));
+
+  return { entries: [...kept, entry] };
+}
+
+/** Whether two stored baselines have the same platform, architecture and Bun binary. */
+function sameBaselinePlatform(one: StoredBaseline, two: StoredBaseline): boolean {
+  return one.recordedOn.platform === two.recordedOn.platform && one.recordedOn.arch === two.recordedOn.arch && one.bun === two.bun;
 }
 
 export function writeBaselineFile(path: string, file: StoredBaselineFile): BaselineFileWrite {
