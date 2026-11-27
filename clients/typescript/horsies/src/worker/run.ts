@@ -66,7 +66,10 @@ export type WorkerRunError =
   | { readonly kind: "manifestBound"; readonly path: string; readonly min: bigint; readonly max: bigint }
   /** The profile set or the requested profile is refused (the core's report). Nothing started. */
   | { readonly kind: "profileRefused"; readonly report: CheckReport }
-  /** The connection settings fail the broker config check. Nothing started. */
+  /**
+   * The connection settings fail the broker config check of the plan. The config check of `Horsies.create` makes the
+   * same check first, so an app that `Horsies.create` accepted does not reach this refusal. Nothing started.
+   */
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
   /**
    * The profile starts `SHARED_THREAD` children, and the runtime of this process is not Node, so it does not cap the
