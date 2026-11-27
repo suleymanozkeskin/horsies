@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { LOG_LEVELS, parseFlags, parseLogLevel, switchFlag, textFlag, usageErrorLines } from "../../../horsies/src/cli/usage.ts";
+import { parseToolFlags } from "../../../horsies/src/tools/command-line.ts";
 
 const FLAGS = { profile: { type: "string" }, live: { type: "boolean" } } as const;
 
@@ -53,5 +54,13 @@ describe("the flag parse", () => {
       "usage: <entry> worker",
       "horsies worker: error: bad",
     ]);
+  });
+
+  test("cli.run and the horsies tool give the same result for the same arguments", () => {
+    const given = [["--profile", "a", "--live"], [], ["--unknown"], ["--profile"], ["--live=yes"], ["extra"]];
+
+    for (const args of given) {
+      assert.deepEqual(parseFlags(args, FLAGS), parseToolFlags(args, FLAGS), args.join(" "));
+    }
   });
 });
