@@ -192,6 +192,7 @@ export type {
   TaskActionIsWorkflowTask,
   TaskActionNotCancellable,
   TaskActionNotFound,
+  TaskActionOutcomeUnknown,
   TaskActionStoredDataInvalid,
 } from "../_catalog/monitoring_errors.ts";
 

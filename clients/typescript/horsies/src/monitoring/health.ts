@@ -71,7 +71,10 @@ export async function pingDatabase(ping: RelayedPing): Promise<Result<DatabasePi
   );
 }
 
-/** Ping the workers and collect the distinct replies by worker id. A worker that did not reply is not listed. */
+/**
+ * Ping the workers and collect the distinct replies by worker id. A worker that did not reply is not listed.
+ * A `waitMs` above `WORKER_PING_WAIT_BOUND_SECONDS` (60 s) is refused with `INVALID_INPUT`; nothing is sent.
+ */
 export async function pingWorkers(
   target: HealthTarget,
   options: PingWorkersOptions,
@@ -131,7 +134,11 @@ export async function worker(
   );
 }
 
-/** The snapshots of one worker, newest first. */
+/**
+ * The snapshots of one worker, newest first. A `newest` count above `WORKER_HISTORY_ROW_BOUND` (10,000) is refused
+ * with `INVALID_INPUT`. `allRetained` is refused with `INVALID_INPUT` when the worker holds more than that many
+ * snapshots; no row is returned in part.
+ */
 export async function workerHistory(
   target: HealthTarget,
   workerId: string,

@@ -1943,8 +1943,8 @@ class EventStreamEnded:
 
 @final
 class EventStreamRefused:
-    """No stream: the handler has no broker. The host writes frame, the degraded frame, and ends
-    the response.
+    """No stream: the handler has no broker, or it serves its bound of open streams. The host
+    writes frame, the degraded frame, and ends the response.
     """
     @property
     def message(self) -> str: ...
@@ -1987,7 +1987,8 @@ class MonitoringHandler:
         """
     def subscribe_events_async(self) -> asyncio.Future[EventStream | EventStreamRefused]:
         """Subscribe one event stream, after an allowed view. A broker without a listener, or a
-        stopped listener, gives a stream whose first frame is the degraded frame. Reads only.
+        stopped listener, gives a stream whose first frame is the degraded frame. A handler with
+        256 open streams gives EventStreamRefused. Reads only.
         """
     def close_events_async(self) -> asyncio.Future[None]:
         """End every event stream of the handler after the degraded frame. Runs to its end when the

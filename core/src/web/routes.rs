@@ -664,7 +664,13 @@ async fn read_worker_history(
 
 async fn read_events(State(state): State<WebState>) -> Response {
     let heartbeat = state.heartbeat;
-    let mut subscription = state.events.subscribe().await;
+    let mut subscription = match state.events.subscribe().await {
+        Ok(subscription) => subscription,
+        Err(refused) => {
+            return ApiError::unavailable(format!("The event stream is refused: {refused}."))
+                .into_response()
+        }
+    };
     let events = stream! {
         while let Some(event) = subscription.recv().await {
             match event {
