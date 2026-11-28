@@ -295,7 +295,9 @@ export const allRegions = defineWorkflow(
 - The depth limit of nested children is 32: a deeper node fails with
   `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `check` reports a nesting that reaches
   it for certain (`HRS-036`) and a child that includes itself with the same
-  parameters and no wait between (`HRS-037`).
+  parameters and no wait between (`HRS-037`). The walk of one root builds at
+  most `MAX_CHECK_SUBWORKFLOW_BUILDS` (1,000) children; at the bound it stops
+  and reports `HRS-039`.
 - A failed child fails its node with `SUB_WORKFLOW_FAILED`. The node's
   `error.subWorkflow` holds the child's `workflowId` and its `summary`
   (status, output, task counts, error summary).
@@ -587,6 +589,7 @@ its `HRS-nnn` code; the check fails.
 | `HRS-033` | An `onError` that is not `"fail"` or `"pause"` |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or includes itself with the same parameters |
 | `HRS-038` | More than 10,000 nodes |
+| `HRS-039` | The nesting walk of one root reached its bound of 1,000 child builds |
 | `HRS-302` | A node of a task that the app does not list |
 
 ## Common Pitfalls

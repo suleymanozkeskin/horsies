@@ -7,6 +7,7 @@ import { Worker } from "node:worker_threads";
 
 import { z } from "zod";
 
+import { MAX_CHECK_SUBWORKFLOW_BUILDS } from "../../../horsies/src/_catalog/workflow_bounds.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { checkWorkflows } from "../../../horsies/src/workflow/check-cases.ts";
 import { MAX_DEFINITION_KEY_CHARS, MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
@@ -42,6 +43,28 @@ function checkCodes(workflows: readonly object[]): readonly string[] {
   assert.deepEqual(checked.refusals, []);
 
   return checkWorkflows(checked.registry).map((refused) => refused.code);
+}
+
+/** A leaf workflow with no params; `builds.count` counts its builds. */
+function countedLeaf(builds: { count: number }): object {
+  return defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", outputType: h.int(), parameters: {} }, (w) => {
+    builds.count += 1;
+
+    return { output: w.task(ping, {}, { nodeId: "a" }) };
+  });
+}
+
+/** A root named `name` with `children` sub-workflow nodes of `leaf`, each a node of its own. */
+function fanRoot(name: string, leaf: object, children: number): object {
+  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, outputType: h.int(), parameters: {} }, (w) => {
+    const nodes = Array.from({ length: children }, (_, position) =>
+      // SAFETY: `leaf` is a workflow with no params and the output `h.int()`.
+      w.subWorkflow(leaf as never, {}, { nodeId: `n${position}` }),
+    );
+
+    // SAFETY: the first node is a child whose declared output is `h.int()`, with the node id `n0`.
+    return { output: nodes[0] as NodeRef<number, string, "n0"> };
+  });
 }
 
 describe("checkWorkflowsAtCreate", () => {
@@ -309,5 +332,77 @@ describe("checkWorkflows", () => {
     );
 
     assert.deepEqual(checkCodes([deep]), ["HRS-036"]);
+  });
+
+  test("a root with as many child builds as the bound: no finding, and every child is built", () => {
+    const builds = { count: 0 };
+    const leaf = countedLeaf(builds);
+    const checked = checkedAtCreate([leaf, fanRoot("fan", leaf, MAX_CHECK_SUBWORKFLOW_BUILDS)]);
+    const buildsBefore = builds.count;
+
+    assert.deepEqual(checked.refusals, []);
+    assert.deepEqual(checkWorkflows(checked.registry), []);
+    // The leaf is a root of its own (one build), and the fan root builds it once per child.
+    assert.equal(builds.count - buildsBefore, MAX_CHECK_SUBWORKFLOW_BUILDS + 1);
+  });
+
+  test("a root with more child builds than the bound: one HRS-039 at the root, and the walk builds no child past the bound", () => {
+    const builds = { count: 0 };
+    const leaf = countedLeaf(builds);
+    const checked = checkedAtCreate([leaf, fanRoot("fan", leaf, MAX_CHECK_SUBWORKFLOW_BUILDS + 5)]);
+
+    assert.deepEqual(checked.refusals, []);
+
+    const buildsBefore = builds.count;
+    const found = checkWorkflows(checked.registry);
+
+    assert.deepEqual(
+      found.map((refused) => [refused.code, refused.path]),
+      [["HRS-039", "workflow fan"]],
+    );
+    assert.match(found[0]?.message ?? "", /the subworkflow nesting walk reached its bound of builds/);
+    // The builds of the leaf: its own root build, and one per granted child build.
+    assert.equal(builds.count - buildsBefore, MAX_CHECK_SUBWORKFLOW_BUILDS + 1);
+  });
+
+  test("the bound counts per root: a second root over the bound gets its own HRS-039, a root under it none", () => {
+    const leaf = countedLeaf({ count: 0 });
+    const over = MAX_CHECK_SUBWORKFLOW_BUILDS + 1;
+
+    const found = checkWorkflows(
+      checkedAtCreate([leaf, fanRoot("fanA", leaf, over), fanRoot("small", leaf, 3), fanRoot("fanB", leaf, over)]).registry,
+    );
+
+    assert.deepEqual(
+      found.map((refused) => [refused.code, refused.path]),
+      [
+        ["HRS-039", "workflow fanA"],
+        ["HRS-039", "workflow fanB"],
+      ],
+    );
+  });
+
+  test("a nesting that doubles its builds at each level: one HRS-039, the last finding of the root", () => {
+    const fan: object = defineWorkflow(
+      {
+        name: "doubling",
+        definitionKey: "tests.doubling.v1",
+        outputType: h.int(),
+        parameters: { level: h.int() },
+        checkCases: [{ level: 0 }],
+      },
+      // SAFETY: the test nests the workflow in itself; the contract of `fan` is complete when the build runs.
+      (w, { level }) => ({
+        output: [0, 1].map((side) =>
+          // SAFETY: as above; the child's declared output is `h.int()`.
+          w.subWorkflow(fan as never, { level: level + 1 }, { nodeId: `side${side}` }),
+        )[0] as NodeRef<number, string, "side0">,
+      }),
+    );
+
+    const codes = checkCodes([fan]);
+
+    assert.equal(codes.filter((code) => code === "HRS-039").length, 1);
+    assert.equal(codes.at(-1), "HRS-039");
   });
 });

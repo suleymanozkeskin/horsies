@@ -48,6 +48,7 @@ import {
   IDEMPOTENCY_KEY_MAX_BYTES,
   MAX_WAIT_LIMIT_MS,
 } from "../../../horsies/src/_catalog/send_bounds.ts";
+import { MAX_CHECK_SUBWORKFLOW_BUILDS } from "../../../horsies/src/_catalog/workflow_bounds.ts";
 import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
 import * as scheduleEntry from "../../../horsies/src/schedules/entry.ts";
 import * as sendBounds from "../../../horsies/src/send/bounds.ts";
@@ -93,6 +94,7 @@ const bounds = [
   DEFAULT_QUEUE_PRIORITY,
   DEFAULT_MAX_CATCH_UP_RUNS,
   DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+  MAX_CHECK_SUBWORKFLOW_BUILDS,
 ];
 
 describe("generated constant modules", () => {

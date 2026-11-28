@@ -1,8 +1,10 @@
 // The checks of the `check` command for the app's workflows: each workflow with no params and each check case is
 // built and checked, and its sub-workflows are walked down to the depth limit. A nesting is reported only when it
 // fails for certain: a child that includes itself with the same params and no wait between (`HRS-037`), and a nesting
-// past depth 32 with no wait on the path (`HRS-036`). The checks of the Rust client's `check_findings`.
+// past depth 32 with no wait on the path (`HRS-036`). The walk of one root builds at most
+// `MAX_CHECK_SUBWORKFLOW_BUILDS` children; at the bound it stops and reports `HRS-039`. The checks of the Rust client's `check_findings`.
 
+import { MAX_CHECK_SUBWORKFLOW_BUILDS } from "../_catalog/workflow_bounds.ts";
 import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { decodeParameters } from "../codec/reader.ts";
@@ -23,6 +25,42 @@ type ChildStart = "withItsWorkflow" | "afterDependencies";
 
 /** One sub-workflow node on the path from a root build. */
 type NestingStep = { readonly definitionKey: string; readonly paramsText: string; readonly start: ChildStart };
+
+/** The builds of the children in the walk of one root: the count, and whether the bound was reported. */
+type ChildBuildBudget = { builds: number; reported: boolean };
+
+/** The answer of the budget for one child build. */
+type BuildDecision = "granted" | "refusedFirst" | "refusedAgain";
+
+/** Count one child build against `budget`. Changes only the budget. */
+function takeBuild(budget: ChildBuildBudget): BuildDecision {
+  if (budget.builds < MAX_CHECK_SUBWORKFLOW_BUILDS) {
+    budget.builds += 1;
+
+    return "granted";
+  }
+
+  if (budget.reported) {
+    return "refusedAgain";
+  }
+
+  budget.reported = true;
+
+  return "refusedFirst";
+}
+
+/** The `HRS-039` finding of the root at `rootPath`. */
+function buildLimitRefusal(rootPath: string): HorsiesError {
+  return refusal(
+    HorsiesErrorCode.WORKFLOW_CHECK_BUILD_LIMIT,
+    rootPath,
+    "the subworkflow nesting walk reached its bound of builds",
+    [
+      `the walk of this workflow built ${MAX_CHECK_SUBWORKFLOW_BUILDS} child workflows and stopped; the rest of its nesting is not checked`,
+      "nest fewer child workflows in this workflow",
+    ],
+  );
+}
 
 /** The refusals of every listed workflow, in list order. Effects: the builds of the workflows and their children. */
 export function checkWorkflows(registry: WorkflowRegistry): readonly HorsiesError[] {
@@ -59,7 +97,7 @@ function rootRefusals(
 ): readonly HorsiesError[] {
   const built = checkedSpec(registry, entry.record, params, path);
 
-  return built.ok ? walk(registry, built.value, [], path) : built.error;
+  return built.ok ? walk(registry, built.value, [], path, { builds: 0, reported: false }, path) : built.error;
 }
 
 /** The checked spec of one build, or its refusals (`HRS-029` for a throw or a thenable, then the spec findings). */
@@ -100,12 +138,17 @@ function checkedSpec(
   }
 }
 
-/** Walk the sub-workflow nodes of `spec`, reached by `path`, into the children that the check can build. */
+/**
+ * Walk the sub-workflow nodes of `spec`, reached by `path`, into the children that the check can build. `budget` counts
+ * the builds of the root at `rootPath`; the first build past the bound is `HRS-039`, and no build follows.
+ */
 function walk(
   registry: WorkflowRegistry,
   spec: CheckedSpec,
   steps: readonly NestingStep[],
   path: string,
+  budget: ChildBuildBudget,
+  rootPath: string,
 ): readonly HorsiesError[] {
   const refusals: HorsiesError[] = [];
 
@@ -135,6 +178,16 @@ function walk(
         refusals.push(...decision.refusals);
         break;
       case "walk": {
+        const build = takeBuild(budget);
+
+        if (build === "refusedFirst") {
+          refusals.push(buildLimitRefusal(rootPath));
+        }
+
+        if (build !== "granted") {
+          break;
+        }
+
         const params = decodeParameters(child.params, node.staticInput, "worker");
 
         if (!params.ok) {
@@ -154,7 +207,7 @@ function walk(
 
         const built = checkedSpec(registry, child.record, Object(params.value), nodePath);
 
-        refusals.push(...(built.ok ? walk(registry, built.value, decision.steps, nodePath) : built.error));
+        refusals.push(...(built.ok ? walk(registry, built.value, decision.steps, nodePath, budget, rootPath) : built.error));
 
         break;
       }

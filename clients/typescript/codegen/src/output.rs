@@ -371,6 +371,7 @@ mod tests {
             "task_send_errors",
             "wire_json",
             "worker_manifest",
+            "workflow_bounds",
             "workflow_handle",
             "workflow_handle_errors",
             "workflow_spec",
