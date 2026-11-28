@@ -295,6 +295,7 @@ A child is at most 32 levels deep. At run time the engine does not start a deepe
 |------|---------|
 | `HRS-036` | The nesting starts a child deeper than 32 for certain |
 | `HRS-037` | A definition includes itself with the same parameters, with no node between the two that waits for other nodes |
+| `HRS-039` | The walk of one root workflow built 320,000 child workflows and stopped; part of its nesting is not checked |
 
 The codes are on the [Errors Reference](/horsies/tasks/errors/#workflow-validation-hrs-001-hrs-099).
 

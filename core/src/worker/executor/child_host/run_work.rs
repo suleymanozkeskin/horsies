@@ -69,6 +69,7 @@ use tokio::time::Instant;
 use crate::core::task::fencing::{
     FencingToken, FencingTokenRefused, TaskAttempt, TaskAttemptRefused,
 };
+use crate::events::{AttemptNumber, MaxRetries};
 pub(super) use crate::worker::executor::protocol::ISOLATED_LEFTOVER_GRACE;
 use crate::worker::executor::protocol::{
     BlockedWhere, LeftoverName, LoopHoldsTasks, StuckWork, MAX_LEFTOVER_TASK_NAMES,
@@ -167,6 +168,88 @@ fn blocking_run_attempt() -> Result<TaskAttempt, TaskAttemptRefused> {
         BlockingRun::Run { attempt, .. } => Ok(attempt),
         BlockingRun::NoRun => Err(TaskAttemptRefused::NotInARun),
     }
+}
+
+/// The cancel state that a test run starts with. A test run is in a run, so
+/// it has no `NotInARun` state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TestRunCancel {
+    /// The run runs, and no cancel was requested.
+    NotRequested,
+    /// A cancel was requested, with `cause`.
+    Requested { cause: CancelCause },
+}
+
+/// The facts that a test run installs: the attempt facts and the cancel
+/// state that a body reads in place of a worker's run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestRunFacts {
+    task_id: uuid::Uuid,
+    attempt: AttemptNumber,
+    max_retries: MaxRetries,
+    cancel: TestRunCancel,
+}
+
+impl TestRunFacts {
+    /// The facts of attempt `attempt` of task `task_id`, whose retry budget
+    /// is `max_retries`, with no cancel requested.
+    pub fn new(task_id: uuid::Uuid, attempt: AttemptNumber, max_retries: MaxRetries) -> Self {
+        Self {
+            task_id,
+            attempt,
+            max_retries,
+            cancel: TestRunCancel::NotRequested,
+        }
+    }
+
+    /// These facts with the cancel state `cancel`.
+    pub fn with_cancel(self, cancel: TestRunCancel) -> Self {
+        Self { cancel, ..self }
+    }
+
+    fn scope(&self) -> RunScope {
+        let scope = RunScope::new(TaskAttempt::new(
+            self.task_id,
+            self.attempt,
+            self.max_retries,
+        ));
+        self.fire_requested_cancel(&scope.cancel_signal());
+        scope
+    }
+
+    fn fire_requested_cancel(&self, signal: &RunCancelSignal) {
+        match self.cancel {
+            TestRunCancel::NotRequested => {}
+            TestRunCancel::Requested { cause } => {
+                let _fired: Fire = signal.fire(cause);
+            }
+        }
+    }
+}
+
+/// Run `future` as the async body of a run with the facts `facts`: while it
+/// runs, [`run_task_attempt`], [`run_fencing_token`], [`run_cancel_signal`],
+/// [`run_cancel_state`] and [`spawn_in_run`] read them, as in a worker
+/// child. When `future` ends, the run closes and the work that `future`
+/// started with [`spawn_in_run`] is aborted; the facts are gone after that.
+///
+/// For a unit test of a task body. It sends nothing to a database and
+/// starts no child.
+pub async fn with_test_run_scope<F: Future>(facts: TestRunFacts, future: F) -> F::Output {
+    let scope = facts.scope();
+    let output = RUN_SCOPE.scope(scope.clone(), future).await;
+    scope.close();
+    scope.abort_alive();
+    output
+}
+
+/// Run `body` as the blocking body of a run with the facts `facts`, on the
+/// calling thread: the reads of [`with_test_run_scope`] work on this thread
+/// while `body` runs, and the earlier state of the thread comes back when it
+/// ends, also when it panics.
+pub fn with_test_blocking_run_scope<R>(facts: TestRunFacts, body: impl FnOnce() -> R) -> R {
+    let scope = facts.scope();
+    in_blocking_run(scope.task_attempt(), scope.cancel_signal(), body)
 }
 
 /// Why [`spawn_in_run`] started no work.

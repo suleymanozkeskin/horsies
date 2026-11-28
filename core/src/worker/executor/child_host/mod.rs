@@ -101,7 +101,7 @@ pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
     current_run, run_cancel_signal, run_cancel_state, run_fencing_token, run_task_attempt,
-    spawn_in_run, CancelCause, HostStopState, HostWork, HostWorkRefused, RunCancelSignal,
-    RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused, RunSpawnRefused, WorkStopCause,
-    MAX_RUN_WORK,
+    spawn_in_run, with_test_blocking_run_scope, with_test_run_scope, CancelCause, HostStopState,
+    HostWork, HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused,
+    RunSignalRefused, RunSpawnRefused, TestRunCancel, TestRunFacts, WorkStopCause, MAX_RUN_WORK,
 };

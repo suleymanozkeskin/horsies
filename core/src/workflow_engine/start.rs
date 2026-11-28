@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
+use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::core::{
     AnyNode, HorsiesError, HorsiesErrorCategory, OperationalCode, TaskError, WorkflowSpec,
 };
@@ -53,9 +54,16 @@ pub(crate) fn node_task_facts(
 // ---------------------------------------------------------------------------
 
 /// The greatest depth of a child workflow. A top-level workflow has depth 0; a child has the depth of its
-/// parent plus 1. Python: `MAX_SUBWORKFLOW_DEPTH` (`core/models/workflow/limits.py`); the baseline CHECK
-/// `horsies_workflows_depth_range` holds the same bound.
-pub(crate) const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
+/// parent plus 1. The baseline CHECK `horsies_workflows_depth_range` holds the same bound. Every client reads
+/// this one value (Python through the generated `_catalog.workflow_bounds`).
+pub const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
+
+/// The most builds of child workflows in the nesting walk of `check` for one root workflow. The walk builds each
+/// child of each build down to [`MAX_SUBWORKFLOW_DEPTH`], so the builds grow as the children per build to the
+/// power of the depth. The bound is derived from two core bounds: [`MAX_WORKFLOW_NODES`] (the most nodes of one
+/// spec, so the most children of one build) times [`MAX_SUBWORKFLOW_DEPTH`] (the levels of the walk). At the bound
+/// the walk stops and `check` reports `HRS-039`. Every client uses this one value.
+pub const MAX_CHECK_SUBWORKFLOW_BUILDS: usize = MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH as usize;
 
 /// The depth of a new child of the workflow `parent_workflow_id` (named `parent_workflow_name`) at
 /// `parent_depth`.

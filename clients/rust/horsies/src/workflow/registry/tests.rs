@@ -181,6 +181,37 @@ impl WorkflowDefinition for Waiting {
     }
 }
 
+/// A definition with params that includes itself twice, with `n + 1`, after
+/// its task: no wait is skipped, so the depth limit gives no finding and the
+/// builds double at each level.
+struct Fanout;
+
+impl WorkflowDefinition for Fanout {
+    type Output = NoWorkflowOutput;
+    type Parameters = Level;
+
+    fn name() -> &'static str {
+        "fanout"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.fanout.v1"
+    }
+
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
+        builder.definition_key("tests.fanout.v1");
+        let tick = add(&mut builder, task_node::<u32, ()>("tick"));
+        for _ in 0..2 {
+            let next = SubWorkflowParameters::Given(Level { n: params.n + 1 });
+            builder.sub_workflow(Fanout::node(next)?.waits_for(tick));
+        }
+        builder.build()
+    }
+}
+
 /// A definition without params whose one node is `D` with `Level { n: 3 }`.
 struct Root<D>(std::marker::PhantomData<D>);
 
@@ -630,6 +661,50 @@ fn a_nesting_past_the_depth_limit_at_once_is_reported() {
     );
 }
 
+/// A walk bound that the fan-out of `Fanout` reaches at once.
+const SMALL_BUILD_BOUND: usize = 5;
+
+#[test]
+fn a_walk_past_the_bound_of_builds_stops_with_one_finding() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Fanout>(&tasks()))
+        .unwrap();
+    registry
+        .register(Definition::without_params::<Root<Fanout>>(&tasks()).unwrap())
+        .unwrap();
+    assert_eq!(
+        codes(&registry.check_findings_within(SMALL_BUILD_BOUND)),
+        vec![Some(HorsiesErrorCode::WorkflowCheckBuildLimit)]
+    );
+}
+
+#[test]
+fn the_check_bound_is_the_nodes_of_a_spec_times_the_depth_limit() {
+    assert_eq!(
+        MAX_CHECK_SUBWORKFLOW_BUILDS,
+        horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH as usize
+    );
+}
+
+#[test]
+fn the_budget_grants_the_bound_then_refuses_once_then_again() {
+    let mut budget = ChildBuildBudget::new(SMALL_BUILD_BOUND);
+    for _ in 0..SMALL_BUILD_BOUND {
+        assert!(matches!(budget.take("node"), BuildDecision::Granted));
+    }
+    match budget.take("node") {
+        BuildDecision::RefusedFirst(finding) => {
+            assert_eq!(
+                finding.code,
+                Some(HorsiesErrorCode::WorkflowCheckBuildLimit)
+            );
+        }
+        other => panic!("expected the first refusal, got {other:?}"),
+    }
+    assert!(matches!(budget.take("node"), BuildDecision::RefusedAgain));
+}
+
 #[test]
 fn a_check_case_that_its_builder_refuses_is_reported() {
     let registry = registry();
@@ -715,7 +790,7 @@ fn the_decision_stops_at_the_depth_limit() {
         params_text: "{}".to_owned(),
         start,
     };
-    let path: Vec<NestingStep> = (0..MAX_SUBWORKFLOW_DEPTH)
+    let path: Vec<NestingStep> = (0..MAX_SUBWORKFLOW_DEPTH as usize)
         .map(|level| step(&format!("level{level}"), ChildStart::AfterDependencies))
         .collect();
     assert!(matches!(

@@ -13,7 +13,7 @@ mod stored_datetime;
 
 pub use custom_code::CustomErrorCode;
 pub use error::{TaskError, TaskErrorCode, UnknownCustomCode};
-pub use runtime::TaskRuntime;
+pub use runtime::{TaskRuntime, TestRun};
 pub use stored_datetime::{StoredDateTime, StoredTime};
 
 pub(crate) use custom_code::{is_free_custom_code, is_retry_code, stored_retry_code};
@@ -40,9 +40,9 @@ pub use horsies_core::TaskAttemptRefused;
 /// (`TaskRuntime::max_retries`, `TaskRuntime::retries_left`), each from 0 to 20.
 pub use horsies_core::events::{MaxRetries, RetriesLeft};
 
-/// The cancel state of a run (`TaskRuntime::cancel_state`), and why a cancel
-/// was requested.
-pub use horsies_core::{CancelCause, RunCancelState};
+/// The cancel state of a run (`TaskRuntime::cancel_state`), why a cancel
+/// was requested, and the cancel state that a `TestRun` installs.
+pub use horsies_core::{CancelCause, RunCancelState, TestRunCancel};
 
 // The library's code catalogs, with Python's names and wire values.
 pub use horsies_core::core::task::error::ExceptionRecord;

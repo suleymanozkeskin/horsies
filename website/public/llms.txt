@@ -15,7 +15,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - `horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
 - `SKILL.md` -> quick orientation and routing (the only file with frontmatter)
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling, the cancel of a running task
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-038 validation
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-039 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
 - `monitoring.md` -> `horsies.monitoring` query API (with the phase timing of a run and its nodes, and the phase record of each attempt), task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, `horsies metrics` and `GET /metrics`, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
@@ -644,6 +644,7 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-036 WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
 - HRS-037 WORKFLOW_SUBWORKFLOW_SELF_NESTING
 - HRS-038 WORKFLOW_TOO_MANY_NODES
+- HRS-039 WORKFLOW_CHECK_BUILD_LIMIT
 Task definition (HRS-100-HRS-199):
 <!-- members: HorsiesErrorCode part -->
 - HRS-100 TASK_NO_RETURN_TYPE

@@ -329,6 +329,13 @@ async fn index_feed(rt: TaskRuntime, feed_urls: Vec<String>) -> Result<usize, Ta
   steps of its work; `cancelled()` is a future and has no use there.
 - Outside a run (a direct call in a test) `cancelled()` never completes,
   `is_cancelled()` is `false` and `cancel_state()` is `NotInARun`.
+- A unit test installs the facts of a run with `TestRun::new(task_id, attempt,
+  max_retries)`, optionally `.with_cancel_state(TestRunCancel::Requested {
+  cause })`. `run(future).await` drives an async body and `run_blocking(||
+  ...)` calls a blocking body with those facts. `task_id()`, `attempt()`,
+  `max_retries()`, `retries_left()`, `fencing_token()` and the cancel
+  reads give them inside the call; they are gone when it ends. Build the
+  future inside the call.
 - Work started with `spawn` belongs to the run: the child waits for it when
   the body returns, cancels it after the grace, and reports work that does
   not stop. Work started with plain `tokio::spawn` is not tracked.

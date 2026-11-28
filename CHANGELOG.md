@@ -10,6 +10,27 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Rust: `TestRun` installs the facts of a run for a unit test.**
+  `TestRun::new(task_id, attempt, max_retries)` (optionally
+  `.with_cancel_state(TestRunCancel::Requested { cause })`) with
+  `run(future).await` for an async body and `run_blocking(|| ...)` for a
+  blocking body. While the future or the closure runs, `task_id()`,
+  `attempt()`, `max_retries()`, `retries_left()`, `fencing_token()`,
+  `cancel_state()`, `is_cancelled()` and `cancelled()` of `TaskRuntime` give
+  the installed facts, as in a worker child; they are gone when it ends.
+  Core: `with_test_run_scope`, `with_test_blocking_run_scope`,
+  `TestRunFacts` and `TestRunCancel`. This is the Rust form of Python's
+  `TaskRuntime.for_test`.
+- **`check` bounds the builds of the sub-workflow nesting walk.** The walk of
+  one root workflow builds at most `MAX_CHECK_SUBWORKFLOW_BUILDS` (320,000, `MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`)
+  child workflows; the builds grow as the children per build to the power of
+  the depth (32), so the walk had no bound. At the bound the walk stops and
+  `check` reports the new code `HRS-039` (`WORKFLOW_CHECK_BUILD_LIMIT`,
+  Rust `WorkflowCheckBuildLimit`) once for that root. The core defines the
+  bound; Python reads it from the generated `_catalog.workflow_bounds`.
+  The sub-workflow depth limit `MAX_SUBWORKFLOW_DEPTH` (32) is now one core
+  constant too: the Rust client reads it from `horsies_core`, and Python from
+  the same generated module.
 - **A shared thread child ends itself above its memory limit: exit code 81.**
   `ChildExitCode::MemoryLimit` (81, `MEMORY_LIMIT_EXIT_CODE`) is the code of a
   shared thread child whose resident memory went above `recycle_above` while

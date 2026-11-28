@@ -1,12 +1,13 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
 //! (`monitoring_bounds.py`, `broker_bounds.py`, `broker_pool_defaults.py`,
 //! `exit_codes.py`, `child_bounds.py`, `task_bounds.py`, `queue_defaults.py`,
-//! `schedule_defaults.py`). Each
+//! `schedule_defaults.py`, `workflow_bounds.py`). Each
 //! constant is a `Final` integer, text or flag whose value is the core's constant, so a
 //! Python bound cannot differ from the bound that the core enforces: `check`
 //! fails when a core value changes and the module is not written again.
 
 use horsies_core::core::config::broker::{BROKER_MAX_OVERFLOW_DEFAULT, BROKER_POOL_SIZE_DEFAULT};
+use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
     CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MEMORY_LIMIT_EXIT_CODE,
@@ -20,8 +21,9 @@ use horsies_core::monitoring::{
 use horsies_core::{
     CANCELLED_WRITE_END, DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
-    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_TASK_TIMEOUT_MS,
-    MIN_TASK_TIMEOUT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_CHECK_SUBWORKFLOW_BUILDS,
+    MAX_SUBWORKFLOW_DEPTH, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -337,8 +339,39 @@ pub const SCHEDULE_DEFAULTS: ConstantModule = ConstantModule {
     constants: &SCHEDULE_DEFAULT_CONSTANTS,
 };
 
+const WORKFLOW_BOUND_CONSTANTS: [CoreConstant; 3] = [
+    CoreConstant {
+        name: "MAX_WORKFLOW_NODES",
+        doc: "The most nodes that one `WorkflowSpec` holds.",
+        value: CoreValue::Integer(MAX_WORKFLOW_NODES as i64),
+    },
+    CoreConstant {
+        name: "MAX_SUBWORKFLOW_DEPTH",
+        doc: "The greatest depth of a child workflow.\n\
+              \n\
+              A top-level workflow has depth 0. A child workflow has the depth of its\n\
+              parent plus 1.",
+        value: CoreValue::Integer(MAX_SUBWORKFLOW_DEPTH as i64),
+    },
+    CoreConstant {
+        name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
+        doc: "The most builds of child workflows in the nesting walk of `check` for one\n\
+              root workflow: the most nodes of a spec times `MAX_SUBWORKFLOW_DEPTH`. At\n\
+              the bound the walk stops and `check` reports `HRS-039`.",
+        value: CoreValue::Integer(MAX_CHECK_SUBWORKFLOW_BUILDS as i64),
+    },
+];
+
+/// The depth limit of sub-workflows and the bound of the nesting walk of `check`.
+pub const WORKFLOW_BOUNDS: ConstantModule = ConstantModule {
+    file: "workflow_bounds.py",
+    doc: "The sub-workflow depth limit and the bound of the nesting walk of `check` in\n\
+          horsies-core, generated from its Rust constants.",
+    constants: &WORKFLOW_BOUND_CONSTANTS,
+};
+
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 8] = [
+pub const CONSTANT_MODULES: [ConstantModule; 9] = [
     MONITORING_BOUNDS,
     BROKER_BOUNDS,
     BROKER_POOL_DEFAULTS,
@@ -347,6 +380,7 @@ pub const CONSTANT_MODULES: [ConstantModule; 8] = [
     TASK_BOUNDS,
     QUEUE_DEFAULTS,
     SCHEDULE_DEFAULTS,
+    WORKFLOW_BOUNDS,
 ];
 
 /// The text of one module of core constants.
@@ -539,6 +573,23 @@ mod tests {
         assert!(rendered.contains("\nDEFAULT_SCHEDULE_ENABLED: Final = True\n"));
         assert!(rendered.contains("\nDEFAULT_SCHEDULE_TIMEZONE: Final = 'UTC'\n"));
         assert!(rendered.contains("\nDEFAULT_MAX_CATCH_UP_RUNS: Final = 100\n"));
+    }
+
+    #[test]
+    fn the_workflow_bounds_hold_the_core_depth_limit_and_check_build_bound() {
+        let rendered = render_constant_module(&WORKFLOW_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nMAX_SUBWORKFLOW_DEPTH: Final = {MAX_SUBWORKFLOW_DEPTH}\n"
+        )));
+        assert!(rendered.contains(&format!(
+            "\nMAX_WORKFLOW_NODES: Final = {MAX_WORKFLOW_NODES}\n"
+        )));
+        assert!(rendered.contains(&format!(
+            "\nMAX_CHECK_SUBWORKFLOW_BUILDS: Final = {MAX_CHECK_SUBWORKFLOW_BUILDS}\n"
+        )));
+        assert_eq!(MAX_WORKFLOW_NODES, 10_000);
+        assert_eq!(MAX_SUBWORKFLOW_DEPTH, 32);
+        assert_eq!(MAX_CHECK_SUBWORKFLOW_BUILDS, 320_000);
     }
 
     #[test]

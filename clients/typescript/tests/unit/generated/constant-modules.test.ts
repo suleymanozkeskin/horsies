@@ -48,6 +48,12 @@ import {
   IDEMPOTENCY_KEY_MAX_BYTES,
   MAX_WAIT_LIMIT_MS,
 } from "../../../horsies/src/_catalog/send_bounds.ts";
+import {
+  MAX_CHECK_SUBWORKFLOW_BUILDS,
+  MAX_SUBWORKFLOW_DEPTH,
+  MAX_WORKFLOW_NODES,
+} from "../../../horsies/src/_catalog/workflow_bounds.ts";
+import { NODE_INDEX_MAX } from "../../../horsies/src/_catalog/workflow_spec.ts";
 import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
 import * as scheduleEntry from "../../../horsies/src/schedules/entry.ts";
 import * as sendBounds from "../../../horsies/src/send/bounds.ts";
@@ -93,6 +99,9 @@ const bounds = [
   DEFAULT_QUEUE_PRIORITY,
   DEFAULT_MAX_CATCH_UP_RUNS,
   DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS,
+  MAX_CHECK_SUBWORKFLOW_BUILDS,
+  MAX_SUBWORKFLOW_DEPTH,
+  MAX_WORKFLOW_NODES,
 ];
 
 describe("generated constant modules", () => {
@@ -109,6 +118,18 @@ describe("generated constant modules", () => {
       expect(code).toBeGreaterThanOrEqual(0);
       expect(code).toBeLessThanOrEqual(maxExitStatus);
     }
+  });
+
+  test("the node bound is the largest node index plus one", () => {
+    expect(MAX_WORKFLOW_NODES).toBe(NODE_INDEX_MAX + 1);
+  });
+
+  test("the depth limit of nested children is 32", () => {
+    expect(MAX_SUBWORKFLOW_DEPTH).toBe(32);
+  });
+
+  test("the build bound of the nesting walk is the node bound times the depth limit", () => {
+    expect(MAX_CHECK_SUBWORKFLOW_BUILDS).toBe(MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH);
   });
 
   test("the largest attempt is one more than the largest retry count", () => {

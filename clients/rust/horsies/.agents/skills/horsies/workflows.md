@@ -300,7 +300,9 @@ impl WorkflowDefinition for AllRegions {
   `template.node(parameters)` also make one.
 - The depth limit of nested children is 32. `check()` reports a nesting
   that reaches it for certain (`HRS-036`) or repeats a definition with the
-  same parameters at once (`HRS-037`).
+  same parameters at once (`HRS-037`). The walk of one root builds at most
+  320,000 children (`MAX_CHECK_SUBWORKFLOW_BUILDS`); at the bound it stops
+  and reports `HRS-039`.
 - A failed child gives its node a `TaskError` whose `sub_workflow()` is the
   `SubWorkflowFailure`.
 
@@ -562,6 +564,7 @@ For a template, pass the builder to `build_with`:
 | `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
 | `HRS-034` | A priority outside 1 to 100 |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or repeats at once |
+| `HRS-039` | The nesting walk of one root reached its bound of 320,000 child builds |
 | `HRS-302` | `builder.task(node)`: the builder's app does not register the task, or registers it with another input or output type. The node is not added |
 
 ## Common Pitfalls

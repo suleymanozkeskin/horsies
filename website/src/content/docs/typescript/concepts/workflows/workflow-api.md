@@ -191,6 +191,7 @@ The types refuse each rule below in typed code. The run-time checks refuse the s
 | A task that the app does not list | `HRS-302` |
 | A sub-workflow nesting that reaches the depth limit | `HRS-036` |
 | A sub-workflow that includes itself with the same parameters | `HRS-037` |
+| The nesting walk of one root built `MAX_CHECK_SUBWORKFLOW_BUILDS` (320,000: 10,000 nodes times the depth limit of 32) child workflows and stopped | `HRS-039` |
 
 The codes are on the [Errors Reference](/horsies/tasks/errors/#workflow-validation-hrs-001-hrs-099).
 

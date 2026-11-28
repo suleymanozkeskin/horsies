@@ -1,7 +1,7 @@
 //! Renders constants of horsies-core as modules of the catalog folder:
 //! `monitoring_bounds.ts`, `exit_codes.ts`, `event_bounds.ts`,
 //! `broker_bounds.ts`, `codec_bounds.ts`, `send_bounds.ts` and
-//! `schedule_defaults.ts`.
+//! `workflow_bounds.ts` and `schedule_defaults.ts`.
 //!
 //! `constant_modules` is the list of the core constants that the
 //! TypeScript package publishes. The list is a choice of this renderer. Each
@@ -25,6 +25,7 @@ use horsies_core::core::task::error::{
     DATA_REFUSED_KEY, ERROR_DATA_DEPTH_LIMIT, SUMMARY_OUTPUT_DEPTH_LIMIT,
 };
 use horsies_core::core::task::result::TASK_RESULT_ENVELOPE_KEY;
+use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::events::{
     MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
     MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
@@ -46,9 +47,9 @@ use horsies_core::web::MAX_OPEN_EVENT_STREAMS;
 use horsies_core::{
     DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
-    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS,
-    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND, WORKER_HISTORY_ROW_BOUND,
-    WORKER_PING_WAIT_BOUND,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_CHECK_SUBWORKFLOW_BUILDS,
+    MAX_SUBWORKFLOW_DEPTH, MAX_WAIT_LIMIT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    WORKER_HISTORY_ROW_BOUND, WORKER_PING_WAIT_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
@@ -404,6 +405,24 @@ const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 4] = [
     },
 ];
 
+/// The stem of the module of the bound of the nesting walk of `check`.
+const WORKFLOW_BOUNDS_MODULE: &str = "workflow_bounds";
+
+const WORKFLOW_BOUND_CONSTANTS: [PublishedConstant; 3] = [
+    PublishedConstant::Integer {
+        name: "MAX_WORKFLOW_NODES",
+        value: MAX_WORKFLOW_NODES as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_SUBWORKFLOW_DEPTH",
+        value: MAX_SUBWORKFLOW_DEPTH as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
+        value: MAX_CHECK_SUBWORKFLOW_BUILDS as i128,
+    },
+];
+
 /// Every generated module of core constants, in file order:
 ///
 /// - the bounds of the monitoring reads (the window spans in whole seconds);
@@ -413,10 +432,11 @@ const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 4] = [
 /// - the bound of the stale and expired task reads of the broker;
 /// - the bounds and spellings of the stored forms;
 /// - the longest result wait, the key bound and the default route of a task;
+/// - the most builds of the nesting walk of `check` for one root workflow;
 /// - the defaults of a task schedule.
 ///
 /// Pure.
-fn constant_modules() -> [ConstantModule; 7] {
+fn constant_modules() -> [ConstantModule; 8] {
     let mut event_constants = EVENT_CONSTANTS.to_vec();
     event_constants.extend(event_handler_constants());
     [
@@ -443,6 +463,10 @@ fn constant_modules() -> [ConstantModule; 7] {
         ConstantModule {
             stem: SEND_BOUNDS_MODULE,
             constants: SEND_CONSTANTS.to_vec(),
+        },
+        ConstantModule {
+            stem: WORKFLOW_BOUNDS_MODULE,
+            constants: WORKFLOW_BOUND_CONSTANTS.to_vec(),
         },
         ConstantModule {
             stem: SCHEDULE_DEFAULTS_MODULE,
@@ -896,6 +920,23 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_bounds_hold_the_node_bound_the_depth_limit_and_the_build_bound_of_the_nesting_walk(
+    ) {
+        assert_eq!(
+            module_of("workflow_bounds"),
+            format!(
+                "{GENERATED_HEADER}\n{}{}{}",
+                integer_statement("MAX_WORKFLOW_NODES", MAX_WORKFLOW_NODES as i128),
+                integer_statement("MAX_SUBWORKFLOW_DEPTH", MAX_SUBWORKFLOW_DEPTH as i128),
+                integer_statement(
+                    "MAX_CHECK_SUBWORKFLOW_BUILDS",
+                    MAX_CHECK_SUBWORKFLOW_BUILDS as i128
+                )
+            )
+        );
+    }
+
+    #[test]
     fn the_broker_bounds_hold_the_task_list_bound() {
         assert_eq!(
             module_of("broker_bounds"),
@@ -907,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn the_files_are_the_seven_modules_in_order_with_distinct_names() {
+    fn the_files_are_the_eight_modules_in_order_with_distinct_names() {
         let paths: Vec<String> = generated_files()
             .iter()
             .map(|file| file.relative_path().display().to_string())
@@ -921,6 +962,7 @@ mod tests {
                 "src/_catalog/broker_bounds.ts",
                 "src/_catalog/codec_bounds.ts",
                 "src/_catalog/send_bounds.ts",
+                "src/_catalog/workflow_bounds.ts",
                 "src/_catalog/schedule_defaults.ts",
             ]
         );

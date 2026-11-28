@@ -14,8 +14,9 @@ use std::sync::Arc;
 use horsies_core::events::{AttemptNumber, MaxRetries, RetriesLeft};
 use horsies_core::{
     run_cancel_signal, run_cancel_state, run_fencing_token, run_task_attempt, spawn_in_run,
-    FencingToken, FencingTokenRefused, RunCancelState, RunSignalRefused, RunSpawnRefused,
-    TaskAttemptRefused,
+    with_test_blocking_run_scope, with_test_run_scope, FencingToken, FencingTokenRefused,
+    RunCancelState, RunSignalRefused, RunSpawnRefused, TaskAttemptRefused, TestRunCancel,
+    TestRunFacts,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -304,6 +305,57 @@ impl TaskRuntime {
     }
 }
 
+/// The facts of a run that a unit test of a task body installs: the task id,
+/// the attempt number, the retry budget and the cancel state. While the test
+/// runs the body through [`TestRun::run`] or [`TestRun::run_blocking`], the
+/// reads of [`TaskRuntime`] give these facts, as in a worker child; outside
+/// that call they give what they give outside a run.
+///
+/// ```ignore
+/// let facts = TestRun::new(task_id, AttemptNumber::try_from(2)?, MaxRetries::try_from(3)?);
+/// let outcome = facts.run(charge(app.task_runtime(), order)).await;
+/// ```
+///
+/// No database, worker or child takes part. Work that the body starts with
+/// [`TaskRuntime::spawn`] is aborted when the future ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestRun {
+    facts: TestRunFacts,
+}
+
+impl TestRun {
+    /// The facts of attempt `attempt` of task `task_id`, whose retry budget
+    /// is `max_retries`. No cancel is requested.
+    pub fn new(task_id: uuid::Uuid, attempt: AttemptNumber, max_retries: MaxRetries) -> Self {
+        Self {
+            facts: TestRunFacts::new(task_id, attempt, max_retries),
+        }
+    }
+
+    /// These facts with the cancel state `cancel`: `NotRequested`, or
+    /// `Requested` with a cause. A requested cancel makes `cancelled()`
+    /// complete at once, `is_cancelled()` `true` and `cancel_state()`
+    /// `RunCancelState::Requested`.
+    pub fn with_cancel_state(self, cancel: TestRunCancel) -> Self {
+        Self {
+            facts: self.facts.with_cancel(cancel),
+        }
+    }
+
+    /// Drive `future`, the async body under test, as the body of a run with
+    /// these facts, and give its output. The facts are gone when it ends.
+    pub async fn run<F: Future>(self, future: F) -> F::Output {
+        with_test_run_scope(self.facts, future).await
+    }
+
+    /// Call `body`, the blocking body under test, on this thread as the body
+    /// of a run with these facts, and give its output. The facts are gone when
+    /// it ends.
+    pub fn run_blocking<R>(self, body: impl FnOnce() -> R) -> R {
+        with_test_blocking_run_scope(self.facts, body)
+    }
+}
+
 impl std::fmt::Debug for TaskRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -315,7 +367,7 @@ impl std::fmt::Debug for TaskRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AppConfig, Horsies};
+    use crate::{AppConfig, CancelCause, Horsies};
 
     #[derive(Debug, PartialEq)]
     struct Settings(u32);
@@ -370,6 +422,144 @@ mod tests {
         assert_eq!(runtime.attempt(), Err(TaskAttemptRefused::NotInARun));
         assert_eq!(runtime.max_retries(), Err(TaskAttemptRefused::NotInARun));
         assert_eq!(runtime.retries_left(), Err(TaskAttemptRefused::NotInARun));
+    }
+
+    fn second_attempt_of_three() -> (uuid::Uuid, TestRun) {
+        let task_id = uuid::Uuid::from_u128(7);
+        let facts = TestRun::new(
+            task_id,
+            AttemptNumber::try_from(2).unwrap(),
+            MaxRetries::try_from(3).unwrap(),
+        );
+        (task_id, facts)
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_task_id() {
+        let runtime = app().task_runtime();
+        let (task_id, facts) = second_attempt_of_three();
+        let read = facts.run(async { runtime.task_id() }).await;
+        assert_eq!(read, Ok(task_id));
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_attempt_number() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let read = facts.run(async { runtime.attempt() }).await;
+        assert_eq!(read, Ok(AttemptNumber::try_from(2).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_retry_budget() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let read = facts.run(async { runtime.max_retries() }).await;
+        assert_eq!(read, Ok(MaxRetries::try_from(3).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_retries_left() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let read = facts.run(async { runtime.retries_left() }).await;
+        assert_eq!(read, Ok(RetriesLeft::try_from(2).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_fencing_token_of_its_facts() {
+        let runtime = app().task_runtime();
+        let (task_id, facts) = second_attempt_of_three();
+        let token = facts.run(async { runtime.fencing_token() }).await.unwrap();
+        assert_eq!(token.task_id(), task_id);
+        assert_eq!(token.value().get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_test_run_has_no_cancel_requested_by_default() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let (state, cancelled) = facts
+            .run(async { (runtime.cancel_state(), runtime.is_cancelled()) })
+            .await;
+        assert_eq!(state, RunCancelState::NotRequested);
+        assert!(!cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_test_run_gives_the_requested_cancel_state() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let facts = facts.with_cancel_state(TestRunCancel::Requested {
+            cause: CancelCause::Operator,
+        });
+        let (state, cancelled) = facts
+            .run(async {
+                runtime.cancelled().await;
+                (runtime.cancel_state(), runtime.is_cancelled())
+            })
+            .await;
+        assert_eq!(
+            state,
+            RunCancelState::Requested {
+                cause: CancelCause::Operator
+            }
+        );
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn a_blocking_test_run_gives_the_attempt_facts_and_the_cancel_state() {
+        let runtime = app().task_runtime();
+        let (task_id, facts) = second_attempt_of_three();
+        let facts = facts.with_cancel_state(TestRunCancel::Requested {
+            cause: CancelCause::Deadline,
+        });
+        let read = facts.run_blocking(|| {
+            (
+                runtime.task_id(),
+                runtime.attempt(),
+                runtime.max_retries(),
+                runtime.retries_left(),
+                runtime.cancel_state(),
+            )
+        });
+        assert_eq!(
+            read,
+            (
+                Ok(task_id),
+                Ok(AttemptNumber::try_from(2).unwrap()),
+                Ok(MaxRetries::try_from(3).unwrap()),
+                Ok(RetriesLeft::try_from(2).unwrap()),
+                RunCancelState::Requested {
+                    cause: CancelCause::Deadline
+                },
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn the_facts_of_a_test_run_are_gone_when_its_future_ends() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        let facts = facts.with_cancel_state(TestRunCancel::Requested {
+            cause: CancelCause::Operator,
+        });
+        facts.run(async {}).await;
+        assert_eq!(runtime.task_id(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.attempt(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.max_retries(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.retries_left(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.cancel_state(), RunCancelState::NotInARun);
+    }
+
+    #[test]
+    fn the_facts_of_a_blocking_test_run_are_gone_when_its_body_ends() {
+        let runtime = app().task_runtime();
+        let (_, facts) = second_attempt_of_three();
+        facts.run_blocking(|| {});
+        assert_eq!(runtime.task_id(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.cancel_state(), RunCancelState::NotInARun);
     }
 
     #[tokio::test]
