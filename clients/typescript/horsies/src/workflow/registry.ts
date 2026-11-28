@@ -115,19 +115,19 @@ export type OutputReadForm =
   | { readonly kind: "workflowNotListed"; readonly workflowName: string };
 
 /**
- * How `get` reads a workflow's stored result: with the declared output form, as the outcome of each terminal node (a
+ * How `get` reads a workflow's stored result: with the declared output form, as `NoWorkflowOutput` (a
  * workflow with no `outputType`), or not at all (a workflow that the app does not list has no form).
  */
 export type WorkflowResultForm =
   | { readonly kind: "form"; readonly form: ReadForm }
-  | { readonly kind: "terminalResults" }
+  | { readonly kind: "noOutput" }
   | { readonly kind: "workflowNotListed"; readonly workflowName: string };
 
-const TERMINAL_RESULTS_FORM: WorkflowResultForm = Object.freeze({ kind: "terminalResults" });
+const NO_OUTPUT_FORM: WorkflowResultForm = Object.freeze({ kind: "noOutput" });
 
 /**
  * The read form of a workflow's stored result: the output kind that the workflow declares (`outputType`), with open
- * custom codes, or `terminalResults` for a workflow with no `outputType`. The checks refuse every build whose output
+ * custom codes, or `noOutput` for a workflow with no `outputType`. The checks refuse every build whose output
  * node does not fit the declaration (`HRS-025`), so the declaration is the one fact; no build runs. A workflow that the
  * app does not list is `workflowNotListed`. Pure.
  */
@@ -144,13 +144,13 @@ export function workflowResultForm(workflow: object, registry: WorkflowRegistry)
   }
 }
 
-/** The result form of a listed workflow: its node form when it declares an output, else `terminalResults`. Pure. */
+/** The result form of a listed workflow: its node form when it declares an output, else `noOutput`. Pure. */
 function resultFormOf(declaration: OutputDeclaration, form: ReadForm): WorkflowResultForm {
   switch (declaration.kind) {
     case "declared":
       return Object.freeze({ kind: "form", form });
     case "notDeclared":
-      return TERMINAL_RESULTS_FORM;
+      return NO_OUTPUT_FORM;
     default:
       return unreachable(declaration, "resultFormOf");
   }

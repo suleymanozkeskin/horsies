@@ -357,7 +357,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### WorkflowHandle
 - .workflow_id -> str
 - .status() / .status_async() -> HandleResult[WorkflowStatus]
-- .get(wait_ms=None) / .get_async(...) -> ReadResult[T, TaskError] (blocking; an outputless workflow gives Ok(Succeeded(terminal_results)), WorkflowTerminalResults = dict[str, TaskOutcome[Any, TaskError] | None])
+- .get(wait_ms=None) / .get_async(...) -> ReadResult[T, TaskError] (blocking; an outputless workflow gives Ok(Succeeded(NoWorkflowOutput())); results(), nodes() and result_for() give the node values)
 - .results() / .results_async() -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]] (keyed by node_id)
 - .result_for(node) / .result_for_async(node) -> ReadResult[T, TaskError] (non-blocking query; Err(ReadWorkflowNotFound(...)) for an id that no workflow has, Err(ReadNodeNotFound(...)) for a node id that the workflow does not have, Err(ReadResultNotReady(...)) before the node has a result)
 - get and result_for put a read failure in Err(ReadError) (ReadWaitTimeout, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotReady, ReadResultDeserializationError, ReadDatabaseError, ReadAsyncContext, ...); the workflow's or the node's error is Ok(Failed(task_error)); the other methods return HandleResult

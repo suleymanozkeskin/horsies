@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::workflow::node::tests::{add, task_node, test_builder};
 use crate::workflow::{
-    OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowSpecBuilder,
+    NoWorkflowOutput, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 
 /// The typed functions of an app with no task: the definitions here add
@@ -86,7 +86,7 @@ where
 struct Countdown;
 
 impl WorkflowDefinition for Countdown {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -113,7 +113,7 @@ impl WorkflowDefinition for Countdown {
 struct Countup;
 
 impl WorkflowDefinition for Countup {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -138,7 +138,7 @@ impl WorkflowDefinition for Countup {
 struct Mirror;
 
 impl WorkflowDefinition for Mirror {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -161,7 +161,7 @@ impl WorkflowDefinition for Mirror {
 struct Waiting;
 
 impl WorkflowDefinition for Waiting {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -188,7 +188,7 @@ impl<D> WorkflowDefinition for Root<D>
 where
     D: WorkflowDefinition<Parameters = Level>,
 {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -209,7 +209,7 @@ where
 struct Plain;
 
 impl WorkflowDefinition for Plain {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -411,7 +411,7 @@ fn a_member_that_no_params_field_takes_fails_the_node() {
 struct NoParams;
 
 impl WorkflowDefinition for NoParams {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -732,7 +732,7 @@ fn the_decision_stops_at_the_depth_limit() {
 struct Panicking;
 
 impl WorkflowDefinition for Panicking {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {

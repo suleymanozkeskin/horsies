@@ -70,6 +70,19 @@ def succeeded_value[T](read: ReadResult[T, TaskError]) -> T:
             pytest.fail(f'expected Ok(Succeeded(...)), got {read!r}')
 
 
+async def node_outcomes_of(
+    handle: WorkflowHandle[Any],
+) -> dict[str, TaskOutcome[Any, TaskError[Any]]]:
+    """The outcome of every node that has a stored result, by node id, from
+    ``handle.results()``. A failed read fails the test."""
+    read = await asyncio.to_thread(handle.results)
+    match read:
+        case Ok(ok_value=outcomes):
+            return outcomes
+        case Err(err_value=error):
+            pytest.fail(f'handle.results() failed: {error!r}')
+
+
 def failed_error(read: ReadResult[Any, TaskError]) -> TaskError:
     """The task error of ``Ok(Failed(task_error))``. Any other read fails the
     test."""

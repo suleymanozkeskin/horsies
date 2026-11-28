@@ -395,7 +395,7 @@ def test_args_from_source_with_the_same_codes_is_accepted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Workflow reads: result_for, results/tasks, the outputless map, the context
+# Workflow reads: result_for, results/tasks, the context
 # ---------------------------------------------------------------------------
 
 
@@ -468,31 +468,6 @@ def test_results_map_folds_an_unknown_code_into_the_entry() -> None:
             assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
         case other:
             pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')
-
-
-def test_outputless_map_entry_gives_the_member() -> None:
-    from horsies.core.models.workflow.handle import (
-        _OUTPUTLESS_TERMINALS,
-        _decode_workflow_envelope,
-    )
-
-    envelope = {
-        '__h_task_result__': True,
-        '__h_outputless_terminals__': True,
-        'ok': {
-            'results_by_id': {'n': json.loads(_stored_error_text('INVALID_EMAIL'))},
-            'task_name_by_id': {'n': 'send_welcome_email'},
-        },
-        'err': None,
-    }
-    read = _decode_workflow_envelope(
-        envelope, _OUTPUTLESS_TERMINALS, app=_typed_app(), workflow_id='w',
-    )
-    match read:
-        case Ok(Succeeded({'n': Failed(TaskError(code=code))})):
-            assert code is WelcomeCode.INVALID_EMAIL
-        case other:
-            pytest.fail(f'expected the member in the map, got {other!r}')
 
 
 def test_context_entry_gives_the_member() -> None:

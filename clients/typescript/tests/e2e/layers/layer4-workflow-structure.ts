@@ -218,17 +218,19 @@ describe("layer 4: workflow structure", () => {
     assert.deepEqual(await workflowValue(handle), { final: "result", count: 42 });
   });
 
-  e2eTest("a workflow with no output node completes with the outcome of each terminal node, by node id", "default", async (suite) => {
+  e2eTest("a workflow with no output node completes with NoWorkflowOutput; results() holds the terminal nodes' outcomes", "default", async (suite) => {
     await suite.worker("isolated-1");
 
     const handle = await startedHandle("fanout_without_output", suite.app.start(structure.fanoutWithoutOutput, {}));
-    const results = await workflowValue(handle);
 
-    assert.equal(results.kind, "terminalResults");
-    assert.deepEqual([...results.byNodeId.keys()].toSorted(), ["b", "c", "d"]);
+    assert.deepEqual(await workflowValue(handle), { kind: "noWorkflowOutput" });
 
-    for (const [nodeId, outcome] of results.byNodeId) {
-      assert.deepEqual(outcome, { kind: "succeeded", value: `completed_${nodeId}` }, `terminal node ${nodeId}`);
+    const results = await handleCall("the node results", handle.results());
+
+    for (const nodeId of ["b", "c", "d"]) {
+      const result = results.get(nodeId);
+
+      assert.deepEqual(result, { kind: "outcome", outcome: { kind: "succeeded", value: `completed_${nodeId}` } }, `terminal node ${nodeId}`);
     }
   });
 
