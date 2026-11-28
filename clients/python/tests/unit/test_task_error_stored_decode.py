@@ -34,6 +34,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     OperationalCode,
     OutcomeCode,
+    ResultSlotStored,
     SubWorkflowFailure,
     TaskError,
     TaskInfo,

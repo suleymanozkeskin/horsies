@@ -116,13 +116,15 @@ if is_ok(info_result) and info_result.ok_value is not None:
 | `ResultSlotStored(outcome)` | The read passed `include_result=True`, and the task stored a result. `outcome` is a `TaskOutcome`: `Succeeded(value)` or `Failed(error)` |
 
 ```python
-from horsies import ResultSlotStored, Succeeded
+from horsies import ResultSlotStored, Succeeded, is_ok
 
-match task_info.result:
-    case ResultSlotStored(value=Succeeded(value)):
-        print(f"Returned: {value}")
-    case _:
-        print("No stored value")
+stored_info_result = handle.info(include_result=True)
+if is_ok(stored_info_result) and stored_info_result.ok_value is not None:
+    match stored_info_result.ok_value.result:
+        case ResultSlotStored(value=Succeeded(value)):
+            print(f"Returned: {value}")
+        case _:
+            print("No stored value")
 ```
 
 `handle.info` and `app.get_task_info` decode an ok value with the task's type when the task is registered in this process. They leave it plain JSON when it is not.
