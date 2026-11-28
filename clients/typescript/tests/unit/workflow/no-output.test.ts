@@ -1,5 +1,5 @@
-// A workflow with no `outputType` (Python `output=None`, Rust `OutputlessResults`): the checks of its builds, the spec
-// data, `get` of its outputless envelope (the outcome of each terminal node), the read of a sub-workflow node of such a
+// A workflow with no `outputType` (Python `output=None`, Rust `NoWorkflowOutput`): the checks of its builds, the spec
+// data, `get` of its outputless envelope (`NoWorkflowOutput` or the stored error), the read of a sub-workflow node of such a
 // child, and an `h.taskOutcome` parameter of it.
 
 import assert from "node:assert/strict";
@@ -205,7 +205,7 @@ describe("the success value of a sub-workflow node of a child with no output", (
 });
 
 describe("get of a workflow with no outputType", () => {
-  test("a COMPLETED workflow: the outcome of each terminal node, by node id, with open codes", async () => {
+  test("a COMPLETED workflow: success with NoWorkflowOutput; the ok map is not read", async () => {
     const ok = terminals(
       { b: okEnvelope("3"), c: `{"__h_task_result__":true,"ok":null,"err":${customErrorText("NO_WORD")}}` },
       { b: "count", c: "word" },
@@ -213,61 +213,15 @@ describe("get of a workflow with no outputType", () => {
 
     const read = await getOf(fanout, outputlessEnvelope(ok));
 
-    assert(read.ok && read.value.kind === "succeeded");
-    assert.equal(read.value.value.kind, "terminalResults");
-
-    const byNodeId = read.value.value.byNodeId;
-
-    assert.deepEqual([...byNodeId.keys()], ["b", "c"]);
-    assert.deepEqual(byNodeId.get("b"), { kind: "succeeded", value: 3 });
-
-    const failed = byNodeId.get("c");
-
-    assert(failed?.kind === "failed");
-    assert.deepEqual([failed.error.kind, failed.error.code], ["custom", "NO_WORD"]);
+    assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: NO_WORKFLOW_OUTPUT } });
   });
 
-  test("a node entry with no payload or no task name: RESULT_DESERIALIZATION_ERROR; the other entries read", async () => {
-    const ok = terminals({ b: "null", c: okEnvelope('"x"'), d: okEnvelope("4") }, { b: "count", c: "word" });
+  test("an ok slot of any shape is not read: success with NoWorkflowOutput", async () => {
+    for (const okText of ["null", "[]", '{"results_by_id":[]}']) {
+      const read = await getOf(fanout, outputlessEnvelope(okText));
 
-    const read = await getOf(fanout, outputlessEnvelope(ok));
-
-    assert(read.ok && read.value.kind === "succeeded");
-
-    const byNodeId = read.value.value.byNodeId;
-
-    for (const nodeId of ["b", "d"]) {
-      const entry = byNodeId.get(nodeId);
-
-      assert(entry?.kind === "failed");
-      assert.deepEqual([entry.error.kind, entry.error.code, entry.error.data], [
-        "builtIn",
-        "RESULT_DESERIALIZATION_ERROR",
-        { node_id: nodeId },
-      ]);
-      assert.match(entry.error.message ?? "", /missing payload or task name/);
+      assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: NO_WORKFLOW_OUTPUT } });
     }
-
-    assert.deepEqual(byNodeId.get("c"), { kind: "succeeded", value: "x" });
-  });
-
-  test("a node entry that is not a stored result: RESULT_DESERIALIZATION_ERROR with the node id", async () => {
-    const read = await getOf(fanout, outputlessEnvelope(terminals({ b: "3" }, { b: "count" })));
-
-    assert(read.ok && read.value.kind === "succeeded");
-
-    const entry = read.value.value.byNodeId.get("b");
-
-    assert(entry?.kind === "failed");
-    assert.deepEqual([entry.error.code, entry.error.data], ["RESULT_DESERIALIZATION_ERROR", { node_id: "b" }]);
-    assert.match(entry.error.message ?? "", /does not read/);
-  });
-
-  test("maps that are left out read as empty", async () => {
-    const read = await getOf(fanout, outputlessEnvelope("{}"));
-
-    assert(read.ok && read.value.kind === "succeeded");
-    assert.equal(read.value.value.byNodeId.size, 0);
   });
 
   test("a stored error: the failed outcome with that error", async () => {
@@ -279,8 +233,7 @@ describe("get of a workflow with no outputType", () => {
   });
 
   const refused: readonly (readonly [string, string, RegExp])[] = [
-    ["an ok slot that is not an object", outputlessEnvelope("[]"), /ok slot malformed/],
-    ["a map member that is not an object", outputlessEnvelope('{"results_by_id":[]}'), /missing or malformed/],
+    ["an error that does not read", `{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":null,"err":7}`, /error payload does not read/],
     ["no envelope marker", '{"__h_outputless_terminals__":true,"ok":{},"err":null}', /envelope marker/],
     ["a typed envelope", okEnvelope("{}"), /wire_outputless=false, handle_outputless=true/],
   ];

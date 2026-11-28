@@ -1,5 +1,5 @@
 // Compile-pass cases of a workflow with no outputType: the build returns no output node; get reads
-// WorkflowTerminalResults; a sub-workflow node of it gives NoWorkflowOutput, which an h.taskOutcome parameter of the
+// NoWorkflowOutput; a sub-workflow node of it gives NoWorkflowOutput, which an h.taskOutcome parameter of the
 // workflow takes; resultFor of that node by a handle of the id gives NoWorkflowOutput.
 
 import {
@@ -11,11 +11,9 @@ import {
   type NoWorkflowOutput,
   type ParameterSchemas,
   type SubWorkflowOutput,
-  type TaskOutcome,
   type WorkflowContract,
   WorkflowId,
   type WorkflowOutput,
-  type WorkflowTerminalResults,
 } from "../../../horsies/src/index.ts";
 
 declare const app: Horsies;
@@ -46,11 +44,11 @@ export const bare = defineWorkflow({ name: "bare", definitionKey: "shop.bare.v1"
 
 type BuildOf<W> = W extends WorkflowContract<ParameterSchemas, infer R> ? R : never;
 
-expectType<Equal<WorkflowOutput<BuildOf<typeof fanout>>, WorkflowTerminalResults>>();
+expectType<Equal<WorkflowOutput<BuildOf<typeof fanout>>, NoWorkflowOutput>>();
 
 expectType<Equal<SubWorkflowOutput<BuildOf<typeof fanout>>, NoWorkflowOutput>>();
 
-expectType<Equal<WorkflowOutput<BuildOf<typeof bare>>, WorkflowTerminalResults>>();
+expectType<Equal<WorkflowOutput<BuildOf<typeof bare>>, NoWorkflowOutput>>();
 
 const afterFanout = defineTask({ name: "after_fanout", input: { done: h.taskOutcome(fanout) }, output: h.int() });
 
@@ -74,11 +72,7 @@ export async function readResults(workflowId: WorkflowId): Promise<void> {
     expectType<Equal<typeof read, Awaited<ReturnType<typeof started.value.get>>>>();
 
     if (read.ok && read.value.kind === "succeeded") {
-      const results: WorkflowTerminalResults = read.value.value;
-      const left: TaskOutcome<unknown, string> | undefined = results.byNodeId.get("left");
-
-      expectType<Equal<typeof results.kind, "terminalResults">>();
-      void left;
+      expectType<Equal<typeof read.value.value, NoWorkflowOutput>>();
     }
   }
 

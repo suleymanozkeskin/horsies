@@ -1,7 +1,7 @@
 // The catalog import: one node per chunk of a supplier catalog, all side by side.
 //
-// As the Rust workflow, it has no output: its result is the outcome of each chunk node, by node id
-// (`WorkflowTerminalResults`). Every chunk must complete for the workflow to complete.
+// As the Rust workflow, it has no output: `get` gives `NoWorkflowOutput`, and `results()` gives the outcome of each
+// chunk node, by node id. Every chunk must complete for the workflow to complete.
 
 import { defineWorkflow } from "horsies";
 

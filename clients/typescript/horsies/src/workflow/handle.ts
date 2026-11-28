@@ -5,7 +5,7 @@
 // Every stored text that a read gives passed the core's strict JSON check in the addon; the codec reader then decodes
 // it with the types of the handle. `get` reads open custom codes (a workflow holds the codes of many tasks); `resultFor`
 // reads one node with that node's contract. `get` of a workflow with no `outputType` reads the outputless envelope as
-// the outcome of each terminal node (`terminal-results.ts`).
+// `NoWorkflowOutput` or the stored error (`outputless.ts`).
 
 import { WorkflowNodeStatus } from "../_catalog/status.ts";
 import { ContractCode, OperationalCode, RetrievalCode } from "../_catalog/task_codes.ts";
@@ -51,7 +51,7 @@ import type {
   WorkflowOutput,
 } from "./node.ts";
 import { nodeTargetForm, type WorkflowRegistry, type WorkflowResultForm, workflowResultForm } from "./registry.ts";
-import { isOutputlessEnvelope, terminalResultsOutcome } from "./terminal-results.ts";
+import { isOutputlessEnvelope, outputlessOutcome } from "./outputless.ts";
 
 /** The stored result of one node read with no type: its outcome with open codes, or why it does not read. */
 export type NodeResult =
@@ -81,7 +81,7 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
   /**
    * The workflow's outcome, waiting while it runs, up to `waitMs`. The custom code is open. The success value is the
-   * output node's value, or `WorkflowTerminalResults` for a workflow with no `outputType`.
+   * output node's value, or `NoWorkflowOutput` for a workflow with no `outputType`.
    */
   get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
   /** The stored result of each node that has one, by node id. */
@@ -249,7 +249,7 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
     case "workflowNotListed":
       return err(notListedError(result.workflowName));
     case "form":
-    case "terminalResults":
+    case "noOutput":
       break;
     default:
       return unreachable(result, "workflowOutcome");
@@ -305,7 +305,7 @@ function resultNotReady(): WorkflowReadError {
   return Object.freeze({ kind: "resultNotReady", code: RetrievalCode.RESULT_NOT_READY });
 }
 
-/** How `get` reads the stored result of a listed workflow: with its declared output form, or as terminal results. */
+/** How `get` reads the stored result of a listed workflow: with its declared output form, or as `NoWorkflowOutput`. */
 export type ResultReading = Exclude<WorkflowResultForm, { readonly kind: "workflowNotListed" }>;
 
 /** The outcome of what a wait for the workflow `workflowId` found, read as `reading` says. Pure. */
@@ -352,12 +352,12 @@ function completedTreeOutcome(workflowId: string, tree: TreeValue, reading: Resu
   switch (reading.kind) {
     case "form":
       return storedOutputless ? envelopeMismatch(workflowId, true, false) : envelopeOutcome(tree, reading.form, "open");
-    case "terminalResults": {
+    case "noOutput": {
       if (!storedOutputless) {
         return envelopeMismatch(workflowId, false, true);
       }
 
-      const outcome = terminalResultsOutcome(workflowId, tree);
+      const outcome = outputlessOutcome(workflowId, tree);
 
       return outcome.ok ? outcome : unreadable(outcome.error.cause);
     }
