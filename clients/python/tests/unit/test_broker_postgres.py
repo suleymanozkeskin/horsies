@@ -40,6 +40,9 @@ from horsies._core import (
     TaskAttemptRecord,
     TaskInfoNotFound,
     TaskInfoRecord,
+    TaskInfoResultNotRequested,
+    TaskInfoResultNotStored,
+    TaskInfoResultStored,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -82,6 +85,9 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     Execution,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
     TaskError,
     TaskInfo,
 )
@@ -768,7 +774,7 @@ class TestGetRawResultRecordAsync:
             task_id=RESULT_TASK_ID,
             task_name='my_task',
             status=TaskStatus.COMPLETED,
-            raw_result={'__h_task_result__': True, 'ok': 7, 'err': None},
+            envelope={'__h_task_result__': True, 'ok': 7, 'err': None},
         ))
         broker._core_handle.raw_result_record_async.assert_awaited_once_with(
             RESULT_TASK_ID, timeout_ms=5_000,
@@ -785,7 +791,7 @@ class TestGetRawResultRecordAsync:
         record = result.ok_value
         assert record is not None
         assert record.status is TaskStatus(status)
-        assert record.raw_result is None
+        assert record.envelope is None
 
     @pytest.mark.asyncio
     async def test_a_stored_result_that_is_not_an_object_is_invalid_json_payload(
@@ -1549,12 +1555,17 @@ def _task_info_record(**changes: Any) -> MagicMock:
         'worker_process_name': 'worker-0',
         'error_code': None,
         'failed_reason': None,
-        'result_json': None,
+        'result': MagicMock(spec=TaskInfoResultNotRequested),
         'attempts': None,
         'execution': 'ISOLATED',
     }
     fields.update(changes)
     return MagicMock(spec=TaskInfoRecord, **fields)
+
+
+def _stored_result(envelope_json: str) -> MagicMock:
+    """A core stored result slot holding ``envelope_json``."""
+    return MagicMock(spec=TaskInfoResultStored, envelope_json=envelope_json)
 
 
 def _core_attempt_record(attempt: int, outcome: str, will_retry: bool) -> MagicMock:
@@ -1618,9 +1629,7 @@ class TestGetTaskInfoAsync:
         assert (info.priority, info.retry_count, info.max_retries) == (100, 1, 3)
         assert (info.worker_hostname, info.worker_pid) == ('host-1', 9999)
         assert info.worker_process_name == 'worker-0'
-        assert info.raw_result is None
-        assert info.decoded_result is None
-        assert info.result_decoded is False
+        assert info.result == ResultSlotNotRequested()
         assert info.failed_reason is None
         assert info.attempts is None
         assert info.execution is Execution.ISOLATED
@@ -1641,10 +1650,10 @@ class TestGetTaskInfoAsync:
         assert info.failed_reason == 'boom'
 
     @pytest.mark.asyncio
-    async def test_the_stored_envelope_is_the_raw_result(self) -> None:
+    async def test_the_stored_envelope_is_the_stored_result(self) -> None:
         envelope = '{"__h_task_result__":true,"ok":"hello","err":null}'
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=envelope),
+            _task_info_record(status='COMPLETED', result=_stored_result(envelope)),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
@@ -1652,9 +1661,25 @@ class TestGetTaskInfoAsync:
         assert is_ok(result)
         info = result.ok_value
         assert info is not None
-        assert info.raw_result == {'__h_task_result__': True, 'ok': 'hello', 'err': None}
-        assert info.decoded_result is None
-        assert info.result_decoded is False
+        assert info.result == ResultSlotStored(
+            {'__h_task_result__': True, 'ok': 'hello', 'err': None},
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_is_not_stored_is_not_stored(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(
+                status='COMPLETED',
+                result=MagicMock(spec=TaskInfoResultNotStored),
+            ),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_ok(result)
+        info = result.ok_value
+        assert info is not None
+        assert info.result == ResultSlotNotStored()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1668,7 +1693,7 @@ class TestGetTaskInfoAsync:
         self, result_json: str, exception_class: type,
     ) -> None:
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=result_json),
+            _task_info_record(status='COMPLETED', result=_stored_result(result_json)),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
@@ -1680,7 +1705,7 @@ class TestGetTaskInfoAsync:
     @pytest.mark.asyncio
     async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=''),
+            _task_info_record(status='COMPLETED', result=_stored_result('')),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)

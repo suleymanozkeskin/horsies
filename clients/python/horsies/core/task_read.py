@@ -218,7 +218,7 @@ def _read_of_row(
             message=f'Task {task_id} was cancelled before completion',
             data={'task_id': str(task_id)},
         )))
-    match record.raw_result:
+    match record.envelope:
         case None if record.status in _TERMINAL_WITH_RESULT:
             return Err(ReadResultNotAvailable(message=(
                 f'Task {task_id} reached terminal status '

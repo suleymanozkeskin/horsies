@@ -81,9 +81,9 @@ WAIT_ABOVE_LIMIT_MS = 2**32
 """One more than the largest wait, 4,294,967,295 ms: every read refuses it."""
 
 
-def _record(status: TaskStatus, raw_result: dict[str, Any] | None) -> DatabaseResult[StoredResult | None]:
+def _record(status: TaskStatus, envelope: dict[str, Any] | None) -> DatabaseResult[StoredResult | None]:
     return Ok(StoredResult(
-        task_id=TASK_ID, task_name='produce', status=status, raw_result=raw_result,
+        task_id=TASK_ID, task_name='produce', status=status, envelope=envelope,
     ))
 
 

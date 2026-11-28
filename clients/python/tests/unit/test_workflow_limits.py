@@ -143,7 +143,7 @@ class TestNestingFindingsInCheck:
     def test_a_nesting_that_ends_before_the_limit_passes(self) -> None:
         app = _app()
 
-        class Ends(WorkflowDefinition[Any]):
+        class Ends(WorkflowDefinition[NoWorkflowOutput]):
             name = 'ends'
             definition_key = 'tests.limits.ends.v1'
 

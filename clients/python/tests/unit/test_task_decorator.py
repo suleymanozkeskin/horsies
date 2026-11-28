@@ -438,7 +438,7 @@ class TestTaskHandleGet:
             task_id='t-4',
             task_name='my_task',
             status=TaskStatus.COMPLETED,
-            raw_result={
+            envelope={
                 '__h_task_result__': True,
                 'ok': 99,
                 'err': None,
@@ -476,7 +476,7 @@ class TestTaskHandleGet:
     def test_wait_timeout_not_cached(self) -> None:
         """WAIT_TIMEOUT is transient; subsequent get() must re-query.
 
-        Non-terminal status + raw_result=None → WAIT_TIMEOUT at the
+        Non-terminal status + envelope=None → WAIT_TIMEOUT at the
         handle layer; the cache stays empty so the next get() call
         revisits the broker.
         """
@@ -490,13 +490,13 @@ class TestTaskHandleGet:
                 task_id='t-6',
                 task_name='my_task',
                 status=TaskStatus.RUNNING,
-                raw_result=None,
+                envelope=None,
             )),
             Ok(StoredResult(
                 task_id='t-6',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
-                raw_result={
+                envelope={
                     '__h_task_result__': True,
                     'ok': 42,
                     'err': None,
@@ -581,7 +581,7 @@ class TestTaskHandleGetAsync:
                 task_id='t-4',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
-                raw_result={
+                envelope={
                     '__h_task_result__': True,
                     'ok': 'async-ok',
                     'err': None,
@@ -642,7 +642,7 @@ class TestTaskHandleGetAsync:
     async def test_wait_timeout_not_cached(self) -> None:
         """WAIT_TIMEOUT is transient; subsequent get_async() must re-query.
 
-        Non-terminal status + raw_result=None → WAIT_TIMEOUT at the
+        Non-terminal status + envelope=None → WAIT_TIMEOUT at the
         handle layer; the cache stays empty so the next call revisits
         the broker.
         """
@@ -656,13 +656,13 @@ class TestTaskHandleGetAsync:
                 task_id='t-7',
                 task_name='my_task',
                 status=TaskStatus.RUNNING,
-                raw_result=None,
+                envelope=None,
             )),
             Ok(StoredResult(
                 task_id='t-7',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
-                raw_result={
+                envelope={
                     '__h_task_result__': True,
                     'ok': 'done',
                     'err': None,
@@ -709,7 +709,7 @@ class TestReadOfRecord:
     2. ``decode_task_result``-driven path must reject malformed envelopes
        on the ok slot for typed handles too.
 
-    3. A terminal record with ``raw_result=None`` must map to
+    3. A terminal record with ``envelope=None`` must map to
        ``ReadResultNotAvailable`` (final, kept) — not ``ReadWaitTimeout``, which
        is transient.
     """
@@ -720,7 +720,7 @@ class TestReadOfRecord:
     def _record(
         *,
         status: Any,
-        raw_result: Any,
+        envelope: Any,
         task_name: str = 'my_task',
         task_id: str = 'task-x',
     ) -> Any:
@@ -730,7 +730,7 @@ class TestReadOfRecord:
             task_id=task_id,
             task_name=task_name,
             status=status,
-            raw_result=raw_result,
+            envelope=envelope,
         )
 
     @pytest.mark.asyncio
@@ -799,7 +799,7 @@ class TestReadOfRecord:
             },
         }
         broker_result = Ok(self._record(
-            status=TaskStatus.FAILED, raw_result=malformed,
+            status=TaskStatus.FAILED, envelope=malformed,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -824,7 +824,7 @@ class TestReadOfRecord:
             },
         }
         broker_result = Ok(self._record(
-            status=TaskStatus.FAILED, raw_result=malformed,
+            status=TaskStatus.FAILED, envelope=malformed,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -839,7 +839,7 @@ class TestReadOfRecord:
 
         raw = {'ok': 1, 'err': None}
         broker_result = Ok(self._record(
-            status=TaskStatus.COMPLETED, raw_result=raw,
+            status=TaskStatus.COMPLETED, envelope=raw,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -865,7 +865,7 @@ class TestReadOfRecord:
             },
         }
         broker_result = Ok(self._record(
-            status=TaskStatus.FAILED, raw_result=stored,
+            status=TaskStatus.FAILED, envelope=stored,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -884,7 +884,7 @@ class TestReadOfRecord:
         ``RESULT_NOT_AVAILABLE``, not transient ``WAIT_TIMEOUT``.
 
         Regression: an earlier implementation always mapped
-        ``raw_result=None`` to ``WAIT_TIMEOUT`` even for terminal rows
+        ``envelope=None`` to ``WAIT_TIMEOUT`` even for terminal rows
         (engine never wrote a payload), which produced wrong retry
         semantics.
         """
@@ -892,7 +892,7 @@ class TestReadOfRecord:
         from horsies.core.types.status import TaskStatus
 
         broker_result = Ok(self._record(
-            status=TaskStatus.COMPLETED, raw_result=None,
+            status=TaskStatus.COMPLETED, envelope=None,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -901,13 +901,13 @@ class TestReadOfRecord:
         assert isinstance(result.err_value, ReadResultNotAvailable)
 
     def test_non_terminal_status_with_none_payload_is_wait_timeout(self) -> None:
-        """Non-terminal row + raw_result=None → ``WAIT_TIMEOUT``
+        """Non-terminal row + envelope=None → ``WAIT_TIMEOUT``
         (timeout fired before terminalization)."""
         from horsies.core.types.result import Ok
         from horsies.core.types.status import TaskStatus
 
         broker_result = Ok(self._record(
-            status=TaskStatus.RUNNING, raw_result=None,
+            status=TaskStatus.RUNNING, envelope=None,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, 100, TextCodes())
@@ -949,7 +949,7 @@ class TestReadOfRecord:
             'err': encode_task_error(original),
         }
         broker_result = Ok(self._record(
-            status=TaskStatus.FAILED, raw_result=wire,
+            status=TaskStatus.FAILED, envelope=wire,
         ))
 
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
@@ -999,9 +999,9 @@ class TestTaskHandleInfo:
     def test_info_with_broker_delegates(self) -> None:
         """info() with broker mode delegates to ``app.get_task_info``.
 
-        Strict-serde phase 6: TaskHandle.info routes through Horsies so
-        the typed ``decoded_result`` field gets populated. The handle no
-        longer talks to ``broker.get_task_info`` directly.
+        TaskHandle.info routes through Horsies so the ``result`` slot
+        holds a typed outcome. The handle does not talk to
+        ``broker.get_task_info`` directly.
         """
         app = _make_app()
         sentinel = object()

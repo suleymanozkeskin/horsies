@@ -72,7 +72,7 @@ def _stored_error(code: str) -> DatabaseResult[StoredResult | None]:
         task_id=TASK_ID,
         task_name='send_welcome_email',
         status=TaskStatus.FAILED,
-        raw_result={
+        envelope={
             '__h_task_result__': True,
             'ok': None,
             'err': {'error_code': code, 'message': 'no', 'data': None, 'exception': None},
@@ -210,7 +210,7 @@ def test_stored_code_that_the_enum_does_not_name_is_unknown_custom_code() -> Non
 
 def test_built_in_code_reads_unchanged_with_typed_codes() -> None:
     stored: DatabaseResult[StoredResult | None] = Ok(StoredResult(
-        task_id=TASK_ID, task_name='send_welcome_email', status=TaskStatus.CANCELLED, raw_result=None,
+        task_id=TASK_ID, task_name='send_welcome_email', status=TaskStatus.CANCELLED, envelope=None,
     ))
     match read_of_record(TASK_ID, stored, str, None, EnumCodes(code_type=WelcomeCode)):
         case Ok(Failed(TaskError(code=OutcomeCode.TASK_CANCELLED))):

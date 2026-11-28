@@ -144,14 +144,14 @@ class TestHistoryFallback:
             record = outcome.ok_value
             assert record is not None
             assert record.status is TaskStatus.COMPLETED
-            assert record.raw_result == {'ok': {'value': 7}}
+            assert record.envelope == {'ok': {'value': 7}}
 
             outcome = await broker.get_raw_result_record_async(uuid.UUID(cancelled))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
             assert record.status is TaskStatus.CANCELLED
-            assert record.raw_result is None
+            assert record.envelope is None
         finally:
             await broker.close_async()
 
@@ -241,6 +241,6 @@ class TestStagedResultReader:
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
-            assert record.raw_result == {'ok': {'value': 7}}
+            assert record.envelope == {'ok': {'value': 7}}
         finally:
             await broker.close_async()
