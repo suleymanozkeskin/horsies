@@ -617,7 +617,9 @@ impl<T, I> TaskNode<T, I> {
     /// Take the result of `source` as the field `field` (Python
     /// `args_from`). The field's type is the receiving type
     /// `TaskOutcome<S, E>`, with `S` the source's output type; `E` reads the
-    /// source's custom codes (`CustomCode` takes any). The node waits for
+    /// source's custom codes (`CustomCode` takes any). A stored custom code that
+    /// the source's task does not declare fails the run with
+    /// `WORKER_SERIALIZATION_ERROR`, whatever `E` is. The node waits for
     /// `source`.
     pub fn arg_from<S, E>(
         mut self,

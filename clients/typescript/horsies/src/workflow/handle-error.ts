@@ -34,7 +34,9 @@ export type WorkflowReadError =
   /** The workflow had not ended when the wait ended; it may still run. */
   | ReadErrorTag<"waitTimeout">
   | ReadErrorTag<"workflowNotFound">
-  /** The node stores no result yet, or the workflow has no node of this id. */
+  /** The workflow has no node of the id. */
+  | ReadErrorTag<"nodeNotFound">
+  /** The node exists and stores no result yet. */
   | ReadErrorTag<"resultNotReady">
   /** The stored value does not read with the handle's types. `cause` holds no value. */
   | (ReadErrorTag<"storedResultUnreadable"> & { readonly cause: string })

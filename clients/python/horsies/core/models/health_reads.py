@@ -51,14 +51,18 @@ MinResponses: TypeAlias = MinResponsesFullWindow | MinResponsesAtLeast
 
 @dataclass(slots=True, frozen=True)
 class WorkerHistoryLimitAllRetained:
-    """The history read returns every retained snapshot of the worker."""
+    """The history read returns every retained snapshot of the worker.
+
+    The read returns at most 10,000 snapshots. It refuses a worker that holds
+    more with ``INVALID_INPUT``, and returns no snapshots in part.
+    """
 
 
 @dataclass(slots=True, frozen=True)
 class WorkerHistoryLimitNewest:
     """The history read returns the newest ``count`` snapshots of the worker.
 
-    ``count`` is 1 or more; the read refuses a lower count with
+    ``count`` is 1 to 10,000; the read refuses another count with
     ``INVALID_INPUT``.
     """
 

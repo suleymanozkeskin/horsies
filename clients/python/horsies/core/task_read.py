@@ -44,6 +44,7 @@ from horsies.core.models.outcome import (
     ReadError,
     ReadInvalidInput,
     ReadNoTypeAvailable,
+    ReadNodeNotFound,
     ReadResult,
     ReadResultDeserializationError,
     ReadResultNotAvailable,
@@ -113,6 +114,7 @@ def _is_final_error(error: ReadError) -> bool:
             ReadWaitTimeout()
             | ReadTaskNotFound()
             | ReadWorkflowNotFound()
+            | ReadNodeNotFound()
             | ReadResultNotReady()
             | ReadWaitInsideTask()
             | ReadAsyncContext()

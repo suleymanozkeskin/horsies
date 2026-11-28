@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['TaskAbsenceReason', 'RerunErrorCode']
 
 
-class TaskAbsenceReason(str, Enum):
+class TaskAbsenceReason(StrEnum):
     """What a read knows about a task id that neither the live table nor the
     task history holds.
     """
@@ -28,7 +28,7 @@ class TaskAbsenceReason(str, Enum):
     """The id is not a UUIDv7, so it carries no birth."""
 
 
-class RerunErrorCode(str, Enum):
+class RerunErrorCode(StrEnum):
     """The failure code of a rerun: in a transaction of the client's own
     handle, or in a transaction that the caller owns.
     """

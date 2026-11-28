@@ -353,11 +353,44 @@ pub fn ping_listener_disabled() -> DatabaseOperationError {
     }
 }
 
+/// The longest reply window of a worker ping. A longer wait is refused
+/// ([`ping_wait_over_bound`]).
+pub const WORKER_PING_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The most snapshots one worker state history read returns. A `limit` above
+/// the bound is refused ([`worker_history_limit_over_bound`]), and a read of
+/// every retained snapshot of a worker that holds more is refused
+/// ([`worker_history_over_bound`]).
+pub const WORKER_HISTORY_ROW_BOUND: i64 = 10_000;
+
 /// The refusal of a worker ping wait of 0 or less: `INVALID_INPUT`, not
 /// retryable, with Python's text (`ping_workers_async`). `wait_ms` is the
 /// given value as the caller wrote it. Nothing ran.
 pub fn ping_wait_refused(wait_ms: &dyn std::fmt::Display) -> DatabaseOperationError {
     DatabaseOperationError::invalid_input(format!("wait_ms must be positive, got {wait_ms}"))
+}
+
+/// The refusal of a worker ping wait above [`WORKER_PING_WAIT_BOUND`]:
+/// `INVALID_INPUT`, not retryable. `wait_ms` is the given value as the
+/// caller wrote it. Nothing ran.
+pub fn ping_wait_over_bound(wait_ms: &dyn std::fmt::Display) -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(format!(
+        "wait_ms must be at most {}, got {wait_ms}",
+        WORKER_PING_WAIT_BOUND.as_millis()
+    ))
+}
+
+/// The reply window of a worker ping: positive, and at most
+/// [`WORKER_PING_WAIT_BOUND`]. Pure.
+///
+/// Errors: [`ping_wait_refused`] for a zero wait, [`ping_wait_over_bound`]
+/// for a wait above the bound.
+pub fn checked_ping_wait(wait: std::time::Duration) -> DatabaseResult<std::time::Duration> {
+    match (wait.is_zero(), wait > WORKER_PING_WAIT_BOUND) {
+        (true, _) => Err(ping_wait_refused(&0)),
+        (false, true) => Err(ping_wait_over_bound(&wait.as_millis())),
+        (false, false) => Ok(wait),
+    }
 }
 
 /// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
@@ -370,14 +403,59 @@ pub fn ping_min_responses_refused(min_responses: &dyn std::fmt::Display) -> Data
 }
 
 /// The worker state history limit, by Python's rule
-/// (`get_worker_state_history_async`): `None` reads every retained row; a
-/// limit of 0 or less is refused ([`worker_history_limit_refused`]). Pure.
-/// The bridge checks the limit with this rule before any connect.
+/// (`get_worker_state_history_async`): `None` reads every retained row, up
+/// to [`WORKER_HISTORY_ROW_BOUND`] ([`checked_history_rows`]); a limit of 0
+/// or less is refused ([`worker_history_limit_refused`]); a limit above the
+/// bound is refused ([`worker_history_limit_over_bound`]). Pure. The bridge
+/// checks the limit with this rule before any connect.
 pub fn checked_history_limit(limit: Option<i64>) -> DatabaseResult<Option<i64>> {
     match limit {
         Some(refused) if refused <= 0 => Err(worker_history_limit_refused(&refused)),
+        Some(refused) if refused > WORKER_HISTORY_ROW_BOUND => {
+            Err(worker_history_limit_over_bound(&refused))
+        }
         other => Ok(other),
     }
+}
+
+/// The row count that a history statement fetches for `limit`: the limit,
+/// or one row past [`WORKER_HISTORY_ROW_BOUND`] for `None`, so that
+/// [`checked_history_rows`] can tell a history at the bound from one past it.
+/// Pure.
+pub fn history_fetch_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(WORKER_HISTORY_ROW_BOUND + 1)
+}
+
+/// The rows of a history read of `limit`. A read of every retained row
+/// (`None`) that fetched more than [`WORKER_HISTORY_ROW_BOUND`] rows is
+/// refused: the rows are not returned in part. Pure.
+///
+/// Errors: [`worker_history_over_bound`].
+pub fn checked_history_rows<T>(limit: Option<i64>, rows: Vec<T>) -> DatabaseResult<Vec<T>> {
+    match (limit, rows.len() > WORKER_HISTORY_ROW_BOUND as usize) {
+        (None, true) => Err(worker_history_over_bound()),
+        (None, false) | (Some(_), _) => Ok(rows),
+    }
+}
+
+/// The refusal of a worker state history `limit` above
+/// [`WORKER_HISTORY_ROW_BOUND`]: `INVALID_INPUT`, not retryable. `limit` is
+/// the given value as the caller wrote it. Nothing ran.
+pub fn worker_history_limit_over_bound(limit: &dyn std::fmt::Display) -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(format!(
+        "limit must be at most {WORKER_HISTORY_ROW_BOUND} when set, got {limit}"
+    ))
+}
+
+/// The refusal of a read of every retained snapshot of a worker that holds
+/// more than [`WORKER_HISTORY_ROW_BOUND`]: `INVALID_INPUT`, not retryable
+/// until the worker's snapshots are pruned. The read changed nothing; a
+/// `limit` of at most the bound reads the newest snapshots.
+pub fn worker_history_over_bound() -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(format!(
+        "limit is not set and the worker holds more than {WORKER_HISTORY_ROW_BOUND} retained \
+         snapshots; set a limit of at most {WORKER_HISTORY_ROW_BOUND}"
+    ))
 }
 
 /// The refusal of a worker state history `limit` of 0 or less:
@@ -801,6 +879,62 @@ mod tests {
                 format!("limit must be positive when set, got {refused}")
             );
         }
+    }
+
+    #[test]
+    fn a_ping_wait_is_positive_and_at_most_the_bound() {
+        assert_eq!(
+            checked_ping_wait(WORKER_PING_WAIT_BOUND).ok(),
+            Some(WORKER_PING_WAIT_BOUND)
+        );
+        let zero = checked_ping_wait(std::time::Duration::ZERO).expect_err("zero is refused");
+        assert_eq!(zero.message(), "wait_ms must be positive, got 0");
+
+        let over = checked_ping_wait(WORKER_PING_WAIT_BOUND + std::time::Duration::from_millis(1))
+            .expect_err("a wait above the bound is refused");
+        assert_eq!(over.code(), DatabaseErrorCode::InvalidInput);
+        assert_eq!(over.message(), "wait_ms must be at most 60000, got 60001");
+        assert!(!over.retryable());
+    }
+
+    #[test]
+    fn a_history_limit_above_the_bound_is_refused() {
+        assert_eq!(
+            checked_history_limit(Some(WORKER_HISTORY_ROW_BOUND)).ok(),
+            Some(Some(WORKER_HISTORY_ROW_BOUND))
+        );
+        let over = checked_history_limit(Some(WORKER_HISTORY_ROW_BOUND + 1))
+            .expect_err("a limit above the bound is refused");
+        assert_eq!(over.code(), DatabaseErrorCode::InvalidInput);
+        assert_eq!(
+            over.message(),
+            "limit must be at most 10000 when set, got 10001"
+        );
+        assert!(!over.retryable());
+    }
+
+    /// Every retained row is read one past the bound, and refused when the
+    /// extra row is there; a limit never refuses its rows.
+    #[test]
+    fn a_read_of_every_retained_row_is_refused_past_the_bound() {
+        assert_eq!(history_fetch_limit(None), WORKER_HISTORY_ROW_BOUND + 1);
+        assert_eq!(history_fetch_limit(Some(7)), 7);
+
+        let at_bound = vec![0_u8; WORKER_HISTORY_ROW_BOUND as usize];
+        assert_eq!(
+            checked_history_rows(None, at_bound.clone()).ok(),
+            Some(at_bound.clone())
+        );
+        let mut past_bound = at_bound.clone();
+        past_bound.push(0);
+        let refused = checked_history_rows(None, past_bound.clone())
+            .expect_err("a history past the bound is refused");
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
+        assert_eq!(
+            checked_history_rows(Some(WORKER_HISTORY_ROW_BOUND), past_bound.clone()).ok(),
+            Some(past_bound)
+        );
     }
 
     #[test]

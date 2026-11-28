@@ -66,14 +66,19 @@ static WORKFLOW_NODE_RESULTS: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid],
 );
 
-/// The stored result of the node `$2` of the workflow `$1`, when it has one (Python
-/// `GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL`).
+/// The node `$2` of the workflow `$1`, from the workflow row (Python
+/// `GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL`): no row means no workflow has the id; a row whose
+/// `workflow_task_id` is NULL means the workflow has no node of this id; a node with no stored
+/// result has a NULL `result`.
 static NODE_RESULT: TypedStatement = TypedStatement::new(
     "workflow_node_result",
-    "SELECT task_name, result, is_subworkflow, sub_definition_key
-     FROM horsies_workflow_tasks
-     WHERE workflow_id = $1 AND node_id = $2
-       AND result IS NOT NULL",
+    "SELECT wt.id AS workflow_task_id, wt.task_name, wt.result,
+            wt.is_subworkflow, wt.sub_definition_key
+     FROM horsies_workflows w
+     LEFT JOIN horsies_workflow_tasks wt
+            ON wt.workflow_id = w.id
+           AND wt.node_id = $2
+     WHERE w.id = $1",
     &[ParameterType::Uuid, ParameterType::Text],
 );
 
@@ -125,6 +130,19 @@ pub struct StoredNodeResult {
     pub result: String,
     pub is_subworkflow: bool,
     pub sub_definition_key: Option<String>,
+}
+
+/// The result of one node of one workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeResultRead {
+    /// No workflow has the id.
+    WorkflowAbsent,
+    /// The workflow has no node of the id.
+    NodeAbsent,
+    /// The node exists and stores no result yet.
+    NotStored,
+    /// The node stores a result.
+    Stored(StoredNodeResult),
 }
 
 /// The nodes of one workflow that store a result.
@@ -267,16 +285,16 @@ pub async fn read_workflow_node_results(
     }
 }
 
-/// The stored result of the node `node_id` of `workflow_id`: one read on the main core pool of
-/// `broker` (Python `WorkflowHandle.result_for_async`). `None`: no node of this id stores a
-/// result, or no workflow has the id; the read does not tell the two apart, as Python's.
+/// The result of the node `node_id` of `workflow_id`: one read on the main core pool of `broker`
+/// (Python `WorkflowHandle.result_for_async`). The read tells the three states without a result
+/// apart: no workflow of the id, no node of the id, and a node that stores no result yet.
 ///
 /// Errors: as [`read_workflow_nodes`].
 pub async fn read_workflow_node_result(
     broker: &PostgresBroker,
     workflow_id: Uuid,
     node_id: &str,
-) -> Result<Option<StoredNodeResult>, WorkflowError> {
+) -> Result<NodeResultRead, WorkflowError> {
     let rows = run_alone(
         broker,
         CheckoutClass::Batch,
@@ -288,12 +306,25 @@ pub async fn read_workflow_node_result(
     )
     .await?;
     match first_row(rows) {
-        None => Ok(None),
-        Some(row) => Ok(Some(stored_node_result(
-            &row,
-            &NODE_RESULT,
-            Some(node_id.to_owned()),
-        )?)),
+        None => Ok(NodeResultRead::WorkflowAbsent),
+        Some(row) => node_result_of_row(&row, node_id),
+    }
+}
+
+/// The read of one row of [`NODE_RESULT`]. Pure.
+fn node_result_of_row(row: &Row, node_id: &str) -> Result<NodeResultRead, WorkflowError> {
+    let node: Option<Uuid> = read_column(row, &NODE_RESULT, "workflow_task_id")?;
+    let result: Option<String> = read_column(row, &NODE_RESULT, "result")?;
+    match (node, result) {
+        (None, _) => Ok(NodeResultRead::NodeAbsent),
+        (Some(_), None) => Ok(NodeResultRead::NotStored),
+        (Some(_), Some(result)) => Ok(NodeResultRead::Stored(StoredNodeResult {
+            node_id: Some(node_id.to_owned()),
+            task_name: read_column(row, &NODE_RESULT, "task_name")?,
+            result,
+            is_subworkflow: read_column(row, &NODE_RESULT, "is_subworkflow")?,
+            sub_definition_key: read_column(row, &NODE_RESULT, "sub_definition_key")?,
+        })),
     }
 }
 

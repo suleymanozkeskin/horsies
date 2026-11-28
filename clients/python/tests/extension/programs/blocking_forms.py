@@ -201,6 +201,11 @@ def _workflow_steps(handle: core.CoreHandle, workflow_id: uuid.UUID) -> list[Ste
             lambda: handle.workflow_node_result_async(workflow_id, NODE_ID),
         ),
         (
+            'node_result_no_such_node',
+            lambda: handle.workflow_node_result(workflow_id, 'no_such_node'),
+            lambda: handle.workflow_node_result_async(workflow_id, 'no_such_node'),
+        ),
+        (
             'node_results',
             lambda: handle.workflow_node_results(workflow_id),
             lambda: handle.workflow_node_results_async(workflow_id),

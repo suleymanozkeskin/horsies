@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['MonitoringQueryErrorCode', 'TaskActionErrorCode', 'MonitoringQueryRefusalCode']
 
 
-class MonitoringQueryErrorCode(str, Enum):
+class MonitoringQueryErrorCode(StrEnum):
     """Failure category for a monitoring read.
 
     Each member names one variant of `MonitoringQueryError`.
@@ -28,7 +28,7 @@ class MonitoringQueryErrorCode(str, Enum):
     """
 
 
-class TaskActionErrorCode(str, Enum):
+class TaskActionErrorCode(StrEnum):
     """Why a task action did not apply.
 
     Each member names one variant of `TaskActionError`.
@@ -42,6 +42,12 @@ class TaskActionErrorCode(str, Enum):
 
     DATABASE_OPERATION_FAILED = 'DATABASE_OPERATION_FAILED'
 
+    OUTCOME_UNKNOWN = 'OUTCOME_UNKNOWN'
+    """The cancel statement went to the server and its reply was lost: the
+    cancel may have committed. A repeated cancel tells which, because a
+    committed cancel answers `TaskNotCancellable` with `CANCELLED`.
+    """
+
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task
     status, or a cancel outcome row that does not decode. Nothing changed:
@@ -51,7 +57,7 @@ class TaskActionErrorCode(str, Enum):
     """
 
 
-class MonitoringQueryRefusalCode(str, Enum):
+class MonitoringQueryRefusalCode(StrEnum):
     """The code of a monitoring query that a client refuses before any connect:
     a window, a page or a limit that the core refuses, or a value that the
     client's types let through and the core cannot take (a count that is not

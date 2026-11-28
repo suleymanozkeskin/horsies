@@ -41,11 +41,13 @@ use horsies_core::monitoring::{
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 use horsies_core::telemetry::labels::DeclaredSource;
+use horsies_core::web::MAX_OPEN_EVENT_STREAMS;
 use horsies_core::{
     DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
     IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS,
-    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND, WORKER_HISTORY_ROW_BOUND,
+    WORKER_PING_WAIT_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
@@ -96,7 +98,7 @@ struct ConstantModule {
     constants: Vec<PublishedConstant>,
 }
 
-const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
+const MONITORING_CONSTANTS: [PublishedConstant; 10] = [
     PublishedConstant::WholeSeconds {
         name: "MONITORING_WINDOW_DEFAULT",
         span: match MONITORING_WINDOW_DEFAULT.to_std() {
@@ -130,6 +132,18 @@ const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
     PublishedConstant::Integer {
         name: "LIST_ROW_BOUND",
         value: LIST_ROW_BOUND as i128,
+    },
+    PublishedConstant::WholeSeconds {
+        name: "WORKER_PING_WAIT_BOUND",
+        span: WORKER_PING_WAIT_BOUND,
+    },
+    PublishedConstant::Integer {
+        name: "WORKER_HISTORY_ROW_BOUND",
+        value: WORKER_HISTORY_ROW_BOUND as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_OPEN_EVENT_STREAMS",
+        value: MAX_OPEN_EVENT_STREAMS as i128,
     },
 ];
 
@@ -653,10 +667,19 @@ mod tests {
                 i128::from(MAX_WORKFLOW_RUNS_LIMIT),
             ),
             ("LIST_ROW_BOUND", LIST_ROW_BOUND as i128),
+            (
+                "WORKER_PING_WAIT_BOUND_SECONDS",
+                i128::from(WORKER_PING_WAIT_BOUND.as_secs()),
+            ),
+            (
+                "WORKER_HISTORY_ROW_BOUND",
+                i128::from(WORKER_HISTORY_ROW_BOUND),
+            ),
+            ("MAX_OPEN_EVENT_STREAMS", MAX_OPEN_EVENT_STREAMS as i128),
         ] {
             assert!(text.contains(&integer_statement(name, value)), "{name}");
         }
-        assert_eq!(text.matches("export const ").count(), 7);
+        assert_eq!(text.matches("export const ").count(), 10);
     }
 
     #[test]

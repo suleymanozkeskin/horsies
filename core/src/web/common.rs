@@ -149,6 +149,34 @@ impl ApiError {
         value: serde_json::Value,
         known_keys: &'static [&'static str],
     ) -> Self {
+        Self::unknown_key(UnknownKeyPlace::Body, key, value, known_keys)
+    }
+
+    /// A query parameter that the route does not declare: the same
+    /// `extra_forbidden` issue as [`Self::unknown_body_key`], at
+    /// `["query", name]`, with the value of the first occurrence of the
+    /// parameter as `input`. The message names the parameter and the
+    /// parameters that the route declares; `ctx.known_keys` lists them in
+    /// declaration order.
+    pub(crate) fn unknown_query_parameter(
+        name: String,
+        value: String,
+        known_parameters: &'static [&'static str],
+    ) -> Self {
+        Self::unknown_key(
+            UnknownKeyPlace::Query,
+            name,
+            serde_json::Value::String(value),
+            known_parameters,
+        )
+    }
+
+    fn unknown_key(
+        place: UnknownKeyPlace,
+        key: String,
+        value: serde_json::Value,
+        known_keys: &'static [&'static str],
+    ) -> Self {
         let known = match known_keys {
             [] => "none".to_owned(),
             keys => keys
@@ -158,14 +186,28 @@ impl ApiError {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
+        let (location, unknown_noun, known_noun) = match place {
+            UnknownKeyPlace::Body => ("body", "key", "keys"),
+            UnknownKeyPlace::Query => ("query", "parameter", "parameters"),
+        };
         Self::Validation(vec![ValidationIssue {
             error_type: "extra_forbidden",
-            msg: format!("Unknown key {}. Known keys: {known}.", json_quoted(&key)),
-            loc: vec!["body".into(), key.into()],
+            msg: format!(
+                "Unknown {unknown_noun} {}. Known {known_noun}: {known}.",
+                json_quoted(&key)
+            ),
+            loc: vec![location.into(), key.into()],
             input: value,
             ctx: Some(serde_json::json!({ "known_keys": known_keys })),
         }])
     }
+}
+
+/// Where a refused unknown key was read.
+#[derive(Debug, Clone, Copy)]
+enum UnknownKeyPlace {
+    Body,
+    Query,
 }
 
 /// `text` as a JSON string, with its quotes.
@@ -218,12 +260,38 @@ impl QueryValues {
             .collect()
     }
 
+    /// The first parameter, in query order, whose name is not in `known`,
+    /// with its value.
+    fn first_unknown(&self, known: &[&str]) -> Option<(&str, &str)> {
+        self.0
+            .iter()
+            .find(|(key, _)| !known.contains(&key.as_str()))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     pub(crate) fn last(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
             .rev()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Refuse the first query parameter, in query order, that the route does not
+/// declare with 422 `extra_forbidden` ([`ApiError::unknown_query_parameter`]).
+/// A route runs it before it reads any parameter.
+pub(crate) fn refuse_unknown_parameters(
+    values: &QueryValues,
+    known_parameters: &'static [&'static str],
+) -> Result<(), ApiError> {
+    match values.first_unknown(known_parameters) {
+        None => Ok(()),
+        Some((name, value)) => Err(ApiError::unknown_query_parameter(
+            name.to_owned(),
+            value.to_owned(),
+            known_parameters,
+        )),
     }
 }
 

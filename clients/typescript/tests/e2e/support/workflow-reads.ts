@@ -35,6 +35,8 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "the wait ended before the workflow";
     case "workflowNotFound":
       return "no workflow has the id";
+    case "nodeNotFound":
+      return "the workflow has no node of the id";
     case "resultNotReady":
       return "the node stores no result yet";
     case "storedResultUnreadable":

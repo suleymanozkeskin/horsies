@@ -287,6 +287,84 @@ def test_typed_node_input_with_an_unknown_code_is_worker_serialization_error() -
     assert 'RATE_LIMITED' in stored['err']['message']
 
 
+@pytest.fixture
+def text_receiver_app(monkeypatch: pytest.MonkeyPatch) -> Horsies:
+    """A receiver that declares `TaskError` (text codes), a source that
+    declares `WelcomeCode`, and a source that declares no codes."""
+    app = _app()
+
+    @app.task('send_welcome_email', error_codes=WelcomeCode)
+    def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
+        return Ok(email)
+
+    @app.task('send_plain')
+    def send_plain(*, email: str) -> Result[str, TaskError]:  # pyright: ignore[reportUnusedFunction]
+        return Ok(email)
+
+    @app.task('report_text')
+    def report_text(*, sent: TaskOutcome[str, TaskError]) -> Result[str, TaskError]:  # pyright: ignore[reportUnusedFunction]
+        match sent:
+            case Succeeded(value):
+                return Ok(value)
+            case Failed(error):
+                return Err(error)
+
+    monkeypatch.setattr(current_module, '_current_app', app)
+    return app
+
+
+def _report_text_input(source_task_name: str, code: str) -> str:
+    return json.dumps({
+        'sent': {
+            '__h_taskresult_envelope__': True,
+            'source_task_name': source_task_name,
+            'source_definition_key': None,
+            'inner': {
+                '__h_task_result__': True,
+                'ok': None,
+                'err': {'error_code': code, 'message': 'no', 'data': None, 'exception': None},
+            },
+        },
+    })
+
+
+def _prepared_text(input_json: str) -> child_runner._PreparedCall | child_runner.EncodedResult:
+    return child_runner._prepare_task_call(
+        'report_text', input_json, child_runner.OnSharedThreadSeat(), TaskRuntime.for_test(task_id=TASK_ID),
+    )
+
+
+@pytest.mark.usefixtures('text_receiver_app')
+def test_upstream_code_that_the_upstream_task_declares_reads() -> None:
+    prepared = _prepared_text(_report_text_input('send_welcome_email', 'MAILBOX_FULL'))
+    assert isinstance(prepared, child_runner._PreparedCall), prepared
+    match prepared.kwargs['sent']:
+        case Failed(TaskError(code='MAILBOX_FULL')):
+            pass
+        case other:
+            pytest.fail(f'expected Failed(MAILBOX_FULL), got {other!r}')
+
+
+@pytest.mark.usefixtures('text_receiver_app')
+def test_upstream_code_that_the_upstream_task_does_not_declare_is_worker_serialization_error() -> None:
+    prepared = _prepared_text(_report_text_input('send_welcome_email', 'RATE_LIMITED'))
+    assert isinstance(prepared, child_runner.EncodedResult), prepared
+    stored: dict[str, Any] = json.loads(prepared.envelope.text)
+    assert stored['err']['error_code'] == {'__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR'}
+    assert 'RATE_LIMITED' in stored['err']['message']
+
+
+@pytest.mark.usefixtures('text_receiver_app')
+def test_upstream_task_without_declared_codes_reads_any_code() -> None:
+    prepared = _prepared_text(_report_text_input('send_plain', 'RATE_LIMITED'))
+    assert isinstance(prepared, child_runner._PreparedCall), prepared
+    match prepared.kwargs['sent']:
+        case Failed(TaskError(code='RATE_LIMITED')):
+            pass
+        case other:
+            pytest.fail(f'expected Failed(RATE_LIMITED), got {other!r}')
+
+
 def test_args_from_source_with_other_codes_is_refused() -> None:
     app = _app()
 

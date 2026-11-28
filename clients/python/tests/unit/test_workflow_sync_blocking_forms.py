@@ -28,6 +28,11 @@ from horsies.core.app import Horsies
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.outcome import (
+    ReadNodeNotFound,
+    ReadResultNotReady,
+    ReadWorkflowNotFound,
+)
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
@@ -37,7 +42,7 @@ from horsies.core.models.workflow.handle_types import (
     WorkflowHandleResumeRecoveryFailed,
     WorkflowHandleStoredDataInvalid,
 )
-from horsies.core.types.result import Ok, Result, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
     pause_workflow_async,
     pause_workflow,
@@ -236,6 +241,8 @@ FACADES: Final[dict[str, Facade]] = {
                 sub_definition_key=None,
             ),
             'not_stored': _record(core.NodeResultNotStored, node_id=NODE_ID),
+            'no_such_node': _record(core.NodeAbsent, node_id=NODE_ID),
+            'workflow_absent': _record(core.WorkflowAbsent),
             'read_failed': _db_operation_failed(),
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
@@ -455,6 +462,29 @@ def test_result_for_refuses_a_node_without_an_id_as_its_async_form() -> None:
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     answers.handle.workflow_node_result.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ('record', 'read_class'),
+    [
+        (_record(core.WorkflowAbsent), ReadWorkflowNotFound),
+        (_record(core.NodeAbsent, node_id=NODE_ID), ReadNodeNotFound),
+        (_record(core.NodeResultNotStored, node_id=NODE_ID), ReadResultNotReady),
+    ],
+    ids=['no_workflow', 'no_node', 'no_result'],
+)
+def test_result_for_tells_no_workflow_no_node_and_no_result_apart(
+    record: MagicMock, read_class: type,
+) -> None:
+    """Each state without a result is its own read failure, in both forms."""
+    _ = _answering('workflow_node_result', record)
+
+    blocking = _workflow_handle().result_for(NODE_KEY)
+    awaited = asyncio.run(_workflow_handle().result_for_async(NODE_KEY))
+
+    for read in (blocking, awaited):
+        assert isinstance(read, Err)
+        assert type(read.err_value) is read_class
 
 
 # =============================================================================
