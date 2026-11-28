@@ -135,7 +135,8 @@ impl Horsies {
     /// [`Self::new`].
     pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, ValidationReport> {
         validate_config(&config)?;
-        let manifest = producer_manifest(&config.database, mode).map_err(broker_refusals_report)?;
+        let manifest = producer_manifest(&config.database, mode)
+            .map_err(|refusals| broker_refusals_report(&refusals))?;
         let install_coverage =
             CoverageRequest::of_retention(&config.retention).map_err(|refused| {
                 config_report(HorsiesError::new(format!(
@@ -452,7 +453,7 @@ fn config_report(refusal: HorsiesError) -> ValidationReport {
 
 /// The report of the phase `config` that holds every refusal of the broker
 /// settings, each with its catalog code. Pure.
-fn broker_refusals_report(refusals: Vec<BrokerSettingRefused>) -> ValidationReport {
+fn broker_refusals_report(refusals: &[BrokerSettingRefused]) -> ValidationReport {
     ValidationReport::of(
         CONFIG_PHASE,
         refusals
