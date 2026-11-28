@@ -25,6 +25,7 @@ use horsies_core::core::task::error::{
     DATA_REFUSED_KEY, ERROR_DATA_DEPTH_LIMIT, SUMMARY_OUTPUT_DEPTH_LIMIT,
 };
 use horsies_core::core::task::result::TASK_RESULT_ENVELOPE_KEY;
+use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::events::{
     MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
     MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
@@ -37,7 +38,6 @@ use horsies_core::frame_protocol::{
     PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
-use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::monitoring::{
     LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
@@ -48,9 +48,8 @@ use horsies_core::{
     DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
     IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_CHECK_SUBWORKFLOW_BUILDS,
-    MAX_SUBWORKFLOW_DEPTH, MAX_WAIT_LIMIT_MS,
-    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND, WORKER_HISTORY_ROW_BOUND,
-    WORKER_PING_WAIT_BOUND,
+    MAX_SUBWORKFLOW_DEPTH, MAX_WAIT_LIMIT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    WORKER_HISTORY_ROW_BOUND, WORKER_PING_WAIT_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
@@ -921,7 +920,8 @@ mod tests {
     }
 
     #[test]
-    fn the_workflow_bounds_hold_the_node_bound_the_depth_limit_and_the_build_bound_of_the_nesting_walk() {
+    fn the_workflow_bounds_hold_the_node_bound_the_depth_limit_and_the_build_bound_of_the_nesting_walk(
+    ) {
         assert_eq!(
             module_of("workflow_bounds"),
             format!(
