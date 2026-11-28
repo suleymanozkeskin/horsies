@@ -374,6 +374,7 @@ A worker child exits with one of these codes; the worker reads it to name how th
 | 76 | A child that the preload process forked did not reparent to the worker |
 | 78 | The worker speaks another protocol version: the worker and its children come from different builds |
 | 80 | The core of the child stopped (a panic in a core background task), or the child was forked after its core started. The child ended itself at its next core call |
+| 81 | A shared-thread child: its resident memory reached `recycle_above` during a run. The child ended itself; the worker replaces it, and a run it held takes the lost-child path and the retry policy |
 | 173 | A child start hook failed or ran past its bound |
 
 ## Environment Variables

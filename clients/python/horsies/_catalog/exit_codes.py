@@ -19,6 +19,7 @@ __all__ = [
     'PROTOCOL_MISMATCH_EXIT_CODE',
     'LIVENESS_LOCK_LOST_EXIT_CODE',
     'CORE_STOPPED_EXIT_CODE',
+    'MEMORY_LIMIT_EXIT_CODE',
     'CHILD_HOOK_FAILED_EXIT_CODE',
 ]
 
@@ -62,6 +63,11 @@ held for the regain bound while it held a task.
 CORE_STOPPED_EXIT_CODE: Final = 80
 """A child: its core stopped, or the process was forked after its core
 started; the child ended itself.
+"""
+
+MEMORY_LIMIT_EXIT_CODE: Final = 81
+"""A shared-thread child: its resident memory reached recycle_above during
+a run; the child ended itself and the worker replaces it.
 """
 
 CHILD_HOOK_FAILED_EXIT_CODE: Final = 173

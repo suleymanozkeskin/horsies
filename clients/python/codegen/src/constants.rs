@@ -9,8 +9,8 @@
 use horsies_core::core::config::broker::{BROKER_MAX_OVERFLOW_DEFAULT, BROKER_POOL_SIZE_DEFAULT};
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
-    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
-    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
+    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MEMORY_LIMIT_EXIT_CODE,
+    PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use horsies_core::monitoring::{
@@ -157,7 +157,7 @@ pub const BROKER_POOL_DEFAULTS: ConstantModule = ConstantModule {
     constants: &BROKER_POOL_DEFAULT_CONSTANTS,
 };
 
-const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
+const EXIT_CODE_CONSTANTS: [CoreConstant; 12] = [
     CoreConstant {
         name: "PARENT_GONE_EXIT_CODE",
         doc: "A child: the parent is gone (the socket reached EOF, or the parent-death\n\
@@ -213,6 +213,12 @@ const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
         doc: "A child: its core stopped, or the process was forked after its core\n\
               started; the child ended itself.",
         value: CoreValue::Integer(CORE_STOPPED_EXIT_CODE as i64),
+    },
+    CoreConstant {
+        name: "MEMORY_LIMIT_EXIT_CODE",
+        doc: "A shared-thread child: its resident memory reached recycle_above during\n\
+              a run; the child ended itself and the worker replaces it.",
+        value: CoreValue::Integer(MEMORY_LIMIT_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "CHILD_HOOK_FAILED_EXIT_CODE",
@@ -458,6 +464,7 @@ mod tests {
             ("PROTOCOL_MISMATCH_EXIT_CODE", PROTOCOL_MISMATCH_EXIT_CODE),
             ("LIVENESS_LOCK_LOST_EXIT_CODE", LIVENESS_LOCK_LOST_EXIT_CODE),
             ("CORE_STOPPED_EXIT_CODE", CORE_STOPPED_EXIT_CODE),
+            ("MEMORY_LIMIT_EXIT_CODE", MEMORY_LIMIT_EXIT_CODE),
             ("CHILD_HOOK_FAILED_EXIT_CODE", CHILD_HOOK_FAILED_EXIT_CODE),
         ] {
             assert!(
