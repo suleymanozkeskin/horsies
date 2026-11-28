@@ -168,8 +168,9 @@ class WorkerStateSnapshot:
     are empty when the worker had none set.
     ``child_count`` counts the children of the worker.
     ``claim_limits`` holds the claim limits of the worker:
-    ``claimed_per_worker`` is the limit that the worker resolved, the seat
-    count of the worker when its profile sets none.
+    ``claimed_per_worker`` is ``NoTaskLimit()`` when its profile sets none;
+    the effective limit is then the seat count, the sum of the capacities in
+    ``execution_class_budgets``.
     ``slot_health`` says whether any slot was down, and why.
     ``execution_class_budgets`` holds the claim budget of each execution
     class that the worker runs children for: its capacity in service and

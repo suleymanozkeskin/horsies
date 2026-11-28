@@ -78,13 +78,14 @@ export interface ExecutionClassBudget {
 export type Measure = { readonly kind: "measured"; readonly value: number } | { readonly kind: "notMeasured" };
 
 /**
- * The claim limits of a worker. `claimedPerWorker` is the limit that the worker resolved: the seat count of the worker
- * when its profile sets none.
+ * The claim limits of a worker, as its profile sets them. `noTaskLimit` in `claimedPerWorker` means that the profile
+ * sets no limit. The worker then holds at most its seat count: the sum of `capacity` over the
+ * `executionClassBudgets` of the same snapshot.
  */
 export interface ClaimLimits {
   /** The most tasks that one claim pass takes from one queue. */
   readonly perQueuePerPass: TaskLimit;
-  /** The most `CLAIMED` tasks that the worker holds. */
+  /** The most `CLAIMED` tasks that the worker holds. `noTaskLimit`: the profile sets none; the seat count applies. */
   readonly claimedPerWorker: TaskLimit;
 }
 
