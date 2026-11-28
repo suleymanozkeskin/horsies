@@ -1182,7 +1182,7 @@ mod tests {
         assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
     }
 
-    fn profile_with_claim(claim: serde_json::Value) -> WorkerProfile {
+    fn profile_with_claim(claim: &serde_json::Value) -> WorkerProfile {
         serde_json::from_value(serde_json::json!({
             "isolated": {"kind": "isolated_children", "count": 2},
             "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 10},
@@ -1196,7 +1196,7 @@ mod tests {
     /// 0 in the column, not the seat count (20).
     #[test]
     fn a_profile_with_no_claim_limit_records_no_limit() {
-        let profile = profile_with_claim(serde_json::json!({}));
+        let profile = profile_with_claim(&serde_json::json!({}));
         let columns = ClaimColumns::of_profile(&profile);
         assert_eq!(columns.processes, 5);
         assert_eq!(
@@ -1211,7 +1211,7 @@ mod tests {
     /// A profile with claim limits records them as set.
     #[test]
     fn a_profile_with_claim_limits_records_the_limits() {
-        let profile = profile_with_claim(serde_json::json!({
+        let profile = profile_with_claim(&serde_json::json!({
             "per_queue_per_pass": {"kind": "task_limit", "tasks": 3},
             "claimed_per_worker": {"kind": "task_limit", "tasks": 7}
         }));
