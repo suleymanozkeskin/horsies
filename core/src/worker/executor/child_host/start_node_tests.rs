@@ -49,6 +49,7 @@ fn context(pool: &TestPool) -> (HostContext, UnixStream) {
             handler_child: super::HandlerChildApp::without_handlers(),
             event_loop: super::EventLoopWatch::RuntimeOnly,
             exit: ProcessExit::Standard,
+            host_core: super::HostCoreWatch::NoHostCore,
         }),
         pid: 1,
         writer,

@@ -99,6 +99,22 @@ describe("the process-wide rules, each in a child process", () => {
     assert.equal(child.stdout, "");
   });
 
+  test("a background panic in a task child before the first read of its core aborts the child", { timeout: CHILD_TEST_BOUND_MS }, () => {
+    const child = runAbortingChildCase("process-core-child.ts", "task-child-panic-before-read", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.signal, ABORT_SIGNAL, child.stderr);
+    assert.match(child.stderr, /aborts: panic in core background task thread horsies-log-forwarder: planned forwarder panic/u);
+    assert.equal(child.stdout, "");
+  });
+
+  test("a defect in a task child after the first read of its core still aborts", { timeout: CHILD_TEST_BOUND_MS }, () => {
+    const child = runAbortingChildCase("process-core-child.ts", "task-child-defect-after-read", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.signal, ABORT_SIGNAL, child.stderr);
+    assert.match(child.stderr, /aborts: defect CLIENT_DEFECT of the horsies package/u);
+    assert.equal(child.stdout, "");
+  });
+
   test("a handle that never connected closes at once and starts no core", () => {
     assert.equal(runChild("never-connected-close").stdout, "undefined not_started");
   });

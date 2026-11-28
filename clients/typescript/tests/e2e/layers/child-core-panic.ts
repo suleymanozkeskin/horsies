@@ -1,15 +1,15 @@
-// A task child whose core background task panicked ends itself; it never runs on (Python
-// `clients/python/tests/e2e/test_child_core_stopped.py`). Each test makes the log forwarder of an isolated child panic
+// A task child whose core background task panicked ends itself with exit code 80, as a Python child does
+// (`clients/python/tests/e2e/test_child_core_stopped.py`). Each test makes the log forwarder of an isolated child panic
 // through the test export of the dev addon (`src/forwarder-panic.ts`), at the moments that the Python file names.
 //
-// A task child runs under the panic rule `ABORT_PROCESS`: at the panic it writes the abort line to stderr (the
-// worker's log) and aborts, so no code of the child runs after the panic. Where Python's child goes on to its next
-// core call with a stopped core, the TypeScript child is already gone:
-// - The panic while the child holds no task: Python releases the next start with no attempt charged; here no start
-//   reaches the ended child. Either way the next task runs once, in a new child.
-// - The panic while a body runs that then returns: Python keeps the result of the body. Here the body never returns:
-//   the attempt takes the crashed-child path (`WORKER_CRASHED`), and the retry policy runs the task again.
-// - The panic while a body runs that then sends: the crashed-child path and the retry, as in Python.
+// A task child runs under the task child rule once its child host read its core: at the panic its core stops (the
+// stop line on stderr, the worker's log), and the child ends itself with exit code 80:
+// - The panic while the child holds no task: the next start is refused with no attempt charged, the child ends, and
+//   the next task runs once, in a new child.
+// - The panic while a body runs that then returns: the result of the body is kept (one attempt, `COMPLETED`), and the
+//   child ends after its result frame.
+// - The panic while a body runs that then sends: the send is a refused core call, the child ends during the body, and
+//   the attempt takes the crashed-child path (`WORKER_CRASHED`) and the retry policy of the task.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -17,7 +17,7 @@ import { describe } from "node:test";
 
 import type { TaskAttempt, TaskHandle } from "#horsies";
 import { loadAddon } from "#horsies";
-import { abortLine } from "../src/forwarder-panic.ts";
+import { childLastLine, endedItselfLine, refusedCallLine, stopLine } from "../src/forwarder-panic.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as panic from "../src/tasks/core-panic.ts";
 import { infoOf, sentHandle, succeeded } from "../support/outcome.ts";
@@ -34,8 +34,8 @@ const RESULT_WAIT_MS = 30_000;
 /** The longest wait for the end of a task whose first run ends with its child. */
 const CRASH_RETRY_WAIT_MS = 60_000;
 
-/** The longest wait for the abort line of a child and for its process to end. */
-const ABORT_WAIT_MS = 30_000;
+/** The longest wait for the stop line of a child, for its end line in the worker's log, and for its process to end. */
+const END_WAIT_MS = 30_000;
 
 /** An attempt as the tests compare it: its outcome, its code, whether it retries, and the process that ran it. */
 type AttemptFacts = readonly [TaskAttempt["outcome"], TaskAttempt["errorCode"], boolean, TaskAttempt["workerPid"]];
@@ -57,11 +57,16 @@ function crashedIn(pid: number): AttemptFacts {
   return ["FAILED", { kind: "recorded", value: "WORKER_CRASHED" }, true, { kind: "recorded", value: pid }];
 }
 
-/** Wait until `worker` logged the abort line of child `pid` and the child process ended. */
-async function childAborted(suite: Suite, worker: TestProcess, pid: number): Promise<void> {
-  await worker.waitForLog(abortLine(pid, panic.PANIC_TEXT), ABORT_WAIT_MS);
-  await pollUntil(ABORT_WAIT_MS, `child ${String(pid)} ends after its abort line`, async () => !processAlive(pid));
+/** Wait until `worker` logged the stop line of the core of child `pid`. */
+async function coreStopped(suite: Suite, worker: TestProcess, pid: number): Promise<void> {
+  await worker.waitForLog(stopLine(pid, panic.PANIC_TEXT), END_WAIT_MS);
   assert.equal(suite.markers.read(`entry-child-${String(pid)}`).kind, "found", `process ${String(pid)} was a child of the worker`);
+}
+
+/** Wait until child `pid` ended itself with exit code 80 while it held no task, and its process ended. */
+async function childEndedItself(worker: TestProcess, pid: number): Promise<void> {
+  await worker.waitForLog(endedItselfLine(pid), END_WAIT_MS);
+  await pollUntil(END_WAIT_MS, `child ${String(pid)} ends after its core stopped`, async () => !processAlive(pid));
 }
 
 /** The process ids of the marker `name`: one line each. Fails the test when it is absent. */
@@ -82,29 +87,37 @@ describe("a task child whose core background task panicked", () => {
     const first = await sentHandle("e2e_core_panic_after_return", suite.app.send(panic.panicAfterReturn, {}));
     const stoppedChild = await succeeded(first, RESULT_WAIT_MS);
 
-    await childAborted(suite, worker, stoppedChild);
+    await coreStopped(suite, worker, stoppedChild);
+    assert.ok(processAlive(stoppedChild), "a child that holds no task ends at its next start");
 
     const second = await sentHandle("e2e_pid", suite.app.send(basic.pid, { sleepMs: 0 }));
     const newChild = await succeeded(second, RESULT_WAIT_MS);
 
+    await childEndedItself(worker, stoppedChild);
+    await worker.waitForLog(childLastLine("At the start of task", second.taskId, panic.PANIC_TEXT), END_WAIT_MS);
     assert.notEqual(newChild, stoppedChild);
     assert.deepEqual(await attemptFacts(first), [completedIn(stoppedChild)], "the run before the panic keeps its result");
     assert.deepEqual(await attemptFacts(second), [completedIn(newChild)], "the next task was charged one attempt, in the new child");
   });
 
   // Python `test_child_core_stopped.py::test_a_body_that_finished_keeps_its_result_and_a_new_child_serves_next`.
-  e2eTest("a panic while a body runs ends the child before the body returns: the crash path and the retry in a new child", "default", async (suite) => {
+  e2eTest("a body that returns after the panic keeps its result, and the child ends after its result", "default", async (suite) => {
     const worker = await suite.worker("isolated-1");
     const token = randomUUID();
     const handle = await sentHandle("e2e_core_panic_in_body", suite.app.send(panic.panicInBody, { token }));
-    const retriedIn = await succeeded(handle, CRASH_RETRY_WAIT_MS);
-    const [stoppedChild, ...laterRuns] = pidLines(suite, `${token}-runs`);
+    const ranIn = await succeeded(handle, RESULT_WAIT_MS);
 
-    assert.ok(stoppedChild !== undefined, "the first run wrote its process id");
-    await childAborted(suite, worker, stoppedChild);
-    assert.deepEqual(laterRuns, [retriedIn], "one retry ran, in the new child");
-    assert.deepEqual(pidLines(suite, `${token}-returned`), [retriedIn], "the first run did not reach its return");
-    assert.deepEqual(await attemptFacts(handle), [crashedIn(stoppedChild), completedIn(retriedIn)]);
+    await coreStopped(suite, worker, ranIn);
+    await childEndedItself(worker, ranIn);
+    await worker.waitForLog(childLastLine("After the body of task", handle.taskId, panic.PANIC_TEXT), END_WAIT_MS);
+    assert.deepEqual(pidLines(suite, `${token}-runs`), [ranIn], "one run, with no retry");
+    assert.deepEqual(pidLines(suite, `${token}-returned`), [ranIn], "the run reached its return");
+    assert.deepEqual(await attemptFacts(handle), [completedIn(ranIn)]);
+
+    const next = await sentHandle("e2e_pid", suite.app.send(basic.pid, { sleepMs: 0 }));
+    const newChild = await succeeded(next, RESULT_WAIT_MS);
+
+    assert.notEqual(newChild, ranIn, "a new child serves the next task");
   });
 
   // Python `test_child_core_stopped.py::test_a_body_that_the_stopped_core_interrupted_takes_the_crash_path_and_the_retry`.
@@ -116,7 +129,9 @@ describe("a task child whose core background task panicked", () => {
     const [stoppedChild, ...rest] = pidLines(suite, `${token}-first-run`);
 
     assert.ok(stoppedChild !== undefined && rest.length === 0, "the first run wrote its process id");
-    await childAborted(suite, worker, stoppedChild);
+    await coreStopped(suite, worker, stoppedChild);
+    await worker.waitForLog(refusedCallLine(panic.PANIC_TEXT), END_WAIT_MS);
+    await pollUntil(END_WAIT_MS, `child ${String(stoppedChild)} ends at the refused call`, async () => !processAlive(stoppedChild));
     assert.notEqual(retriedIn, stoppedChild);
     assert.deepEqual(await attemptFacts(handle), [crashedIn(stoppedChild), completedIn(retriedIn)]);
     assert.deepEqual(await suite.rows.tasksNamed(basic.pid.name), [], "the send after the panic did not run");

@@ -17,21 +17,34 @@
 //!   runtime has it.
 //! - Under the panic rule `StopCore`, a panic in a core background task stops
 //!   the core: every later call, and every call in flight, ends with
-//!   `CoreStopped` and the subject and cause of the first panic.
+//!   `CoreStopped` and the subject and cause of the first panic. A panic
+//!   before the core started is kept: the core starts stopped, and every
+//!   call is refused.
+//! - In a task child under the task child rule (`panic_rule`), the child
+//!   host reads the stop through [`task_child_core_state`], and a call that
+//!   the stopped core refuses ends the child with exit code 80: the child
+//!   holds a run then, and the worker takes the crashed-child path.
 
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use horsies_core::frame_protocol::CORE_STOPPED_EXIT_CODE;
 use horsies_core::process_runtime::{
     process_runtime, shape_process_runtime, ProcessRuntime, RuntimeShape, ShapeOutcome, ThreadStart,
 };
 use napi_derive::napi;
 use tokio::sync::watch;
 
+use horsies_core::{HostCoreState, HostCoreStop};
+
 use crate::call::thrown::{NativeThrown, StateAfter};
+use crate::child::exit::child_process_exit;
 use crate::logging::bridge::{make_thread_default, started_log, LogBridge};
-use crate::process_core::panic_rule::{fix_panic_rule, install_panic_hook, PanicReport};
+use crate::process_core::panic_rule::{
+    enter_task_child_rule, fix_panic_rule, install_panic_hook, task_child_rule, PanicReport,
+    TaskChildRule,
+};
 
 /// Worker threads of the runtime of a producer process and of a worker
 /// parent. A call waits on one connection, so two workers give the latency
@@ -132,6 +145,10 @@ pub struct Core {
 static CORE: OnceLock<Core> = OnceLock::new();
 static START_LOCK: Mutex<()> = Mutex::new(());
 
+/// The first panic of a core background task before the core started (the
+/// log forwarder starts first). The core then starts stopped with it.
+static PANIC_BEFORE_START: OnceLock<PanicReport> = OnceLock::new();
+
 impl Core {
     /// The handle of the core runtime.
     pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
@@ -147,13 +164,7 @@ impl Core {
     /// in flight, and refuse every later call. The report goes to stderr at
     /// once.
     pub fn stop(&self, report: PanicReport) {
-        let _write_failure_ignored = writeln!(
-            std::io::stderr(),
-            "horsies: the core stopped in process {}: panic in {}: {}",
-            self.pid,
-            report.subject,
-            report.cause
-        );
+        write_stop_line(self.pid, &report);
         let _first_report_wins = self.first_panic.set(report);
         let _previous_value = self.stop_signal.send_replace(true);
     }
@@ -184,23 +195,81 @@ pub fn core_for_call() -> Result<&'static Core, CallRefusal> {
 
 /// The refusal of a pure call (one that needs no runtime) in this process:
 /// the fork rule and the stop rule, as for every core call. Starts nothing.
+/// Under the task child rule a stop refusal does not return: the child ends
+/// with exit code 80 ([`end_task_child_at_refused_call`]).
 pub fn pure_call_refusal() -> Option<CallRefusal> {
-    let core = CORE.get()?;
     let this_pid = std::process::id();
-    match (core.pid == this_pid, core.stopped_report()) {
-        (false, _) => Some(CallRefusal::ForkedAfterStart {
-            core_pid: core.pid,
-            this_pid,
-        }),
-        (true, Some(report)) => Some(CallRefusal::Stopped(report.clone())),
-        (true, None) => None,
+    let refusal = match CORE.get() {
+        None => PANIC_BEFORE_START
+            .get()
+            .map(|report| CallRefusal::Stopped(report.clone())),
+        Some(core) => match (core.pid == this_pid, core.stopped_report()) {
+            (false, _) => Some(CallRefusal::ForkedAfterStart {
+                core_pid: core.pid,
+                this_pid,
+            }),
+            (true, Some(report)) => Some(CallRefusal::Stopped(report.clone())),
+            (true, None) => None,
+        },
+    };
+    match (refusal, task_child_rule()) {
+        (Some(CallRefusal::Stopped(report)), Some(TaskChildRule::StopCoreAbortDefects)) => {
+            end_task_child_at_refused_call(&report)
+        }
+        (refusal, _) => refusal,
     }
+}
+
+/// The first panic of a core background task of this process, started core
+/// or not. Starts nothing.
+fn stop_report_of_process() -> Option<PanicReport> {
+    match CORE.get() {
+        Some(core) => core.stopped_report().cloned(),
+        None => PANIC_BEFORE_START.get().cloned(),
+    }
+}
+
+/// The state of this process's core for the child host of a task child. The
+/// first call enters the task child rule (`panic_rule`): from then on a
+/// panic in a core background task stops the core and no longer aborts the
+/// child. Starts nothing; returns at once.
+pub fn task_child_core_state() -> HostCoreState {
+    enter_task_child_rule();
+    match stop_report_of_process() {
+        None => HostCoreState::Running,
+        Some(report) => HostCoreState::Stopped(HostCoreStop {
+            subject: report.subject,
+            cause: report.cause,
+        }),
+    }
+}
+
+/// The last line of a task child whose stopped core refused a call. Pure.
+pub fn refused_call_line(report: &PanicReport) -> String {
+    format!(
+        "At a core call of this child: the core of this child stopped after a panic in a core \
+         background task ({}: {}); the child ends itself with exit code {CORE_STOPPED_EXIT_CODE}",
+        report.subject, report.cause,
+    )
+}
+
+/// End a task child whose stopped core refused a call (Python
+/// `child_main.end_child_after_core_refusal`): the cause goes to stderr (the
+/// log forwarder may be the task that panicked), then the child exits with
+/// code 80 and runs no exit handler.
+fn end_task_child_at_refused_call(report: &PanicReport) -> ! {
+    let _write_failure_ignored =
+        writeln!(std::io::stderr(), "horsies: {}", refused_call_line(report));
+    child_process_exit().end(CORE_STOPPED_EXIT_CODE)
 }
 
 /// The state of the core in this process. Starts nothing.
 pub fn core_status() -> CoreStatus {
     match CORE.get() {
-        None => CoreStatus::NotStarted,
+        None => match PANIC_BEFORE_START.get() {
+            None => CoreStatus::NotStarted,
+            Some(_) => CoreStatus::Stopped,
+        },
         Some(core) => match (core.pid == std::process::id(), core.stopped_report()) {
             (false, _) => CoreStatus::Inherited,
             (true, Some(_)) => CoreStatus::Stopped,
@@ -210,19 +279,27 @@ pub fn core_status() -> CoreStatus {
 }
 
 /// Stop the core of this process after a panic in a core background task.
-/// Before the core is set, the report goes to stderr only.
+/// Before the core is set, the report goes to stderr and is kept: the core
+/// starts stopped with the first one.
 pub fn stop_after_background_panic(report: PanicReport) {
     match CORE.get() {
         Some(core) => core.stop(report),
         None => {
-            let _write_failure_ignored = writeln!(
-                std::io::stderr(),
-                "horsies: panic in {} before the core started: {}",
-                report.subject,
-                report.cause
-            );
+            write_stop_line(std::process::id(), &report);
+            let _first_report_wins = PANIC_BEFORE_START.set(report);
         }
     }
+}
+
+/// The stderr line of the stop of the core of process `pid`, written at
+/// once: the log forwarder may be the task that panicked.
+fn write_stop_line(pid: u32, report: &PanicReport) {
+    let _write_failure_ignored = writeln!(
+        std::io::stderr(),
+        "horsies: the core stopped in process {pid}: panic in {}: {}",
+        report.subject,
+        report.cause
+    );
 }
 
 fn start_core() -> Result<&'static Core, CallRefusal> {
@@ -240,11 +317,19 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
         })
     })?;
     let runtime = start_runtime(log.dispatch().clone()).map_err(CallRefusal::StartFailed)?;
-    let (stop_signal, _first_receiver) = watch::channel(false);
+    let first_panic = OnceLock::new();
+    let stopped = match PANIC_BEFORE_START.get() {
+        Some(report) => {
+            let _empty_cell_set = first_panic.set(report.clone());
+            true
+        }
+        None => false,
+    };
+    let (stop_signal, _first_receiver) = watch::channel(stopped);
     let core = Core {
         pid: std::process::id(),
         runtime,
-        first_panic: OnceLock::new(),
+        first_panic,
         stop_signal,
         log,
     };
