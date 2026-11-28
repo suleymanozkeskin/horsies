@@ -1,5 +1,5 @@
 // A workflow with no `outputType` (Python `output=None`, Rust `NoWorkflowOutput`): the checks of its builds, the spec
-// data, `get` of its outputless envelope (`NoWorkflowOutput` or the stored error), the read of a sub-workflow node of such a
+// data, `get` of its plain envelope (`NoWorkflowOutput` or the stored error), the read of a sub-workflow node of such a
 // child, and an `h.taskOutcome` parameter of it.
 
 import assert from "node:assert/strict";
@@ -72,18 +72,13 @@ function workflowId(): WorkflowId {
   return parsed.value;
 }
 
-/** The outputless envelope of a COMPLETED workflow whose `ok` slot is `okText`. */
-function outputlessEnvelope(okText: string): string {
-  return `{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":${okText},"err":null}`;
-}
+/** The plain envelope that the core stores for a COMPLETED workflow with no output node. */
+const PLAIN_ENVELOPE = '{"__h_task_result__":true,"ok":null,"err":null}';
 
-/** The `ok` slot of an outputless envelope with `entries` (node id to the stored text) and the task names. */
-function terminals(entries: Readonly<Record<string, string>>, taskNames: Readonly<Record<string, string>>): string {
-  const results = Object.entries(entries).map(([nodeId, text]) => `"${nodeId}":${text}`);
-  const names = Object.entries(taskNames).map(([nodeId, taskName]) => `"${nodeId}":"${taskName}"`);
-
-  return `{"results_by_id":{${results.join(",")}},"task_name_by_id":{${names.join(",")}},"definition_key_by_id":{}}`;
-}
+/** The envelope form that the core stored before the plain one: a marker key and a map of the terminal nodes in `ok`. */
+const OLD_TERMINAL_MAP_ENVELOPE =
+  '{"__h_task_result__":true,"__h_outputless_terminals__":true,' +
+  '"ok":{"results_by_id":{},"task_name_by_id":{},"definition_key_by_id":{}},"err":null}';
 
 /** `get` of `workflow` when the wait finds the COMPLETED stored result `text`; `R` is the build return of `workflow`. */
 async function getOf<R extends BuildReturn = BuildReturnWithoutOutput>(workflow: object, text: string) {
@@ -205,52 +200,38 @@ describe("the success value of a sub-workflow node of a child with no output", (
 });
 
 describe("get of a workflow with no outputType", () => {
-  test("a COMPLETED workflow: success with NoWorkflowOutput; the ok map is not read", async () => {
-    const ok = terminals(
-      { b: okEnvelope("3"), c: `{"__h_task_result__":true,"ok":null,"err":${customErrorText("NO_WORD")}}` },
-      { b: "count", c: "word" },
-    );
-
-    const read = await getOf(fanout, outputlessEnvelope(ok));
+  test("a COMPLETED workflow stores the plain envelope: success with NoWorkflowOutput", async () => {
+    const read = await getOf(fanout, PLAIN_ENVELOPE);
 
     assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: NO_WORKFLOW_OUTPUT } });
   });
 
-  test("an ok slot of any shape is not read: success with NoWorkflowOutput", async () => {
-    for (const okText of ["null", "[]", '{"results_by_id":[]}']) {
-      const read = await getOf(fanout, outputlessEnvelope(okText));
-
-      assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: NO_WORKFLOW_OUTPUT } });
-    }
-  });
-
   test("a stored error: the failed outcome with that error", async () => {
-    const text = `{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":null,"err":${customErrorText("ANY")}}`;
+    const text = `{"__h_task_result__":true,"ok":null,"err":${customErrorText("ANY")}}`;
     const read = await getOf(fanout, text);
 
     assert(read.ok && read.value.kind === "failed");
     assert.deepEqual([read.value.error.kind, read.value.error.code], ["custom", "ANY"]);
   });
 
-  const refused: readonly (readonly [string, string, RegExp])[] = [
-    ["an error that does not read", `{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":null,"err":7}`, /error payload does not read/],
-    ["no envelope marker", '{"__h_outputless_terminals__":true,"ok":{},"err":null}', /envelope marker/],
-    ["a typed envelope", okEnvelope("{}"), /wire_outputless=false, handle_outputless=true/],
+  const refused: readonly (readonly [string, string])[] = [
+    ["an error that does not read", '{"__h_task_result__":true,"ok":null,"err":7}'],
+    ["no envelope marker", '{"ok":null,"err":null}'],
+    ["a typed envelope with a value in ok", okEnvelope("{}")],
+    ["the old terminal-map envelope", OLD_TERMINAL_MAP_ENVELOPE],
   ];
 
-  for (const [title, text, cause] of refused) {
+  for (const [title, text] of refused) {
     test(`${title}: storedResultUnreadable`, async () => {
       const read = await getOf(fanout, text);
 
       assert(!read.ok && read.error.kind === "storedResultUnreadable");
-      assert.match(read.error.cause, cause);
     });
   }
 
-  test("a workflow with an outputType that reads an outputless envelope: storedResultUnreadable", async () => {
-    const read = await getOf<BuildReturn>(parent, outputlessEnvelope(terminals({}, {})));
+  test("the plain envelope read by a workflow with an outputType: storedResultUnreadable", async () => {
+    const read = await getOf<BuildReturn>(parent, PLAIN_ENVELOPE);
 
     assert(!read.ok && read.error.kind === "storedResultUnreadable");
-    assert.match(read.error.cause, /wire_outputless=true, handle_outputless=false/);
   });
 });
