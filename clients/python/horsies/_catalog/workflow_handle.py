@@ -9,9 +9,7 @@ __all__ = ['WorkflowHandleErrorCode']
 
 
 class WorkflowHandleErrorCode(StrEnum):
-    """Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
-
-    Two error strategies by return type:
+    """Two error strategies by return type:
 
     1. **Wrap strategy** — methods that do not read an outcome
        (status, cancel, pause, resume, results, tasks) return
@@ -19,7 +17,7 @@ class WorkflowHandleErrorCode(StrEnum):
 
     2. **Read strategy** — the reads of an outcome (`WorkflowHandle::get`,
        `WorkflowHandle::result_for`) return the outcome or a read error:
-       Python `ReadResult`, Rust `Result<TaskOutcome, WorkflowReadError>`. A
+       Rust `Result<TaskOutcome, WorkflowReadError>`. A
        failed read is the read error (`DATABASE_ERROR` for an infrastructure or
        query failure), apart from the outcome of the workflow or the node,
        instead of `HandleResult::Err(...)`.

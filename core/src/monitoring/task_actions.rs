@@ -33,8 +33,7 @@ pub enum TaskActionErrorCode {
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
-    /// result until the stored row changes (Python
-    /// `clients/python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    /// result until the stored row changes.
     StoredDataInvalid,
 }
 

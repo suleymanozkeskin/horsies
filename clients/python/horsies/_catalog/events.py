@@ -98,7 +98,7 @@ The executor of the worker uses this type too (`ExecutionClass` there):
 the class of a row, the budget of a claim and the kind of a child are
 one set of values.
 
-The order is the order of Python's `Execution` members: `ISOLATED`,
+The order is `ISOLATED`,
 `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
 serializes as its stored value.
 
@@ -131,13 +131,13 @@ start's miss path wrote what each case needs, except for
 
 type ShortageErrno = Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']
 """An errno that names an OS resource limit. A boot that failed with one can
-succeed later, when the resource is free again (Python `ShortageErrno`).
+succeed later, when the resource is free again.
 """
 
 
 type ReleaseReason = Literal['POOL_STOPPING', 'POOL_FAILED', 'QUEUE_FULL', 'NO_CHILD_OF_ITS_KIND', 'RUNNER_BEATS_FAILED_CLOSED', 'HELD_FOR_QUEUE_CAP', 'WORKFLOW_NOT_RUNNABLE', 'RETURNED_AS_ISOLATED']
 """Why the worker released a claimed task before it ran (the `reason` label
-of `horsies.task.claims.released`, and the `reason` of a `ClaimReleased`
+of the claims-released metric, and the `reason` of a `ClaimReleased`
 event).
 
 `POOL_STOPPING`: The worker is stopping.
@@ -160,7 +160,7 @@ event).
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptErrorCodeBuiltIn:
-    """A built-in code of horsies."""
+    """A built-in code of the core."""
 
     code: BuiltInTaskCode
 
@@ -357,7 +357,7 @@ class AttemptEndDecidedByWorker:
 
     child_execution: Execution = field(repr=False)
     """Internal: the execution class of the child that ran the
-    attempt, the `horsies.task.execution` of the span.
+    attempt, the execution class of the span.
     """
 
     worker_id: str = field(repr=False)
@@ -468,7 +468,7 @@ type AttemptRecord = (
 
 type RecoveryAction = Literal['RUNNING_FAILED', 'RUNNING_RETRIED', 'CLAIM_REQUEUED', 'ORPHAN_CANCELLED', 'PENDING_EXPIRED']
 """What the reaper did to a task row (the `action` label of
-`horsies.recovery.tasks`, and the `action` of a `TaskRecovered` event).
+the recovered-tasks metric, and the `action` of a `TaskRecovered` event).
 
 `RUNNING_FAILED`: A stale RUNNING row failed.
 
@@ -484,7 +484,7 @@ type RecoveryAction = Literal['RUNNING_FAILED', 'RUNNING_RETRIED', 'CLAIM_REQUEU
 
 type ReplaceReason = Literal['CHILD_DIED', 'CHANNEL_LOST', 'PROTOCOL_VIOLATION', 'PROTOCOL_MISMATCH', 'KILLED_BY_PARENT', 'SLOT_DEFECT', 'SPAWNER_STOPPED', 'TASK_COUNT', 'MEMORY_LIMIT', 'SECOND_CANCEL', 'LOOP_BLOCKED', 'LEFTOVER_WORK', 'AT_DEADLINE', 'CORE_STOPPED']
 """Why a child ended and was replaced (the `reason` label of
-`horsies.worker.children.replaced`): the loss causes of a child, and the
+the children-replaced metric): the loss causes of a child, and the
 reasons why a child retires after a task. The `reason` of a
 `ChildReplaced` event too.
 

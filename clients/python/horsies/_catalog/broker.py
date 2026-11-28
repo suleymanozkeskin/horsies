@@ -11,11 +11,10 @@ __all__ = ['DatabaseErrorCode']
 class DatabaseErrorCode(StrEnum):
     """Categorized broker operation failure codes.
 
-    The members are Python's, in Python's order
-    (`clients/python/horsies/core/brokers/result_types.py`). The nine operation codes from
-    `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
-    Python, `DatabaseOperationFailed`. A client produces `NO_DATABASE` and
-    `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
+    The nine operation codes from `SCHEMA_INIT_FAILED` to
+    `LISTENER_SUBSCRIBE_FAILED` share one variant, `DatabaseOperationFailed`.
+    A client produces `NO_DATABASE` and `NO_TYPE_AVAILABLE`; only a client
+    with a sync call form produces `ASYNC_CONTEXT`.
     """
 
     SCHEMA_INIT_FAILED = 'SCHEMA_INIT_FAILED'
@@ -65,7 +64,8 @@ class DatabaseErrorCode(StrEnum):
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync facade was called on a thread that runs an event loop. Its wait
-    would stall that loop, so nothing ran. Python client only.
+    would stall that loop, so nothing ran. A client with no sync call form
+    never gives it.
     """
 
     INVALID_INPUT = 'INVALID_INPUT'

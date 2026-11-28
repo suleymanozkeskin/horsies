@@ -21,7 +21,7 @@ pub enum MonitoringQueryErrorCode {
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
     /// Not retryable: a repeat gives the same result until the stored row
-    /// changes (Python `clients/python/horsies/monitoring/errors.py:26-98`).
+    /// changes.
     HistoryContractViolation,
 }
 
@@ -29,9 +29,9 @@ pub enum MonitoringQueryErrorCode {
 /// a window, a page or a limit that the core refuses, or a value that the
 /// client's types let through and the core cannot take (a count that is not
 /// a whole number, a task index outside 32 bits, text that is not
-/// well-formed). The Python client has no code for these inputs: its parse
-/// functions answer `WindowRefused` and `PageRefused`, and its types cannot
-/// hold the other values.
+/// well-formed). A client whose parse functions answer `WindowRefused` and
+/// `PageRefused`, and whose types cannot hold the other values, has no code
+/// for these inputs.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]

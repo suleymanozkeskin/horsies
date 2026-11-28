@@ -72,10 +72,23 @@ const STRICT_JSON_IO_HELPERS: &str =
      case _:\n            \
      return value\n";
 
+/// What reads the manifest text, as the Python module names it: the long
+/// form for the module doc and the short form for the dump function doc.
+/// The producer and scheduler manifests name the Python bridge classes; the
+/// other readers are named by the model.
+fn python_reader(module: &ManifestModule) -> (&'static str, &'static str) {
+    match module.root {
+        "ProducerManifest" => ("`horsies._core.CoreHandle`", "`CoreHandle`"),
+        "SchedulerManifest" => ("`horsies._core.CoreScheduler`", "`CoreScheduler`"),
+        _ => (module.reader, module.reader_short),
+    }
+}
+
 /// The text of the manifest module.
 pub fn render_manifest_module(module: &ManifestModule, encoder: DumpEncoder) -> String {
     let dump = dump_function_name(module.root);
     let bounds = module.int_bounds();
+    let (reader, _) = python_reader(module);
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str(&format!(
         "\"\"\"The {} of horsies-core, generated from its Rust types.\n\n\
@@ -83,7 +96,7 @@ pub fn render_manifest_module(module: &ManifestModule, encoder: DumpEncoder) -> 
          parser enforces, and `{dump}`, which gives the JSON text that\n\
          {} takes.\n\"\"\"\n\n",
         words(module.root),
-        module.reader
+        reader
     ));
     text.push_str(match encoder {
         DumpEncoder::PlainJson => PLAIN_JSON_IMPORTS,
@@ -117,7 +130,7 @@ fn render_dump(module: &ManifestModule, dump: &str, encoder: DumpEncoder) -> Str
              \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\"\"\"\n    \
              return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
             root = module.root,
-            reader = module.reader_short
+            reader = python_reader(module).1
         ),
         DumpEncoder::StrictJsonIo => format!(
             "{STRICT_JSON_IO_HELPERS}\n\ndef {dump}(manifest: {root}) -> SerdeResult[str]:\n    \
@@ -128,7 +141,7 @@ fn render_dump(module: &ManifestModule, dump: &str, encoder: DumpEncoder) -> Str
              \"\"\"\n    \
              return dumps_json(dataclasses.asdict(manifest, dict_factory=_json_object))\n",
             root = module.root,
-            reader = module.reader_short
+            reader = python_reader(module).1
         ),
     }
 }

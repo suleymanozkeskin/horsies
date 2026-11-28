@@ -9,11 +9,7 @@ __all__ = ['WorkflowStartErrorCode']
 
 
 class WorkflowStartErrorCode(StrEnum):
-    """Categorized workflow start failure codes.
-
-    The members are Python's, in Python's order
-    (`clients/python/horsies/core/workflows/start_types.py`).
-    """
+    """Categorized workflow start failure codes."""
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
     """Config error: no broker attached."""

@@ -15,18 +15,16 @@ use crate::FailureCause;
 
 /// Categorized task send failure codes.
 ///
-/// The members are Python's, in Python's order
-/// (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
-/// one variant per member.
+/// [`TaskSendError`] has one variant per member.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "task_send", values = "equal_text")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
     SendSuppressed,
-    /// A sync (Python) or blocking (Rust) send or resend was called
-    /// on a thread that runs an event loop (Python) or a tokio runtime
-    /// (Rust); the blocking enqueue would stall it, so nothing was written.
+    /// A sync or blocking send or resend was called
+    /// on a thread that runs an event loop or a tokio runtime;
+    /// the blocking enqueue would stall it, so nothing was written.
     /// A blocking resend on the same thread returns this code again; the
     /// async forms complete the dispatch with the same task id.
     #[code_catalog(blocking_form_only)]
@@ -159,7 +157,7 @@ pub enum TaskSendError {
     },
     /// A sync send ran inside a running event loop. Nothing was written.
     ///
-    /// The payload is prepared. ``resend_async(err)`` completes the same
+    /// The payload is prepared. the async resend completes the same
     /// dispatch with the same task id. A sync resend from the same loop returns
     /// this error again.
     // The Rust client's blocking forms give it on a thread that runs a tokio
@@ -175,8 +173,8 @@ pub enum TaskSendError {
     },
     /// The input was refused before anything was written.
     ///
-    /// ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
-    /// input without a Python exception. The resend methods refuse this error.
+    /// ``cause`` is the exception of the cause, or ``NoCause`` when a check refused the
+    /// input without an exception. The resend methods refuse this error.
     // `cause` is what refused it.
     #[error_class(
         class = "TaskSendValidationFailed",
@@ -195,7 +193,7 @@ pub enum TaskSendError {
     ///
     /// ``retryable`` is the core's classification of the cause. ``resend(err)``
     /// sends the same task id and payload again; the broker returns the existing
-    /// task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
+    /// task for a duplicate. ``cause`` is ``NoCause`` when the broker found
     /// the failure by a data check.
     // `cause` is what the enqueue met.
     #[error_class(

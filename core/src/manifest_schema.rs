@@ -367,8 +367,8 @@ pub struct ManifestModule {
 pub const PRODUCER_MANIFEST: ManifestModule = ManifestModule {
     root: "ProducerManifest",
     version: PRODUCER_MANIFEST_VERSION,
-    reader: "`horsies._core.CoreHandle`",
-    reader_short: "`CoreHandle`",
+    reader: "the producer handle of the core",
+    reader_short: "the producer handle",
     types: &[
         <SchemaMode as ManifestItem>::ITEM,
         <SessionDatabase as ManifestItem>::ITEM,
@@ -449,8 +449,8 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
 pub const SCHEDULER_MANIFEST: ManifestModule = ManifestModule {
     root: "SchedulerManifest",
     version: SCHEDULER_MANIFEST_VERSION,
-    reader: "`horsies._core.CoreScheduler`",
-    reader_short: "`CoreScheduler`",
+    reader: "the scheduler of the core",
+    reader_short: "the scheduler",
     types: &[
         <ScheduleTaskOptions as ManifestItem>::ITEM,
         <ScheduleSendManifest as ManifestItem>::ITEM,

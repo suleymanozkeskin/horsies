@@ -104,7 +104,7 @@ pub struct PostgresConfig {
     #[serde(default)]
     pub echo: bool,
 
-    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
+    /// TCP keepalives of every core connection.
     /// Default: on, 30 s, 10 s, 3 probes. [`Self::validate`] refuses a value
     /// outside its bound.
     #[serde(default)]

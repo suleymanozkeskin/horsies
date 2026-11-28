@@ -148,7 +148,7 @@ impl From<NotRunCause> for ReleaseReason {
 /// The error code of an attempt that ended with a task error.
 #[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum AttemptErrorCode {
-    /// A built-in code of horsies.
+    /// A built-in code of the core.
     BuiltIn { code: BuiltInTaskCode },
     /// A code that the task chose, of at most 128 characters.
     Custom { code: CustomCodeText },
@@ -312,7 +312,7 @@ pub enum AttemptEnd {
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
         /// Internal: the execution class of the child that ran the
-        /// attempt, the `horsies.task.execution` of the span.
+        /// attempt, the execution class of the span.
         #[event_schema(internal)]
         child_execution: Execution,
         /// Internal: the worker that claimed the task and ended the attempt.

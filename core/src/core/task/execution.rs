@@ -21,7 +21,7 @@ pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
 /// the class of a row, the budget of a claim and the kind of a child are
 /// one set of values.
 ///
-/// The order is the order of Python's `Execution` members: `ISOLATED`,
+/// The order is `ISOLATED`,
 /// `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
 /// serializes as its stored value.
 #[derive(

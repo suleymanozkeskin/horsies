@@ -119,7 +119,7 @@ class WorkflowHandleResumeRecoveryFailed:
 class WorkflowHandleAsyncContext:
     """A sync method was called on a thread that runs an event loop. Nothing ran.
 
-    Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    Its wait would stall that loop. Call the async form; a sync call on
     that thread returns this error again.
     """
 
