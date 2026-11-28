@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::no_member_after_the_tag;
 use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 /// Largest keepalive idle time and interval in seconds: Linux's limit for
 /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` (tcp(7)).
@@ -70,7 +70,7 @@ impl From<KeepaliveSeconds> for u32 {
 }
 
 impl ManifestValue for KeepaliveSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "KEEPALIVE_SECONDS",
         min: 1,
         max: MAX_KEEPALIVE_SECONDS as u64,
@@ -109,7 +109,7 @@ impl From<KeepaliveProbes> for u32 {
 }
 
 impl ManifestValue for KeepaliveProbes {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "KEEPALIVE_PROBES",
         min: 1,
         max: MAX_KEEPALIVE_PROBES as u64,
@@ -147,15 +147,14 @@ impl From<TcpUserTimeoutMs> for u32 {
 }
 
 impl ManifestValue for TcpUserTimeoutMs {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "TCP_USER_TIMEOUT_MS",
         min: 1,
         max: MAX_TCP_USER_TIMEOUT_MS as u64,
     });
 }
 
-/// TCP keepalives of every core connection, checked form (Python
-/// `TcpKeepalivesOff`, `TcpKeepalivesOn`).
+/// TCP keepalives of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -202,8 +201,7 @@ impl TcpKeepalivesConfig {
     }
 }
 
-/// The TCP user timeout of every core connection, checked form (Python
-/// `TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter`).
+/// The TCP user timeout of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]

@@ -80,7 +80,7 @@ mod tests {
     use crate::ts_text::GENERATED_HEADER;
 
     const SAMPLE: TextNewType = TextNewType {
-        python_module: "probe_key",
+        module: "probe_key",
         name: "ProbeKey",
         doc: "",
         constants: &[

@@ -35,7 +35,7 @@ use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::core::{OnError, WorkflowSpec};
 use crate::manifest::parse_manifest;
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 use crate::scheduler_manifest::RetentionClassKey;
 use crate::worker_manifest::QueuePriority;
 use crate::workflow_engine::child_spec::ClientSpec;
@@ -73,7 +73,7 @@ impl SpecDataRefused {
 pub struct SpecDataVersion(BoundedU32<WORKFLOW_SPEC_DATA_VERSION, WORKFLOW_SPEC_DATA_VERSION>);
 
 impl ManifestValue for SpecDataVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "SPEC_DATA_VERSION",
         min: WORKFLOW_SPEC_DATA_VERSION as u64,
         max: WORKFLOW_SPEC_DATA_VERSION as u64,
@@ -95,7 +95,7 @@ impl NodeIndex {
 }
 
 impl ManifestValue for NodeIndex {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "NODE_INDEX",
         min: 0,
         max: MAX_NODE_INDEX as u64,
@@ -109,7 +109,7 @@ impl ManifestValue for NodeIndex {
 pub struct MinSuccess(BoundedU32<1, MAX_NODE_INDEX>);
 
 impl ManifestValue for MinSuccess {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MIN_SUCCESS",
         min: 1,
         max: MAX_NODE_INDEX as u64,

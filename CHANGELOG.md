@@ -226,6 +226,22 @@ and there is no migration contract between pre-1.0 versions.
   Core: `ChildProgram::Rust` is `ChildProgram::Host`. The core texts of the
   fork refusal, the `spawn_in_run` and `run_cancel_signal` refusals and the
   result-wait refusal of a task body name no client API or language.
+- **The codegen model of the core has neutral names.** Core data that the
+  code generators read names no Python type and no Python base class. No
+  user-facing API changes and the generated Python files are unchanged.
+  `python_module` is `module`; `python_class` is `type_name` (also
+  `ErrorEnum::type_name`); `python_name` is `type_name` (manifest types) and
+  `alias_name` (code unions of events); `python_base` and `PythonEnumBase`
+  (`StrEnum`, `PlainEnum`) are `values` and `EnumValues` (`EqualText`,
+  `Opaque`); `python_type` is `slot_type`, `cause_type` and `field_type`;
+  `PythonValue` and `PythonItem` are `ValueType` and `ItemType`;
+  `ManifestValue::PYTHON` is `ManifestValue::VALUE_TYPE`. Derive keys:
+  `#[error_slot(python = "...")]` is `#[error_slot(slot_type = "...")]`,
+  `#[error_class(exception = "BaseException" | "BaseException | NoCause")]`
+  is `#[error_class(cause = "required" | "optional")]`, and
+  `#[code_catalog(base = "str_enum" | "enum")]` is
+  `#[code_catalog(values = "equal_text" | "opaque")]`. The doc comments of
+  these types state facts in neutral terms.
 - **Breaking (Rust): `TaskSendError` holds a typed exception cause.**
   `TaskSendError::ValidationFailed.cause` is a `BrokerRefusalCause` (it was a
   `FailureCause`): `Check` is Python's `NoCause()`, `ValueRule(text)` is the

@@ -49,7 +49,7 @@ use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
-use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
+use crate::manifest_schema::{IntBound, ItemType, ManifestValue, ValueType};
 use crate::telemetry::labels::DeclaredSource;
 use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};
@@ -78,7 +78,7 @@ macro_rules! bounded_count {
         pub struct $name(pub $inner);
 
         impl ManifestValue for $name {
-            const PYTHON: PythonValue = PythonValue::Int(IntBound {
+            const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
                 name: $bound,
                 min: <$inner>::SMALLEST.get() as u64,
                 max: <$inner>::LARGEST.get() as u64,
@@ -201,7 +201,7 @@ impl From<WorkerManifestVersion> for u32 {
 }
 
 impl ManifestValue for WorkerManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: WORKER_MANIFEST_VERSION as u64,
         max: WORKER_MANIFEST_VERSION as u64,
@@ -253,7 +253,7 @@ impl From<DrainTimeoutMs> for u64 {
 }
 
 impl ManifestValue for DrainTimeoutMs {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "DRAIN_TIMEOUT_MS",
         min: MIN_DRAIN_TIMEOUT_MS,
         max: MAX_DRAIN_TIMEOUT_MS,
@@ -335,7 +335,7 @@ impl From<HandlerNameText> for String {
 }
 
 impl ManifestValue for HandlerNameText {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// One event handler of the app.
@@ -345,8 +345,7 @@ impl ManifestValue for HandlerNameText {
 #[serde(deny_unknown_fields)]
 pub struct HandlerManifest {
     /// The name of the handler: the value of the `handler` label of
-    /// `horsies.telemetry.handler.errors` and
-    /// `horsies.telemetry.handler.dropped`. Each name is once in the
+    /// the handler errors and handler dropped metrics. Each name is once in the
     /// manifest.
     pub name: HandlerNameText,
     /// The one event type that the handler takes.
@@ -409,7 +408,7 @@ impl From<HandlerList> for Vec<HandlerManifest> {
 }
 
 impl ManifestValue for HandlerList {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Named("HandlerManifest"));
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Named("HandlerManifest"));
 }
 
 /// The event handlers that the app registered.
@@ -487,7 +486,7 @@ pub struct TaskManifest {
 
 /// The declared codes of a task are a tuple of code texts in Python.
 impl ManifestValue for DeclaredErrorCodes {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Str);
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Str);
 }
 
 /// The connection settings of a worker. The pool of the worker process
@@ -515,9 +514,9 @@ pub struct WorkerDatabaseManifest {
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
+    /// TCP keepalives of every core connection.
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python `tcp_user_timeout`).
+    /// TCP user timeout of every core connection.
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -713,7 +712,7 @@ pub enum Preload {
     NoPreload,
 }
 
-/// The settings of one worker (Python `WorkerProfile`), every value given.
+/// The settings of one worker, every value given.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -743,7 +742,7 @@ pub enum QueueConcurrency {
     NoLimit,
 }
 
-/// One custom queue of the app (Python `CustomQueueConfig`).
+/// One custom queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -754,7 +753,7 @@ pub struct CustomQueueManifest {
     pub max_concurrency: QueueConcurrency,
 }
 
-/// The queues of the app (Python `AppConfig.queue_mode`). A worker serves
+/// The queues of the app. A worker serves
 /// every queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
@@ -767,7 +766,7 @@ pub enum Queues {
     Default,
 }
 
-/// The lease of a claim (Python `AppConfig.claim_lease_ms`).
+/// The lease of a claim.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -779,7 +778,7 @@ pub enum ClaimLease {
     Milliseconds { ms: Milliseconds },
 }
 
-/// The most RUNNING tasks of the cluster (Python `AppConfig.cluster_wide_cap`).
+/// The most RUNNING tasks of the cluster.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]

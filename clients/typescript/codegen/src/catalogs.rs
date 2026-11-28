@@ -120,7 +120,7 @@ fn terminal_set(catalog: &CodeCatalog, constant: &str, members: &[&str]) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::catalog::{CallForms, CatalogMember, CodeEnum, PythonEnumBase};
+    use horsies_core::catalog::{CallForms, CatalogMember, CodeEnum, EnumValues};
     use horsies_core::{RetrievalCode, TaskStatus};
 
     use std::path::Path;
@@ -145,9 +145,9 @@ mod tests {
 
     fn catalog(module: &'static str, class: &'static str) -> CodeCatalog {
         CodeCatalog {
-            python_module: module,
-            python_class: class,
-            python_base: PythonEnumBase::StrEnum,
+            module,
+            type_name: class,
+            values: EnumValues::EqualText,
             doc: "A status.",
             members: MEMBERS,
             terminal_states: TerminalStates::NotALifecycle,

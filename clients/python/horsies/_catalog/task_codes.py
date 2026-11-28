@@ -13,8 +13,7 @@ class OperationalCode(StrEnum):
 
     Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 
-    Members, wire values and order are Python's (`clients/python/horsies/core/models/tasks.py`), plus
-    `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
+    `WORKFLOW_START_INCOMPLETE` is held by both catalogs.
     """
 
     UNHANDLED_EXCEPTION = 'UNHANDLED_EXCEPTION'

@@ -1,40 +1,40 @@
-//! `#[derive(ErrorCatalog)]`: the Python class of each variant of an error
-//! enum, read by the Python code generator. `#[derive(ErrorClassValues)]`:
+//! `#[derive(ErrorCatalog)]`: the error class of each variant of an error
+//! enum, read by the code generators. `#[derive(ErrorClassValues)]`:
 //! the values of the instance slots of a value, which a client passes to the
 //! constructor of its class.
 //!
 //! The enum is the one source. Container attribute:
 //! `#[error_catalog(module = "...", code = "...", union = "...", union_doc = "...")]`:
-//! the module under `horsies._catalog`, the code enum (a path in scope), and
+//! the module that holds the classes, the code enum (a path in scope), and
 //! the name and doc of the union of every class.
 //!
 //! Variant attribute: `#[error_class(class = "...", ...)]` with
 //!
-//! - `code = "Variant"`: `code` is a `ClassVar` member, the variant
-//!   `Variant` of the code enum; or `code_field = "field"` and
-//!   `code_subset = "Name"`: `code` is the field `field`, a `Literal`
-//!   subset `Name` that converts into the code enum (`From`);
-//! - `never_retryable`: `retryable: ClassVar[bool] = False`; or
-//!   `always_retryable`: `retryable: ClassVar[bool] = True`, for a class whose
-//!   same call, unchanged, can succeed later. A variant takes at most one of the two;
-//! - `exception = "BaseException"` or `exception = "BaseException | NoCause"`:
-//!   the type of the last slot, `cause`, the core's exception class of the
-//!   cause.
+//! - `code = "Variant"`: `code` is a fixed member of the code catalog, the
+//!   variant `Variant` of the code enum; or `code_field = "field"` and
+//!   `code_subset = "Name"`: `code` is the field `field`, a subset `Name`
+//!   of the code catalog that converts into the code enum (`From`);
+//! - `never_retryable`: a repeat of the same call does not complete it; or
+//!   `always_retryable`: the same call, unchanged, can succeed later. A
+//!   variant takes at most one of the two;
+//! - `cause = "required"` or `cause = "optional"`: the class has a last
+//!   slot, `cause`. A required cause is always present. An optional cause
+//!   is absent when a check of the core found the failure.
 //!
 //! The variant's `///` lines are the class doc. Each named field other than
 //! the code field has one of:
 //!
-//! - `#[error_slot(python = "Type")]`, with `hidden` for
-//!   `field(repr=False)`: an instance field. `Type` is a variant of
-//!   `horsies_core::error_catalog::SlotType`.
+//! - `#[error_slot(slot_type = "Type")]`, with `hidden` for a field that the
+//!   text form of the class leaves out: an instance field. `Type` is a
+//!   variant of `horsies_core::error_catalog::SlotType`.
 //! - `#[error_slot(cause)]`: the typed cause that the `cause` slot is
 //!   built from (`horsies_core::error_catalog::ExceptionCause`). A variant
-//!   has at most one, and only with `exception`.
+//!   has at most one, and only with `cause = "..."`.
 //! - `#[error_slot(skip)]`: a field that the class does not show.
 //!
 //! `ErrorClassValues` needs the `cause` field on every variant with
-//! `exception`. `ErrorCatalog` also takes a variant with `exception` and no
-//! `cause` field.
+//! `cause = "..."`. `ErrorCatalog` also takes a variant with `cause = "..."`
+//! and no `cause` field.
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
@@ -42,7 +42,7 @@ use syn::{Attribute, Data, DataEnum, DeriveInput, Fields, Ident, LitStr, Path, V
 
 use crate::code_catalog::{doc_text, screaming_snake_case};
 
-/// The Python types that a field slot can have: the variants of
+/// The slot types that a field slot can have: the variants of
 /// `SlotType`.
 const SLOT_TYPES: &[&str] = &[
     "Str",
@@ -79,10 +79,12 @@ enum Retry {
 }
 
 /// The declared type of the `cause` slot, when the class has one.
-enum ExceptionSlot {
+enum CauseSlot {
     Absent,
-    Exception,
-    ExceptionOrNoCause,
+    /// `cause = "required"`: every value has a cause.
+    Required,
+    /// `cause = "optional"`: a value has a cause or has none.
+    Optional,
 }
 
 /// The settings of one variant.
@@ -90,7 +92,7 @@ struct ClassSettings {
     class: String,
     code: CodeSource,
     retry: Retry,
-    exception: ExceptionSlot,
+    cause_slot: CauseSlot,
 }
 
 /// The variants of an enum without generic parameters, or the refusal for
@@ -131,7 +133,7 @@ pub fn derive_error_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
 
             const ERROR_CATALOG: ::horsies_core::error_catalog::ErrorCatalog =
                 ::horsies_core::error_catalog::ErrorCatalog {
-                    python_module: #module,
+                    module: #module,
                     code_catalog: <#code as ::horsies_core::catalog::CodeEnum>::CATALOG,
                     union: #union,
                     union_doc: #union_doc,
@@ -144,7 +146,7 @@ pub fn derive_error_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
                 }
             }
 
-            fn python_class(&self) -> &'static str {
+            fn type_name(&self) -> &'static str {
                 match self {
                     #(#class_arms,)*
                 }
@@ -204,22 +206,22 @@ fn class_parts(variant: &Variant, code: &Path) -> syn::Result<ClassParts> {
     let fields = variant_fields(variant, &settings)?;
     let _checked_cause = variant_cause(variant, &settings, &fields)?;
     slots.extend(field_slots(&fields));
-    match settings.exception {
-        ExceptionSlot::Absent => {}
-        ExceptionSlot::Exception => slots.push(quote!(
+    match settings.cause_slot {
+        CauseSlot::Absent => {}
+        CauseSlot::Required => slots.push(quote!(
             ::horsies_core::error_catalog::ErrorSlot::Exception {
-                python_type: ::horsies_core::error_catalog::ExceptionType::Exception,
+                cause_type: ::horsies_core::error_catalog::ExceptionType::Exception,
             }
         )),
-        ExceptionSlot::ExceptionOrNoCause => slots.push(quote!(
+        CauseSlot::Optional => slots.push(quote!(
             ::horsies_core::error_catalog::ErrorSlot::Exception {
-                python_type: ::horsies_core::error_catalog::ExceptionType::ExceptionOrNoCause,
+                cause_type: ::horsies_core::error_catalog::ExceptionType::ExceptionOrNoCause,
             }
         )),
     }
     Ok(ClassParts {
         record: quote!(::horsies_core::error_catalog::ErrorClass {
-            python_class: #class,
+            type_name: #class,
             doc: #doc,
             slots: &[#(#slots,)*],
         }),
@@ -269,7 +271,7 @@ fn variant_fields(variant: &Variant, settings: &ClassSettings) -> syn::Result<Ve
 }
 
 /// The `cause` field of `variant`, if it has one. A `cause` field needs
-/// `exception` on its variant, and a variant has at most one.
+/// `cause = "..."` on its variant, and a variant has at most one.
 fn variant_cause<'a>(
     variant: &Variant,
     settings: &ClassSettings,
@@ -280,19 +282,17 @@ fn variant_cause<'a>(
         .filter(|field| matches!(field.slot, FieldSlot::Cause))
         .map(|field| &field.ident)
         .collect();
-    match (&settings.exception, causes.as_slice()) {
+    match (&settings.cause_slot, causes.as_slice()) {
         (_, []) => Ok(None),
-        (ExceptionSlot::Absent, [cause, ..]) => Err(syn::Error::new_spanned(
+        (CauseSlot::Absent, [cause, ..]) => Err(syn::Error::new_spanned(
             cause,
-            "a #[error_slot(cause)] field needs exception = \"...\" on its variant",
+            "a #[error_slot(cause)] field needs cause = \"...\" on its variant",
         )),
-        (ExceptionSlot::Exception | ExceptionSlot::ExceptionOrNoCause, [cause]) => Ok(Some(*cause)),
-        (ExceptionSlot::Exception | ExceptionSlot::ExceptionOrNoCause, [_, ..]) => {
-            Err(syn::Error::new_spanned(
-                &variant.ident,
-                "a variant has at most one #[error_slot(cause)] field",
-            ))
-        }
+        (CauseSlot::Required | CauseSlot::Optional, [cause]) => Ok(Some(*cause)),
+        (CauseSlot::Required | CauseSlot::Optional, [_, ..]) => Err(syn::Error::new_spanned(
+            &variant.ident,
+            "a variant has at most one #[error_slot(cause)] field",
+        )),
     }
 }
 
@@ -302,16 +302,16 @@ fn field_slots(fields: &[VariantField]) -> Vec<TokenStream> {
         .iter()
         .filter_map(|field| match &field.slot {
             FieldSlot::Skip | FieldSlot::Cause => None,
-            FieldSlot::Slot { python_type, repr } => {
+            FieldSlot::Slot { slot_type, repr } => {
                 let name_text = field.ident.to_string();
-                let python_type = Ident::new(python_type, Span::call_site());
+                let slot_type = Ident::new(slot_type, Span::call_site());
                 let repr = match repr {
                     Repr::Shown => quote!(::horsies_core::error_catalog::SlotRepr::Shown),
                     Repr::Hidden => quote!(::horsies_core::error_catalog::SlotRepr::Hidden),
                 };
                 Some(quote!(::horsies_core::error_catalog::ErrorSlot::Field {
                     name: #name_text,
-                    python_type: ::horsies_core::error_catalog::SlotType::#python_type,
+                    slot_type: ::horsies_core::error_catalog::SlotType::#slot_type,
                     repr: #repr,
                 }))
             }
@@ -360,12 +360,12 @@ fn values_arm(variant: &Variant) -> syn::Result<TokenStream> {
         )),
     }
     for field in &fields {
-        let FieldSlot::Slot { python_type, .. } = &field.slot else {
+        let FieldSlot::Slot { slot_type, .. } = &field.slot else {
             continue;
         };
         let name = &field.ident;
         bound.push(name);
-        let data = match python_type.as_str() {
+        let data = match slot_type.as_str() {
             "Str" => quote!(::horsies_core::error_catalog::SlotData::Str(
                 ::core::convert::AsRef::<str>::as_ref(#name)
             )),
@@ -388,9 +388,9 @@ fn values_arm(variant: &Variant) -> syn::Result<TokenStream> {
         };
         values.push(slot_value(&name.to_string(), data));
     }
-    match (&settings.exception, cause) {
-        (ExceptionSlot::Absent, _) => {}
-        (ExceptionSlot::Exception | ExceptionSlot::ExceptionOrNoCause, Some(cause)) => {
+    match (&settings.cause_slot, cause) {
+        (CauseSlot::Absent, _) => {}
+        (CauseSlot::Required | CauseSlot::Optional, Some(cause)) => {
             bound.push(cause);
             values.push(slot_value(
                 "cause",
@@ -399,10 +399,10 @@ fn values_arm(variant: &Variant) -> syn::Result<TokenStream> {
                 )),
             ));
         }
-        (ExceptionSlot::Exception | ExceptionSlot::ExceptionOrNoCause, None) => {
+        (CauseSlot::Required | CauseSlot::Optional, None) => {
             return Err(syn::Error::new_spanned(
                 variant_ident,
-                "ErrorClassValues needs one #[error_slot(cause)] field on a variant with exception",
+                "ErrorClassValues needs one #[error_slot(cause)] field on a variant with cause = \"...\"",
             ))
         }
     }
@@ -431,13 +431,13 @@ enum FieldSlot {
     /// The typed cause of the `cause` slot.
     Cause,
     Slot {
-        python_type: String,
+        slot_type: String,
         repr: Repr,
     },
 }
 
 fn slot_of_field(attrs: &[Attribute], name: &Ident) -> syn::Result<FieldSlot> {
-    let mut python_type: Option<String> = None;
+    let mut slot_type: Option<String> = None;
     let mut repr = Repr::Shown;
     let mut skip = false;
     let mut cause = false;
@@ -454,14 +454,14 @@ fn slot_of_field(attrs: &[Attribute], name: &Ident) -> syn::Result<FieldSlot> {
                 .map(ToString::to_string)
                 .unwrap_or_default();
             match key.as_str() {
-                "python" => {
+                "slot_type" => {
                     let value: LitStr = meta.value()?.parse()?;
                     match SLOT_TYPES.contains(&value.value().as_str()) {
-                        true => python_type = Some(value.value()),
+                        true => slot_type = Some(value.value()),
                         false => {
                             return Err(syn::Error::new_spanned(
                                 &value,
-                                format!("python must be one of {SLOT_TYPES:?}"),
+                                format!("slot_type must be one of {SLOT_TYPES:?}"),
                             ))
                         }
                     }
@@ -470,27 +470,29 @@ fn slot_of_field(attrs: &[Attribute], name: &Ident) -> syn::Result<FieldSlot> {
                 "skip" => skip = true,
                 "cause" => cause = true,
                 _ => {
-                    return Err(meta.error("the error_slot keys are python, hidden, skip and cause"))
+                    return Err(
+                        meta.error("the error_slot keys are slot_type, hidden, skip and cause")
+                    )
                 }
             }
             Ok(())
         })?;
     }
-    match (seen, skip, cause, python_type) {
+    match (seen, skip, cause, slot_type) {
         (false, _, _, _) => Err(syn::Error::new_spanned(
             name,
-            "each field of an ErrorCatalog variant has #[error_slot(python = \"...\")], #[error_slot(cause)] or #[error_slot(skip)]",
+            "each field of an ErrorCatalog variant has #[error_slot(slot_type = \"...\")], #[error_slot(cause)] or #[error_slot(skip)]",
         )),
         (true, true, false, None) => Ok(FieldSlot::Skip),
         (true, false, true, None) => Ok(FieldSlot::Cause),
-        (true, false, false, Some(python_type)) => Ok(FieldSlot::Slot { python_type, repr }),
+        (true, false, false, Some(slot_type)) => Ok(FieldSlot::Slot { slot_type, repr }),
         (true, false, false, None) => Err(syn::Error::new_spanned(
             name,
-            "error_slot needs python = \"...\", cause or skip",
+            "error_slot needs slot_type = \"...\", cause or skip",
         )),
         (true, _, _, _) => Err(syn::Error::new_spanned(
             name,
-            "error_slot takes one of python, cause and skip",
+            "error_slot takes one of slot_type, cause and skip",
         )),
     }
 }
@@ -501,7 +503,7 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
     let mut code_field: Option<Ident> = None;
     let mut code_subset: Option<String> = None;
     let mut retry = Retry::ByField;
-    let mut exception = ExceptionSlot::Absent;
+    let mut cause_slot = CauseSlot::Absent;
     for attr in variant
         .attrs
         .iter()
@@ -524,22 +526,22 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
                     code_field = Some(meta.value()?.parse::<LitStr>()?.parse::<Ident>()?);
                 }
                 "code_subset" => code_subset = Some(meta.value()?.parse::<LitStr>()?.value()),
-                "exception" => {
+                "cause" => {
                     let value: LitStr = meta.value()?.parse()?;
-                    exception = match value.value().as_str() {
-                        "BaseException" => ExceptionSlot::Exception,
-                        "BaseException | NoCause" => ExceptionSlot::ExceptionOrNoCause,
+                    cause_slot = match value.value().as_str() {
+                        "required" => CauseSlot::Required,
+                        "optional" => CauseSlot::Optional,
                         _ => {
                             return Err(syn::Error::new_spanned(
                                 &value,
-                                "exception must be \"BaseException\" or \"BaseException | NoCause\"",
+                                "cause must be \"required\" or \"optional\"",
                             ))
                         }
                     };
                 }
                 _ => {
                     return Err(meta.error(
-                        "the error_class keys are class, code, code_field, code_subset, never_retryable, always_retryable and exception",
+                        "the error_class keys are class, code, code_field, code_subset, never_retryable, always_retryable and cause",
                     ))
                 }
             }
@@ -566,7 +568,7 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
         class,
         code,
         retry,
-        exception,
+        cause_slot,
     })
 }
 
@@ -656,16 +658,16 @@ mod tests {
                 /// The id holds another command.
                 #[error_class(class = "DatabasePayloadMismatch", code = "PayloadMismatch", never_retryable)]
                 PayloadMismatch {
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
                 },
                 /// A broker operation failed.
-                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "DatabaseOperationFailedCode", exception = "BaseException")]
+                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "DatabaseOperationFailedCode", cause = "required")]
                 OperationFailed {
                     code: DatabaseOperationFailedCode,
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
-                    #[error_slot(python = "Bool")]
+                    #[error_slot(slot_type = "Bool")]
                     retryable: bool,
                     #[error_slot(skip)]
                     cause: FailureCause,
@@ -673,15 +675,15 @@ mod tests {
             }
         })
         .expect("the derive accepts the enum");
-        assert!(text.contains("python_module:\"broker_errors\""), "{text}");
+        assert!(text.contains("module:\"broker_errors\""), "{text}");
         assert!(text.contains(
-            "python_class:\"DatabasePayloadMismatch\",doc:\"Theidholdsanothercommand.\",slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"PAYLOAD_MISMATCH\"},::horsies_core::error_catalog::ErrorSlot::NeverRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\",python_type:::horsies_core::error_catalog::SlotType::Str,repr:::horsies_core::error_catalog::SlotRepr::Hidden,},]"
+            "type_name:\"DatabasePayloadMismatch\",doc:\"Theidholdsanothercommand.\",slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"PAYLOAD_MISMATCH\"},::horsies_core::error_catalog::ErrorSlot::NeverRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\",slot_type:::horsies_core::error_catalog::SlotType::Str,repr:::horsies_core::error_catalog::SlotRepr::Hidden,},]"
         ), "{text}");
         assert!(text.contains(
             "ErrorSlot::CodeSubset{subset:\"DatabaseOperationFailedCode\"},::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\""
         ), "{text}");
         assert!(text.contains(
-            "ErrorSlot::Field{name:\"retryable\",python_type:::horsies_core::error_catalog::SlotType::Bool,repr:::horsies_core::error_catalog::SlotRepr::Shown,},::horsies_core::error_catalog::ErrorSlot::Exception{python_type:::horsies_core::error_catalog::ExceptionType::Exception,},]"
+            "ErrorSlot::Field{name:\"retryable\",slot_type:::horsies_core::error_catalog::SlotType::Bool,repr:::horsies_core::error_catalog::SlotRepr::Shown,},::horsies_core::error_catalog::ErrorSlot::Exception{cause_type:::horsies_core::error_catalog::ExceptionType::Exception,},]"
         ), "{text}");
         assert!(
             text.contains("Self::PayloadMismatch{..}=>DatabaseErrorCode::PayloadMismatch"),
@@ -705,7 +707,7 @@ mod tests {
                 /// The key is held.
                 #[error_class(class = "TaskSendIdempotencyKeyConflict", code = "IdempotencyKeyConflict", always_retryable)]
                 IdempotencyKeyConflict {
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
                 },
             }
@@ -728,7 +730,7 @@ mod tests {
                 enum Failure {
                     #[error_class(class = "Failed", code = "Failed", #keys)]
                     Failed {
-                        #[error_slot(python = "Str", hidden)]
+                        #[error_slot(slot_type = "Str", hidden)]
                         message: String,
                     },
                 }
@@ -761,13 +763,13 @@ mod tests {
             enum Failure {
                 #[error_class(class = "Failed", code = "Failed")]
                 Failed {
-                    #[error_slot(python = "dict")]
+                    #[error_slot(slot_type = "dict")]
                     data: String,
                 },
             }
         })
         .expect_err("the derive refuses the enum");
-        assert!(error.contains("python must be one of"), "{error}");
+        assert!(error.contains("slot_type must be one of"), "{error}");
     }
 
     #[test]
@@ -804,12 +806,12 @@ mod tests {
             #[error_catalog(module = "broker_errors", code = "DatabaseErrorCode", union = "U", union_doc = "u")]
             enum BrokerError {
                 /// A broker operation failed.
-                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "Sub", exception = "BaseException")]
+                #[error_class(class = "DatabaseOperationFailed", code_field = "code", code_subset = "Sub", cause = "required")]
                 OperationFailed {
                     code: Sub,
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
-                    #[error_slot(python = "Bool")]
+                    #[error_slot(slot_type = "Bool")]
                     retryable: bool,
                     #[error_slot(skip)]
                     detail: String,
@@ -819,11 +821,11 @@ mod tests {
                 /// The task is not cancellable.
                 #[error_class(class = "NotCancellable", code = "NotCancellable", never_retryable)]
                 NotCancellable {
-                    #[error_slot(python = "Uuid")]
+                    #[error_slot(slot_type = "Uuid")]
                     task_id: Uuid,
-                    #[error_slot(python = "UuidText")]
+                    #[error_slot(slot_type = "UuidText")]
                     workflow_id: Uuid,
-                    #[error_slot(python = "TaskStatus")]
+                    #[error_slot(slot_type = "TaskStatus")]
                     current_status: TaskStatus,
                 },
             }
@@ -858,15 +860,15 @@ mod tests {
                 /// The payload is too large.
                 #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
                 PayloadTooLarge {
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
-                    #[error_slot(python = "Int")]
+                    #[error_slot(slot_type = "Int")]
                     size_bytes: u64,
                 },
                 /// The id holds another command.
                 #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
                 PayloadMismatch {
-                    #[error_slot(python = "TaskSendPayload", hidden)]
+                    #[error_slot(slot_type = "TaskSendPayload", hidden)]
                     payload: Box<TaskSendPayload>,
                 },
             }
@@ -885,9 +887,9 @@ mod tests {
         let error = values_text(syn::parse_quote! {
             #[error_catalog(module = "m", code = "Code", union = "U", union_doc = "u")]
             enum Failure {
-                #[error_class(class = "Failed", code = "Failed", exception = "BaseException")]
+                #[error_class(class = "Failed", code = "Failed", cause = "required")]
                 Failed {
-                    #[error_slot(python = "Str", hidden)]
+                    #[error_slot(slot_type = "Str", hidden)]
                     message: String,
                     #[error_slot(skip)]
                     cause: FailureCause,
@@ -914,7 +916,7 @@ mod tests {
             derive_text(input.clone()).expect_err("ErrorCatalog refuses the enum"),
             values_text(input).expect_err("ErrorClassValues refuses the enum"),
         ] {
-            assert!(error.contains("needs exception"), "{error}");
+            assert!(error.contains("needs cause"), "{error}");
         }
     }
 
@@ -923,7 +925,7 @@ mod tests {
         let error = derive_text(syn::parse_quote! {
             #[error_catalog(module = "m", code = "Code", union = "U", union_doc = "u")]
             enum Failure {
-                #[error_class(class = "Failed", code = "Failed", exception = "BaseException")]
+                #[error_class(class = "Failed", code = "Failed", cause = "required")]
                 Failed {
                     #[error_slot(cause)]
                     first: Cause,
@@ -944,14 +946,17 @@ mod tests {
         let error = derive_text(syn::parse_quote! {
             #[error_catalog(module = "m", code = "Code", union = "U", union_doc = "u")]
             enum Failure {
-                #[error_class(class = "Failed", code = "Failed", exception = "BaseException")]
+                #[error_class(class = "Failed", code = "Failed", cause = "required")]
                 Failed {
-                    #[error_slot(python = "Str", cause)]
+                    #[error_slot(slot_type = "Str", cause)]
                     cause: Cause,
                 },
             }
         })
         .expect_err("the derive refuses the enum");
-        assert!(error.contains("one of python, cause and skip"), "{error}");
+        assert!(
+            error.contains("one of slot_type, cause and skip"),
+            "{error}"
+        );
     }
 }

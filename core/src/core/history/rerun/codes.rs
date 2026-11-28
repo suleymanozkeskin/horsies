@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "history", base = "str_enum")]
+#[code_catalog(module = "history", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RerunErrorCode {
     /// The handle could not connect, could not install the schema, or could

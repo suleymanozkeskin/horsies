@@ -751,7 +751,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
 
-    use horsies_core::manifest_schema::{ChoiceValue, MemberDefault, PythonItem, PythonValue};
+    use horsies_core::manifest_schema::{
+        ChoiceValue, ItemType as CoreItemType, MemberDefault, ValueType as CoreValueType,
+    };
 
     use super::*;
     use crate::ts_text::{GENERATED_HEADER, MAX_SAFE_INTEGER};
@@ -775,7 +777,7 @@ mod tests {
         max: MAX_SAFE_INTEGER as u64,
     };
 
-    fn field(name: &'static str, value: PythonValue) -> ManifestField {
+    fn field(name: &'static str, value: CoreValueType) -> ManifestField {
         ManifestField {
             name,
             doc: "",
@@ -785,7 +787,7 @@ mod tests {
     }
 
     const MODE: ManifestType = ManifestType {
-        python_name: "Mode",
+        type_name: "Mode",
         doc: "",
         shape: ManifestShape::Choice {
             values: &[
@@ -802,24 +804,24 @@ mod tests {
     };
 
     const LIMIT: ManifestType = ManifestType {
-        python_name: "Limit",
+        type_name: "Limit",
         doc: "",
         shape: ManifestShape::Tagged {
             tag_field: "kind",
             variants: &[
                 TaggedVariant {
-                    python_class: "LimitBytes",
+                    type_name: "LimitBytes",
                     tag_value: "BYTES",
                     doc: "",
                     fields: VariantFields::Own(&[ManifestField {
                         name: "bytes",
                         doc: "",
-                        value: PythonValue::Int(BYTES),
+                        value: CoreValueType::Int(BYTES),
                         default: MemberDefault::NoDefault,
                     }]),
                 },
                 TaggedVariant {
-                    python_class: "LimitNoLimit",
+                    type_name: "LimitNoLimit",
                     tag_value: "NO_LIMIT",
                     doc: "",
                     fields: VariantFields::Own(&[]),
@@ -829,20 +831,20 @@ mod tests {
     };
 
     const QUEUE: ManifestType = ManifestType {
-        python_name: "Queue",
+        type_name: "Queue",
         doc: "",
         shape: ManifestShape::Record {
             fields: &[
                 ManifestField {
                     name: "name",
                     doc: "The doc is not rendered.",
-                    value: PythonValue::Str,
+                    value: CoreValueType::Str,
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "priority",
                     doc: "",
-                    value: PythonValue::Int(PRIORITY),
+                    value: CoreValueType::Int(PRIORITY),
                     default: MemberDefault::NoDefault,
                 },
             ],
@@ -850,50 +852,50 @@ mod tests {
     };
 
     const ROOT: ManifestType = ManifestType {
-        python_name: "Root",
+        type_name: "Root",
         doc: "",
         shape: ManifestShape::Record {
             fields: &[
                 ManifestField {
                     name: "manifest_version",
                     doc: "",
-                    value: PythonValue::Int(PRIORITY),
+                    value: CoreValueType::Int(PRIORITY),
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "mode",
                     doc: "",
-                    value: PythonValue::Named("Mode"),
+                    value: CoreValueType::Named("Mode"),
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "enabled",
                     doc: "",
-                    value: PythonValue::Bool,
+                    value: CoreValueType::Bool,
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "limit",
                     doc: "",
-                    value: PythonValue::Named("Limit"),
+                    value: CoreValueType::Named("Limit"),
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "queues",
                     doc: "",
-                    value: PythonValue::List(PythonItem::Named("Queue")),
+                    value: CoreValueType::List(CoreItemType::Named("Queue")),
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "names",
                     doc: "",
-                    value: PythonValue::List(PythonItem::Str),
+                    value: CoreValueType::List(CoreItemType::Str),
                     default: MemberDefault::NoDefault,
                 },
                 ManifestField {
                     name: "priorities",
                     doc: "",
-                    value: PythonValue::List(PythonItem::Int(PRIORITY)),
+                    value: CoreValueType::List(CoreItemType::Int(PRIORITY)),
                     default: MemberDefault::NoDefault,
                 },
             ],
@@ -1076,13 +1078,13 @@ mod tests {
             reader: "",
             reader_short: "",
             types: &[ManifestType {
-                python_name: "Root",
+                type_name: "Root",
                 doc: "",
                 shape: ManifestShape::Record {
                     fields: &[ManifestField {
                         name: "missing",
                         doc: "",
-                        value: PythonValue::Named("Missing"),
+                        value: CoreValueType::Named("Missing"),
                         default: MemberDefault::NoDefault,
                     }],
                 },
@@ -1100,13 +1102,16 @@ mod tests {
     #[test]
     fn a_map_field_is_a_readonly_map_from_text_keys() {
         assert_eq!(
-            field_type_text(&field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))),
+            field_type_text(&field(
+                "ages",
+                CoreValueType::Map(CoreItemType::Int(PRIORITY))
+            )),
             "ReadonlyMap<string, number>"
         );
         assert_eq!(
             field_type_text(&field(
                 "limits",
-                PythonValue::Map(PythonItem::Named("Limit"))
+                CoreValueType::Map(CoreItemType::Named("Limit"))
             )),
             "ReadonlyMap<string, Limit>"
         );
@@ -1118,7 +1123,7 @@ mod tests {
             member_entry(
                 &SAMPLE,
                 "Root",
-                &field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))
+                &field("ages", CoreValueType::Map(CoreItemType::Int(PRIORITY)))
             ),
             "[\"ages\", new Map(Array.from(value.ages, ([key, item]) => \
              [key, integerToWire(item, \"Root.ages\")] as const))]"
@@ -1127,7 +1132,7 @@ mod tests {
             member_entry(
                 &SAMPLE,
                 "Root",
-                &field("limits", PythonValue::Map(PythonItem::Named("Limit")))
+                &field("limits", CoreValueType::Map(CoreItemType::Named("Limit")))
             ),
             "[\"limits\", new Map(Array.from(value.limits, ([key, item]) => \
              [key, limitToWire(item)] as const))]"
@@ -1137,9 +1142,9 @@ mod tests {
     #[test]
     fn a_map_of_items_that_are_their_own_wire_value_is_the_wire_value() {
         for (name, value) in [
-            ("classes", PythonValue::Map(PythonItem::Str)),
-            ("modes", PythonValue::Map(PythonItem::Named("Mode"))),
-            ("sizes", PythonValue::Map(PythonItem::Int(BYTES))),
+            ("classes", CoreValueType::Map(CoreItemType::Str)),
+            ("modes", CoreValueType::Map(CoreItemType::Named("Mode"))),
+            ("sizes", CoreValueType::Map(CoreItemType::Int(BYTES))),
         ] {
             assert_eq!(
                 member_entry(&SAMPLE, "Root", &field(name, value)),
@@ -1151,13 +1156,13 @@ mod tests {
     #[test]
     fn an_optional_field_is_its_item_type_or_null() {
         assert_eq!(
-            field_type_text(&field("note", PythonValue::Optional(PythonItem::Str))),
+            field_type_text(&field("note", CoreValueType::Optional(CoreItemType::Str))),
             "string | null"
         );
         assert_eq!(
             field_type_text(&field(
                 "seconds",
-                PythonValue::Optional(PythonItem::Int(PRIORITY))
+                CoreValueType::Optional(CoreItemType::Int(PRIORITY))
             )),
             "number | null"
         );
@@ -1169,7 +1174,10 @@ mod tests {
             member_entry(
                 &SAMPLE,
                 "Root",
-                &field("seconds", PythonValue::Optional(PythonItem::Int(PRIORITY)))
+                &field(
+                    "seconds",
+                    CoreValueType::Optional(CoreItemType::Int(PRIORITY))
+                )
             ),
             "[\"seconds\", value.seconds === null ? null : \
              integerToWire(value.seconds, \"Root.seconds\")]"
@@ -1178,7 +1186,7 @@ mod tests {
             member_entry(
                 &SAMPLE,
                 "Root",
-                &field("note", PythonValue::Optional(PythonItem::Str))
+                &field("note", CoreValueType::Optional(CoreItemType::Str))
             ),
             "[\"note\", value.note]"
         );
@@ -1187,18 +1195,18 @@ mod tests {
     #[test]
     fn a_time_of_day_is_a_plain_time_whose_wire_value_is_its_text() {
         assert_eq!(
-            field_type_text(&field("at", PythonValue::TimeOfDay)),
+            field_type_text(&field("at", CoreValueType::TimeOfDay)),
             "Temporal.PlainTime"
         );
         assert_eq!(
-            member_entry(&SAMPLE, "Root", &field("at", PythonValue::TimeOfDay)),
+            member_entry(&SAMPLE, "Root", &field("at", CoreValueType::TimeOfDay)),
             "[\"at\", value.at.toString()]"
         );
         assert_eq!(
             member_entry(
                 &SAMPLE,
                 "Root",
-                &field("times", PythonValue::List(PythonItem::TimeOfDay))
+                &field("times", CoreValueType::List(CoreItemType::TimeOfDay))
             ),
             "[\"times\", value.times.map((item) => item.toString())]"
         );
@@ -1206,7 +1214,7 @@ mod tests {
 
     #[test]
     fn a_length_of_time_is_a_duration_whose_wire_value_is_its_text() {
-        let every = PythonValue::Duration(EVERY_BOUND);
+        let every = CoreValueType::Duration(EVERY_BOUND);
         assert_eq!(field_type_text(&field("every", every)), "Temporal.Duration");
         assert_eq!(
             member_entry(&SAMPLE, "Root", &field("every", every)),
@@ -1221,20 +1229,20 @@ mod tests {
     };
 
     const DAILY: ManifestType = ManifestType {
-        python_name: "Daily",
+        type_name: "Daily",
         doc: "",
         shape: ManifestShape::Record {
             fields: &[ManifestField {
                 name: "time",
                 doc: "",
-                value: PythonValue::TimeOfDay,
+                value: CoreValueType::TimeOfDay,
                 default: MemberDefault::NoDefault,
             }],
         },
     };
 
     const PATTERN_DAILY: TaggedVariant = TaggedVariant {
-        python_class: "PatternDaily",
+        type_name: "PatternDaily",
         tag_value: "daily",
         doc: "",
         fields: VariantFields::OfRecord("Daily"),
@@ -1249,7 +1257,7 @@ mod tests {
         types: &[
             DAILY,
             ManifestType {
-                python_name: "Pattern",
+                type_name: "Pattern",
                 doc: "",
                 shape: ManifestShape::Tagged {
                     tag_field: "type",
@@ -1284,7 +1292,7 @@ mod tests {
     )]
     fn a_variant_that_holds_the_fields_of_a_choice_is_a_defect() {
         let variant = TaggedVariant {
-            python_class: "PatternMode",
+            type_name: "PatternMode",
             tag_value: "mode",
             doc: "",
             fields: VariantFields::OfRecord("Mode"),
@@ -1297,7 +1305,7 @@ mod tests {
         let second = ManifestField {
             name: "second",
             doc: "",
-            value: PythonValue::Int(PRIORITY),
+            value: CoreValueType::Int(PRIORITY),
             default: MemberDefault::Int(7),
         };
         assert_eq!(
@@ -1307,7 +1315,7 @@ mod tests {
         let step = ManifestField {
             name: "max_step",
             doc: "",
-            value: PythonValue::Int(BYTES),
+            value: CoreValueType::Int(BYTES),
             default: MemberDefault::Int(10_000),
         };
         assert_eq!(
@@ -1322,7 +1330,7 @@ mod tests {
     #[test]
     fn a_field_without_a_member_default_has_no_constant() {
         assert_eq!(
-            member_default_constant("Root", &field("enabled", PythonValue::Bool)),
+            member_default_constant("Root", &field("enabled", CoreValueType::Bool)),
             None
         );
     }
@@ -1335,7 +1343,7 @@ mod tests {
         let note = ManifestField {
             name: "note",
             doc: "",
-            value: PythonValue::Str,
+            value: CoreValueType::Str,
             default: MemberDefault::Int(1),
         };
         let _refused = member_default_constant("Root", &note);
@@ -1350,38 +1358,38 @@ mod tests {
             reader_short: "",
             types: &[
                 ManifestType {
-                    python_name: "Term",
+                    type_name: "Term",
                     doc: "",
                     shape: ManifestShape::Tagged {
                         tag_field: "kind",
                         variants: &[TaggedVariant {
-                            python_class: "TermRange",
+                            type_name: "TermRange",
                             tag_value: "range",
                             doc: "",
                             fields: VariantFields::Own(&[ManifestField {
                                 name: "step",
                                 doc: "",
-                                value: PythonValue::Int(PRIORITY),
+                                value: CoreValueType::Int(PRIORITY),
                                 default: MemberDefault::Int(1),
                             }]),
                         }],
                     },
                 },
                 ManifestType {
-                    python_name: "Root",
+                    type_name: "Root",
                     doc: "",
                     shape: ManifestShape::Record {
                         fields: &[
                             ManifestField {
                                 name: "term",
                                 doc: "",
-                                value: PythonValue::Named("Term"),
+                                value: CoreValueType::Named("Term"),
                                 default: MemberDefault::NoDefault,
                             },
                             ManifestField {
                                 name: "second",
                                 doc: "",
-                                value: PythonValue::Int(PRIORITY),
+                                value: CoreValueType::Int(PRIORITY),
                                 default: MemberDefault::Int(0),
                             },
                         ],

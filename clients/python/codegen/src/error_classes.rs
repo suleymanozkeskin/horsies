@@ -45,24 +45,22 @@ pub struct ErrorModule {
 pub fn error_modules() -> BTreeMap<&'static str, ErrorModule> {
     let mut modules: BTreeMap<&'static str, ErrorModule> = BTreeMap::new();
     for catalog in ERROR_CATALOGS {
-        module_entry(&mut modules, catalog.python_module)
+        module_entry(&mut modules, catalog.module)
             .catalogs
             .push(*catalog);
     }
     for subset in code_subsets() {
-        module_entry(&mut modules, subset.python_module)
+        module_entry(&mut modules, subset.module)
             .subsets
             .push(subset);
     }
     for record in ERROR_RECORDS {
-        module_entry(&mut modules, record.python_module)
+        module_entry(&mut modules, record.module)
             .records
             .push(*record);
     }
     for union in ERROR_UNIONS {
-        module_entry(&mut modules, union.python_module)
-            .unions
-            .push(*union);
+        module_entry(&mut modules, union.module).unions.push(*union);
     }
     modules
 }
@@ -84,7 +82,7 @@ fn module_entry<'a>(
 pub fn exception_modules() -> BTreeMap<&'static str, Vec<ExceptionClass>> {
     let mut modules: BTreeMap<&'static str, Vec<ExceptionClass>> = BTreeMap::new();
     for class in EXCEPTION_CLASSES {
-        modules.entry(class.python_module).or_default().push(*class);
+        modules.entry(class.module).or_default().push(*class);
     }
     modules
 }
@@ -92,7 +90,7 @@ pub fn exception_modules() -> BTreeMap<&'static str, Vec<ExceptionClass>> {
 /// The text of one exception-class module: an `Exception` subclass per
 /// class, whose body is its doc. It imports nothing.
 pub fn render_exception_module(module: &str, classes: &[ExceptionClass]) -> String {
-    let names: Vec<&str> = classes.iter().map(|class| class.python_class).collect();
+    let names: Vec<&str> = classes.iter().map(|class| class.type_name).collect();
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str(&format!(
         "\"\"\"Exception classes of the `{module}` area: {}.\"\"\"\n",
@@ -109,7 +107,7 @@ pub fn render_exception_module(module: &str, classes: &[ExceptionClass]) -> Stri
 
 /// One `Exception` subclass. A class without a doc has `pass` as its body.
 fn render_exception_class(class: &ExceptionClass) -> String {
-    let mut text = format!("class {}(Exception):\n", class.python_class);
+    let mut text = format!("class {}(Exception):\n", class.type_name);
     match docstring(class.doc, "    ") {
         Some(doc) => text.push_str(&doc),
         None => text.push_str("    pass\n"),
@@ -147,8 +145,8 @@ pub fn render_error_module(module: &str, contents: &ErrorModule) -> String {
     ));
     text.push_str(&render_imports(contents, &classes));
     let mut exported: Vec<&str> = contents.subsets.iter().map(|subset| subset.name).collect();
-    exported.extend(contents.records.iter().map(|record| record.python_class));
-    exported.extend(classes.iter().map(|class| class.python_class));
+    exported.extend(contents.records.iter().map(|record| record.type_name));
+    exported.extend(classes.iter().map(|class| class.type_name));
     exported.extend(union_names.iter().copied());
     exported.extend(contents.unions.iter().map(|union| union.name));
     let exported: Vec<String> = exported.into_iter().map(string_literal).collect();
@@ -172,7 +170,7 @@ pub fn render_error_module(module: &str, contents: &ErrorModule) -> String {
         let members: Vec<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         text.push_str(&render_union(catalog.union, catalog.union_doc, &members));
     }
@@ -195,7 +193,7 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
         matches!(
             slot,
             ErrorSlot::Field {
-                python_type: SlotType::Uuid,
+                slot_type: SlotType::Uuid,
                 ..
             }
         )
@@ -204,7 +202,7 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
         matches!(
             slot,
             ErrorSlot::Field {
-                python_type: SlotType::TaskStatus,
+                slot_type: SlotType::TaskStatus,
                 ..
             }
         )
@@ -219,16 +217,13 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
         .collect();
     let uses_datetime = record_fields.iter().any(|field| {
         matches!(
-            field.python_type,
+            field.field_type,
             RecordFieldType::DateTime | RecordFieldType::OptionalDateTime
         )
     });
-    let uses_retention_key = record_fields.iter().any(|field| {
-        matches!(
-            field.python_type,
-            RecordFieldType::OptionalRetentionClassKey
-        )
-    });
+    let uses_retention_key = record_fields
+        .iter()
+        .any(|field| matches!(field.field_type, RecordFieldType::OptionalRetentionClassKey));
     let uses_default_retention_key = record_fields
         .iter()
         .any(|field| field.default == FieldDefault::DefaultRetentionClassKey);
@@ -248,8 +243,8 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
     for catalog in &contents.catalogs {
         add_import(
             &mut catalog_imports,
-            catalog.code_catalog.python_module,
-            catalog.code_catalog.python_class,
+            catalog.code_catalog.module,
+            catalog.code_catalog.type_name,
         );
     }
     if uses_status {
@@ -261,14 +256,14 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
     if uses_retention_key {
         add_import(
             &mut catalog_imports,
-            RETENTION_CLASS_KEY.python_module,
+            RETENTION_CLASS_KEY.module,
             RETENTION_CLASS_KEY.name,
         );
     }
     if uses_default_retention_key {
         add_import(
             &mut catalog_imports,
-            RETENTION_CLASS_KEY.python_module,
+            RETENTION_CLASS_KEY.module,
             DEFAULT_RETENTION_CLASS.name,
         );
     }
@@ -297,7 +292,7 @@ fn render_subset(subset: &CodeSubset) -> String {
     for member in &subset.members {
         text.push_str(&format!(
             "    {}.{member},\n",
-            subset.code_catalog.python_class
+            subset.code_catalog.type_name
         ));
     }
     text.push_str("]\n");
@@ -313,7 +308,7 @@ const FAILURE_CAUSE_DOC: &str = "The exception of the cause, or ``NoCause()`` wh
 fn render_class(class: &ErrorClass, code: &CodeCatalog) -> String {
     let mut text = format!(
         "@dataclass(slots=True, frozen=True)\nclass {}:\n",
-        class.python_class
+        class.type_name
     );
     if let Some(doc) = docstring(class.doc, "    ") {
         text.push_str(&doc);
@@ -342,20 +337,20 @@ fn render_slot(slot: &ErrorSlot, code: &CodeCatalog) -> String {
     match slot {
         ErrorSlot::CodeMember { member } => format!(
             "code: ClassVar[{class}] = {class}.{member}",
-            class = code.python_class
+            class = code.type_name
         ),
         ErrorSlot::CodeSubset { subset } => format!("code: {subset}"),
         ErrorSlot::NeverRetryable => "retryable: ClassVar[bool] = False".to_owned(),
         ErrorSlot::AlwaysRetryable => "retryable: ClassVar[bool] = True".to_owned(),
         ErrorSlot::Field {
             name,
-            python_type,
+            slot_type,
             repr,
         } => match repr {
-            SlotRepr::Shown => format!("{name}: {}", annotation(*python_type)),
-            SlotRepr::Hidden => format!("{name}: {} = field(repr=False)", annotation(*python_type)),
+            SlotRepr::Shown => format!("{name}: {}", annotation(*slot_type)),
+            SlotRepr::Hidden => format!("{name}: {} = field(repr=False)", annotation(*slot_type)),
         },
-        ErrorSlot::Exception { python_type } => match python_type {
+        ErrorSlot::Exception { cause_type } => match cause_type {
             ExceptionType::Exception => "cause: BaseException = field(repr=False)".to_owned(),
             ExceptionType::ExceptionOrNoCause => {
                 "cause: BaseException | NoCause = field(repr=False)".to_owned()
@@ -365,8 +360,8 @@ fn render_slot(slot: &ErrorSlot, code: &CodeCatalog) -> String {
 }
 
 /// The annotation text of a field type.
-fn annotation(python_type: SlotType) -> &'static str {
-    match python_type {
+fn annotation(slot_type: SlotType) -> &'static str {
+    match slot_type {
         SlotType::Str | SlotType::UuidText => "str",
         SlotType::Bool => "bool",
         SlotType::Int => "int",
@@ -381,7 +376,7 @@ fn annotation(python_type: SlotType) -> &'static str {
 fn render_record(record: &RecordClass) -> String {
     let mut text = format!(
         "@dataclass(slots=True, frozen=True)\nclass {}:\n",
-        record.python_class
+        record.type_name
     );
     if let Some(doc) = docstring(record.doc, "    ") {
         text.push_str(&doc);
@@ -391,7 +386,7 @@ fn render_record(record: &RecordClass) -> String {
         for line in field.note.lines().filter(|line| !line.trim().is_empty()) {
             text.push_str(&format!("    # {}\n", line.trim()));
         }
-        let annotation = record_annotation(field.python_type);
+        let annotation = record_annotation(field.field_type);
         match field.default {
             FieldDefault::Required => {
                 text.push_str(&format!("    {}: {annotation}\n", field.name));
@@ -409,8 +404,8 @@ fn render_record(record: &RecordClass) -> String {
 }
 
 /// The annotation text of a record field type.
-fn record_annotation(python_type: RecordFieldType) -> &'static str {
-    match python_type {
+fn record_annotation(field_type: RecordFieldType) -> &'static str {
+    match field_type {
         RecordFieldType::Str => "str",
         RecordFieldType::Int => "int",
         RecordFieldType::DateTime => "datetime",
@@ -478,14 +473,14 @@ fn render_union(name: &str, doc: &str, members: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::catalog::{CallForms, CatalogMember, PythonEnumBase, TerminalStates};
+    use horsies_core::catalog::{CallForms, CatalogMember, EnumValues, TerminalStates};
 
     use super::*;
 
     const CODES: CodeCatalog = CodeCatalog {
-        python_module: "broker",
-        python_class: "DatabaseErrorCode",
-        python_base: PythonEnumBase::StrEnum,
+        module: "broker",
+        type_name: "DatabaseErrorCode",
+        values: EnumValues::EqualText,
         doc: "",
         members: &[CatalogMember {
             name: "PAYLOAD_MISMATCH",
@@ -497,7 +492,7 @@ mod tests {
     };
 
     const MISMATCH: ErrorClass = ErrorClass {
-        python_class: "DatabasePayloadMismatch",
+        type_name: "DatabasePayloadMismatch",
         doc: "Nothing was written.",
         slots: &[
             ErrorSlot::CodeMember {
@@ -506,16 +501,16 @@ mod tests {
             ErrorSlot::NeverRetryable,
             ErrorSlot::Field {
                 name: "message",
-                python_type: SlotType::Str,
+                slot_type: SlotType::Str,
                 repr: SlotRepr::Hidden,
             },
             ErrorSlot::Field {
                 name: "owner_task_id",
-                python_type: SlotType::Uuid,
+                slot_type: SlotType::Uuid,
                 repr: SlotRepr::Shown,
             },
             ErrorSlot::Exception {
-                python_type: ExceptionType::ExceptionOrNoCause,
+                cause_type: ExceptionType::ExceptionOrNoCause,
             },
         ],
     };
@@ -531,7 +526,7 @@ mod tests {
     #[test]
     fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
         let class = ErrorClass {
-            python_class: "Sample",
+            type_name: "Sample",
             doc: "The state may clear.",
             slots: &[
                 ErrorSlot::CodeMember {
@@ -561,7 +556,7 @@ mod tests {
     #[test]
     fn a_subset_lists_its_members_on_the_code_class() {
         let subset = CodeSubset {
-            python_module: "broker_errors",
+            module: "broker_errors",
             name: "DatabaseOperationFailedCode",
             doc: "The operation codes.",
             code_catalog: CODES,
@@ -685,8 +680,8 @@ mod tests {
     #[test]
     fn a_class_without_a_doc_has_pass_as_its_body() {
         let class = ExceptionClass {
-            python_module: "probe_errors",
-            python_class: "ProbeError",
+            module: "probe_errors",
+            type_name: "ProbeError",
             doc: "",
         };
         assert_eq!(

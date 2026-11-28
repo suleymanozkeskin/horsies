@@ -20,9 +20,9 @@ class HorsiesErrorCode(StrEnum):
     HRS-023 and HRS-106 are retired and are not used again.
 
     This enum is the one list of the codes of both clients. `horsies-codegen`
-    renders it as `horsies._catalog.error_codes.HorsiesErrorCode`, the Python
-    `HorsiesErrorCode`: the member name is the variant name in SCREAMING_SNAKE_CASE,
-    the value is the `HRS-nnn` code, and the docstring is the variant doc.
+    renders it for each client: the member name is the variant name in
+    SCREAMING_SNAKE_CASE, the value is the `HRS-nnn` code, and the member doc
+    is the variant doc.
     """
 
     WORKFLOW_NO_NAME = 'HRS-001'
@@ -192,7 +192,7 @@ class HorsiesErrorCode(StrEnum):
     """`execution=SHARED_ASYNC` on a function defined with `def`."""
 
     TASK_SHARED_THREAD_REQUIRES_DEF = 'HRS-108'
-    """`execution=SHARED_THREAD` on a function defined with `async def`."""
+    """`execution=SHARED_THREAD` on an async function."""
 
     TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT = 'HRS-109'
     """`SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms`."""
@@ -293,16 +293,16 @@ class HorsiesErrorCode(StrEnum):
 
     EVENT_HANDLER_UNKNOWN_EVENT_TYPE = 'HRS-222'
     """An event handler registration names a value that is not an event
-    type. Only the Python client refuses with it: the Rust registration
-    takes the event type as a type parameter.
+    type. Only a client that reads the event type from an annotation refuses
+    with it: the Rust registration takes the event type as a type parameter.
     """
 
     EVENT_HANDLER_INVALID_SIGNATURE = 'HRS-223'
     """An event handler cannot take the events of its type: a value that is
     not a function or a bound method, a generator function, a function
     that does not take a call with one event, or an event parameter
-    annotated with another event type. Only the Python client refuses
-    with it: the Rust compiler checks the handler.
+    annotated with another event type. Only a client that reads the handler
+    at run time refuses with it: the Rust compiler checks the handler.
     """
 
     EVENT_HANDLER_DUPLICATE_NAME = 'HRS-224'
@@ -310,7 +310,8 @@ class HorsiesErrorCode(StrEnum):
 
     EVENT_HANDLER_INVALID_NAME = 'HRS-225'
     """The name of an event handler is empty, longer than 255 characters, or
-    `(unknown)`; in Python, also a function with no module name.
+    `(unknown)`; for a handler read at run time, also a function with no
+    module name.
     """
 
     EVENT_HANDLER_LIMIT = 'HRS-226'

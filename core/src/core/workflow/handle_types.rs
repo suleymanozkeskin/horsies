@@ -5,8 +5,6 @@ use crate::broker::BrokerError;
 use crate::failure_cause::FailureCause;
 use crate::workflow_engine::error::WorkflowError;
 ///
-/// Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
-///
 /// Two error strategies by return type:
 ///
 /// 1. **Wrap strategy** — methods that do not read an outcome
@@ -15,14 +13,14 @@ use crate::workflow_engine::error::WorkflowError;
 ///
 /// 2. **Read strategy** — the reads of an outcome (`WorkflowHandle::get`,
 ///    `WorkflowHandle::result_for`) return the outcome or a read error:
-///    Python `ReadResult`, Rust `Result<TaskOutcome, WorkflowReadError>`. A
+///    Rust `Result<TaskOutcome, WorkflowReadError>`. A
 ///    failed read is the read error (`DATABASE_ERROR` for an infrastructure or
 ///    query failure), apart from the outcome of the workflow or the node,
 ///    instead of `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
-#[code_catalog(module = "workflow_handle", base = "str_enum")]
+#[code_catalog(module = "workflow_handle", values = "equal_text")]
 pub enum WorkflowHandleErrorCode {
     /// Workflow ID does not exist in the database.
     WorkflowNotFound,
@@ -149,9 +147,9 @@ pub enum WorkflowHandleError {
         never_retryable
     )]
     NotFound {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
     },
     /// The operation failed with a database or driver error.
@@ -163,14 +161,14 @@ pub enum WorkflowHandleError {
     #[error_class(
         class = "WorkflowHandleDatabaseOperationFailed",
         code = "DatabaseOperationFailed",
-        exception = "BaseException"
+        cause = "required"
     )]
     DatabaseOperationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
         /// The failed connect, client family check, statement or child
         /// build.
@@ -188,12 +186,12 @@ pub enum WorkflowHandleError {
         class = "WorkflowHandleStoredDataInvalid",
         code = "StoredDataInvalid",
         never_retryable,
-        exception = "BaseException"
+        cause = "required"
     )]
     StoredDataInvalid {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
         /// The stored value that does not parse.
         #[error_slot(cause)]
@@ -214,12 +212,12 @@ pub enum WorkflowHandleError {
         class = "WorkflowHandleResumeRecoveryFailed",
         code = "ResumeRecoveryFailed",
         never_retryable,
-        exception = "BaseException"
+        cause = "required"
     )]
     ResumeRecoveryFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
         /// The failure of the work after the commit.
         #[error_slot(cause)]
@@ -227,7 +225,7 @@ pub enum WorkflowHandleError {
     },
     /// A sync method was called on a thread that runs an event loop. Nothing ran.
     ///
-    /// Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    /// Its wait would stall that loop. Call the async form; a sync call on
     /// that thread returns this error again.
     #[error_class(
         class = "WorkflowHandleAsyncContext",
@@ -235,9 +233,9 @@ pub enum WorkflowHandleError {
         never_retryable
     )]
     AsyncContext {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
     },
 }

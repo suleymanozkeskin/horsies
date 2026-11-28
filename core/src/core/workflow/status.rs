@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[code_catalog(
     module = "status",
-    base = "str_enum",
+    values = "equal_text",
     terminal_states = "WORKFLOW_TERMINAL_STATES"
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -114,7 +114,7 @@ impl std::fmt::Display for WorkflowStatus {
 )]
 #[code_catalog(
     module = "status",
-    base = "str_enum",
+    values = "equal_text",
     terminal_states = "WORKFLOW_NODE_TERMINAL_STATES"
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

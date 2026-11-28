@@ -18,12 +18,11 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 ///
 /// Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 ///
-/// Members, wire values and order are Python's (`clients/python/horsies/core/models/tasks.py`), plus
-/// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
+/// `WORKFLOW_START_INCOMPLETE` is held by both catalogs.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "task_codes", base = "str_enum")]
+#[code_catalog(module = "task_codes", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OperationalCode {
     /// The task panicked or raised an error that no exception mapper turned into a task error.
@@ -79,7 +78,7 @@ impl OperationalCode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "task_codes", base = "str_enum")]
+#[code_catalog(module = "task_codes", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ContractCode {
     ReturnTypeMismatch,
@@ -110,7 +109,7 @@ impl ContractCode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "task_codes", base = "str_enum")]
+#[code_catalog(module = "task_codes", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RetrievalCode {
     WaitTimeout,
@@ -161,7 +160,7 @@ impl RetrievalCode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "task_codes", base = "str_enum")]
+#[code_catalog(module = "task_codes", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OutcomeCode {
     TaskCancelled,

@@ -2,7 +2,7 @@
 //! one test per outcome of the call-form rule and of the model checks, and
 //! assertions on the real model.
 
-use horsies_core::catalog::{PythonEnumBase, TerminalStates};
+use horsies_core::catalog::{EnumValues, TerminalStates};
 use horsies_core::error_catalog::{ErrorSlot, ExceptionType, FieldDefault};
 
 use super::*;
@@ -27,9 +27,9 @@ const CODE_MEMBERS: &[CatalogMember] = &[
 ];
 
 const CODES: CodeCatalog = CodeCatalog {
-    python_module: "probe",
-    python_class: "ProbeErrorCode",
-    python_base: PythonEnumBase::StrEnum,
+    module: "probe",
+    type_name: "ProbeErrorCode",
+    values: EnumValues::EqualText,
     doc: "",
     members: CODE_MEMBERS,
     terminal_states: TerminalStates::NotALifecycle,
@@ -37,12 +37,12 @@ const CODES: CodeCatalog = CodeCatalog {
 
 const MESSAGE: ErrorSlot = ErrorSlot::Field {
     name: "message",
-    python_type: SlotType::Str,
+    slot_type: SlotType::Str,
     repr: SlotRepr::Hidden,
 };
 
 const ENQUEUE_FAILED: ErrorClass = ErrorClass {
-    python_class: "ProbeEnqueueFailed",
+    type_name: "ProbeEnqueueFailed",
     doc: "",
     slots: &[
         ErrorSlot::CodeMember {
@@ -50,23 +50,23 @@ const ENQUEUE_FAILED: ErrorClass = ErrorClass {
         },
         ErrorSlot::Field {
             name: "task_id",
-            python_type: SlotType::Uuid,
+            slot_type: SlotType::Uuid,
             repr: SlotRepr::Shown,
         },
         MESSAGE,
         ErrorSlot::Field {
             name: "retryable",
-            python_type: SlotType::Bool,
+            slot_type: SlotType::Bool,
             repr: SlotRepr::Shown,
         },
         ErrorSlot::Exception {
-            python_type: ExceptionType::ExceptionOrNoCause,
+            cause_type: ExceptionType::ExceptionOrNoCause,
         },
     ],
 };
 
 const PAYLOAD_MISMATCH: ErrorClass = ErrorClass {
-    python_class: "ProbePayloadMismatch",
+    type_name: "ProbePayloadMismatch",
     doc: "",
     slots: &[
         ErrorSlot::CodeMember {
@@ -76,14 +76,14 @@ const PAYLOAD_MISMATCH: ErrorClass = ErrorClass {
         MESSAGE,
         ErrorSlot::Field {
             name: "size_bytes",
-            python_type: SlotType::Int,
+            slot_type: SlotType::Int,
             repr: SlotRepr::Shown,
         },
     ],
 };
 
 const OPERATION_FAILED: ErrorClass = ErrorClass {
-    python_class: "ProbeOperationFailed",
+    type_name: "ProbeOperationFailed",
     doc: "",
     slots: &[
         ErrorSlot::CodeSubset {
@@ -92,17 +92,17 @@ const OPERATION_FAILED: ErrorClass = ErrorClass {
         MESSAGE,
         ErrorSlot::Field {
             name: "current_status",
-            python_type: SlotType::TaskStatus,
+            slot_type: SlotType::TaskStatus,
             repr: SlotRepr::Shown,
         },
         ErrorSlot::Exception {
-            python_type: ExceptionType::Exception,
+            cause_type: ExceptionType::Exception,
         },
     ],
 };
 
 const ASYNC_CONTEXT: ErrorClass = ErrorClass {
-    python_class: "ProbeAsyncContext",
+    type_name: "ProbeAsyncContext",
     doc: "",
     slots: &[
         ErrorSlot::CodeMember {
@@ -114,7 +114,7 @@ const ASYNC_CONTEXT: ErrorClass = ErrorClass {
 };
 
 const CATALOG: ErrorCatalog = ErrorCatalog {
-    python_module: "probe_errors",
+    module: "probe_errors",
     code_catalog: CODES,
     union: "ProbeCoreError",
     union_doc: "",
@@ -127,7 +127,7 @@ const CATALOG: ErrorCatalog = ErrorCatalog {
 };
 
 const UNION: ErrorUnion = ErrorUnion {
-    python_module: "probe_errors",
+    module: "probe_errors",
     name: "ProbeEnqueueError",
     doc: "",
     members: &[
@@ -139,7 +139,7 @@ const UNION: ErrorUnion = ErrorUnion {
 
 fn subset(name: &'static str, members: Vec<&'static str>) -> CodeSubset {
     CodeSubset {
-        python_module: "probe_errors",
+        module: "probe_errors",
         name,
         doc: "",
         code_catalog: CODES,
@@ -163,7 +163,7 @@ fn sample_module() -> ErrorModule {
 /// A sample class with `slots`, its code slot first.
 fn subset_class(slots: &'static [ErrorSlot]) -> ErrorClass {
     ErrorClass {
-        python_class: "ProbeSubsetClass",
+        type_name: "ProbeSubsetClass",
         doc: "",
         slots,
     }
@@ -482,7 +482,7 @@ fn a_subset_outside_the_module_is_a_defect() {
 #[should_panic(expected = "the code GONE of ProbeGone is not a member of ProbeErrorCode")]
 fn a_code_member_outside_the_catalog_is_a_defect() {
     let gone = ErrorClass {
-        python_class: "ProbeGone",
+        type_name: "ProbeGone",
         doc: "",
         slots: &[ErrorSlot::CodeMember { member: "GONE" }],
     };
@@ -493,7 +493,7 @@ fn a_code_member_outside_the_catalog_is_a_defect() {
 #[should_panic(expected = "the class ProbeNoCode does not start with its code slot")]
 fn a_class_without_its_code_slot_first_is_a_defect() {
     let no_code = ErrorClass {
-        python_class: "ProbeNoCode",
+        type_name: "ProbeNoCode",
         doc: "",
         slots: &[MESSAGE],
     };
@@ -504,7 +504,7 @@ fn a_class_without_its_code_slot_first_is_a_defect() {
 #[should_panic(expected = "the union ProbeStrangerError names ProbeStranger, which is not a class")]
 fn a_union_member_outside_the_module_is_a_defect() {
     let stranger = ErrorUnion {
-        python_module: "probe_errors",
+        module: "probe_errors",
         name: "ProbeStrangerError",
         doc: "",
         members: &["ProbeStranger"],
@@ -517,7 +517,7 @@ fn a_union_member_outside_the_module_is_a_defect() {
 #[should_panic(expected = "the class ProbeHolder holds TaskSendPayload, which is not a record")]
 fn a_payload_class_outside_the_payload_module_is_a_defect() {
     let holder = ErrorClass {
-        python_class: "ProbeHolder",
+        type_name: "ProbeHolder",
         doc: "",
         slots: &[
             ErrorSlot::CodeMember {
@@ -525,7 +525,7 @@ fn a_payload_class_outside_the_payload_module_is_a_defect() {
             },
             ErrorSlot::Field {
                 name: "payload",
-                python_type: SlotType::TaskSendPayload,
+                slot_type: SlotType::TaskSendPayload,
                 repr: SlotRepr::Hidden,
             },
         ],
@@ -536,7 +536,7 @@ fn a_payload_class_outside_the_payload_module_is_a_defect() {
 #[test]
 fn a_class_without_instance_slots_has_no_slots_member() {
     let bare = ErrorClass {
-        python_class: "ProbeBare",
+        type_name: "ProbeBare",
         doc: "",
         slots: &[
             ErrorSlot::CodeMember {
@@ -556,7 +556,7 @@ fn a_class_without_instance_slots_has_no_slots_member() {
 #[test]
 fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
     let conflict = ErrorClass {
-        python_class: "ProbeConflict",
+        type_name: "ProbeConflict",
         doc: "",
         slots: &[
             ErrorSlot::CodeMember {
@@ -607,17 +607,17 @@ fn the_family_prefix_is_every_word_that_the_class_names_share() {
     let catalog = ErrorCatalog {
         classes: &[
             ErrorClass {
-                python_class: "WorkflowHandleNotFound",
+                type_name: "WorkflowHandleNotFound",
                 doc: "",
                 slots: &[],
             },
             ErrorClass {
-                python_class: "WorkflowHandleNotPaused",
+                type_name: "WorkflowHandleNotPaused",
                 doc: "",
                 slots: &[],
             },
             ErrorClass {
-                python_class: "WorkflowHandleAsyncContext",
+                type_name: "WorkflowHandleAsyncContext",
                 doc: "",
                 slots: &[],
             },
@@ -641,7 +641,7 @@ fn a_catalog_with_one_class_has_no_family_prefix() {
 #[should_panic(expected = "the class names of the catalog ProbeCoreError share no first word")]
 fn a_catalog_whose_class_names_share_no_word_is_a_defect() {
     const STRANGER: ErrorClass = ErrorClass {
-        python_class: "StrangerFailed",
+        type_name: "StrangerFailed",
         doc: "",
         slots: &[],
     };
@@ -656,7 +656,7 @@ fn a_catalog_whose_class_names_share_no_word_is_a_defect() {
 #[should_panic(expected = "the class Probe is only the family prefix of its catalog")]
 fn a_class_that_is_only_the_prefix_is_a_defect() {
     let bare = ErrorClass {
-        python_class: "Probe",
+        type_name: "Probe",
         doc: "",
         slots: &[],
     };
@@ -671,7 +671,7 @@ fn a_value_without_hidden_slots_is_frozen_as_it_is() {
 #[test]
 fn a_module_without_imported_types_has_no_import_section() {
     let bare = ErrorClass {
-        python_class: "ProbeBare",
+        type_name: "ProbeBare",
         doc: "",
         slots: &[ErrorSlot::CodeMember {
             member: "PAYLOAD_MISMATCH",
@@ -683,7 +683,7 @@ fn a_module_without_imported_types_has_no_import_section() {
 #[test]
 fn catalogs_subsets_records_and_unions_group_by_module_in_name_order() {
     let other = ErrorCatalog {
-        python_module: "another_errors",
+        module: "another_errors",
         ..CATALOG
     };
     let modules = error_modules(&[CATALOG, other], vec![operation_subset()], &[], &[UNION]);
@@ -697,8 +697,8 @@ fn catalogs_subsets_records_and_unions_group_by_module_in_name_order() {
 }
 
 const RECORD: RecordClass = RecordClass {
-    python_module: "probe_errors",
-    python_class: "ProbePayload",
+    module: "probe_errors",
+    type_name: "ProbePayload",
     doc: "",
     fields: &[
         record_field("task_name", RecordFieldType::Str),
@@ -714,10 +714,10 @@ const RECORD: RecordClass = RecordClass {
     ],
 };
 
-const fn record_field(name: &'static str, python_type: RecordFieldType) -> RecordField {
+const fn record_field(name: &'static str, field_type: RecordFieldType) -> RecordField {
     RecordField {
         name,
-        python_type,
+        field_type,
         default: FieldDefault::Required,
         note: "",
     }

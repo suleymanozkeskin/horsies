@@ -199,8 +199,8 @@ fn every_field_has_a_closed_or_bounded_form() {
             ValueForm::Codes(union) => {
                 let members = code_members(union);
                 let unique: BTreeSet<&str> = members.iter().copied().collect();
-                assert!(!members.is_empty(), "{}", union.python_name);
-                assert_eq!(unique.len(), members.len(), "{}", union.python_name);
+                assert!(!members.is_empty(), "{}", union.alias_name);
+                assert_eq!(unique.len(), members.len(), "{}", union.alias_name);
             }
             ValueForm::Named(name) => match value_type(name).shape {
                 NamedShape::Choice { values } => assert!(!values.is_empty(), "{name}"),
@@ -259,10 +259,10 @@ fn contract_names_are_unique_python_identifiers() {
     names.extend(EVENT_VALUE_TYPES.iter().map(|named| named.name));
     for named in EVENT_VALUE_TYPES {
         if let NamedShape::Variants { variants } = named.shape {
-            names.extend(variants.iter().map(|variant| variant.python_class));
+            names.extend(variants.iter().map(|variant| variant.type_name));
         }
     }
-    names.extend(code_unions().iter().map(|union| union.python_name));
+    names.extend(code_unions().iter().map(|union| union.alias_name));
     let unique: BTreeSet<&str> = names.iter().copied().collect();
     assert_eq!(unique.len(), names.len(), "{names:?}");
     for name in names {
@@ -1087,7 +1087,7 @@ fn form_text(form: ValueForm) -> String {
         ValueForm::WholeNumber { min, max } => format!("WholeNumber({min}..={max})"),
         ValueForm::Duration => "Duration".to_owned(),
         ValueForm::Time => "Time".to_owned(),
-        ValueForm::Codes(union) => format!("Codes({})", union.python_name),
+        ValueForm::Codes(union) => format!("Codes({})", union.alias_name),
         ValueForm::Named(name) => name.to_owned(),
     }
 }
@@ -1133,11 +1133,11 @@ fn contract_snapshot() -> String {
         let classes: Vec<&str> = union
             .catalogs
             .iter()
-            .map(|catalog| catalog.python_class)
+            .map(|catalog| catalog.type_name)
             .collect();
         text.push_str(&format!(
             "\ncodes {}: {}\n",
-            union.python_name,
+            union.alias_name,
             classes.join(" | ")
         ));
     }

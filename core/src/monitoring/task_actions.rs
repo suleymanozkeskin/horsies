@@ -19,7 +19,7 @@ use super::models::CancelPolicy;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "monitoring", base = "str_enum")]
+#[code_catalog(module = "monitoring", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskActionErrorCode {
     TaskNotFound,
@@ -33,8 +33,7 @@ pub enum TaskActionErrorCode {
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
-    /// result until the stored row changes (Python
-    /// `clients/python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    /// result until the stored row changes.
     StoredDataInvalid,
 }
 
@@ -64,9 +63,9 @@ pub enum TaskActionError {
     #[error("{message}")]
     #[error_class(class = "TaskActionNotFound", code = "TaskNotFound", never_retryable)]
     NotFound {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
     },
     /// The task's status does not admit the cancel. Nothing changed.
@@ -81,11 +80,11 @@ pub enum TaskActionError {
         never_retryable
     )]
     NotCancellable {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskStatus")]
+        #[error_slot(slot_type = "TaskStatus")]
         current_status: TaskStatus,
     },
     /// The task belongs to a workflow. Nothing changed.
@@ -99,11 +98,11 @@ pub enum TaskActionError {
         never_retryable
     )]
     IsWorkflowTask {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskStatus")]
+        #[error_slot(slot_type = "TaskStatus")]
         current_status: TaskStatus,
     },
     /// The cancel failed with a database or driver error, or the core of this
@@ -120,14 +119,14 @@ pub enum TaskActionError {
     #[error_class(
         class = "TaskActionDatabaseOperationFailed",
         code = "DatabaseOperationFailed",
-        exception = "BaseException"
+        cause = "required"
     )]
     DatabaseOperationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
         /// The failed connect, client family check or statement.
         #[error_slot(cause)]
@@ -147,14 +146,14 @@ pub enum TaskActionError {
     #[error_class(
         class = "TaskActionOutcomeUnknown",
         code = "OutcomeUnknown",
-        exception = "BaseException"
+        cause = "required"
     )]
     OutcomeUnknown {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
         /// The statement whose reply was lost.
         #[error_slot(cause)]
@@ -172,12 +171,12 @@ pub enum TaskActionError {
         class = "TaskActionStoredDataInvalid",
         code = "StoredDataInvalid",
         never_retryable,
-        exception = "BaseException"
+        cause = "required"
     )]
     StoredDataInvalid {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
         /// The outcome row that does not decode.
         #[error_slot(cause)]

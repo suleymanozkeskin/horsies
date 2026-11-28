@@ -1,4 +1,4 @@
-//! `#[derive(EventSchema)]`: the wire codec and the Python form of a type of
+//! `#[derive(EventSchema)]`: the wire codec and the schema of a type of
 //! the event contract (`horsies_core::events`), read from the type itself.
 //!
 //! - A struct of named fields is an event type. Its wire form is
@@ -9,13 +9,13 @@
 //!   `EventValue` and `EventNamedValue`.
 //! - An enum with a variant of named fields is a variant type. Its wire form
 //!   is `[variant name, field, ...]`, and `[variant name]` for a unit
-//!   variant. The Python class of a variant is the enum name, then the
+//!   variant. The type name of a variant is the enum name, then the
 //!   variant name. The derive implements `EventValue` and
 //!   `EventNamedValue`.
 //!
 //! Each field type implements `horsies_core::events::EventValue`. A field
 //! with `#[event_schema(internal)]` is read only by the handler child: it is
-//! on the wire and on the Python class, and it is not a field of the stable
+//! on the wire and on the class of the type, and it is not a field of the stable
 //! contract. A tuple struct, a tuple variant, a union and a generic type are
 //! refused.
 
@@ -198,7 +198,7 @@ fn variants(ident: &Ident, doc: &str, data: &DataEnum) -> syn::Result<TokenStrea
         refuse_event_schema_keys(&variant.attrs, "a variant")?;
         let variant_ident = &variant.ident;
         let tag = variant_ident.to_string();
-        let python_class = format!("{name}{tag}");
+        let type_name = format!("{name}{tag}");
         let variant_doc = doc_text(&variant.attrs);
         let fields = match &variant.fields {
             Fields::Unit => Vec::new(),
@@ -218,7 +218,7 @@ fn variants(ident: &Ident, doc: &str, data: &DataEnum) -> syn::Result<TokenStrea
         schemas.push(quote! {
             ::horsies_core::events::VariantType {
                 tag: #tag,
-                python_class: #python_class,
+                type_name: #type_name,
                 doc: #variant_doc,
                 fields: &[#(#field_schemas,)*],
             }
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn an_enum_with_fields_is_a_variant_type_with_prefixed_python_classes() {
+    fn an_enum_with_fields_is_a_variant_type_with_prefixed_type_names() {
         let text = derive_text(syn::parse_quote! {
             enum AttemptStart {
                 Reported { started_at: Time },
@@ -447,8 +447,8 @@ mod tests {
         })
         .expect("the derive accepts the enum");
         assert!(text.contains("NamedShape::Variants"));
-        assert!(text.contains("tag:\"Reported\",python_class:\"AttemptStartReported\""));
-        assert!(text.contains("tag:\"NotReported\",python_class:\"AttemptStartNotReported\""));
+        assert!(text.contains("tag:\"Reported\",type_name:\"AttemptStartReported\""));
+        assert!(text.contains("tag:\"NotReported\",type_name:\"AttemptStartNotReported\""));
         assert!(text.contains("wire_variant(wire,\"AttemptStart\")"));
         assert!(text.contains("\"NotReported\"=>{let[]=fieldselse"));
         assert!(text.contains(".inside(\"started_at\").inside(\"Reported\")"));

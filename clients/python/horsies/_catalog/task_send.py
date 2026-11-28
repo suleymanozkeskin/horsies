@@ -11,9 +11,7 @@ __all__ = ['TaskSendErrorCode', 'SeatRelayCode']
 class TaskSendErrorCode(StrEnum):
     """Categorized task send failure codes.
 
-    The members are Python's, in Python's order
-    (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
-    one variant per member.
+    [`TaskSendError`] has one variant per member.
     """
 
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
@@ -22,9 +20,9 @@ class TaskSendErrorCode(StrEnum):
     """
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """A sync (Python) or blocking (Rust) send or resend was called
-    on a thread that runs an event loop (Python) or a tokio runtime
-    (Rust); the blocking enqueue would stall it, so nothing was written.
+    """A sync or blocking send or resend was called
+    on a thread that runs an event loop or a tokio runtime;
+    the blocking enqueue would stall it, so nothing was written.
     A blocking resend on the same thread returns this code again; the
     async forms complete the dispatch with the same task id.
     """

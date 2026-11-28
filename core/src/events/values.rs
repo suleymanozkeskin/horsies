@@ -107,7 +107,7 @@ pub type SlotIndex = BoundedU32<0, MAX_SLOT_INDEX>;
 /// The four built-in task code catalogs. Their wire values are unique
 /// across them.
 pub const BUILT_IN_TASK_CODES: CodeUnion = CodeUnion {
-    python_name: "BuiltInTaskCode",
+    alias_name: "BuiltInTaskCode",
     doc: "A built-in task error code: a member of one of the four built-in code catalogs.",
     catalogs: &[
         <OperationalCode as CodeEnum>::CATALOG,
@@ -127,7 +127,7 @@ impl EventValue for BuiltInTaskCode {
     fn from_wire(wire: &WireValue) -> Result<Self, DecodeRefusal> {
         let text = wire_text(wire)?;
         BuiltInTaskCode::parse(text)
-            .ok_or_else(|| DecodeRefusal::unknown_name(BUILT_IN_TASK_CODES.python_name, text))
+            .ok_or_else(|| DecodeRefusal::unknown_name(BUILT_IN_TASK_CODES.alias_name, text))
     }
 }
 
@@ -148,7 +148,7 @@ impl From<NotRunCause> for ReleaseReason {
 /// The error code of an attempt that ended with a task error.
 #[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum AttemptErrorCode {
-    /// A built-in code of horsies.
+    /// A built-in code of the core.
     BuiltIn { code: BuiltInTaskCode },
     /// A code that the task chose, of at most 128 characters.
     Custom { code: CustomCodeText },
@@ -312,7 +312,7 @@ pub enum AttemptEnd {
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
         /// Internal: the execution class of the child that ran the
-        /// attempt, the `horsies.task.execution` of the span.
+        /// attempt, the execution class of the span.
         #[event_schema(internal)]
         child_execution: Execution,
         /// Internal: the worker that claimed the task and ended the attempt.

@@ -1,5 +1,5 @@
 //! The sections of the worker manifest that set the worker's own loops:
-//! recovery (Python `RecoveryConfig`), retention (`RetentionConfig`),
+//! recovery (`RecoveryConfig`), retention (`RetentionConfig`),
 //! resilience (`WorkerResilienceConfig`) and the payload size guard
 //! (`PayloadPolicy`).
 //!
@@ -21,7 +21,7 @@ use crate::core::config::{
     PausedWorkflowAge, PayloadPolicy, RecoveryConfig, RetentionConfig, WorkerResilienceConfig,
 };
 use crate::core::history::periods::{MAX_RETENTION_DAYS, MIN_RETENTION_DAYS};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 /// The largest `worker_state_snapshot_interval_ms` as the bound of its
 /// manifest field. Half the live window fits a `u32`.
@@ -186,7 +186,7 @@ impl From<PausedAgeMicros> for u64 {
 }
 
 impl ManifestValue for PausedAgeMicros {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "PAUSED_AGE_MICROS",
         min: 1,
         max: MAX_PAUSED_AGE_MICROS,
@@ -223,14 +223,14 @@ impl From<PayloadBytes> for u64 {
 }
 
 impl ManifestValue for PayloadBytes {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "PAYLOAD_BYTES",
         min: 1,
         max: MAX_PAYLOAD_BYTES,
     });
 }
 
-/// Stale task detection and crash recovery (Python `RecoveryConfig`).
+/// Stale task detection and crash recovery.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -300,8 +300,7 @@ pub enum QueueRetention {
     Forever,
 }
 
-/// How long records live and how their storage is kept ahead (Python
-/// `RetentionConfig`).
+/// How long records live and how their storage is kept ahead.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -330,12 +329,11 @@ pub struct RetentionManifest {
 pub enum RetryAttemptLimit {
     /// At most `attempts` attempts.
     Attempts { attempts: RetryAttemptCount },
-    /// No limit on the attempts (Python `database_retry_max_attempts=0`).
+    /// No limit on the attempts.
     NoLimit,
 }
 
-/// Retry and backoff after database errors, and the poll interval (Python
-/// `WorkerResilienceConfig`).
+/// Retry and backoff after database errors, and the poll interval.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -355,11 +353,11 @@ pub struct ResilienceManifest {
 pub enum PayloadLimit {
     /// A threshold of `bytes` bytes of UTF-8 text.
     Bytes { bytes: PayloadBytes },
-    /// No threshold (Python `None`).
+    /// No threshold.
     NoLimit,
 }
 
-/// The size guard of serialized payloads (Python `PayloadPolicy`).
+/// The size guard of serialized payloads.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]

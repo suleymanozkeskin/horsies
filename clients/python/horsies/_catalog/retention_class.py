@@ -9,8 +9,7 @@ __all__ = ['RetentionClassKey', 'DEFAULT_RETENTION_CLASS_KEY']
 
 
 RetentionClassKey = NewType('RetentionClassKey', str)
-"""The key of a finite period class. ``period_class_key`` of
-``horsies.core.history.periods`` builds it.
+"""The key of a finite period class.
 
 The enqueue paths take this type, so a raw string key is a type error at
 a typed call site, not a row that has no partition later. Like
