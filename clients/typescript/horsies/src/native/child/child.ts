@@ -72,3 +72,12 @@ export function loopHold(taskId: string): void {
 export function loopRelease(): void {
   nativeValue("loopRelease", () => childAddon().loopRelease());
 }
+
+/**
+ * End this `SHARED_THREAD` child at its memory bound: the addon writes one stderr line that names `boundMb` and
+ * `measuredMb` (MiB), then ends the process with exit code 81 (`MEMORY_LIMIT`) through the core's immediate exit. Does
+ * not return.
+ */
+export function endAtMemoryLimit(boundMb: number, measuredMb: number): never {
+  return childAddon().endAtMemoryLimit(boundMb, measuredMb);
+}

@@ -1,6 +1,7 @@
 // A `SHARED_THREAD` child on the child host: hook 0 boots the seat isolates (a provider failure there is the hook's
 // failure, so the core ends the child with 173); the main thread runs no provider; the main-thread watch (the turn
-// timer every 100 ms, no run mark); the posts of the core go to the seat pool; `stopWork` is a defect there; an
+// timer every 100 ms, no run mark); the memory watch that hook 0 starts for `recycleAbove`; the posts of the core go
+// to the seat pool; `stopWork` is a defect there; an
 // isolated child runs a `SHARED_THREAD` body on its main thread. The operations of an isolate on the main thread.
 
 import assert from "node:assert/strict";
@@ -9,6 +10,7 @@ import { describe, test } from "node:test";
 import { provideFor } from "../../../horsies/src/child/app-members.ts";
 import { type ChildModeDeps, runChildMode } from "../../../horsies/src/child/host.ts";
 import { LOOP_TURN_TICK_MS } from "../../../horsies/src/child/loop-marks.ts";
+import { MEMORY_LIMIT_EXIT_CODE } from "../../../horsies/src/_catalog/exit_codes.ts";
 import { thrownError } from "../../../horsies/src/native/call/envelope.ts";
 import type { BodyFactsRecord, ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { EnqueueRequest } from "../../../horsies/src/native/sends/addon.ts";
@@ -19,6 +21,7 @@ import {
   setSeatBodyObserver,
 } from "../../../horsies/src/seats/body-observer.ts";
 import { relayedRefusal, serveSeatOperation } from "../../../horsies/src/seats/operations.ts";
+import { MEMORY_WATCH_INTERVAL_MS } from "../../../horsies/src/seats/memory-watch.ts";
 import type { IsolateEvents, SeatHost } from "../../../horsies/src/seats/pool.ts";
 import { type MainToSeat, SEAT_PROTOCOL_VERSION, type SeatMarker } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect, type CoreDefect, CoreStopped, ForkedAfterCoreStart, TooManyPendingCalls } from "../../../horsies/src/thrown-errors.ts";
@@ -26,7 +29,7 @@ import type { CoreAccess, ProducerCore } from "../../../horsies/src/app/core-acc
 import { ENQUEUED, fakeCoreHandle, fakeProducer, PREPARED, TASK_ID } from "../app/support.ts";
 import { type AddonWorkflowCore, noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { FakeChildNative, settled } from "../child/child-native.ts";
-import { contextOf, crunch, ENDED_AT, seatApp, TEST_SEAT_BOUNDS } from "./support.ts";
+import { contextOf, crunch, ENDED_AT, seatApp, TEST_SEAT_BOUNDS, UNREAD_MEMORY } from "./support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -66,6 +69,7 @@ function threadDeps(native: FakeChildNative): ChildModeDeps & Recorded {
 
       return { kind: "started", isolate: { post: (message) => posts.push(message) } };
     },
+    memory: UNREAD_MEMORY,
     bounds: () => TEST_SEAT_BOUNDS,
     clock: () => 0,
     now: () => ENDED_AT,
@@ -208,6 +212,79 @@ describe("a SHARED_THREAD child", () => {
     deps.isolates[0]?.events.message({ kind: "bootFailed", protocol: 1, seatIndex: 0, hookName: "provide #1 openPool", cause: "Error: refused" });
     await settled();
     assert.deepEqual(deps.settlements, ["1 threw the provider provide #1 openPool failed in the seat isolate 0: Error: refused"]);
+  });
+
+  test("recycleAbove off: hook 0 starts no memory watch", async () => {
+    const native = new FakeChildNative();
+    const base = threadDeps(native);
+    const seatTimers: number[] = [];
+
+    const deps: ChildModeDeps & Recorded = {
+      ...base,
+      seats: {
+        ...base.seats,
+        timer: (milliseconds) => {
+          seatTimers.push(milliseconds);
+
+          return () => undefined;
+        },
+      },
+    };
+
+    void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
+    await settled();
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1, taskSendPool: 2, recycleAbove: { kind: "off" } } });
+    deps.isolates[0]?.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
+    await settled();
+    assert.deepEqual(seatTimers, []);
+  });
+
+  test("a bound: the watch reads the resident memory only while a run is held, and ends the child at the bound", async () => {
+    const native = new FakeChildNative();
+    const base = threadDeps(native);
+    const reads: number[] = [];
+    const ends: [number, number][] = [];
+    const fires: (() => void)[] = [];
+
+    const deps: ChildModeDeps & Recorded = {
+      ...base,
+      seats: {
+        ...base.seats,
+        memory: {
+          residentBytes: () => {
+            reads.push(reads.length);
+
+            return 300 * 1024 * 1024;
+          },
+          endAtLimit: (boundMb, measuredMb) => {
+            ends.push([boundMb, measuredMb]);
+
+            throw new Ended(MEMORY_LIMIT_EXIT_CODE);
+          },
+        },
+        timer: (milliseconds, fire) => {
+          assert.equal(milliseconds, MEMORY_WATCH_INTERVAL_MS);
+          fires.push(fire);
+
+          return () => undefined;
+        },
+      },
+    };
+
+    const fireLast = (): void => {
+      (fires.at(-1) ?? assert.fail("no memory read is armed"))();
+    };
+
+    void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
+    await settled();
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1, taskSendPool: 2, recycleAbove: { kind: "atMb", mb: 256 } } });
+    deps.isolates[0]?.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
+    await settled();
+    fireLast();
+    assert.deepEqual([reads.length, ends], [0, []]);
+    native.serves[0]?.post(runBodyPost(5n));
+    assert.throws(fireLast, { name: "Error", code: MEMORY_LIMIT_EXIT_CODE });
+    assert.deepEqual([reads.length, ends], [1, [[256, 300]]]);
   });
 
   test("the main-thread watch: the turn timer runs every 100 ms, and no run mark is set", async () => {

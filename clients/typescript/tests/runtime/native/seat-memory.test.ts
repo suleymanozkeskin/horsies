@@ -51,6 +51,10 @@ describe("the memory cap of a seat isolate", () => {
 
     const started = startSeatPool({ seats: 1, taskSendPool: 2 }, {
       start: workerIsolates(ENTRY, { maxOldGenerationSizeMb: SMALL_CAP_MB }),
+      memory: {
+        residentBytes: () => assert.fail("the pool reads no resident memory"),
+        endAtLimit: () => assert.fail("the pool ends no child at a memory bound"),
+      },
       bounds: () => ({ opsWaiting: 10_000, replacementBootBoundMs: 10_000 }),
       clock: () => performance.now(),
       now: () => Temporal.Now.instant(),

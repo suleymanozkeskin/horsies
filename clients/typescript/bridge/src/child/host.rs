@@ -153,6 +153,9 @@ pub enum ChildExitName {
     ChildHookFailed,
     /// A run met the stopped core of the process: exit 80.
     CoreStopped,
+    /// The resident memory of a `SHARED_THREAD` child reached its bound
+    /// while it held runs: exit 81.
+    MemoryLimit,
 }
 
 impl ChildExitName {
@@ -167,6 +170,7 @@ impl ChildExitName {
             ChildHostExit::ProtocolMismatch => Self::ProtocolMismatch,
             ChildHostExit::ChildHookFailed => Self::ChildHookFailed,
             ChildHostExit::CoreStopped => Self::CoreStopped,
+            ChildHostExit::MemoryLimit => Self::MemoryLimit,
         }
     }
 }
@@ -573,6 +577,13 @@ mod tests {
             ChildServeEnd {
                 code: 80,
                 exit: ChildExitName::CoreStopped,
+            }
+        );
+        assert_eq!(
+            serve_end(ChildHostExit::MemoryLimit),
+            ChildServeEnd {
+                code: 81,
+                exit: ChildExitName::MemoryLimit,
             }
         );
     }

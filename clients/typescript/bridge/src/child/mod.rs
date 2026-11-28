@@ -12,6 +12,7 @@
 //!   start hooks.
 //! - `loop_watch`: the marks of the JavaScript main thread's loop.
 //! - `exit`: the host thread, the exit of the process, the backstop.
+//! - `memory_limit`: the end of a `SHARED_THREAD` child at its memory bound.
 //! - `handler_slot`: the slot that the handler child area fills before the
 //!   serve.
 
@@ -21,4 +22,5 @@ pub mod exit;
 pub mod handler_slot;
 pub mod host;
 pub mod loop_watch;
+pub mod memory_limit;
 pub mod start_hooks;

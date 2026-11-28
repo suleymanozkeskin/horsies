@@ -1,12 +1,14 @@
 // `SHARED_THREAD` tasks (Rust `clients/rust/tests/worker/src/tasks/classes.rs`, Python
 // `clients/python/tests/e2e/tasks/shared_thread_tasks.py`), and the cases of the seat isolates of a TypeScript thread
 // child: a sync and an async body, the cancel cell of a sync body and the signal of an async body, a send through the
-// relay with no addon in the isolate, CPU work, and a block of the child's main thread.
+// relay with no addon in the isolate, CPU work, a block of the child's main thread, and memory past the bound of the
+// child.
 //
 // Every body runs in a seat isolate of a thread child, or on the main thread of an isolated child when the worker
 // retries a timed-out thread run there. A body that holds its thread holds its isolate only: the main thread of the
 // child, which hands the runs to the isolates, keeps turning.
 
+import { randomFillSync } from "node:crypto";
 import { BroadcastChannel, isMainThread, threadId } from "node:worker_threads";
 
 import { defineTask, h, type Horsies } from "#horsies";
@@ -44,6 +46,21 @@ const MAIN_BLOCK_MS = 30_000;
 
 /** How long the asking body holds its isolate after the ask: past the block limit, so its run is in flight at the kill. */
 const ASKER_HOLD_MS = 10_000;
+
+/** The size of one chunk that `e2e_thread_holds_memory` keeps, in MiB, and the most chunks it keeps: 512 MiB at most. */
+const HELD_CHUNK_MB = 16;
+const HELD_CHUNKS = 32;
+
+/** The memory that `e2e_thread_holds_memory` keeps at most, in MiB: above the bound of `thread-memory-bound-1x1`. */
+export const HELD_MEMORY_MB = HELD_CHUNK_MB * HELD_CHUNKS;
+
+/** The pause after each chunk, so the child passes its bound by a few chunks only before the memory watch reads it. */
+const HELD_CHUNK_PAUSE_MS = 20;
+
+/** How long `e2e_thread_holds_memory` holds its isolate after the last chunk: far past the memory watch interval. */
+const HELD_MEMORY_HOLD_MS = 20_000;
+
+const BYTES_PER_MIB = 1024 * 1024;
 
 const THREAD_CODES = ["INTERRUPTED", "MARKER_FAILED", "SEND_FAILED", "NOT_IN_SEAT"] as const;
 
@@ -191,6 +208,21 @@ export const threadBlocksMain = defineTask({
   retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["WORKER_CRASHED"] },
 });
 
+/**
+ * The first run keeps `Buffer` chunks (outside the JavaScript heap of its isolate) up to `HELD_MEMORY_MB`, then holds
+ * its isolate, and writes its pid to `<token>-held`; the memory watch of the child ends the child at its bound. The
+ * retry, on `WORKER_CRASHED`, gives the pid of its child.
+ */
+export const threadHoldsMemory = defineTask({
+  name: "e2e_thread_holds_memory",
+  input: { token: h.string() },
+  output: h.int(),
+  errorCodes: THREAD_CODES,
+  execution: "SHARED_THREAD",
+  timeoutMs: THREAD_TIMEOUT_MS,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["WORKER_CRASHED"] },
+});
+
 /** Every contract of this module. */
 export const THREAD_CONTRACTS = [
   threadHealthcheck,
@@ -204,6 +236,7 @@ export const THREAD_CONTRACTS = [
   threadCpuWork,
   threadSendsFromSeat,
   threadBlocksMain,
+  threadHoldsMemory,
 ] as const;
 
 /**
@@ -217,6 +250,18 @@ export function blockMainThreadOnAsk(): void {
     holdThread(MAIN_BLOCK_MS);
   });
   channel.unref();
+}
+
+/** Keep `HELD_CHUNKS` chunks of random bytes (pages that the OS cannot share or compress away), one after the other. */
+function keepChunks(): Buffer[] {
+  const chunks: Buffer[] = [];
+
+  for (let chunk = 0; chunk < HELD_CHUNKS; chunk += 1) {
+    chunks.push(randomFillSync(Buffer.allocUnsafe(HELD_CHUNK_MB * BYTES_PER_MIB)));
+    holdThread(HELD_CHUNK_PAUSE_MS);
+  }
+
+  return chunks;
 }
 
 /** Compute for `milliseconds` with no wait; the count of turns. */
@@ -341,6 +386,23 @@ function implementSeatCalls(app: Horsies): void {
       case "counted":
         return ok({ place: placeHere(), addonLoads: loads.loads, sentId: sent.value.taskId });
     }
+  });
+  app.implement(threadHoldsMemory, ({ token }, { ok, err }) => {
+    const first = createOnce(`${token}-held`, String(process.pid));
+
+    if (!first.ok) {
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+    }
+
+    if (first.value === "created") {
+      const chunks = keepChunks();
+
+      holdThread(HELD_MEMORY_HOLD_MS);
+      // The chunks stay reachable until the hold ends.
+      void chunks.length;
+    }
+
+    return ok(process.pid);
   });
   app.implement(threadBlocksMain, ({ token }, { ok, err }) => {
     const first = createOnce(`${token}-blocked`, String(process.pid));

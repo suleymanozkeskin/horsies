@@ -153,7 +153,8 @@ export type ChildExitName =
   | "BOOT_FAILED"
   | "PROTOCOL_MISMATCH"
   | "CHILD_HOOK_FAILED"
-  | "CORE_STOPPED";
+  | "CORE_STOPPED"
+  | "MEMORY_LIMIT";
 
 /** The end of the serve: the exit code of the process and its name. */
 export interface ChildServeEnd {
@@ -202,6 +203,7 @@ export interface ChildAddon {
   loopTurned(): NativeEnvelope<undefined>;
   loopHold(taskId: string): NativeEnvelope<undefined>;
   loopRelease(): NativeEnvelope<undefined>;
+  endAtMemoryLimit(boundMb: number, measuredMb: number): never;
 }
 
 /** The `child` functions of the addon. Throws as `requireAddon` does. */

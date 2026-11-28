@@ -42,6 +42,7 @@ export const endSpawnMatches: SameFunction<typeof Generated.endSpawn, ChildAddon
 export const loopTurnedMatches: SameFunction<typeof Generated.loopTurned, ChildAddon["loopTurned"]> = true;
 export const loopHoldMatches: SameFunction<typeof Generated.loopHold, ChildAddon["loopHold"]> = true;
 export const loopReleaseMatches: SameFunction<typeof Generated.loopRelease, ChildAddon["loopRelease"]> = true;
+export const endAtMemoryLimitMatches: SameFunction<typeof Generated.endAtMemoryLimit, ChildAddon["endAtMemoryLimit"]> = true;
 
 export const cancelCauseMatches: Mutual<Generated.CancelCauseName, CancelCauseName> = true;
 export const stopCauseMatches: Mutual<Generated.WorkStopCauseName, WorkStopCauseName> = true;

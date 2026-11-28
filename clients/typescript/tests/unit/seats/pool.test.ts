@@ -30,7 +30,7 @@ import {
 import { ClientDefect, type CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
 import { PREPARED, TASK_ID } from "../app/support.ts";
-import { ENDED_AT, settled, TEST_RELAY_BOUNDS, TEST_SEAT_BOUNDS, testPoolSize } from "./support.ts";
+import { ENDED_AT, settled, TEST_RELAY_BOUNDS, TEST_SEAT_BOUNDS, testPoolSize, UNREAD_MEMORY } from "./support.ts";
 
 /** The name of the operation of `request`, for the record of the served operations. */
 function operationName(request: SeatRequest): string {
@@ -83,6 +83,7 @@ class PoolFakes {
 
         return { kind: "started", isolate: { post: (message) => posts.push(message) } };
       },
+      memory: UNREAD_MEMORY,
       bounds: () => TEST_SEAT_BOUNDS,
       clock: () => this.now,
       now: () => this.wall,
@@ -365,6 +366,38 @@ describe("runs on the seat pool", () => {
 
     fakes.send(0, result(9n, "1"));
     assert.ok(fakes.defects[0] instanceof ClientDefect);
+  });
+});
+
+describe("the runs that the child holds, for its memory watch", () => {
+  test("a pool with no run holds none; a run on a seat is held until its result", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    assert.equal(pool.holdsRuns(), false);
+    pool.run(runPost(1n));
+    assert.equal(pool.holdsRuns(), true);
+    fakes.send(0, result(1n, "1"));
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["free"], false]);
+  });
+
+  test("a run that waits for the new isolate of a seat is held", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    pool.run(runPost(1n));
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["booting"], false]);
+    pool.run(runPost(2n));
+    assert.deepEqual([pool.waiting(), pool.holdsRuns()], [1, true]);
+  });
+
+  test("a settled run with recorded facts is held until the core's end of its body", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    pool.run({ ...runPost(1n), facts: RECORDED_FACTS });
+    fakes.send(0, result(1n, "1"));
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["settled"], true]);
+    pool.bodyEnded(TASK_ID, 2, { kind: "returned" });
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["free"], false]);
   });
 });
 

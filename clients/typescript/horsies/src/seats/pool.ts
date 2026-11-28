@@ -42,6 +42,7 @@ import { CHILD_HOOK_FAILED_EXIT_CODE } from "../_catalog/exit_codes.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { EndedSeatRun } from "./body-observer.ts";
+import type { ChildMemory } from "./memory-watch.ts";
 import { clearCancel, newCancelCells, requestCancel } from "./cancel-cells.ts";
 import { type IsolateEnd, isolateEndOutcome, isolateEndRecord } from "./isolate-end.ts";
 import {
@@ -84,6 +85,8 @@ export type SeatRunPost = Extract<ChildPost, { readonly kind: "runBody" }>;
 /** What the seats of a child need from the process. */
 export interface SeatHost {
   readonly start: StartIsolate;
+  /** The resident memory of the child process and its end at the bound (`memory-watch.ts`). The pool does not read it. */
+  readonly memory: ChildMemory;
   /** The bounds of the seats, from the core's constants (`seatBounds` of the addon). The pool reads them once. */
   readonly bounds: () => SeatBounds;
   /** A monotonic clock, in milliseconds. */
@@ -312,6 +315,11 @@ export class SeatPool {
   /** The runs that wait for a free isolate. */
   waiting(): number {
     return this.#waiting.length;
+  }
+
+  /** Whether the child holds a run: a run on a seat, a settled run whose core end has not come, or a waiting run. */
+  holdsRuns(): boolean {
+    return this.#waiting.length > 0 || this.#seats.some(seatHoldsRun);
   }
 
   /**
@@ -694,6 +702,21 @@ export class SeatPool {
 }
 
 /** The cancel of a run after a cancel with `cause`: the first cause stays. Pure. */
+/** Whether a seat in `state` holds a run of the core. Pure. */
+function seatHoldsRun(state: SeatState): boolean {
+  switch (state.kind) {
+    case "running":
+    case "settled":
+      return true;
+    case "booting":
+    case "free":
+    case "ended":
+      return false;
+    default:
+      return unreachable(state, "seatHoldsRun");
+  }
+}
+
 function firstCancel(cancel: RunCancel, cause: CancelCauseName): RunCancel {
   switch (cancel.kind) {
     case "notRequested":
