@@ -17,9 +17,6 @@ import type { SpecAppView, WorkflowLookup } from "./checks.ts";
 import { type OutputDeclaration, type WorkflowRecord, workflowRecord } from "./define.ts";
 import type { NodeTarget } from "./node-checks.ts";
 
-/** The deepest child workflow (the core's `MAX_SUBWORKFLOW_DEPTH`). */
-export const MAX_SUBWORKFLOW_DEPTH = 32;
-
 /**
  * A workflow of the app's list: its contract, its record, the kind tree of its params and the kind of the success
  * value of a sub-workflow node of it.

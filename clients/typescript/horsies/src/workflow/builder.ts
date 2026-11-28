@@ -4,7 +4,7 @@
 // after the build returns, so every finding names its node. A node can name only nodes that the build made before it,
 // so a build has no cycle and its first node is a root.
 
-import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
+import { MAX_WORKFLOW_NODES } from "../_catalog/workflow_bounds.ts";
 import { isFunction, isObjectLike } from "../codec/values.ts";
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { ContextUse, TaskContract } from "../contract/define-task.ts";
@@ -77,9 +77,6 @@ export type RecordedNode =
     };
 
 /** The nodes of one run of a build, in the order of the calls. */
-/** The most nodes of one workflow (the core's `MAX_WORKFLOW_NODES`). */
-export const MAX_WORKFLOW_NODES: number = NODE_INDEX_MAX + 1;
-
 export class BuildSession {
   readonly #nodes: RecordedNode[] = [];
   #made = 0;

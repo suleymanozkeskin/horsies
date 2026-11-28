@@ -37,6 +37,7 @@ use horsies_core::frame_protocol::{
     PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
+use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::monitoring::{
     LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
@@ -47,7 +48,7 @@ use horsies_core::{
     DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
     IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_CHECK_SUBWORKFLOW_BUILDS,
-    MAX_WAIT_LIMIT_MS,
+    MAX_SUBWORKFLOW_DEPTH, MAX_WAIT_LIMIT_MS,
     RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND, WORKER_HISTORY_ROW_BOUND,
     WORKER_PING_WAIT_BOUND,
 };
@@ -408,10 +409,20 @@ const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 4] = [
 /// The stem of the module of the bound of the nesting walk of `check`.
 const WORKFLOW_BOUNDS_MODULE: &str = "workflow_bounds";
 
-const WORKFLOW_BOUND_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
-    name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
-    value: MAX_CHECK_SUBWORKFLOW_BUILDS as i128,
-}];
+const WORKFLOW_BOUND_CONSTANTS: [PublishedConstant; 3] = [
+    PublishedConstant::Integer {
+        name: "MAX_WORKFLOW_NODES",
+        value: MAX_WORKFLOW_NODES as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_SUBWORKFLOW_DEPTH",
+        value: MAX_SUBWORKFLOW_DEPTH as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
+        value: MAX_CHECK_SUBWORKFLOW_BUILDS as i128,
+    },
+];
 
 /// Every generated module of core constants, in file order:
 ///
@@ -910,11 +921,13 @@ mod tests {
     }
 
     #[test]
-    fn the_workflow_bounds_hold_the_build_bound_of_the_nesting_walk() {
+    fn the_workflow_bounds_hold_the_node_bound_the_depth_limit_and_the_build_bound_of_the_nesting_walk() {
         assert_eq!(
             module_of("workflow_bounds"),
             format!(
-                "{GENERATED_HEADER}\n{}",
+                "{GENERATED_HEADER}\n{}{}{}",
+                integer_statement("MAX_WORKFLOW_NODES", MAX_WORKFLOW_NODES as i128),
+                integer_statement("MAX_SUBWORKFLOW_DEPTH", MAX_SUBWORKFLOW_DEPTH as i128),
                 integer_statement(
                     "MAX_CHECK_SUBWORKFLOW_BUILDS",
                     MAX_CHECK_SUBWORKFLOW_BUILDS as i128
