@@ -401,6 +401,30 @@ pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitR
     }
 }
 
+/// Judge the `timeout_ms` of the options text of a new send with the rule
+/// of the dispatch ([`read_stored_options`] reads it with the same
+/// function): no options, no `timeout_ms` and `null` pass; an int from
+/// [`MIN_TASK_TIMEOUT_MS`] to [`MAX_TASK_TIMEOUT_MS`] passes; any other
+/// value is the refusal that the dispatch gives.
+///
+/// A text that is not a JSON object passes here: the send refuses it
+/// first, with the reader of the whole options (`enqueue_max_retries`).
+/// Pure.
+///
+/// Errors: [`TimeoutRefusal`], worded by [`timeout_refusal_message`].
+pub fn check_stored_timeout(task_options: Option<&str>) -> Result<(), TimeoutRefusal> {
+    let Some(text) = task_options else {
+        return Ok(());
+    };
+    let Ok(members) = options_members(text) else {
+        return Ok(());
+    };
+    match read_timeout(members.get("timeout_ms")) {
+        StoredTimeout::Invalid(refusal) => Err(refusal),
+        StoredTimeout::NoTimeout | StoredTimeout::Limit(_) => Ok(()),
+    }
+}
+
 impl StoredOptions {
     /// Whether the dispatch may run user code (Python `read_stored_timeout`
     /// and the child's refusal path). Unreadable options, a timeout that does
