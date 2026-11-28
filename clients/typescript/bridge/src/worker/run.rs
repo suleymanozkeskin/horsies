@@ -626,7 +626,7 @@ mod tests {
     /// The start members of a TypeScript worker of the profile `profile`.
     fn start(profile: &str) -> String {
         format!(
-            r#"{{"profile": {profile}, "metrics_endpoint": {{"kind": "NO_METRICS_ENDPOINT"}}, "tasks": {{"ping": {{"execution": "ISOLATED", "error_codes": []}}}}, "handlers": {{"kind": "NO_HANDLERS"}}, "worker_ended_spans": "NO_SPANS", "child_launch": {{"command": {{"program": "/usr/bin/node", "args": ["/app/main.js", "--horsies-child"]}}, "preload": {{"kind": "NO_PRELOAD_PROGRAM"}}, "program": {{"kind": "RUST"}}, "log_level": "INFO"}}}}"#
+            r#"{{"profile": {profile}, "metrics_endpoint": {{"kind": "NO_METRICS_ENDPOINT"}}, "tasks": {{"ping": {{"execution": "ISOLATED", "error_codes": []}}}}, "handlers": {{"kind": "NO_HANDLERS"}}, "worker_ended_spans": "NO_SPANS", "child_launch": {{"command": {{"program": "/usr/bin/node", "args": ["/app/main.js", "--horsies-child"]}}, "preload": {{"kind": "NO_PRELOAD_PROGRAM"}}, "program": {{"kind": "HOST"}}, "log_level": "INFO"}}}}"#
         )
     }
 

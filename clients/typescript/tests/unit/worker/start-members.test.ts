@@ -37,7 +37,7 @@ describe("the start members", () => {
         '"handlers":{"kind":"NO_HANDLERS"},' +
         '"worker_ended_spans":"NO_SPANS",' +
         '"child_launch":{"command":{"program":"/usr/local/bin/node","args":["/srv/app/main.js","--horsies-child"]},' +
-        '"preload":{"kind":"NO_PRELOAD_PROGRAM"},"program":{"kind":"RUST"},"log_level":"INFO"}}',
+        '"preload":{"kind":"NO_PRELOAD_PROGRAM"},"program":{"kind":"HOST"},"log_level":"INFO"}}',
     );
   });
 
@@ -62,7 +62,7 @@ describe("the start members", () => {
       child_launch: {
         command: COMMAND,
         preload: { kind: "NO_PRELOAD_PROGRAM" },
-        program: { kind: "RUST" },
+        program: { kind: "HOST" },
         log_level: "DEBUG",
       },
     });
@@ -108,7 +108,7 @@ describe("the start members", () => {
     assert.deepEqual(childLaunch(COMMAND, "WARNING"), {
       command: COMMAND,
       preload: { kind: "NO_PRELOAD_PROGRAM" },
-      program: { kind: "RUST" },
+      program: { kind: "HOST" },
       log_level: "WARNING",
     });
   });

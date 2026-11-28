@@ -170,7 +170,7 @@ describe("the worker run", () => {
       child_launch: {
         command: { program: "/usr/local/bin/node", args: ["/srv/app/main.js", "--horsies-child"] },
         preload: { kind: "NO_PRELOAD_PROGRAM" },
-        program: { kind: "RUST" },
+        program: { kind: "HOST" },
         log_level: "INFO",
       },
     });

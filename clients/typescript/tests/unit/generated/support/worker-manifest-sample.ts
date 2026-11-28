@@ -114,7 +114,7 @@ export const MANIFEST: WorkerManifest = {
   child_launch: {
     command: { program: "/usr/local/bin/node", args: ["--enable-source-maps", "dist/worker.js"] },
     preload: { kind: "NO_PRELOAD_PROGRAM" },
-    program: { kind: "RUST" },
+    program: { kind: "HOST" },
     log_level: "INFO",
   },
 };

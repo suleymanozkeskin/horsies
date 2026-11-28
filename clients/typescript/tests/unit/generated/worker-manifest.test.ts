@@ -87,7 +87,7 @@ const MANIFEST_TEXT = [
   String.raw`"child_launch":{"command":{"program":"/usr/local/bin/node",`,
   String.raw`"args":["--enable-source-maps","dist/worker.js"]},`,
   String.raw`"preload":{"kind":"NO_PRELOAD_PROGRAM"},`,
-  String.raw`"program":{"kind":"RUST"},`,
+  String.raw`"program":{"kind":"HOST"},`,
   String.raw`"log_level":"INFO"}}`,
 ].join("");
 
