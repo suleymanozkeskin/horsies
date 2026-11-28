@@ -19,10 +19,4 @@ describe("the declared codes of a task in the child plan", () => {
 
     assert.deepEqual(declaredCodesOf(ping), []);
   });
-
-  test("a contract with an empty errorCodes list gives none", () => {
-    const quiet = defineTask({ name: "quiet", input: {}, output: h.null(), errorCodes: [] });
-
-    assert.deepEqual(declaredCodesOf(quiet), []);
-  });
 });

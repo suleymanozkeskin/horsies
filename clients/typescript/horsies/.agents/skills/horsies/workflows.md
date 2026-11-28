@@ -96,7 +96,8 @@ The input of a node has one member per parameter:
   against the `errorCodes` of the upstream task. A code that the task does
   not declare ends the run with `WORKER_SERIALIZATION_ERROR` and the body
   does not run. A built-in code is always accepted. A task with no
-  `errorCodes` (or an empty list) accepts every custom code.
+  `errorCodes` accepts every custom code. An empty `errorCodes` list is
+  refused; leave `errorCodes` out.
 - An `.optional()` or defaulted parameter may be left out.
 - A node for a plain parameter, a value for an `h.taskOutcome` parameter, a
   missing parameter, an unknown parameter, a source of another output type

@@ -31,6 +31,8 @@ export type ContractRule =
   | "TaskName"
   /** A parameter name that is not an identifier, that the engine fills, or that only the engine writes. */
   | "ParameterName"
+  /** An `errorCodes` list with no code. */
+  | "ErrorCodes"
   /** A Standard Schema that is not a zod schema. */
   | "SchemaVendor"
   /** A zod 3 schema: zod 3.24 and later, or the `zod/v3` export of zod 4. */
@@ -121,6 +123,8 @@ function definitionRefused(refused: DefinitionRefused): ContractRefused {
       return contractRefused("TaskName", refused.path, taskNameDetail(refused.fault), [taskNameHelp(refused.fault)]);
     case "ParameterName":
       return contractRefused("ParameterName", refused.path, refused.detail, []);
+    case "ErrorCodes":
+      return contractRefused("ErrorCodes", refused.path, refused.detail, []);
     default:
       return unreachable(refused, "definitionRefused");
   }
