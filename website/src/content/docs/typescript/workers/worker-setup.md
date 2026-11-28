@@ -43,6 +43,7 @@ node main.ts worker --profile default
 |-------|------|---------|
 | `isolated` | `IsolatedSetting`: `IsolatedChildren` or `NoIsolatedChildren` | No isolated children |
 | `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` or `NoSharedAsyncChildren` | No shared async children |
+| `sharedThread` | `SharedThreadSetting`: `SharedThreadChildren` or `NoSharedThreadChildren`. Node only: see [Thread Seats](/horsies/typescript/workers/thread-seats/) | No shared thread children |
 | `pool` | `ParentPoolInput`: the connection pool of the worker process | Its size follows the seats |
 | `claim` | `ClaimLimitsInput` | No limits |
 | `drainTimeoutMs` | `number`: how long a stopping worker waits for running tasks, in milliseconds | 300,000 (300 s) |
@@ -56,6 +57,8 @@ node main.ts worker --profile default
 | `NoIsolatedChildren` | `kind: "noIsolatedChildren"` |
 | `SharedAsyncChildren` | `kind: "sharedAsyncChildren"`, `count`, `seats`, `recycle?: SharedRecycleInput`, `pool?: SharedPoolInput`, `executor?: ExecutorThreads`, `taskSendPool?: PoolSize` |
 | `NoSharedAsyncChildren` | `kind: "noSharedAsyncChildren"` |
+| `SharedThreadChildren` | `kind: "sharedThreadChildren"`, `count`, `seats`, `recycle?: SharedRecycleInput`, `pool?: SharedPoolInput`, `taskSendPool?: PoolSize` |
+| `NoSharedThreadChildren` | `kind: "noSharedThreadChildren"` |
 
 An isolated child runs one task at a time in its own process. A shared async child runs up to `seats` tasks at once on its one event loop. The task code of a shared async child runs on its event loop. `executor` sets the threads of the core's runtime in the child: they run its database writes, its connections and its frames to the worker. `ExecutorThreads` is `{ kind: "threads", threads }` (1 to 256) or `{ kind: "fromSeats" }` (the default). See [Concurrency](/horsies/workers/concurrency/#worker-level-children).
 
@@ -100,9 +103,10 @@ Set the drain timeout below the stop window of the supervisor. See [Graceful Shu
 
 | Field | Bounds |
 |-------|--------|
-| `isolated.count`, `sharedAsync.count` | 1 to 1,024 |
+| `isolated.count`, `sharedAsync.count`, `sharedThread.count` | 1 to 1,024 |
 | `executor.threads` | 1 to 256 |
 | `sharedAsync.seats` | 1 to 1,000 |
+| `sharedThread.seats` | 1 to 256 |
 | `tasks` of a `TaskLimit` | 1 to 2,147,483,647 |
 | `mb` of a `MemoryLimit` | 1 to 16,777,216 |
 | `connections` of a `PoolSize` | 1 to 1,000 |
@@ -120,7 +124,7 @@ A worker starts each child with the runtime that runs the worker: a worker start
 | `SHARED_ASYNC` | Yes | Yes |
 | `SHARED_THREAD` | Yes | No. The worker refuses a profile with `SHARED_THREAD` children with `sharedThreadUnavailable`: see [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/) |
 
-A shared thread child runs each seat in a `worker_threads` thread of its own:
+A shared thread child runs each seat in a `worker_threads` thread of its own. The API is on [Thread Seats](/horsies/typescript/workers/thread-seats/):
 
 - The JavaScript heap of each seat has the heap limit of the child's main thread: the limit that `--max-old-space-size` on the worker command sets, or the default of V8. The profile has no member for it. A seat at that limit ends alone: its run ends `WORKER_CRASHED`, and a new thread takes the seat.
 - The limit does not cover `ArrayBuffer` and `Buffer` memory. That memory of every seat counts toward the whole child. `recycle.above` bounds the resident memory of the whole child: the worker replaces the child after a task once the child reaches it.

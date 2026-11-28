@@ -16,12 +16,13 @@ A cancel reaches a task body through its runtime: `runtime.signal` fires, and `r
 | Cause | When | Classes |
 |-------|------|---------|
 | `"OPERATOR"` | An operator cancels the running task: `app.monitoring.cancelTask` with the policy `"includeRunning"`, or the web UI. See [Monitoring Queries](/horsies/typescript/monitoring/monitoring-queries/) | Every class |
-| `"DEADLINE"` | The run reaches its `timeoutMs` | `SHARED_ASYNC` |
+| `"DEADLINE"` | The run reaches its `timeoutMs` | `SHARED_ASYNC`, `SHARED_THREAD` |
 
 - The reason of the signal is `{ cause }`. The first cause stays: a deadline after an operator cancel does not change it.
 - An operator cancel moves the task to `CANCELLED` at once. What the body returns after the cancel is dropped. A cancel that comes before the body starts: the body does not run. The rules of each task status are on [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
 - At its deadline an `ISOLATED` run gets no signal: the worker kills its child and stores `TASK_TIMEOUT`.
 - A `SHARED_ASYNC` run whose deadline fired ends as `TASK_TIMEOUT`, whatever the body returns after the signal.
+- A `SHARED_THREAD` run gets the signal and the cancel state in its seat isolate. The main thread of the child writes the cause into a shared cell of the seat, so a sync body reads it with `cancelState()` with no turn of its event loop. A run whose deadline fired ends as `TASK_TIMEOUT`, whatever the body returns after it. See [Thread Seats](/horsies/typescript/workers/thread-seats/#write-a-thread-task).
 
 ## Pass the Signal
 
@@ -124,7 +125,7 @@ app.implement(importBatches, ({ batchIds }, { ok, cancelState }) => {
 
 - **`ISOLATED`**: the body runs until it returns, or until the kill at its `timeoutMs`. With `cancelGraceMs`, the worker kills the child `cancelGraceMs` after an operator cancel when the body has not ended; the task stays `CANCELLED`. Without it, an operator cancel kills nothing.
 - **`SHARED_ASYNC`** (default grace 1,000 ms): a body that has not settled `cancelGraceMs` after the signal keeps its seat. Its child takes no new task, and the worker kills the child when no run in it has time left. No retry runs next to the live body. The steps, and the stored `cancel_end`, are on [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout) and [An Operator Cancel](/horsies/workers/shared-async-tasks/#an-operator-cancel).
-- **`SHARED_THREAD`** takes no `cancelGraceMs`.
+- **`SHARED_THREAD`** takes no `cancelGraceMs`. A body that does not stop keeps its seat. At its deadline the child takes no new task, and the worker kills the child when no run in it has time left. After an operator cancel the body runs until it returns. The steps are on [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/#the-timeout).
 
 So a `SHARED_ASYNC` body stops at its deadline only where it passes `runtime.signal`. Many I/O libraries take no signal. Declare a task whose libraries take no signal `ISOLATED`, the default: at the deadline the worker kills its child, and the task never holds a shared seat past its deadline.
 

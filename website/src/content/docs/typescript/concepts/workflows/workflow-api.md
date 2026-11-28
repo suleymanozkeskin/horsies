@@ -194,6 +194,88 @@ The types refuse each rule below in typed code. The run-time checks refuse the s
 
 The codes are on the [Errors Reference](/horsies/tasks/errors/#workflow-validation-hrs-001-hrs-099).
 
+### The Check of the Workflows
+
+The `check` command, the worker start and the scheduler start check each workflow of the `workflows` list. The check reads no database:
+
+1. A workflow with `parameters: {}` is built once. A workflow with parameters is built once for each check case.
+2. Each build gets the checks of the table above.
+3. The check walks into the sub-workflow nodes of each build. A node with static parameters builds its child with them, and the walk goes on in the child. A node whose parameters come from an upstream node is not walked: its child gets its parameters at run time.
+4. The walk reports a nesting only when it fails for certain, that is, when no node on the path waits for a dependency.
+
+| Refused | Code |
+|---------|------|
+| A check case that is not parameters of the workflow | `HRS-028` |
+| A build that throws, or returns a thenable | `HRS-029` |
+| Sub-workflow parameters that do not decode as the child's parameters | `HRS-031` |
+| A nesting past the depth limit (32) | `HRS-036` |
+| A sub-workflow that includes itself with the same parameters | `HRS-037` |
+
+Each refusal names its path: `workflow checkout checkCases[1]`, or `workflow checkout > ship > pack` for a node of the walk. The check reports every refusal of the workflows phase, then stops. See [CLI Reference](/horsies/typescript/cli/#check).
+
+## Read the Workflow Context
+
+A task defined with `workflowContext: true` has `runtime.workflowContext`. A task without it has no such member: a read fails typecheck.
+
+<!-- ts-check: alone -->
+```ts
+import { defineTask, defineWorkflow, h, type Horsies } from "horsies";
+
+const charge = defineTask({ name: "charge", input: { amountCents: h.int() }, output: h.int() });
+
+const audit = defineTask({ name: "audit", input: {}, output: h.boolean(), workflowContext: true });
+
+export const checkout = defineWorkflow(
+  { name: "checkout", definitionKey: "shop.checkout.v1", parameters: {}, outputType: h.boolean() },
+  (w) => {
+    const charged = w.task(charge, { amountCents: 4_200 }, { nodeId: "charge" });
+
+    return { output: w.task(audit, {}, { nodeId: "audit", waitsFor: [charged], workflowContextFrom: [charged] }) };
+  },
+);
+
+export function implementAudit(app: Horsies) {
+  return app.implement(audit, (_input, { ok, workflowContext }) => {
+    switch (workflowContext.kind) {
+      case "context": {
+        const charged = workflowContext.context.resultFor("charge", charge);
+
+        return ok(charged.ok && charged.value.kind === "succeeded");
+      }
+
+      case "noContext":
+        return ok(false);
+    }
+  });
+}
+```
+
+| `runtime.workflowContext` | When |
+|---------------------------|------|
+| `{ kind: "context", context }` | The run is a workflow node that names `workflowContextFrom` |
+| `{ kind: "noContext" }` | A direct send, or a node with no `workflowContextFrom` |
+
+| Member of `WorkflowContext` | Type | Gives |
+|-----------------------------|------|-------|
+| `workflowId` | `WorkflowId` | The workflow of the node |
+| `nodeIndex` | `number` | The index of the node in its workflow |
+| `taskName` | `string` | The task name of the node |
+| `resultFor(nodeId, contract)` | `Result<TaskOutcome<O, E>, ContextReadError>` | The outcome of a task node, read with the output type and the codes of `contract` |
+| `hasResult(nodeId)` | `boolean` | Whether the context holds a result for the node |
+| `summaryFor(nodeId)` | `Result<SubWorkflowSummary, ContextReadError>` | The summary of a sub-workflow node |
+| `outputFor(nodeId, workflow)` | `Result<Recorded<O>, ContextReadError>` | The output of a sub-workflow node, read with the output type of `workflow`: `{ kind: "recorded", value }` or `{ kind: "notRecorded" }` |
+| `hasSummary(nodeId)` | `boolean` | Whether the context holds a summary for the node |
+
+| `ContextReadError` `kind` | Fields | Means |
+|---------------------------|--------|-------|
+| `"nodeNotInContext"` | `nodeId` | The node is not in `workflowContextFrom`, or it did not end |
+| `"unreadable"` | `nodeId`, `cause` | The stored value does not read with the types of the contract |
+| `"unknownCustomCode"` | `nodeId`, `storedCode` | The stored error has a custom code that the contract does not list |
+
+- The context holds the nodes of `workflowContextFrom` only. A node that did not end has no entry: `hasResult` and `hasSummary` give `false`.
+- A `SHARED_THREAD` body gets the same reads (`ThreadWorkflowTaskRuntime`).
+- A test gives a body its context with the `workflowContext` option of `TaskRuntime.forTest`. See [Testing](/horsies/typescript/operations/testing/#taskruntimefortest).
+
 ## Joins
 
 ```ts

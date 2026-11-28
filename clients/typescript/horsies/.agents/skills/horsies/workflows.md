@@ -565,6 +565,13 @@ its `HRS-nnn` code; the check fails.
   So a workflow that only a sub-workflow node starts has check cases too.
 - Give the cases that reach each branch of the build: `check` sees only the
   specs that the cases build.
+- The refusals: a case that is not parameters of the workflow (`HRS-028`),
+  a build that throws or returns a thenable (`HRS-029`), sub-workflow
+  parameters that do not decode (`HRS-031`). The walk builds the child of
+  each sub-workflow node with static parameters (a node fed by an upstream
+  node is not walked) and reports a nesting only when no node on the path
+  waits: past depth 32 (`HRS-036`), or a sub-workflow that includes itself
+  with the same parameters (`HRS-037`).
 
 ## Validation Codes
 

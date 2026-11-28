@@ -46,7 +46,9 @@ Enqueue stores a `timeout_ms` on every `SHARED_THREAD` row. A row without a usab
 
 Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be stopped from outside, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
 
-The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust), and [Thread Seats](/horsies/typescript/workers/thread-seats/) (TypeScript).
+
+In the TypeScript client, a thread seat is a `worker_threads` isolate of its own, on Node only. The isolate runs the app's entry file and does not load the addon: its sends, reads and workflow calls go to the main thread of the child. A body reads the cancel state with `runtime.cancelState()`, and an async body also gets `runtime.signal`.
 
 ## The Timeout
 
@@ -68,7 +70,7 @@ The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child 
 An operator can cancel a running task (`cancel_task` with the policy `INCLUDE_RUNNING`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
 
 1. The child sets the cancel state of the `TaskRuntime` of the task to the cause `OPERATOR`. A task whose code has not started yet does not start.
-2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`) can stop at its next read.
+2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`, TypeScript `runtime.cancelState()`) can stop at its next read.
 3. What the task returns after the cancel is dropped: the task stays `CANCELLED`. The seat stays in use until the thread returns.
 4. The deadline rules above still apply to the child: a task past its deadline closes the child, and the worker kills the child when no task in it has time left.
 

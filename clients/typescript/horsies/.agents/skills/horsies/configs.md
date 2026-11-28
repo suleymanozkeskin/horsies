@@ -101,6 +101,7 @@ the core's default: the package holds no copy of a default.
 | `resendOnTransientError` | `boolean`, default `false` | `operations/atomic-enqueue-and-topology` |
 | `schemaMode` | `SchemaMode`: `"MIGRATE_AND_VALIDATE"` (the default), `"OBSERVE_ONLY"` or `"ASSUME_INITIALIZED"` | `configuration/broker-config` |
 | `logFormat` | `LogFormat`: `{ kind: "textLogs" }` (the default) or `{ kind: "jsonLogs" }` | `configuration/app-config` |
+| `tracing` | `TracingConfigInput`: `{ kind: "noTracing" }` (the default) or `{ kind: "otelTracing", parentage?, workerEndedSpans? }` | `observability/tracing` |
 
 The shared pages are under `https://suleymanozkeskin.github.io/horsies/`,
 for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-config/`.
@@ -156,6 +157,34 @@ const created = Horsies.create({
   skips them, and the create is not refused.
 - `enabled: false` on the section stops the `scheduler` command at its start;
   on an entry it keeps the entry's name known and sends nothing.
+
+### `tracing`
+
+`{ kind: "otelTracing" }` opens the send, start and attempt spans and
+records the producer metrics through the global providers of
+`@opentelemetry/api` (an optional peer, 1.7.0 to below 2). `Horsies.create`
+refuses it with `HRS-220` when the API does not load.
+
+| Field | Values | Default |
+|---|---|---|
+| `parentage` | `"childOfSend"`: the attempt span is a child of the send span; `"linkedToSend"`: a new trace with a link to the send span | `"childOfSend"` |
+| `workerEndedSpans` | `"makeSpans"`: the handler child makes the span of each attempt that the worker ended; `"noSpans"` | `"makeSpans"` |
+
+- Set the global context manager, propagator and tracer provider at the top
+  of the entry file, before `Horsies.create`. Every line before `cli.run`
+  runs in each child, in each seat isolate and in the handler child, so each
+  of them gets the SDK. An `app.onChildStart` hook runs on the main thread of
+  a shared thread child only: it does not reach a seat.
+- The client installs no context manager. Without one, a span that a body
+  opens has no parent.
+- `currentTask()` gives `{ kind: "running", taskId, taskName, attempt, span }`
+  inside a body (also after an `await` and in `runtime.spawn` work), else
+  `{ kind: "noTask" }`. `span` is `{ kind: "spanIds", traceId, spanId }` or
+  `{ kind: "noSpanIds" }`. Put the fields on each log record.
+- A task child calls `forceFlush()` of the global tracer provider before it
+  exits, for at most 1,000 ms. A process that sends calls
+  `provider.shutdown()` before it ends.
+- A throw of the SDK never changes a send, a start or a run.
 
 ### `database`
 
@@ -282,6 +311,7 @@ export const created = Horsies.create({
 |---|---|
 | `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `prePing`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
 | `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `executor: ExecutorThreads`, `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
+| `sharedThread` | `SharedThreadSetting`: `SharedThreadChildren` (`kind: "sharedThreadChildren"`, `count` (1 to 1,024), `seats` (1 to 256), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `taskSendPool`) or `NoSharedThreadChildren` (`{ kind: "noSharedThreadChildren" }`). Node only |
 | `pool` | `ParentPoolInput`: `maxSize: SharedPoolSize` |
 | `claim` | `ClaimLimitsInput`: `perQueuePerPass`, `claimedPerWorker` (`TaskLimit`) |
 | `drainTimeoutMs` | `number`: 1 to 86,400,000 ms; default 300,000 ms (300 s) |
@@ -303,6 +333,23 @@ export const created = Horsies.create({
 - A `SHARED_ASYNC` task runs on a shared async child. The routing and the
   sizing are on the shared docs pages `workers/execution-modes` and
   `workers/concurrency`.
+- A `SHARED_THREAD` task runs on a seat of a shared thread child: one
+  `worker_threads` isolate per seat, Node only. A worker on Bun refuses a
+  profile with `sharedThread` children at its start
+  (`sharedThreadUnavailable`, exit code 1). Each seat runs the entry file,
+  so each `app.provide` factory runs once per seat; the `app.onChildStart`
+  hooks run on the main thread of the child. A seat loads no addon: its
+  sends, reads and workflow calls go through the seat relay to the main
+  thread, at most `taskSendPool` (default 2) of them at the database at
+  once per seat, and at most 10,000 waiting; past that the call fails with
+  `SEAT_RELAY_FULL` (retryable, nothing sent).
+- The JavaScript heap of each seat has the heap limit of the child's main
+  isolate (`--max-old-space-size` on the worker command); a seat at that
+  limit ends alone with its run (`WORKER_CRASHED`). `Buffer` memory is
+  outside it. `recycle.above` bounds the resident memory of the whole
+  child: while the child holds runs it reads its memory every 100 ms, and
+  at the bound it ends with exit code 81; each run in it ends
+  `WORKER_CRASHED`.
 - A profile field outside its bound is refused with `HRS-218` at
   `Horsies.create`, with the path of the field
   (`workerProfiles["default"].isolated.count`).
@@ -504,13 +551,14 @@ bun app.ts check --live
 |---|---|
 | `<entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. The static check runs first. `--log-level` default `INFO`. A missing or unknown `--profile` exits 1 and the core names the profiles of the app |
 | `<entry> check [--live] [--log-level LEVEL]` | Checks the app. `--log-level` default `WARNING`. Sends stay suppressed |
+| `<entry> scheduler [--log-level LEVEL]` | Runs the schedules of the `schedule` section. The static check runs first, with the schedules. `--log-level` default `INFO`. No section, `enabled: false` or a refused check exits 1 and starts nothing. Sends stay suppressed until the scheduler serves |
 | `<entry> web [--host HOST] [--port PORT] [--authorization none\|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]` | Serves the monitoring web UI of the app (see `monitoring.md`) |
-| `<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`) |
+| `<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`). The `queue` and `schedule` label values are the queues and the schedule names of the config; other names are `(unknown)` |
 
 - `--log-level` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in
   any case.
-- `SIGTERM` or `SIGINT` stops the worker, the web server and the metrics
-  server. The first signal asks the stop once; each later signal writes one
+- `SIGTERM` or `SIGINT` stops the worker, the scheduler, the web server and
+  the metrics server. The first signal asks the stop once; each later signal writes one
   line to stderr and does nothing more. The worker drains within the
   profile's `drainTimeoutMs`.
 - A flag that the command does not know, a text flag with no value, a value
@@ -572,11 +620,15 @@ import {
   type RecoveryConfigInput, type RetentionConfigInput, type HoursRetention, type PausedWorkflowExpiry,
   type RetentionPeriod, type QueueRetention, type ResilienceConfigInput, type RetryAttempts,
   type SchemaMode, type LogFormat,
+  // Tracing
+  currentTask, type TracingConfigInput, type AttemptParentage, type WorkerEndedSpans, type CurrentTask,
+  type RunningTask, type NoRunningTask, type SpanIds, type NoSpanIds,
   // Schedules
   taskSchedule, type ScheduleSection, type TaskSchedule, type TaskScheduleOptions, type SchedulePattern,
   // Worker profiles
   type WorkerProfileInput, type IsolatedChildren, type IsolatedRecycleInput, type IsolatedPoolInput,
-  type SharedAsyncChildren, type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,
+  type SharedAsyncChildren, type SharedThreadChildren, type SharedThreadSetting, type NoSharedThreadChildren,
+  type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,
   type ParentPoolInput, type ClaimLimitsInput, type TaskLimit, type MemoryLimit, type PoolSize, type ParentCpu,
   // State and hooks
   type StateKey, type ProviderFactory, type ChildStartHook,

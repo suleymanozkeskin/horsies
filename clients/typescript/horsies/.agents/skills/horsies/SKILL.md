@@ -18,8 +18,8 @@ folder only when the task needs it:
 |---|---|
 | `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `resend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
 | `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `resendStart`, `WorkflowHandle`, `app.workflowHandle` |
-| `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
-| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerunTask` and `app.rerunTaskIn` |
+| `configs.md` | `Horsies.create` and its refusals, the broker, queues, schedules, worker profiles and shared thread seats, recovery, retention, tracing, `cli.run` and its commands |
+| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerunTask` and `app.rerunTaskIn`, event handlers (`app.onEvent`, `app.onHandlerChildStart`) |
 
 The package has four entry points. The `exports` map allows no deep import:
 

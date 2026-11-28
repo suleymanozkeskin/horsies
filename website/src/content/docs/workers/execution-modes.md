@@ -105,7 +105,7 @@ Keep a task `ISOLATED` when one of these is true:
 | The task returns while asyncio tasks that it started are alive | `async def` only. The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after they ended, and replaces the child. Still alive after the rounds: the worker kills the child, and writes what the task returned after the exit | The child waits up to `cancel_grace_ms` for them, then cancels them in three rounds 0.1 s apart and takes no new task. The worker writes what the task returned after they ended. Still alive after the rounds: the task is stuck, and keeps what it returned | Does not apply: a `def` task has no event loop |
 | The task blocks the process | Nothing else is affected | A loop that has not turned for 5 s: the worker kills the child at once. The task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP` | C code that holds the GIL stops every thread. When the child has not reported the deadline by `timeout_ms + 10 s`, the worker kills it |
 | The child crashes | That task fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` |
-| An operator cancels the running task | The task code gets the cancel: an async body at its next `await` (Python `asyncio.CancelledError`, Rust `cancelled()`), a sync body through the cancel state of `TaskRuntime`. The task is `CANCELLED` at once | As `ISOLATED` for an async body | The task code gets the cancel state of `TaskRuntime`. The task is `CANCELLED` at once |
+| An operator cancels the running task | The task code gets the cancel: an async body at its next `await` (Python `asyncio.CancelledError`, Rust `cancelled()`, TypeScript `runtime.signal`), a sync body through the cancel state of `TaskRuntime`. The task is `CANCELLED` at once | As `ISOLATED` for an async body | The task code gets the cancel state of `TaskRuntime`. The task is `CANCELLED` at once |
 | The cancelled code does not stop | It runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel | After `cancel_grace_ms`: a second cancel and the cancel rounds, and the child takes no new task. Still alive: the task is stuck, and keeps its seat until no task in the child has time left | The thread runs until it returns |
 
 A task retries only when its `retry_for` names the code. In every mode, the worker writes the outcome only after the attempt has ended, so a retry never runs next to the attempt that it replaces. A shared task that the worker names as the cause of a kill or of a stuck stop retries in an isolated child.
@@ -116,7 +116,7 @@ Each mode adds rules to [Defining Tasks](/horsies/tasks/defining-tasks/). The pa
 
 Every mode:
 
-- Read the cancel of an operator: let `asyncio.CancelledError` propagate in an async body, and read the cancel state of `TaskRuntime` between the steps of a sync body. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) (Python) and [Task Runtime](/horsies/rust/tasks/defining-tasks/#task-runtime) (Rust).
+- Read the cancel of an operator: let `asyncio.CancelledError` propagate in an async body, and read the cancel state of `TaskRuntime` between the steps of a sync body. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) (Python) and [Task Runtime](/horsies/rust/tasks/defining-tasks/#task-runtime) (Rust), and [Cancellation](/horsies/typescript/tasks/cancellation/) (TypeScript).
 
 `ISOLATED`:
 
@@ -151,7 +151,9 @@ A worker profile sets the children of each mode. A profile can mix the modes. Fo
 
 The app has one task of each mode. A worker with the `io` profile runs the `SHARED_ASYNC` task on a shared async seat. It runs the `SHARED_THREAD` task and the `ISOLATED` task in its isolated children, because the profile has no shared thread children. A worker with the `compute` profile runs the `SHARED_THREAD` task on a seat thread, and the `SHARED_ASYNC` task in an isolated child.
 
-The Python example is in [Mix the Modes](/horsies/workers/worker-profiles/#mix-the-modes). The Rust profile types are in [Worker Setup](/horsies/rust/workers/worker-setup/#define-a-profile).
+The Python example is in [Mix the Modes](/horsies/workers/worker-profiles/#mix-the-modes). The Rust profile types are in [Worker Setup](/horsies/rust/workers/worker-setup/#define-a-profile). The TypeScript profile types are in [Worker Setup](/horsies/typescript/workers/worker-setup/#define-a-profile).
+
+A TypeScript thread seat is a `worker_threads` isolate, not an OS thread of the core. The isolate does not load the addon: its sends, reads and workflow calls go to the main thread of its child. Shared thread children run on Node only. See [Thread Seats](/horsies/typescript/workers/thread-seats/).
 
 A profile can also hold only shared children. Its worker claims no `ISOLATED` rows, so another worker must have isolated children for them. The fleet check reports a class that no live worker serves. See [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 

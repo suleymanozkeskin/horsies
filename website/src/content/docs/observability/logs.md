@@ -37,17 +37,19 @@ The client puts the task on the records that the task body writes:
 |--------|-----------|--------|
 | Python | `TaskContextFilter` on the horsies handler; add it to a handler of your own | `task_id`, `task_name`, `attempt`, and `trace_id`, `span_id` when the attempt has a span |
 | Rust | Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) | `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt` on each record of the body |
+| TypeScript | `currentTask()` in a log library hook (a mixin or a format) | `taskId`, `taskName`, `attempt`, and `traceId`, `spanId` when the attempt has a span |
 
-Both work with tracing on or off. With tracing on, the `trace_id` of a record of the body is the trace id of the attempt span: the trace of the send, or a new trace with `LinkedToSend()` or with no carrier.
+Each works with tracing on or off. With tracing on, the `trace_id` of a record of the body is the trace id of the attempt span: the trace of the send, or a new trace with `LinkedToSend()` or with no carrier.
 
 ## JSON Lines
 
 | Client | Turn on | Keys |
 |--------|---------|------|
 | Python | `AppConfig(log_format=JsonLogs())` | `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`; each line has every key |
+| TypeScript | `logFormat: { kind: "jsonLogs" }` in `Horsies.create` | The keys of the Python client; a key with no value is `null` |
 | Rust | `horsies::cli::run_with_log_format(app, LogFormat::JsonLogs)` | `timestamp`, `level`, `target`, the fields of the event at the top level (`message` among them), `span` (the innermost span, with its name and fields) and `spans` (every span of the record, outermost first) |
 
-The worker, the scheduler, the check and each worker child write in the format. The setup of each client: [Log Setup (Python)](/horsies/observability/log-setup/), [Logs (Rust)](/horsies/rust/cli/#logs).
+The worker, the scheduler, the check and each worker child write in the format. The setup of each client: [Log Setup (Python)](/horsies/observability/log-setup/), [Logs (Rust)](/horsies/rust/cli/#logs), [Log Format (TypeScript)](/horsies/typescript/configuration/app-config/#log-format).
 
 ## Records of a Failing Recovery Step
 

@@ -48,7 +48,7 @@ function serveMonitoring(app: Horsies): void {
 }
 ```
 
-The handler serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` label values of `/metrics` are the queues of the app config. See [Fleet Collector](/horsies/observability/fleet-collector/).
+The handler serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` label values of `/metrics` are the queues of the app config, and the `schedule` label values are the names of the entries of its `schedule` section. Every other name is `(unknown)`. See [Fleet Collector](/horsies/observability/fleet-collector/).
 
 - `createMonitoringHandler` does no I/O. The first request connects the app's handle. A request whose handle cannot be built is answered with the cause as `{"detail": ...}`: 503 when the cause may clear, 500 when it stays (for example a connection setting that the core refuses). The next request tries again.
 - The handler runs no schema step. The schema gate of the core answers 409 `SCHEMA_INCOMPATIBLE`: see [Schema Handling](/horsies/monitoring/web-ui-deployment/#schema-handling).

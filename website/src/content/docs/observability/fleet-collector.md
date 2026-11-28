@@ -97,7 +97,7 @@ Each failed read is one log line at WARNING. Alert on `horsies_exporter_collect_
 
 ## Label Values
 
-- `queue` takes the queues of the app config: `default` in `QueueMode.DEFAULT`, the custom queues in `QueueMode.CUSTOM`. `schedule` takes the schedule names of the schedule config.
+- `queue` takes the queues of the app config: `default` in `QueueMode.DEFAULT`, the custom queues in `QueueMode.CUSTOM`. `schedule` takes the schedule names of the schedule config. In the TypeScript client, the queues are those of `queueMode` and `customQueues`, and the schedule names are the `name` of each `taskSchedule` entry of the `schedule` section, a disabled entry included.
 - Every other name is `(unknown)`. One `(unknown)` series stands for every such name: counts add up, ages take the largest.
 - A config name that cannot be a label value of its own counts in the `(unknown)` series too: the empty name, the text `(unknown)`, and a name after 100,000 names of its set. One WARNING line at the start names each such name with its reason (at most 32 names, then the count of the others). The start goes on.
 

@@ -67,7 +67,7 @@ export const app = created.value;
 | `tasks` | `readonly AnyTaskContract[]` | Every task contract of the app. See [Defining Tasks](/horsies/typescript/tasks/defining-tasks/) |
 | `workflows` | `readonly AnyWorkflowContract[]` | Every workflow contract of the app. See [Workflow API](/horsies/typescript/concepts/workflows/workflow-api/) |
 | `queueMode`, `customQueues` | `"default"`, or `"custom"` with a non-empty list of `CustomQueueInput` | [Queues](#queues), [Queue Modes](/horsies/concepts/queue-modes/) |
-| `schedule` | `ScheduleSection` | [Schedules](#schedules), [Schedule Config](/horsies/scheduling/schedule-config/) |
+| `schedule` | `ScheduleSection` | [Schedules](#schedules), [Schedule Config](/horsies/typescript/scheduling/schedule-config/) |
 | `database` | `DatabaseConfigInput` | [Database](#database), [Broker Config](/horsies/configuration/broker-config/) |
 | `clusterWideCap` | `ClusterCapSetting`: `{ kind: "clusterCap", tasks }` or `{ kind: "noClusterCap" }` (the default) | [Concurrency](/horsies/workers/concurrency/#cluster-level-cluster_wide_cap) |
 | `claim` | `ClaimMode` | [Claim Mode](#claim-mode) |
@@ -78,6 +78,7 @@ export const app = created.value;
 | `resilience` | `ResilienceConfigInput` | [Resilience](#resilience) |
 | `workerProfiles` | `Readonly<Record<string, WorkerProfileInput>>` | [Worker Setup](/horsies/typescript/workers/worker-setup/) |
 | `resendOnTransientError` | `boolean` | `true`: a send that fails with a transient database error is sent again, up to 3 times. Left out: `false`, no resend. See [Sending Tasks](/horsies/typescript/tasks/sending-tasks/) |
+| `tracing` | `TracingConfigInput`: `{ kind: "noTracing" }` (the default) or `{ kind: "otelTracing", parentage?, workerEndedSpans? }` | [Tracing Setup](/horsies/typescript/observability/tracing-setup/) |
 | `schemaMode` | `SchemaMode` | [Schema Mode](#schema-mode) |
 | `logFormat` | `LogFormat` | [Log Format](#log-format) |
 
@@ -324,7 +325,7 @@ export const scheduled = Horsies.create({
 
 - `Horsies.create` records the section once. These cases go to the report of `check` and of the scheduler start: a contract that the app does not list, a queue that the app does not admit, an input that does not fit or is over the payload bound, an unknown time zone, a pattern that breaks a rule, a repeated name, and a bad check interval. `Horsies.create` is not refused for them. The worker start skips them.
 - Run the schedules with the `scheduler` command. See [CLI Reference](/horsies/typescript/cli/#scheduler).
-- The meaning of each pattern is on [Schedule Patterns](/horsies/scheduling/schedule-patterns/).
+- The fields of each entry, the patterns, the defaults and the bounds are on [Schedule Config](/horsies/typescript/scheduling/schedule-config/). The meaning of each pattern is on [Schedule Patterns](/horsies/scheduling/schedule-patterns/).
 
 ## Schema Mode
 
