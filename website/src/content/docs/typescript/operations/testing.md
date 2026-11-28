@@ -105,6 +105,7 @@ The runtime answers:
 | `cancelState()` | `{ kind: "notRequested" }` |
 | `spawn(name, work)` | Runs `work` at once with a signal of its own that never fires. It is never refused |
 | `state(key)` | The value of the entry for `key`. A key with no entry throws `ClientDefect` |
+| `workflowContext` | `{ kind: "context", context }` from the `workflowContext` option, else `{ kind: "noContext" }`. The reads of the context are on [Read the Workflow Context](/horsies/typescript/concepts/workflows/workflow-api/#read-the-workflow-context) |
 
 ## Give a Body Its App State
 

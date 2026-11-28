@@ -143,6 +143,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
   - After a body that finished: the child reports the result first, and the worker writes it as for any task. The task keeps its result, with no second run.
   - A body that the refusal ended (a core call of the body raised `CoreStopped` and the body let it out, or returned it as its error) has no result: the child reports nothing, and the task takes the crashed-child path (`WORKER_CRASHED`) and its retry policy. So does every other run of a shared child whose body still runs when the child exits.
   - A fork of a child exits at once and writes nothing to the worker.
+- The TypeScript client throws both as subclasses of `CoreError`, from every call that runs on the core: `CoreStopped` with `subject`, `cause` and `stateAfter` (`"noChange"` for a read; `"outcomeUnknown"` for a write, which may have committed), and `ForkedAfterCoreStart` with `corePid` and `thisPid`. No result type of the TypeScript client has a variant for them. A TypeScript worker child ends with exit code 80 as above.
 - The Rust client has the fork state only. Every public call of the Rust client that runs on the core panics in a process that was forked without `exec` after the core's process runtime started in its parent, async and blocking forms alike, with both process ids and the fix; nothing ran. No Rust result type holds the fork. The Rust client has no stopped-core state: a panic in a core task of a Rust program is the program's panic.
 
 | Raised | Cause | What to do |

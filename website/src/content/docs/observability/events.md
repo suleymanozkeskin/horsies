@@ -12,6 +12,7 @@ The worker emits one typed event at each lifecycle step of a task and of its chi
 |--------|--------------------|----------|
 | Python | `@app.on_event(EventType)` on a `def` or an `async def` function; the event types are in `horsies.telemetry` | [Event Handlers (Python)](/horsies/workers/event-handlers/) |
 | Rust | `app.on_event::<E>(name, handler)` for an async handler, `app.on_event_blocking::<E>(name, handler)` for a blocking one; the event types are in `horsies::events` | [Event Handlers (Rust)](/horsies/rust/monitoring/event-handlers/) |
+| TypeScript | `app.onEvent(eventType, { name }, handler)` for a sync or async handler; the event types are exported by `horsies`. All handlers of a handler child share one event loop | [Event Handlers (TypeScript)](/horsies/typescript/monitoring/event-handlers/) |
 
 ## Why and When
 
@@ -19,7 +20,7 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 ## The Event Contract
 
-The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
+The core defines each event type once. The Python client generates its classes from the core, the Rust client re-exports the core types, and the TypeScript client generates its types from the core, so the three clients read the same events.
 
 - The contract has a version. This release has version 9: `core/tests/fixtures/event_contract/v9.txt` in the repository holds its text. Version 9 renames the field `child_kind` to `child_execution` in `AttemptPlaced`, `ChildStarted`, `ChildReplaced`, `SlotDown` and `SlotRecovered`, and adds the built-in code `UNKNOWN_CUSTOM_CODE`. Version 8 renamed the variants of an error code that the task chose to `Custom` and `CustomOverBound`. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
@@ -93,7 +94,7 @@ The handler child never stops the worker, and it is not a slot: the claim budget
 
 ### Start Hook
 
-A handler child runs its own start hooks, never the start hooks of the task children: Python `@app.on_handler_child_start`, Rust `app.on_handler_child_start(hook)`. Each hook runs once in each handler child, a replacement child included, before the handlers start, for at most 10 seconds. A hook that fails or runs longer ends the child and leaves it down until the worker restarts; the worker runs its tasks. Set up what the handlers share there, for example the OpenTelemetry SDK of the child.
+A handler child runs its own start hooks, never the start hooks of the task children: Python `@app.on_handler_child_start`, Rust `app.on_handler_child_start(hook)`, TypeScript `app.onHandlerChildStart(hook)`. Each hook runs once in each handler child, a replacement child included, before the handlers start, for at most 10 seconds. A hook that fails or runs longer ends the child and leaves it down until the worker restarts; the worker runs its tasks. Set up what the handlers share there, for example the OpenTelemetry SDK of the child.
 
 ### Delivery, Drops and Stats
 
@@ -106,8 +107,8 @@ A handler child runs its own start hooks, never the start hooks of the task chil
 
 - Delivery is at most once. An event that drops is never sent again.
 - The child sends the totals of each handler to the worker every 5 seconds, and once more at its stop. The worker metrics take them, with the resident memory of the child: `horsies.worker.memory.rss{process="handler_child"}`.
-- The `handler` label is the name of the handler: the qualified name of the function in Python, the name given at registration in Rust. An app has at most 32 handlers.
-- A handler that blocks delays only its own queue. A handler that never returns fills its own queue, and its events drop.
+- The `handler` label is the name of the handler: the qualified name of the function in Python, the name given at registration in Rust and TypeScript. An app has at most 32 handlers.
+- A handler that blocks delays only its own queue. A handler that never returns fills its own queue, and its events drop. In the TypeScript client, all handlers share one event loop: a handler that holds the loop with sync work delays every handler.
 
 ## Things to Avoid
 

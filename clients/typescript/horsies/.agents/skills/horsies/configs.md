@@ -551,13 +551,14 @@ bun app.ts check --live
 |---|---|
 | `<entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. The static check runs first. `--log-level` default `INFO`. A missing or unknown `--profile` exits 1 and the core names the profiles of the app |
 | `<entry> check [--live] [--log-level LEVEL]` | Checks the app. `--log-level` default `WARNING`. Sends stay suppressed |
+| `<entry> scheduler [--log-level LEVEL]` | Runs the schedules of the `schedule` section. The static check runs first, with the schedules. `--log-level` default `INFO`. No section, `enabled: false` or a refused check exits 1 and starts nothing. Sends stay suppressed until the scheduler serves |
 | `<entry> web [--host HOST] [--port PORT] [--authorization none\|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]` | Serves the monitoring web UI of the app (see `monitoring.md`) |
-| `<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`) |
+| `<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`). The `queue` and `schedule` label values are the queues and the schedule names of the config; other names are `(unknown)` |
 
 - `--log-level` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in
   any case.
-- `SIGTERM` or `SIGINT` stops the worker, the web server and the metrics
-  server. The first signal asks the stop once; each later signal writes one
+- `SIGTERM` or `SIGINT` stops the worker, the scheduler, the web server and
+  the metrics server. The first signal asks the stop once; each later signal writes one
   line to stderr and does nothing more. The worker drains within the
   profile's `drainTimeoutMs`.
 - A flag that the command does not know, a text flag with no value, a value

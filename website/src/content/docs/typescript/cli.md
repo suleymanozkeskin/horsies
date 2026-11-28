@@ -93,7 +93,7 @@ node main.ts check --live
 The static check reads no database. It runs in phases and stops at the first phase that refuses:
 
 1. The registrations after `Horsies.create`: an implementation of a contract that the app does not list, and a second implementation of one contract.
-2. The workflows: each listed workflow with no parameters, and each check case, is built and checked. The walk into the sub-workflows refuses a nesting that fails for certain.
+2. The workflows: each listed workflow with no parameters, and each check case, is built and checked. A case that is not parameters of the workflow is `HRS-028`. The walk into the sub-workflows refuses a nesting that fails for certain: past the depth limit (`HRS-036`), or a sub-workflow that includes itself with the same parameters (`HRS-037`). See [The Check of the Workflows](/horsies/typescript/concepts/workflows/workflow-api/#the-check-of-the-workflows).
 3. Each listed contract has an implementation in this entry (`HRS-300`). A check that passes means that a worker start from the same entry passes the same rule.
 4. The codes of each implementation's `exceptionMapper` pass the code rules of the core.
 

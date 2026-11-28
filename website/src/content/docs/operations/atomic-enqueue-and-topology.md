@@ -77,7 +77,7 @@ The key holds as long as its task is live (`PENDING`, `CLAIMED` or `RUNNING`). W
 | Default | 24 hours |
 | Maximum | 30 days (inclusive) |
 
-The Python client sets the window on the broker ([Make a Send Repeatable](/horsies/tasks/sending-tasks/#make-a-send-repeatable)). The Rust client uses the default.
+The Python client sets the window on the broker ([Make a Send Repeatable](/horsies/tasks/sending-tasks/#make-a-send-repeatable)). The Rust client uses the default. The TypeScript client uses the default for a send: its config has no field for the window. A TypeScript rerun takes its own window in `RerunEnqueuePolicy.reservationWindow`, more than 0 and at most 30 days ([Rerun](/horsies/typescript/operations/rerun/)).
 
 The command compared on a repeat includes the task name, queue, priority, kwargs, `good_until`, delay and task options. A repeat with changed kwargs is a conflict, not a replay.
 

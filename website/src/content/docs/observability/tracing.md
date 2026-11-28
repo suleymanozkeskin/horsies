@@ -14,6 +14,7 @@ Tracing is off by default. Turn it on in each client:
 |--------|---------|-------|
 | Python | `AppConfig(tracing=OtelTracing())`, with the extra `horsies[otel]` | [Tracing Setup (Python)](/horsies/observability/tracing-setup/) |
 | Rust | The feature `otel` of the crate `horsies` | [Tracing Setup (Rust)](/horsies/rust/observability/tracing-setup/) |
+| TypeScript | `tracing: { kind: "otelTracing" }` in `Horsies.create`, with the peer `@opentelemetry/api` | [Tracing Setup (TypeScript)](/horsies/typescript/observability/tracing-setup/) |
 
 With tracing off, a client imports or compiles no OpenTelemetry code, opens no span, and stores no carrier.
 
@@ -42,6 +43,7 @@ Use tracing to follow one task from the code that sent it to each attempt in a w
 | Python | `OtelTracing(parentage=ChildOfSend())` (default) | A child of the send span: the send and its attempts are one trace |
 | Python | `OtelTracing(parentage=LinkedToSend())` | The root of a new trace, with a link to the send span. The other entries of the extracted context, such as baggage, stay |
 | Rust | No setting | A child of the send span |
+| TypeScript | `parentage: "childOfSend"` (default) or `parentage: "linkedToSend"` | As the Python settings of the same names |
 
 ## The Trace Carrier
 
@@ -143,8 +145,9 @@ For each such attempt, the [handler child](/horsies/observability/events/#the-ha
 |--------|---------------------------|-----|
 | Python | `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)` | `OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS)` |
 | Rust | The feature `otel` | `app.set_worker_ended_spans(WorkerEndedSpans::NoSpans)` |
+| TypeScript | `workerEndedSpans: "makeSpans"` | `workerEndedSpans: "noSpans"` |
 
-Set the tracer provider of the handler child in its start hook (Python `@app.on_handler_child_start`), or in `main` before `horsies::cli::run` (Rust).
+Set the tracer provider of the handler child in its start hook (Python `@app.on_handler_child_start`), or in `main` before `horsies::cli::run` (Rust), or at the top of the entry file or in `app.onHandlerChildStart` (TypeScript).
 
 | Item | Value |
 |------|-------|
@@ -171,7 +174,7 @@ The log records of the worker for an attempt carry the same trace id. See [Logs]
 - **The span of an attempt that the worker ended starts at the placement.** It stands in for the span of the child, which was never exported. With the worker-ended spans off, the trace of such an attempt has the send span and no span of the attempt. The attempt record, the metrics and the history row of the task still record it.
 - **An attempt with an end that is not known has no span.** When the worker killed the child and did not see its exit, recovery decides the row, and no span is made.
 - **Spans of a killed attempt keep the lost parent.** A span that the body made inside a killed attempt, and that its child exported before the kill, keeps the id of the lost attempt span as its parent. A trace shows it next to the span of the worker, not under it.
-- **The last spans of a child.** At its stop, a Python worker child, and a Python handler child after the 2 seconds of its handlers, flush the global tracer provider for at most 1 second. The Rust client has no flush of its own: a batch span processor exports the last spans of a child only when `main` shuts the provider down after `horsies::cli::run` returns.
+- **The last spans of a child.** At its stop, a Python worker child, and a Python handler child after the 2 seconds of its handlers, flush the global tracer provider for at most 1 second. The Rust client has no flush of its own: a batch span processor exports the last spans of a child only when `main` shuts the provider down after `horsies::cli::run` returns. A TypeScript task child calls `forceFlush()` of the global tracer provider before it exits, together with the wait for its log records for at most 1 second.
 - **No span for the time in the queue.** The wait from the due time to the claim is the metric `horsies.task.queue.duration`. See the [Metric Reference](/horsies/observability/metric-reference/).
 
 ## Things to Avoid
