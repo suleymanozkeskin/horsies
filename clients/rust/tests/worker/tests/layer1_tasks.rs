@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use horsies::{
-    task, Horsies, ReadError, TaskError, TaskInfoParts, TaskOutcome, TaskSendError,
+    task, Horsies, ReadError, ResultSlot, TaskError, TaskInfoParts, TaskOutcome, TaskSendError,
     TaskSendOptions, TaskStatus,
 };
 use horsies_test_support::{poll, rows};
@@ -582,7 +582,9 @@ async fn test_task_info_after_completion() {
     assert_eq!(info.task_name, "e2e_simple");
     assert_eq!(info.queue, "default");
     assert_eq!(info.status, TaskStatus::Completed);
-    let result = info.result.expect("the result was asked for");
+    let ResultSlot::Stored(result) = info.result else {
+        panic!("the result was asked for and stored: {:?}", info.result);
+    };
     assert_eq!(
         result.ok().map(|value| value.get().to_owned()),
         Some("42".to_owned())

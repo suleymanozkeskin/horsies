@@ -36,6 +36,10 @@ from .core.models.tasks import (
     Execution,
     TaskInfo,
     TaskAttemptInfo,
+    ResultSlot,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
 )
 from .core.models.outcome import (
     Failed,
@@ -378,6 +382,10 @@ __all__ = [
     'RetryPolicy',
     'Execution',
     'TaskInfo',
+    'ResultSlot',
+    'ResultSlotNotRequested',
+    'ResultSlotNotStored',
+    'ResultSlotStored',
     'TaskAttemptInfo',
     'TaskRuntime',
     'FencingToken',

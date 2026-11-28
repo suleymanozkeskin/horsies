@@ -121,6 +121,6 @@ def task_action_causes_are_exceptions() -> None:
     )
 
 
-def the_history_status_is_parsed(info: TaskInfo) -> None:
+def the_history_status_is_parsed(info: TaskInfo[object]) -> None:
     _ = info.status is TaskStatus.COMPLETED
     _ = info.status == 'COMPLETED'  # pyright: ignore[reportUnnecessaryComparison]

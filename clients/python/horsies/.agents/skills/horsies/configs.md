@@ -410,7 +410,8 @@ read = app.get_result("task-uuid", wait_ms=5000)  # sync
 # Raw stored envelope, no typed decode — returns DatabaseResult[StoredResult | None]
 raw = await broker.get_raw_result_record_async("task-uuid", wait_ms=5000)
 
-# Fetch task metadata by ID — returns DatabaseResult[TaskInfo | None]
+# Fetch task metadata by ID — returns DatabaseResult[TaskInfo[dict[str, Json]] | None];
+# info.result is ResultSlotNotRequested | ResultSlotNotStored | ResultSlotStored(envelope)
 info = await broker.get_task_info_async("task-uuid", include_result=True)
 info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ```
