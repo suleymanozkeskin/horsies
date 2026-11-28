@@ -476,25 +476,43 @@ fn default_drain_timeout() -> Duration {
     DEFAULT_DRAIN_TIMEOUT
 }
 
-/// A value of a worker profile outside its bound. `path` is the field path
-/// of the value in the config, for example
+/// A value of a worker profile outside its bound.
+///
+/// - `profile`: the name of the profile.
+/// - `field`: the path of the value inside the profile, with `.` between
+///   the members, for example `isolated.count`.
+///
+/// [`ProfileValueRefused::path`] gives the path in the config, for example
 /// `worker_profiles['batch'].isolated.count`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileValueRefused {
     /// A count, size or task limit outside its bounds.
-    OutOfBounds { path: String, refused: OutOfBounds },
-    /// A drain timeout of 0, or above [`MAX_DRAIN_TIMEOUT`].
+    OutOfBounds {
+        profile: String,
+        field: String,
+        refused: OutOfBounds,
+    },
+    /// A drain timeout of 0, or above [`MAX_DRAIN_TIMEOUT`]. The field is
+    /// [`DRAIN_TIMEOUT_FIELD`].
     DrainTimeout {
-        path: String,
+        profile: String,
         refused: DrainTimeoutRefused,
     },
 }
 
+/// The field of a profile that holds the drain timeout.
+pub const DRAIN_TIMEOUT_FIELD: &str = "drain_timeout";
+
 impl ProfileValueRefused {
-    /// The field path of the refused value.
-    pub fn path(&self) -> &str {
+    /// The field path of the refused value in the config. Pure.
+    pub fn path(&self) -> String {
         match self {
-            Self::OutOfBounds { path, .. } | Self::DrainTimeout { path, .. } => path,
+            Self::OutOfBounds { profile, field, .. } => {
+                format!("{}.{field}", profile_path(profile))
+            }
+            Self::DrainTimeout { profile, .. } => {
+                format!("{}.{DRAIN_TIMEOUT_FIELD}", profile_path(profile))
+            }
         }
     }
 
@@ -515,22 +533,23 @@ impl ProfileValueRefused {
 
 impl fmt::Display for ProfileValueRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.path();
         match self {
-            Self::OutOfBounds { path, refused } => write!(
+            Self::OutOfBounds { refused, .. } => write!(
                 formatter,
                 "{path}: {} is outside the bounds {} to {}",
                 refused.value, refused.min, refused.max,
             ),
             Self::DrainTimeout {
-                path,
                 refused: DrainTimeoutRefused::Zero,
+                ..
             } => write!(
                 formatter,
                 "{path}: a drain timeout of 0 is refused; a stopping worker needs a deadline"
             ),
             Self::DrainTimeout {
-                path,
                 refused: DrainTimeoutRefused::AboveMaximum(timeout),
+                ..
             } => write!(
                 formatter,
                 "{path}: {timeout:?} is above the maximum of {MAX_DRAIN_TIMEOUT:?}"
@@ -588,7 +607,7 @@ impl WorkerProfile {
             assert!(
                 !check.refusals.is_empty(),
                 "a value of the profile {} is missing without a refusal",
-                check.profile,
+                profile_path(&check.profile),
             );
             return Err(check.refusals);
         };
@@ -612,7 +631,7 @@ impl WorkerProfile {
 /// Each check that keeps a refusal returns `None`, so a profile with a
 /// refusal has no checked value.
 struct ProfileCheck {
-    /// The path of the profile: `worker_profiles['batch']`.
+    /// The name of the profile.
     profile: String,
     refusals: Vec<ProfileValueRefused>,
 }
@@ -620,14 +639,9 @@ struct ProfileCheck {
 impl ProfileCheck {
     fn new(name: &str) -> Self {
         Self {
-            profile: profile_path(name),
+            profile: name.to_owned(),
             refusals: Vec::new(),
         }
-    }
-
-    /// The path of `field` in the profile.
-    fn path(&self, field: &str) -> String {
-        format!("{}.{field}", self.profile)
     }
 
     /// `value` as a bounded number, or `None` after its refusal is kept.
@@ -639,9 +653,11 @@ impl ProfileCheck {
         match BoundedU32::<MIN, MAX>::try_from(value) {
             Ok(bounded) => Some(bounded),
             Err(refused) => {
-                let path = self.path(field);
-                self.refusals
-                    .push(ProfileValueRefused::OutOfBounds { path, refused });
+                self.refusals.push(ProfileValueRefused::OutOfBounds {
+                    profile: self.profile.clone(),
+                    field: field.to_owned(),
+                    refused,
+                });
                 None
             }
         }
@@ -652,9 +668,10 @@ impl ProfileCheck {
         match DrainTimeout::try_from(value) {
             Ok(timeout) => Some(timeout),
             Err(refused) => {
-                let path = self.path("drain_timeout");
-                self.refusals
-                    .push(ProfileValueRefused::DrainTimeout { path, refused });
+                self.refusals.push(ProfileValueRefused::DrainTimeout {
+                    profile: self.profile.clone(),
+                    refused,
+                });
                 None
             }
         }

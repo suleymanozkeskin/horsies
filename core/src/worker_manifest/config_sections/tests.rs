@@ -104,21 +104,72 @@ fn each_profile_of_the_config_is_its_manifest_profile() {
     assert_eq!(sections(&config).profiles, manifest.profiles);
 }
 
-/// A client builds the sections only of a config that `AppConfig::validate`
-/// accepted. A profile value outside its bound is a defect of the client:
-/// the builder panics with its path and its bounds.
+/// A profile value outside its bound is refused with its profile, its field
+/// and the bound of the value.
 #[test]
-#[should_panic(
-    expected = "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"
-)]
-fn a_profile_value_outside_its_bound_is_a_defect_of_the_client() {
+fn a_profile_value_outside_its_bound_is_refused_with_its_field_and_bound() {
+    use crate::core::config::worker_profile::input;
     let mut config = config();
-    let profile = crate::core::config::worker_profile::input::WorkerProfile {
-        isolated: crate::core::config::worker_profile::input::IsolatedChildren::new(0).into(),
-        ..crate::core::config::worker_profile::input::WorkerProfile::default()
+    let profile = input::WorkerProfile {
+        isolated: input::IsolatedChildren::new(0).into(),
+        ..input::WorkerProfile::default()
     };
     let _replaced = config.worker_profiles.insert("web".to_owned(), profile);
-    let _sections = config_sections(&config);
+    assert_eq!(
+        config_sections(&config),
+        Err(ManifestBoundRefused {
+            field: ConfigField::WorkerProfile {
+                name: "web".to_owned(),
+                field: "isolated.count".to_owned(),
+            },
+            min: 1,
+            max: 1024,
+        }),
+    );
+}
+
+/// A drain timeout of 0 is refused with the bound of the manifest field, in
+/// milliseconds.
+#[test]
+fn a_zero_drain_timeout_is_refused_with_the_manifest_bound() {
+    use crate::core::config::worker_profile::input;
+    let mut config = config();
+    let profile = input::WorkerProfile {
+        drain_timeout: std::time::Duration::ZERO,
+        ..input::WorkerProfile::default()
+    };
+    let _replaced = config.worker_profiles.insert("web".to_owned(), profile);
+    assert_eq!(
+        config_sections(&config),
+        Err(ManifestBoundRefused {
+            field: ConfigField::WorkerProfile {
+                name: "web".to_owned(),
+                field: "drain_timeout".to_owned(),
+            },
+            min: wire::MIN_DRAIN_TIMEOUT_MS,
+            max: wire::MAX_DRAIN_TIMEOUT_MS,
+        }),
+    );
+}
+
+/// The path of a profile field: the profile name is one key, each member of
+/// the field is one key.
+#[test]
+fn a_profile_field_has_its_config_path() {
+    let field = ConfigField::WorkerProfile {
+        name: "web".to_owned(),
+        field: "claim.per_queue_per_pass.tasks".to_owned(),
+    };
+    assert_eq!(
+        field.segments(),
+        [
+            FieldSegment::Member("worker_profiles"),
+            FieldSegment::Key("web"),
+            FieldSegment::Key("claim"),
+            FieldSegment::Key("per_queue_per_pass"),
+            FieldSegment::Key("tasks"),
+        ],
+    );
 }
 
 /// The custom queues in config order, with their priority and limit, and
