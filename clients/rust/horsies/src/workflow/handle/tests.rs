@@ -4,6 +4,7 @@ use std::convert::Infallible;
 
 use serde_json::json;
 
+use super::super::dependency::NoWorkflowOutput;
 use super::*;
 use crate::{AppConfig, Horsies, TaskErrorCode, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
@@ -138,7 +139,9 @@ fn a_paused_workflow_is_the_paused_outcome() {
     assert_eq!(code_text(&outcome), "WORKFLOW_PAUSED");
 }
 
-fn outputless() -> serde_json::Value {
+/// The result that migrations before 1009 stored for a workflow with no
+/// output node: the marker and a map of the terminal nodes in `ok`.
+fn old_outputless() -> serde_json::Value {
     json!({
         "__h_task_result__": true,
         "__h_outputless_terminals__": true,
@@ -167,12 +170,12 @@ fn an_untyped_value_keeps_its_stored_text() {
     assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
 }
 
-/// Python fails closed when the stored form and the handle's type disagree:
-/// an outputless result is read as `NoWorkflowOutput` only.
+/// A result of the old outputless form is not an envelope of the strict form:
+/// it is unreadable for an output node type.
 #[test]
-fn an_outputless_result_read_as_an_output_node_type_is_unreadable() {
+fn an_old_outputless_result_read_as_an_output_node_type_is_unreadable() {
     assert!(matches!(
-        end_outcome::<u32>(workflow(), completed(Some(outputless()))),
+        end_outcome::<u32>(workflow(), completed(Some(old_outputless()))),
         Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
@@ -637,20 +640,32 @@ fn a_handle_read_of_an_outputless_child_node_gives_no_workflow_output() {
     );
 }
 
-/// A workflow with no output node, read by a handle typed `NoWorkflowOutput`:
-/// the value, or the stored error. The terminal results are not read.
+/// A workflow with no output node stores the plain envelope. A handle typed
+/// `NoWorkflowOutput` reads the value, or the stored error.
 #[test]
 fn an_outputless_workflow_read_as_no_workflow_output_gives_the_value_or_its_error() {
+    let plain = completed(Some(
+        json!({"__h_task_result__": true, "ok": null, "err": null}),
+    ));
     assert_eq!(
-        end_outcome::<NoWorkflowOutput>(workflow(), completed(Some(outputless()))).unwrap(),
+        end_outcome::<NoWorkflowOutput>(workflow(), plain).unwrap(),
         TaskOutcome::Succeeded(NoWorkflowOutput)
     );
     let failed = completed(Some(json!({
         "__h_task_result__": true,
-        "__h_outputless_terminals__": true,
         "ok": null,
         "err": {"error_code": "DECLINED", "message": "no"},
     })));
     let outcome = end_outcome::<NoWorkflowOutput>(workflow(), failed).unwrap();
     assert_eq!(code_text(&outcome), "DECLINED");
+}
+
+/// A row written before migration 1009 holds the old outputless form. A
+/// handle typed `NoWorkflowOutput` does not read it: the read fails closed.
+#[test]
+fn an_old_outputless_row_read_as_no_workflow_output_is_unreadable() {
+    assert!(matches!(
+        end_outcome::<NoWorkflowOutput>(workflow(), completed(Some(old_outputless()))),
+        Err(WorkflowReadError::ResultDeserializationError { .. })
+    ));
 }

@@ -915,8 +915,7 @@ impl WorkflowOps {
 }
 
 /// The result of the end of `workflow_id`, read as a client reads it: the
-/// stored result envelope of a COMPLETED workflow (of an outputless one, the
-/// `results_by_id` map of its envelope, each entry an envelope); the stored
+/// stored result envelope of a COMPLETED workflow; the stored
 /// error of a FAILED, CANCELLED or EXPIRED workflow, or the code of its
 /// status when it stores none; the code of a PAUSED, missing or unfinished
 /// workflow. The read is the clients'; the tests read the core's stored
@@ -951,7 +950,7 @@ pub(super) fn result_of_end(
         WorkflowWait::Ended(WorkflowEnd::Completed { result }) => {
             let text = result
                 .unwrap_or_else(|| panic!("COMPLETED workflow {workflow_id} stores no result"));
-            completed_result(&text)
+            stored_result(&text)
         }
     }
 }
@@ -962,17 +961,6 @@ fn ended_code(status: TerminalErrorStatus) -> OutcomeCode {
         TerminalErrorStatus::Failed => OutcomeCode::WorkflowFailed,
         TerminalErrorStatus::Cancelled => OutcomeCode::WorkflowCancelled,
         TerminalErrorStatus::Expired => OutcomeCode::WorkflowExpired,
-    }
-}
-
-/// The stored result of a COMPLETED workflow: its envelope, or for an
-/// outputless workflow the `results_by_id` map of its envelope.
-fn completed_result(text: &str) -> TaskResult<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("the stored result is not JSON: {error}: {text}"));
-    match value.get("__h_outputless_terminals__") {
-        Some(serde_json::Value::Bool(true)) => TaskResult::Ok(value["ok"]["results_by_id"].clone()),
-        Some(_) | None => stored_result(text),
     }
 }
 

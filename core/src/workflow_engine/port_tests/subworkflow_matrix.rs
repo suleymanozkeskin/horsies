@@ -361,16 +361,21 @@ fn summary_of(text: Option<&str>) -> SubWorkflowSummary {
         .expect("the child summary decodes")
 }
 
-/// The entry of `node_id` in the ok map of an outputless workflow's `get()`.
-pub(super) fn outputless_entry(
-    got: &TaskResult<serde_json::Value>,
+/// The result of the node `node_id` as `result_for()` reads it.
+pub(super) async fn node_entry(
+    pool: &TestPool,
+    workflow_id: Uuid,
     node_id: &str,
 ) -> TaskResult<serde_json::Value> {
-    match got {
-        TaskResult::Ok(map) => serde_json::from_value(map[node_id].clone())
-            .unwrap_or_else(|error| panic!("entry '{node_id}' is not an envelope: {error}: {map}")),
-        TaskResult::Err(error) => panic!("get() of a COMPLETED outputless workflow: {error:?}"),
-    }
+    handle(pool, workflow_id)
+        .result_for::<serde_json::Value>(node_id)
+        .await
+        .expect("the node result read")
+}
+
+/// `get()` of a COMPLETED workflow with no output node: the value `null`.
+pub(super) async fn assert_no_workflow_output(pool: &TestPool, workflow_id: Uuid) {
+    assert_ok_value(&get(pool, workflow_id).await, &serde_json::Value::Null);
 }
 
 /// A row of a workflow tree.
@@ -636,18 +641,21 @@ pub(super) fn outputless_parent() -> WorkflowSpec {
 
 /// `test_outputless_success_policy_keeps_failed_subworkflow_result`
 #[tokio::test]
-async fn an_outputless_workflow_holds_the_optional_child_error_in_its_map() {
+async fn an_outputless_workflow_keeps_the_optional_child_error_in_its_node() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &outputless_parent()).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    let got = get(&pool, workflow_id).await;
+    assert_no_workflow_output(&pool, workflow_id).await;
     assert_ok_value(
-        &outputless_entry(&got, "node_0"),
+        &node_entry(&pool, workflow_id, "node_0").await,
         &serde_json::json!("required_ok"),
     );
     let child_id = child_of(&pool, workflow_id, 1).await;
-    let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), Some(child_id));
+    let _summary = assert_subworkflow_error(
+        &node_entry(&pool, workflow_id, "node_1").await,
+        Some(child_id),
+    );
 }
 
 /// `test_nested_subworkflow_success_records_depth_root_and_result`
@@ -1109,7 +1117,7 @@ async fn required_and_optional_children_hold_their_results() {
 
 /// `test_subworkflow_deep_outputless_nested_failed_optional`
 #[tokio::test]
-async fn an_optional_nested_failed_child_appears_in_the_outputless_map() {
+async fn an_optional_nested_failed_child_keeps_its_error_in_its_node() {
     let pool = shared_pool().await;
     let mut deep = parent(
         "deep_outputless_nested_failed_optional",
@@ -1123,13 +1131,16 @@ async fn an_optional_nested_failed_child_appears_in_the_outputless_map() {
     let workflow_id = run(&pool, &deep).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    let got = get(&pool, workflow_id).await;
+    assert_no_workflow_output(&pool, workflow_id).await;
     assert_ok_value(
-        &outputless_entry(&got, "node_0"),
+        &node_entry(&pool, workflow_id, "node_0").await,
         &serde_json::json!("required_ok"),
     );
     let middle_id = child_of(&pool, workflow_id, 1).await;
-    let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), Some(middle_id));
+    let _summary = assert_subworkflow_error(
+        &node_entry(&pool, workflow_id, "node_1").await,
+        Some(middle_id),
+    );
     assert!(tree(&pool, workflow_id)
         .await
         .iter()
@@ -1186,10 +1197,13 @@ async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_work
     let workflow_id = run(&pool, &mixed).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    let got = get(&pool, workflow_id).await;
-    assert_ok_value(&outputless_entry(&got, "node_0"), &serde_json::json!(11));
+    assert_no_workflow_output(&pool, workflow_id).await;
     assert_ok_value(
-        &outputless_entry(&got, "node_2"),
+        &node_entry(&pool, workflow_id, "node_0").await,
+        &serde_json::json!(11),
+    );
+    assert_ok_value(
+        &node_entry(&pool, workflow_id, "node_2").await,
         &serde_json::json!({
             "input_is_err": true,
             "input_error_code": "L7_DEEP_MIXED_SOURCE_FAIL",
@@ -1197,5 +1211,8 @@ async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_work
         }),
     );
     let nested_id = child_of(&pool, workflow_id, 3).await;
-    let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_3"), Some(nested_id));
+    let _summary = assert_subworkflow_error(
+        &node_entry(&pool, workflow_id, "node_3").await,
+        Some(nested_id),
+    );
 }

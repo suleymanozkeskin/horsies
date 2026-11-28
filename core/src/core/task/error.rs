@@ -174,8 +174,7 @@ pub enum OutcomeCode {
     UpstreamSkipped,
     SubWorkflowFailed,
     WorkflowSuccessCaseNotMet,
-    /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
-    /// SKIPPED.
+    /// A COMPLETED workflow has no output: its output node is SKIPPED.
     WorkflowOutputSkipped,
 }
 

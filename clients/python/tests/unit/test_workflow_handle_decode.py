@@ -2,10 +2,13 @@
 
 Strict-serde phase 5/6 regression coverage. The decode routine must:
 
-1. Reject envelopes whose ``__h_outputless_terminals__`` flag disagrees
-   with the handle's ``output_type`` (silent coercion was the bug).
-2. Apply the disagreement check BEFORE the err-fast-path so a smuggled
-   outputless flag on a typed payload can't slip through the err route.
+1. Read the plain envelope of a workflow with no output node
+   (``ok`` null) as ``NoWorkflowOutput``, and refuse a typed payload for
+   that type.
+2. Refuse the old outputless envelope (migrations before 1009 stored the
+   key ``__h_outputless_terminals__`` and a map of the terminal nodes in
+   ``ok``) for every ``output_type``: it is not an envelope of the strict
+   form.
 3. Use `decode_task_error` for polymorphic err decoding so a
    SubWorkflowFailure emitted by a child workflow round-trips with its
    subclass fields intact.
@@ -33,7 +36,6 @@ from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.handle import (
-    _OUTPUTLESS_WORKFLOW,  # pyright: ignore[reportPrivateUsage]
     _decode_workflow_envelope,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.types.result import Err, Ok
@@ -57,11 +59,12 @@ def _typed_envelope(ok: Any) -> dict[str, Any]:
     }
 
 
-def _outputless_envelope(
+def _old_outputless_envelope(
     results_by_id: dict[str, Any],
     task_name_by_id: dict[str, str],
 ) -> dict[str, Any]:
-    """Wire-outputless envelope with embedded per-node results."""
+    """The envelope that migrations before 1009 stored for a workflow with
+    no output node: the marker and the embedded per-node results."""
     return {
         '__h_task_result__': True,
         '__h_outputless_terminals__': True,
@@ -84,66 +87,27 @@ def _err_envelope(err_payload: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessMismatch:
-    """Mismatch between wire flag and handle ``output_type`` is a contract
-    violation — silent coercion to the wrong shape is the bug."""
+    """The stored form and the handle's ``output_type`` must agree."""
 
-    def test_typed_handle_on_outputless_wire_rejected(self) -> None:
-        """Handle has a typed ``output_type`` but the envelope is outputless."""
-        wire = _outputless_envelope(
-            results_by_id={},
-            task_name_by_id={},
-        )
+    def test_typed_handle_on_the_old_outputless_wire_rejected(self) -> None:
+        wire = _old_outputless_envelope(results_by_id={}, task_name_by_id={})
         result = _decode_workflow_envelope(
             cast(Json, wire),
             output_type=int,
             app=None,
             workflow_id='wf-1',
         )
-        message = _unreadable_message(result)
-        assert 'wire_outputless=True, handle_outputless=False' in message
+        assert '__h_outputless_terminals__' in _unreadable_message(result)
 
-    def test_outputless_handle_on_typed_wire_rejected(self) -> None:
-        """Handle is outputless but the envelope carries a typed payload."""
+    def test_no_workflow_output_handle_on_a_typed_wire_rejected(self) -> None:
         wire = _typed_envelope(ok=42)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            output_type=_OUTPUTLESS_WORKFLOW,
+            output_type=NoWorkflowOutput,
             app=None,
             workflow_id='wf-2',
         )
-        message = _unreadable_message(result)
-        assert 'wire_outputless=False, handle_outputless=True' in message
-
-    def test_smuggled_outputless_flag_on_typed_err_envelope_rejected(
-        self,
-    ) -> None:
-        """Outputless flag MUST be checked before err-fast-path.
-
-        Regression: an attacker / cross-version producer could write
-        ``__h_outputless_terminals__: True`` next to an err slot and
-        slip past the outputless check if the err-fast-path ran first.
-        """
-        wire = {
-            '__h_task_result__': True,
-            '__h_outputless_terminals__': True,
-            'ok': None,
-            'err': {
-                'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
-                'message': 'sneak',
-                'data': None,
-                'exception': None,
-            },
-        }
-        # Handle is typed; smuggled outputless flag must trip mismatch
-        # BEFORE the err-fast-path returns a (spurious) decode.
-        result = _decode_workflow_envelope(
-            cast(Json, wire),
-            output_type=int,
-            app=None,
-            workflow_id='wf-3',
-        )
-        message = _unreadable_message(result)
-        assert 'wire_outputless=True, handle_outputless=False' in message
+        _unreadable_message(result)
 
 
 @pytest.mark.unit
@@ -232,11 +196,37 @@ class TestWorkflowEnvelopeErrSlot:
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessPath:
-    """An outputless handle reads the outputless envelope as
-    ``NoWorkflowOutput``; the embedded per-node map is not read."""
+    """A handle of ``NoWorkflowOutput`` reads the plain envelope of a
+    workflow with no output node."""
 
-    def test_outputless_wire_reads_as_no_workflow_output(self) -> None:
-        wire = _outputless_envelope(
+    def test_plain_envelope_reads_as_no_workflow_output(self) -> None:
+        result = _decode_workflow_envelope(
+            cast(Json, _typed_envelope(ok=None)),
+            output_type=NoWorkflowOutput,
+            app=None,
+            workflow_id='wf-out',
+        )
+        assert result == Ok(Succeeded(NoWorkflowOutput()))
+
+    def test_plain_envelope_with_an_err_slot_reads_as_failed(self) -> None:
+        wire = _typed_envelope(ok=None)
+        wire['err'] = encode_task_error(
+            TaskError(code=OperationalCode.UNHANDLED_EXCEPTION, message='boom'),
+        )
+        result = _decode_workflow_envelope(
+            cast(Json, wire),
+            output_type=NoWorkflowOutput,
+            app=None,
+            workflow_id='wf-out',
+        )
+        match result:
+            case Ok(Failed(task_error)):
+                assert task_error.message == 'boom'
+            case _:
+                pytest.fail(f'expected Ok(Failed(...)), got {result!r}')
+
+    def test_a_row_of_the_old_outputless_form_is_unreadable(self) -> None:
+        wire = _old_outputless_envelope(
             results_by_id={
                 'node-0': {
                     '__h_task_result__': True,
@@ -248,25 +238,8 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            output_type=_OUTPUTLESS_WORKFLOW,
+            output_type=NoWorkflowOutput,
             app=None,
-            workflow_id='wf-out',
+            workflow_id='wf-old',
         )
-        assert result == Ok(Succeeded(NoWorkflowOutput()))
-
-    def test_outputless_wire_with_an_err_slot_reads_as_failed(self) -> None:
-        wire = _outputless_envelope(results_by_id={}, task_name_by_id={})
-        wire['err'] = encode_task_error(
-            TaskError(code=OperationalCode.UNHANDLED_EXCEPTION, message='boom'),
-        )
-        result = _decode_workflow_envelope(
-            cast(Json, wire),
-            output_type=_OUTPUTLESS_WORKFLOW,
-            app=None,
-            workflow_id='wf-out',
-        )
-        match result:
-            case Ok(Failed(task_error)):
-                assert task_error.message == 'boom'
-            case _:
-                pytest.fail(f'expected Ok(Failed(...)), got {result!r}')
+        assert '__h_outputless_terminals__' in _unreadable_message(result)

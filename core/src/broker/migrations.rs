@@ -35,7 +35,10 @@
 //!   (`1008_retry_policy_keys_and_custom_category.sql`) replaces the
 //!   validation functions of the retry policy of a workflow node (the keys
 //!   `intervals_seconds` and `retry_for`) and the monitoring functions that
-//!   hold the code category of a custom code (`CUSTOM`).
+//!   hold the code category of a custom code (`CUSTOM`). Version 1009
+//!   (`1009_outputless_plain_result.sql`) stores the plain envelope
+//!   `{"__h_task_result__":true,"ok":null,"err":null}` as the result of a
+//!   COMPLETED workflow with no output node.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -183,12 +186,17 @@ pub(crate) const SUB_WORKFLOW_FAILED_CODE_MIGRATION_VERSION: i64 = 1007;
 /// (`core/migrations/1008_retry_policy_keys_and_custom_category.sql`).
 pub(crate) const RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION: i64 = 1008;
 
+/// Version of the migration that stores the plain envelope as the result of
+/// a COMPLETED workflow with no output node
+/// (`core/migrations/1009_outputless_plain_result.sql`).
+pub(crate) const OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION: i64 = 1009;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 8] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 9] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -228,6 +236,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 8] = [
         RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION,
         "1008_retry_policy_keys_and_custom_category.sql",
         include_str!("../../migrations/1008_retry_policy_keys_and_custom_category.sql"),
+    ),
+    (
+        OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION,
+        "1009_outputless_plain_result.sql",
+        include_str!("../../migrations/1009_outputless_plain_result.sql"),
     ),
 ];
 
@@ -332,7 +345,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 9] = [
+const MIGRATION_SOURCES: [MigrationSource; 10] = [
     // The baseline creates horsies_client_family with the CHECK
     // horsies_client_family_family_known: family IN ('PYTHON', 'RUST')
     // (baseline `0001_tables.sql`).
@@ -460,6 +473,21 @@ const MIGRATION_SOURCES: [MigrationSource; 9] = [
         script: SqlScript::new(
             "migration_1008_retry_policy_keys_and_custom_category",
             LATER_MIGRATION_FILES[7].2,
+        ),
+        admitted_families: &[],
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column, builds no index and changes no CHECK: it
+    // replaces four functions in place, drops
+    // horsies_workflow_outputless_result and writes no row.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[8].0,
+        description: "outputless plain result",
+        script: SqlScript::new(
+            "migration_1009_outputless_plain_result",
+            LATER_MIGRATION_FILES[8].2,
         ),
         admitted_families: &[],
         readers: ReaderPublication::NotPublished,

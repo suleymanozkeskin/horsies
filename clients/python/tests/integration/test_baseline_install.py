@@ -56,6 +56,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1006: 'typescript client family',
     1007: 'sub-workflow failed code',
     1008: 'retry policy keys and custom category',
+    1009: 'outputless plain result',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""

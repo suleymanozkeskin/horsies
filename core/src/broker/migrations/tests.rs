@@ -2907,21 +2907,20 @@ fn retry_policy_keys_and_custom_category_position() -> usize {
         .expect("migration 1008 is a link of the chain")
 }
 
-/// Migration 1008 is the newest link of the chain: it publishes no reader,
+/// Migration 1008 is the ninth link of the chain: it publishes no reader,
 /// declares no index step, admits no client family, and its checksum is
 /// SHA-384 of its file. Its text names no schema, holds no transaction
 /// control and drops nothing: it replaces nine functions in place. The file
-/// list of the harnesses ends with this file.
+/// list of the harnesses holds this file after the file of 1007, and migration
+/// 1009 follows it.
 #[test]
-fn the_retry_policy_keys_and_custom_category_is_the_newest_migration() {
+fn the_retry_policy_keys_and_custom_category_is_the_ninth_migration() {
     let chain = embedded_migrations();
-    let (version, name, text) = *LATER_MIGRATION_FILES
-        .last()
-        .expect("the chain has migrations after the baseline");
-    let migration = chain.last().expect("the chain is not empty");
+    let (version, name, text) = LATER_MIGRATION_FILES[7];
     let position = retry_policy_keys_and_custom_category_position();
-    assert_eq!(chain.len(), LATER_MIGRATION_FILES.len() + 1);
-    assert_eq!(position, chain.len() - 1);
+    let migration = &chain[position];
+    assert_eq!(position, 8);
+    assert_eq!(outputless_plain_result_position(), position + 1);
     assert_eq!(
         version,
         RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION
@@ -2947,10 +2946,6 @@ fn the_retry_policy_keys_and_custom_category_is_the_newest_migration() {
         migration.checksum.as_slice(),
         Sha384::digest(text.as_bytes()).as_slice()
     );
-    assert_eq!(
-        expected_schema_version(),
-        RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION
-    );
     assert!(
         !text.contains("public."),
         "the migration names the public schema"
@@ -2972,10 +2967,9 @@ fn the_retry_policy_keys_and_custom_category_is_the_newest_migration() {
     assert_eq!(text.matches("\nCREATE OR REPLACE FUNCTION ").count(), 9);
     let files = migration_sql_file_texts();
     assert_eq!(
-        files.len(),
-        BASELINE_SQL_FILE_TEXTS.len() + LATER_MIGRATION_FILES.len()
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 7),
+        Some(&(version, name, text))
     );
-    assert_eq!(files.last(), Some(&(version, name, text)));
 }
 
 /// A build whose chain ends before migration 1008 meets a database that
@@ -2990,6 +2984,107 @@ fn a_chain_without_the_retry_policy_keys_refuses_a_database_that_has_them() {
         classify(ledger(applied, RUST), &chain[..position]),
         Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
             stored: RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION,
+            own: chain[position - 1].version,
+        })),
+    );
+}
+
+/// The position of migration 1009 in the embedded chain: the number of
+/// migrations that a database before it holds.
+fn outputless_plain_result_position() -> usize {
+    embedded_migrations()
+        .iter()
+        .position(|migration| migration.version == OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION)
+        .expect("migration 1009 is a link of the chain")
+}
+
+/// Migration 1009 is the newest link of the chain: it publishes no reader,
+/// declares no index step, admits no client family, and its checksum is
+/// SHA-384 of its file. Its text names no schema, holds no transaction
+/// control, replaces four functions in place and drops one function: the
+/// reader of the outputless envelope. The file list of the harnesses ends
+/// with this file.
+#[test]
+fn the_outputless_plain_result_is_the_newest_migration() {
+    let chain = embedded_migrations();
+    let (version, name, text) = *LATER_MIGRATION_FILES
+        .last()
+        .expect("the chain has migrations after the baseline");
+    let migration = chain.last().expect("the chain is not empty");
+    let position = outputless_plain_result_position();
+    assert_eq!(chain.len(), LATER_MIGRATION_FILES.len() + 1);
+    assert_eq!(position, chain.len() - 1);
+    assert_eq!(version, OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1009);
+    assert_eq!(migration.description, "outputless plain result");
+    assert!(migration.admitted_families.is_empty());
+    for own in [
+        ClientFamily::Python,
+        ClientFamily::Rust,
+        ClientFamily::TypeScript,
+    ] {
+        assert_eq!(family_row_at(chain, position, own), FamilyRow::NotWritten);
+    }
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert_eq!(
+        expected_schema_version(),
+        OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    let statements: Vec<String> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .map(|line| line.trim().to_uppercase())
+        .collect();
+    for statement in &statements {
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {statement}"
+        );
+        assert!(
+            !statement.starts_with("ALTER "),
+            "the migration alters more than functions: {statement}"
+        );
+    }
+    let drops: Vec<&String> = statements
+        .iter()
+        .filter(|statement| statement.starts_with("DROP "))
+        .collect();
+    assert_eq!(
+        drops,
+        ["DROP FUNCTION HORSIES_WORKFLOW_OUTPUTLESS_RESULT(UUID);"]
+    );
+    assert_eq!(text.matches("\nCREATE OR REPLACE FUNCTION ").count(), 4);
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.len(),
+        BASELINE_SQL_FILE_TEXTS.len() + LATER_MIGRATION_FILES.len()
+    );
+    assert_eq!(files.last(), Some(&(version, name, text)));
+}
+
+/// A build whose chain ends before migration 1009 meets a database that
+/// applied migration 1009: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_outputless_plain_result_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let position = outputless_plain_result_position();
+    let applied: Vec<AppliedMigration> = chain[..=position].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..position]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: OUTPUTLESS_PLAIN_RESULT_MIGRATION_VERSION,
             own: chain[position - 1].version,
         })),
     );
@@ -3388,7 +3483,7 @@ async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_v
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1002 to 1008 over the workflow rows");
+        .expect("apply migrations 1002 to 1009 over the workflow rows");
 
     let installed = bookkeeping_rows(&database).await;
     assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -3435,9 +3530,10 @@ async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_v
 /// workflow rows, an upgrade from migration 1001 with workflow rows, an
 /// upgrade from migration 1002 with live rows, an upgrade from migration
 /// 1003 with a worker snapshot, an upgrade from migration 1004 with live rows
-/// through migrations 1005 to 1008, an upgrade from the migration before
+/// through migrations 1005 to 1009, an upgrade from the migration before
 /// 1006, an upgrade from the migration before 1007 and an upgrade from the
-/// migration before 1008 end in the same schema: the same columns,
+/// migration before 1008 and an upgrade from the migration before 1009 end
+/// in the same schema: the same columns,
 /// constraints, indexes, sequences and functions, and the same bookkeeping.
 #[tokio::test]
 async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
@@ -3453,7 +3549,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     upgraded
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1001 to 1008 over the live rows");
+        .expect("apply migrations 1001 to 1009 over the live rows");
     let from_1001 = MigrationTestDatabase::create().await;
     from_1001
         .install_first_migrations(ClientFamily::Rust, 2)
@@ -3462,7 +3558,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1001
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1002 to 1008 over the workflow rows");
+        .expect("apply migrations 1002 to 1009 over the workflow rows");
     let from_1002 = MigrationTestDatabase::create().await;
     from_1002
         .install_first_migrations(ClientFamily::Rust, 3)
@@ -3471,7 +3567,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1002
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1003 to 1008 over the live rows");
+        .expect("apply migrations 1003 to 1009 over the live rows");
     let from_1003 = MigrationTestDatabase::create().await;
     from_1003
         .install_first_migrations(ClientFamily::Rust, 4)
@@ -3480,7 +3576,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1003
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1004 to 1008 over the worker snapshot");
+        .expect("apply migrations 1004 to 1009 over the worker snapshot");
     let from_1004 = MigrationTestDatabase::create().await;
     from_1004
         .install_first_migrations(ClientFamily::Rust, claim_generation_by_status_position())
@@ -3489,7 +3585,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1004
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1005 to 1008 over the live rows");
+        .expect("apply migrations 1005 to 1009 over the live rows");
     let before_1006 = MigrationTestDatabase::create().await;
     before_1006
         .install_first_migrations(ClientFamily::Rust, typescript_client_family_position())
@@ -3497,7 +3593,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     before_1006
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1006 to 1008");
+        .expect("apply migrations 1006 to 1009");
     let before_1007 = MigrationTestDatabase::create().await;
     before_1007
         .install_first_migrations(ClientFamily::Rust, sub_workflow_failed_code_position())
@@ -3505,7 +3601,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     before_1007
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1007 and 1008");
+        .expect("apply migrations 1007 to 1009");
     let before_1008 = MigrationTestDatabase::create().await;
     before_1008
         .install_first_migrations(
@@ -3516,7 +3612,15 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     before_1008
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migration 1008");
+        .expect("apply migrations 1008 and 1009");
+    let before_1009 = MigrationTestDatabase::create().await;
+    before_1009
+        .install_first_migrations(ClientFamily::Rust, outputless_plain_result_position())
+        .await;
+    before_1009
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1009");
 
     let fresh_shape = schema_shape(&fresh).await;
     assert_eq!(fresh_shape, schema_shape(&upgraded).await);
@@ -3527,6 +3631,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     assert_eq!(fresh_shape, schema_shape(&before_1006).await);
     assert_eq!(fresh_shape, schema_shape(&before_1007).await);
     assert_eq!(fresh_shape, schema_shape(&before_1008).await);
+    assert_eq!(fresh_shape, schema_shape(&before_1009).await);
     let fresh_rows = bookkeeping_rows(&fresh).await;
     assert_eq!(fresh_rows, bookkeeping_rows(&upgraded).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1001).await);
@@ -3536,6 +3641,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     assert_eq!(fresh_rows, bookkeeping_rows(&before_1006).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&before_1007).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&before_1008).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&before_1009).await);
     fresh.drop().await;
     upgraded.drop().await;
     from_1001.drop().await;
@@ -3545,6 +3651,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     before_1006.drop().await;
     before_1007.drop().await;
     before_1008.drop().await;
+    before_1009.drop().await;
 }
 
 /// A database at migration 1002 that holds live PENDING, CLAIMED and RUNNING
@@ -3564,7 +3671,7 @@ async fn a_1002_database_with_live_rows_gets_the_cancelled_attempt() {
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1003 to 1008 over the live rows");
+        .expect("apply migrations 1003 to 1009 over the live rows");
 
     let installed = bookkeeping_rows(&database).await;
     assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -3707,7 +3814,7 @@ async fn a_1003_database_with_a_worker_snapshot_gets_the_profile_name_with_no_va
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1004 to 1008 over the worker snapshot");
+        .expect("apply migrations 1004 to 1009 over the worker snapshot");
 
     let installed = bookkeeping_rows(&database).await;
     assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -3919,7 +4026,7 @@ async fn a_1004_database_with_claimed_rows_with_no_claim_generation_stops_at_100
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1005 to 1008 after each row holds a claim generation");
+        .expect("apply migrations 1005 to 1009 after each row holds a claim generation");
     assert_eq!(
         bookkeeping_rows(&database).await,
         chain_rows(embedded_migrations().len())
@@ -3949,7 +4056,7 @@ async fn a_1004_database_with_another_constraint_of_the_rule_name_gets_the_rule_
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1005 to 1008 over a constraint of the same name");
+        .expect("apply migrations 1005 to 1009 over a constraint of the same name");
 
     let rule = database
         .client()
@@ -4093,7 +4200,7 @@ async fn a_database_before_1006_of_each_family_gets_the_typescript_family_and_ke
         database
             .install(own, InstallLockPlan::fleet())
             .await
-            .expect("apply migrations 1006 to 1008");
+            .expect("apply migrations 1006 to 1009");
 
         let installed = bookkeeping_rows(&database).await;
         assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -4144,7 +4251,7 @@ async fn migration_1006_gives_the_family_check_its_predicate_whatever_the_databa
         database
             .install(ClientFamily::Rust, InstallLockPlan::fleet())
             .await
-            .expect("apply migrations 1006 to 1008");
+            .expect("apply migrations 1006 to 1009");
 
         assert_eq!(
             family_checks(&database).await,

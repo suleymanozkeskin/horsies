@@ -1257,12 +1257,9 @@ BEGIN
     v_result := (wft_workflow(v_wf)).result::json;
     PERFORM wft_check((wft_workflow(v_wf)).status = 'COMPLETED' AND (wft_workflow(v_wf)).completed_at IS NOT NULL,
                       'completion: COMPLETED');
-    PERFORM wft_check((v_result ->> '__h_outputless_terminals__') = 'true'
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n1')::jsonb = (wft_ok('2'))::jsonb
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n2')::jsonb = (wft_ok('{"z":3}'))::jsonb
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n0') IS NULL
-                      AND (v_result -> 'ok' -> 'task_name_by_id' ->> 'n1') = 't1',
-                      'completion: the outputless map holds the terminal nodes only');
+    PERFORM wft_check((wft_workflow(v_wf)).result = '{"__h_task_result__":true,"ok":null,"err":null}'
+                      AND horsies_workflow_result_kind((wft_workflow(v_wf)).result) = 'VALUE',
+                      'completion: a workflow with no output node stores the plain envelope');
 END $$;
 
 DO $$
@@ -2748,7 +2745,7 @@ BEGIN
     SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_done, v_token, 300000);
     PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.workflow_status = 'COMPLETED'
                       AND v_row.advance_child_workflow_id IS NULL
-                      AND ((wft_workflow(v_done)).result::json ->> '__h_outputless_terminals__') = 'true',
+                      AND (wft_workflow(v_done)).result = '{"__h_task_result__":true,"ok":null,"err":null}',
                       'recover completion: an all-terminal workflow completes with its output');
     SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_child, v_token, 300000);
     PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.advance_child_workflow_id = v_child,
@@ -2956,17 +2953,27 @@ END $$;
 DO $$
 DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000e02';
-    v_result json;
 BEGIN
     PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1},{"idx":2}]');
     UPDATE horsies_workflow_tasks
     SET status = 'COMPLETED', result = CASE task_index WHEN 0 THEN '' WHEN 1 THEN wft_ok('1') END
     WHERE workflow_id = v_wf;
-    v_result := horsies_workflow_outputless_result(v_wf)::json;
-    PERFORM wft_check(json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n0') = 'null'
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n1')::jsonb = (wft_ok('1'))::jsonb
-                      AND json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n2') = 'null',
-                      'empty text: an empty terminal result is the entry null of a result that is not an envelope');
+    PERFORM wft_check(horsies_workflow_try_complete(v_wf) = 'COMPLETED'
+                      AND (wft_workflow(v_wf)).result = '{"__h_task_result__":true,"ok":null,"err":null}',
+                      'empty text: an empty terminal result does not change the plain envelope');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_check(horsies_workflow_result_kind(
+                          '{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":{},"task_name_by_id":{},"definition_key_by_id":{}},"err":null}'
+                      ) = 'UNREADABLE'
+                      AND horsies_workflow_result_kind('{"__h_task_result__":true,"ok":null,"err":null}') = 'VALUE',
+                      'old outputless envelope: the result written before migration 1009 does not read; the plain envelope is a value');
+    PERFORM wft_check((horsies_workflow_err_slot(
+                          '{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":{},"task_name_by_id":{},"definition_key_by_id":{}},"err":null}'
+                      )::json -> 'error_code')::text LIKE '%RESULT_DESERIALIZATION_ERROR%',
+                      'old outputless envelope: the err slot read gives RESULT_DESERIALIZATION_ERROR');
 END $$;
 
 DO $$
