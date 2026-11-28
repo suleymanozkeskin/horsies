@@ -349,9 +349,9 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
         }
     };
     match init.program {
-        ChildProgram::Rust => Ok(init),
+        ChildProgram::Host => Ok(init),
         ChildProgram::Python(_) => {
-            tracing::error!("a Rust child got the init frame of a Python child");
+            tracing::error!("a host child got the init frame of a Python child");
             Err(ChildHostExit::BadParentFrame)
         }
     }

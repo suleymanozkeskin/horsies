@@ -14,7 +14,8 @@
 //! - [`WorkerChildren::stop`]: every pool stops with the drain timeout.
 //!
 //! The pools never run user code in the worker process: every task runs in a
-//! child.
+//! child. The Python client, the Rust client and the TypeScript client start
+//! their children through these pools.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -65,7 +66,8 @@ pub struct ChildLaunch {
     /// How the preload process starts, for a profile whose children fork
     /// from one.
     pub preload: PreloadProgram,
-    /// The Python app to import, or the Rust tasks of the worker binary.
+    /// The Python app to import, or the tasks of the app program started again
+    /// in child mode.
     pub program: ChildProgram,
     pub log_level: ChildLogLevel,
     /// The URL that a child connects with.
@@ -82,7 +84,7 @@ pub enum PreloadProgram {
     /// The program and its first arguments. The spawner appends the
     /// descriptor of the preload's socket, the worker pid and the mode.
     Command(ChildCommand),
-    /// The child program has no preload process (a Rust child): every child
+    /// The child program has no preload process (a host child): every child
     /// starts with `exec`.
     NoPreloadProgram,
 }

@@ -110,7 +110,7 @@ mod tests {
 
     fn init(child_kind: ChildKind, connection: ChildConnection) -> InitFrame {
         InitFrame {
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url: InitUrl::new("postgresql://user:secret@db:5432/app".to_owned()),
             connection,

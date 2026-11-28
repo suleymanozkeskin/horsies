@@ -92,7 +92,7 @@ fn worker_of(
         ChildLaunch {
             command,
             preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url,
             connection,

@@ -72,7 +72,7 @@ fn a_version_two_ready_frame_is_a_protocol_mismatch() {
 fn a_version_two_init_frame_is_a_protocol_mismatch() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":2,"program":{"kind":"host"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","#,
             r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
             r#""tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"#,
@@ -708,7 +708,7 @@ fn a_reported_start_round_trips_exactly() {
 
 fn handler_init() -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),
@@ -725,7 +725,7 @@ fn the_init_frame_of_a_handler_child() {
         &ParentFrame::Init(handler_init()),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,

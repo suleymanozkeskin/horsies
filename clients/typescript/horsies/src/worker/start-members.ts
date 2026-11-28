@@ -99,14 +99,14 @@ function endedSpansOfSwitch(spans: "makeSpans" | "noSpans"): WorkerEndedSpans {
 }
 
 /**
- * How each child starts: `command`, no preload process, the host-child program value `RUST` (the worker program in
- * child mode: the core's child host serves the JavaScript child), and the log level of the start. Pure.
+ * How each child starts: `command`, no preload process, the host-child program value `HOST` (the app program started
+ * again in child mode: the core's child host serves the JavaScript child), and the log level of the start. Pure.
  */
 export function childLaunch(command: ChildCommand, logLevel: WorkerLogLevel): ChildLaunchManifest {
   return {
     command: { program: command.program, args: [...command.args] },
     preload: { kind: "NO_PRELOAD_PROGRAM" },
-    program: { kind: "RUST" },
+    program: { kind: "HOST" },
     log_level: logLevel,
   };
 }

@@ -443,3 +443,16 @@ fn the_shared_thread_init_frame_carries_the_memory_limit_of_the_profile() {
     );
     assert_eq!(recycle_above_of(&unlimited), MemoryLimit::Off);
 }
+
+/// The README of the crate names the three clients that run on the core.
+#[test]
+fn the_readme_names_three_clients() {
+    let readme = include_str!("../../../README.md");
+    for client in [
+        "the `horsies` package on PyPI",
+        "the `horsies` crate",
+        "the `horsies` package on npm",
+    ] {
+        assert!(readme.contains(client), "the README lacks {client}");
+    }
+}

@@ -17,7 +17,7 @@ const TEST_WAIT: Duration = Duration::from_secs(20);
 
 fn init() -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://preload@localhost/test".to_owned()),
         connection: ChildConnection::default(),

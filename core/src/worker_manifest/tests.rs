@@ -784,14 +784,21 @@ fn each_choice_parses_from_its_wire_name() {
     let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["claim"]["claim_lease"] = json!({"kind": "MILLISECONDS", "ms": 30_000});
     document["claim"]["queues"] = json!({"kind": "DEFAULT"});
-    document["child_launch"]["program"] = json!({"kind": "RUST"});
+    document["child_launch"]["program"] = json!({"kind": "HOST"});
     let manifest = parsed(&document);
     assert_eq!(manifest.claim.queues, Queues::Default);
-    assert_eq!(manifest.child_launch.program, ChildProgram::Rust);
+    assert_eq!(manifest.child_launch.program, ChildProgram::Host);
     assert!(matches!(
         manifest.claim.claim_lease,
         ClaimLease::Milliseconds { ms } if ms.0.get() == 30_000
     ));
+}
+
+#[test]
+fn the_program_value_rust_is_refused() {
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
+    document["child_launch"]["program"] = json!({"kind": "RUST"});
+    assert!(refused_path(&document).starts_with("child_launch.program"));
 }
 
 #[test]

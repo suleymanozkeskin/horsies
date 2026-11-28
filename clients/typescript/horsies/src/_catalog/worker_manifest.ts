@@ -643,13 +643,13 @@ export interface ChildProgramPython {
   readonly parent_argv: ReadonlyArray<string>;
 }
 
-export interface ChildProgramRust {
-  readonly kind: "RUST";
+export interface ChildProgramHost {
+  readonly kind: "HOST";
 }
 
 export type ChildProgram =
   | ChildProgramPython
-  | ChildProgramRust;
+  | ChildProgramHost;
 
 export type WorkerLogLevel =
   | "DEBUG"
@@ -1307,8 +1307,8 @@ export function childProgramToWire(value: ChildProgram): ReadonlyMap<string, Wir
         ["parent_sys_path", value.parent_sys_path],
         ["parent_argv", value.parent_argv],
       ]);
-    case "RUST":
-      return new Map<string, WireJson>([["kind", "RUST"]]);
+    case "HOST":
+      return new Map<string, WireJson>([["kind", "HOST"]]);
     default: {
       const unreachable: never = value;
 

@@ -166,7 +166,7 @@ const WORKER_START_MEMBERS: StartMembers = {
   childLaunch: {
     command: { program: process.execPath, args: ["/app/main.js", "--horsies-child"] },
     preload: { kind: "NO_PRELOAD_PROGRAM" },
-    program: { kind: "RUST" },
+    program: { kind: "HOST" },
     log_level: "INFO",
   },
 };

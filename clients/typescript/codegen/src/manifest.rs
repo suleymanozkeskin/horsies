@@ -1505,8 +1505,8 @@ mod tests {
              [key, workerProfileManifestToWire(item)] as const))],\n",
             "\nexport interface QueuesCustom {\n  readonly kind: \"CUSTOM\";\n  \
              readonly queues: ReadonlyArray<CustomQueueManifest>;\n}\n",
-            "\nexport type ChildProgram =\n  | ChildProgramPython\n  | ChildProgramRust;\n",
-            "\nexport interface ChildProgramRust {\n  readonly kind: \"RUST\";\n}\n",
+            "\nexport type ChildProgram =\n  | ChildProgramPython\n  | ChildProgramHost;\n",
+            "\nexport interface ChildProgramHost {\n  readonly kind: \"HOST\";\n}\n",
         ] {
             assert!(text.contains(part), "{part}");
         }

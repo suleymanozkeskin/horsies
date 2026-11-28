@@ -51,7 +51,7 @@ fn bounds() -> HandlerChildBounds {
 /// The init frame of a handler child.
 fn handler_init() -> crate::worker::executor::protocol::InitFrame {
     crate::worker::executor::protocol::InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),

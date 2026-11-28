@@ -2488,7 +2488,7 @@ mod tests {
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
                 preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-                program: ChildProgram::Rust,
+                program: ChildProgram::Host,
                 log_level: ChildLogLevel::Info,
                 database_url,
                 connection: ChildConnection::default(),
@@ -3227,7 +3227,7 @@ mod tests {
             ChildLaunch {
                 command,
                 preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-                program: ChildProgram::Rust,
+                program: ChildProgram::Host,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
                 connection: ChildConnection::default(),
@@ -3259,7 +3259,7 @@ mod tests {
             ChildLaunch {
                 command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
                 preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-                program: ChildProgram::Rust,
+                program: ChildProgram::Host,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
                 connection: ChildConnection::default(),
@@ -3308,7 +3308,7 @@ mod tests {
                 ChildLaunch {
                     command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
                     preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-                    program: ChildProgram::Rust,
+                    program: ChildProgram::Host,
                     log_level: ChildLogLevel::Info,
                     database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
                     connection: ChildConnection::default(),

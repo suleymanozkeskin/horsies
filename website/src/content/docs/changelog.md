@@ -222,6 +222,15 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **The child program of a host child is named `host`, not `rust`.** In the
+  worker manifest, `child_launch.program` has the kind `HOST` (was `RUST`),
+  and the child init frame has the program kind `host` (was `rust`). The
+  Python bridge reports a host program as `'HOST'`. The generated Python type
+  is `ChildProgramHost` (was `ChildProgramRust`). A parent and its children
+  must come from one build, as before; the protocol version does not change.
+  Core: `ChildProgram::Rust` is `ChildProgram::Host`. The core texts of the
+  fork refusal, the `spawn_in_run` and `run_cancel_signal` refusals and the
+  result-wait refusal of a task body name no client API or language.
 - **Breaking (Rust): `TaskSendError` holds a typed exception cause.**
   `TaskSendError::ValidationFailed.cause` is a `BrokerRefusalCause` (it was a
   `FailureCause`): `Check` is Python's `NoCause()`, `ValueRule(text)` is the

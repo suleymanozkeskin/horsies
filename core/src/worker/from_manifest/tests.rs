@@ -80,7 +80,7 @@ fn the_plan_takes_the_child_launch_and_the_registered_classes() {
             assert_eq!(program.app_locator, "app.main:app");
             assert_eq!(program.imports, vec!["app.tasks"]);
         }
-        ChildProgram::Rust => panic!("the manifest names a Python child"),
+        ChildProgram::Host => panic!("the manifest names a Python child"),
     }
     assert_eq!(launch.log_level, ChildLogLevel::Info);
     let mut names: Vec<&str> = plan.registered.task_names().collect();

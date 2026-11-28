@@ -73,7 +73,7 @@ fn worker_of_one_idle_child(broker: Arc<PostgresBroker>, app_config: AppConfig) 
         ChildLaunch {
             command: idle_child_of_any_kind(),
             preload: PreloadProgram::NoPreloadProgram,
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url,
             connection: ChildConnection::default(),

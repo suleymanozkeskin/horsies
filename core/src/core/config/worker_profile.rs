@@ -722,7 +722,7 @@ impl<'de> Deserialize<'de> for DrainTimeout {
 ///
 /// The default is `NoPreload`: the value of a profile that does not set
 /// `preload` (`WorkerProfile::default()`, or a config text without the key).
-/// A Rust child is an `exec` of the app's binary. The Python client does not
+/// A child that starts by exec runs the app program again. The Python client does not
 /// use this default: it writes the value of its own model (default
 /// `library`) into each worker manifest, and the manifest has no default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1762,7 +1762,7 @@ mod tests {
 
     /// Python `test_worker_profile.py::TestDefaults` and
     /// `::TestDrainTimeoutBounds::test_profile_defaults`, except `preload`:
-    /// the core's default is `NoPreload` (a Rust child is an `exec`), and
+    /// the core's default is `NoPreload` (a child that starts by exec), and
     /// Python writes its own default, `library`, into each worker manifest.
     #[test]
     fn an_empty_profile_has_the_core_defaults() {

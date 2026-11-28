@@ -120,8 +120,8 @@ pub struct PythonProgram {
 pub enum ChildProgram {
     /// The Python child program; it imports the app.
     Python(PythonProgram),
-    /// The worker binary in child mode; its tasks are compiled in.
-    Rust,
+    /// The app program started again in child mode; its tasks are compiled in.
+    Host,
 }
 
 /// The connection pool of a child: `min_size` connections stay open,
@@ -482,7 +482,7 @@ enum ProgramWire<'a> {
         parent_sys_path: &'a [String],
         parent_argv: &'a [String],
     },
-    Rust,
+    Host,
 }
 
 #[derive(Serialize)]
@@ -612,7 +612,7 @@ fn program_wire(program: &ChildProgram) -> ProgramWire<'_> {
             parent_sys_path: &python.parent_sys_path,
             parent_argv: &python.parent_argv,
         },
-        ChildProgram::Rust => ProgramWire::Rust,
+        ChildProgram::Host => ProgramWire::Host,
     }
 }
 
@@ -909,9 +909,9 @@ fn decode_program(program: &Fields<'_>) -> Result<ChildProgram, MalformedFrame> 
                 parent_argv: program.text_list("parent_argv")?,
             }))
         }
-        "rust" => {
+        "host" => {
             program.only(&["kind"])?;
-            Ok(ChildProgram::Rust)
+            Ok(ChildProgram::Host)
         }
         other => Err(program.unknown_kind(other)),
     }
