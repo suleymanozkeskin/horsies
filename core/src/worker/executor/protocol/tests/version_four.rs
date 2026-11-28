@@ -47,7 +47,7 @@ fn a_version_three_ready_frame_is_a_protocol_mismatch() {
 fn a_version_three_init_frame_is_a_protocol_mismatch() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":3,"program":{"kind":"host"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","#,
             r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
             r#""tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"#,

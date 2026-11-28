@@ -854,8 +854,8 @@ pub enum ChildProgram {
         parent_sys_path: Vec<String>,
         parent_argv: Vec<String>,
     },
-    /// The worker binary in child mode; its tasks are compiled in.
-    Rust,
+    /// The app program started again in child mode; its tasks are compiled in.
+    Host,
 }
 
 /// The log level of the worker and its children (`horsies worker --log-level`).

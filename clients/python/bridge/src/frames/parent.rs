@@ -75,7 +75,7 @@ pub struct HandlerChildKind {
 /// The first frame to a child or to the preload process.
 #[pyclass(module = "horsies._core", name = "InitFrame", frozen)]
 pub struct InitFrameRecord {
-    /// `PythonProgram`, or `'RUST'`.
+    /// `PythonProgram`, or `'HOST'`.
     #[pyo3(get)]
     program: Py<PyAny>,
     /// `'DEBUG'`, `'INFO'`, `'WARNING'`, `'ERROR'` or `'CRITICAL'`.
@@ -298,7 +298,7 @@ fn program_object(py: Python<'_>, program: &ChildProgram) -> PyResult<Py<PyAny>>
             parent_argv: python.parent_argv.clone(),
         }
         .into_py_any(py),
-        ChildProgram::Rust => "RUST".into_py_any(py),
+        ChildProgram::Host => "HOST".into_py_any(py),
     }
 }
 

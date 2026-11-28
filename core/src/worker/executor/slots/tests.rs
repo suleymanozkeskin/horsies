@@ -916,7 +916,7 @@ fn every_task_gets_exactly_one_answer() {
 
 fn init_frame() -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),

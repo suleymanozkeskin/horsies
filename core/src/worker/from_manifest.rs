@@ -583,7 +583,7 @@ fn launch_of(manifest: &WorkerManifest, connection: ChildConnection) -> ChildLau
                 parent_sys_path: parent_sys_path.clone(),
                 parent_argv: parent_argv.clone(),
             }),
-            ManifestChildProgram::Rust => ChildProgram::Rust,
+            ManifestChildProgram::Host => ChildProgram::Host,
         },
         log_level: child_log_level(launch.log_level),
         database_url: DatabaseUrl::new(manifest.database.database_url.expose().to_owned()),

@@ -7,7 +7,7 @@ use std::os::fd::RawFd;
 
 use crate::worker::executor::protocol::ProcessId;
 
-/// The first argument that starts a worker binary in child mode.
+/// The first argument that starts the app program again in child mode.
 pub const CHILD_MODE_ARGUMENT: &str = "--horsies-child";
 
 /// The arguments of a child.

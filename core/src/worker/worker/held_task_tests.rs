@@ -126,7 +126,7 @@ async fn worker_holding_one_task(config: AppConfig, pid_file: &Path, drain_secs:
         ChildLaunch {
             command: child_holding_its_first_run(pid_file),
             preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url,
             connection: ChildConnection::default(),

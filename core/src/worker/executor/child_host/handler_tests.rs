@@ -495,7 +495,7 @@ async fn an_init_frame_after_the_boot_ends_the_service_as_a_bad_frame() {
     let running = set.start(roomy()).unwrap();
     let (parent, mut frames) = tokio::sync::mpsc::channel(8);
     let init = InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://user:secret@db:5432/app".to_owned()),
         connection: ChildConnection::default(),

@@ -400,10 +400,10 @@ fn the_ready_frame_names_the_protocol() {
 }
 
 #[test]
-fn the_init_frame_of_a_rust_child() {
+fn the_init_frame_of_a_host_child() {
     assert_parent_bytes(
         &ParentFrame::Init(InitFrame {
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
             connection: ChildConnection::default(),
@@ -412,7 +412,7 @@ fn the_init_frame_of_a_rust_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
@@ -468,7 +468,7 @@ fn the_init_frame_of_a_python_child() {
 
 fn shared_thread_init(recycle_above: MemoryLimit) -> ParentFrame {
     ParentFrame::Init(InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),
@@ -491,7 +491,7 @@ fn shared_thread_init_bytes(recycle_above: Option<&str>) -> Vec<u8> {
     framed(
         &format!(
             concat!(
-                r#"{{"kind":"init","protocol":4,"program":{{"kind":"rust"}},"log_level":"info","#,
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"host"}},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{{"tcp_keepalives":{{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3}},"tcp_user_timeout":{{"kind":"after","#,
@@ -558,7 +558,7 @@ fn transaction_mode_connection() -> ChildConnection {
 
 fn init_with(connection: ChildConnection) -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@pooler/db".to_owned()),
         connection,
@@ -573,7 +573,7 @@ fn the_init_frame_carries_keepalives_off_and_transaction_mode() {
         &ParentFrame::Init(init_with(transaction_mode_connection())),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@pooler/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
                 r#""tcp_user_timeout":{"kind":"system_default"},"#,
@@ -624,7 +624,7 @@ fn init_bytes_with_connection(connection: &str) -> Vec<u8> {
     framed(
         &format!(
             concat!(
-                r#"{{"kind":"init","protocol":4,"program":{{"kind":"rust"}},"#,
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"host"}},"#,
                 r#""log_level":"info","database_url":"postgresql://u@h/db","#,
                 r#""connection":{},"process_name":"c","#,
                 r#""child_kind":{{"kind":"isolated","pool":{{"min_size":0,"max_size":1,"#,
@@ -670,7 +670,7 @@ fn a_keepalive_value_outside_its_bounds_is_refused() {
 fn an_init_frame_without_its_connection_settings_is_refused() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","process_name":"c","#,
             r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
             r#""check":true},"task_send_pool":2}}"#,
@@ -1339,6 +1339,21 @@ fn an_unknown_kind_is_malformed() {
             kind: BoundedText::cut("dance"),
         },
     );
+}
+
+#[test]
+fn the_program_kind_rust_is_an_unknown_kind() {
+    let init = framed(
+        concat!(
+            r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+            r#""database_url":"postgresql://u@h/db","process_name":"c"}"#,
+        ),
+        b"",
+    );
+    assert!(matches!(
+        malformed_parent(&init),
+        MalformedFrame::UnknownKind { .. }
+    ));
 }
 
 #[test]

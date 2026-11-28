@@ -97,7 +97,7 @@ pub enum ProcessRuntimeRefusal {
     /// it without `exec`. It does not clear in this process.
     #[error(
         "the core runtime started in process {core_pid}, and this process ({this_pid}) is a fork \
-         of it without exec; start the process with spawn or forkserver"
+         of it without exec; start the process again with exec instead of fork"
     )]
     ForkedAfterStart { core_pid: u32, this_pid: u32 },
     /// The OS refused the runtime's threads. A later use tries again.
@@ -312,6 +312,23 @@ mod tests {
         let text = refusal.to_string();
         assert!(
             text.contains("process 10") && text.contains("(11)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_fork_refusal_names_exec_and_no_client_start_method() {
+        let text = ProcessRuntimeRefusal::ForkedAfterStart {
+            core_pid: 10,
+            this_pid: 11,
+        }
+        .to_string();
+        assert!(
+            text.contains("without exec; start the process again with exec instead of fork"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("spawn") && !text.contains("forkserver"),
             "{text}"
         );
     }

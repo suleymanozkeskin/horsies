@@ -113,7 +113,7 @@ __all__ = [
     'PreloadLaunchNoPreloadProgram',
     'PreloadLaunch',
     'ChildProgramPython',
-    'ChildProgramRust',
+    'ChildProgramHost',
     'ChildProgram',
     'WorkerLogLevel',
     'ChildLaunchManifest',
@@ -1317,13 +1317,13 @@ class ChildProgramPython:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ChildProgramRust:
-    """The worker binary in child mode; its tasks are compiled in."""
+class ChildProgramHost:
+    """The app program started again in child mode; its tasks are compiled in."""
 
-    kind: Literal['RUST'] = 'RUST'
+    kind: Literal['HOST'] = 'HOST'
 
 
-type ChildProgram = ChildProgramPython | ChildProgramRust
+type ChildProgram = ChildProgramPython | ChildProgramHost
 """What a child runs."""
 
 

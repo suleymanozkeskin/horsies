@@ -3455,7 +3455,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "InitFrame",
         doc: "The first frame to a child or to the preload process. The database URL and the\nconnection settings stay in the core.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("program", "PythonProgram | Literal['RUST']"), property("log_level", "Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']"), property("process_name", "str"), property("child_kind", "IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind | HandlerChildKind")],
+        properties: &[property("program", "PythonProgram | Literal['HOST']"), property("log_level", "Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']"), property("process_name", "str"), property("child_kind", "IsolatedChildKind | SharedAsyncChildKind | SharedThreadChildKind | HandlerChildKind")],
         methods: &[],
     },
     StubClass {

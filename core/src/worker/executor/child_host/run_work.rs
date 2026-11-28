@@ -257,7 +257,7 @@ pub fn with_test_blocking_run_scope<R>(facts: TestRunFacts, body: impl FnOnce() 
 pub enum RunSpawnRefused {
     /// The caller is not the async body of a run in a Rust child, nor work
     /// that such a body started with `spawn_in_run`.
-    #[error("spawn_in_run was called outside the async body of a task run in a Rust child")]
+    #[error("spawn_in_run was called outside the async body of a task run in a child")]
     NotInARun,
     /// The run has ended; its left work is being stopped.
     #[error("the run has ended; it takes no new work")]
@@ -307,7 +307,7 @@ pub enum RunSignalRefused {
     /// The caller is not the body of a run in a Rust child (its async body,
     /// or the thread of its blocking body), nor work that an async body
     /// started with `spawn_in_run`.
-    #[error("run_cancel_signal was called outside the body of a task run in a Rust child")]
+    #[error("run_cancel_signal was called outside the body of a task run in a child")]
     NotInARun,
 }
 
@@ -1975,6 +1975,18 @@ mod tests {
                     cause: CancelCause::Deadline
                 }
             )
+        );
+    }
+
+    #[test]
+    fn the_refusals_of_spawn_and_cancel_signal_say_a_child() {
+        assert_eq!(
+            RunSpawnRefused::NotInARun.to_string(),
+            "spawn_in_run was called outside the async body of a task run in a child"
+        );
+        assert_eq!(
+            RunSignalRefused::NotInARun.to_string(),
+            "run_cancel_signal was called outside the body of a task run in a child"
         );
     }
 }

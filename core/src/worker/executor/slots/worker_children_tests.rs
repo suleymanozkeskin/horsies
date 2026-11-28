@@ -22,7 +22,7 @@ fn launch(command: ChildCommand) -> ChildLaunch {
     ChildLaunch {
         command,
         preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),

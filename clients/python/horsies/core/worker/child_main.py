@@ -397,7 +397,7 @@ def read_python_init_frame(
         case core.InitFrame(program=core.PythonProgram()):
             return frame
         case core.InitFrame():
-            _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
+            _exit_bad_parent_frame('Parent sent the init frame of a host child')
         case (
             core.RunFrame()
             | core.SharedRunFrame()
@@ -447,11 +447,11 @@ def task_child_kind_of(init: core.InitFrame) -> TaskChildKind:
 
 def python_program_of(init: core.InitFrame) -> core.PythonProgram:
     """The Python program of an init frame that ``read_init_frame`` took. A
-    Rust program here is a defect: ``AssertionError``."""
+    host program here is a defect: ``AssertionError``."""
     match init.program:
         case core.PythonProgram() as program:
             return program
-        case 'RUST':
+        case 'HOST':
             raise AssertionError('read_init_frame takes only the init frame of a Python child')
         case _ as unreachable:
             assert_never(unreachable)

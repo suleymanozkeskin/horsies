@@ -147,7 +147,7 @@ fn push_member(path: &mut String, name: &str) {
 
 /// How each child of a Rust worker starts: `program` with `args` (from the
 /// core's `child_command()`: this executable and the child mode argument),
-/// no preload process, the Rust child program, and the log level of the
+/// no preload process, the host child program, and the log level of the
 /// start. Pure.
 ///
 /// Errors: [`ChildLaunchRefused`] for a part of the command that is not
@@ -174,7 +174,7 @@ pub(crate) fn rust_child_launch(
     Ok(wire::ChildLaunchManifest {
         command: wire::ChildCommandManifest { program, args },
         preload: wire::PreloadLaunch::NoPreloadProgram,
-        program: wire::ChildProgram::Rust,
+        program: wire::ChildProgram::Host,
         log_level,
     })
 }
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(launch.command.program, "/srv/app/bin/worker");
         assert_eq!(launch.command.args, vec![horsies_core::CHILD_MODE_ARGUMENT]);
         assert_eq!(launch.preload, wire::PreloadLaunch::NoPreloadProgram);
-        assert_eq!(launch.program, wire::ChildProgram::Rust);
+        assert_eq!(launch.program, wire::ChildProgram::Host);
     }
 
     #[test]
