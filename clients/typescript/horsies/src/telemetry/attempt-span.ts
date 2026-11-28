@@ -9,9 +9,9 @@
 // - A thrown value is recorded on the span. The end sets the status: unset for a returned value (as the Python
 //   client); ERROR with `error.type` for an error code, `TASK_TIMEOUT` (the run's deadline) and `TASK_CANCELLED` (an
 //   operator cancel).
-// - The end is the first of the body's end and, in a `SHARED_ASYNC` child, the core's decision at the run's cancel
-//   signal: the core ends such a run at its deadline or at an operator cancel while the body may run on, so a body
-//   that never settles still gets its span.
+// - The end is the first of the core's end of the body (`bodyEnded`, which the body observer's `end` gives) and, in a
+//   `SHARED_ASYNC` child, the core's decision at the run's cancel signal: the core ends such a run at its deadline or at
+//   an operator cancel while the body may run on, so a body that never settles still gets its span.
 // - A body that does not start gets no span (the core posts no body for it).
 // - A throw of the user's SDK never changes a run: no span at the open. A throw at any stage (the open, the record of
 //   a thrown value, the end) is a span not made: one WARNING record per process on `horsies.telemetry`

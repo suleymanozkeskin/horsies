@@ -30,7 +30,7 @@ import {
 import { ClientDefect, type CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
 import { PREPARED, TASK_ID } from "../app/support.ts";
-import { ENDED_AT, settled, TEST_SEAT_BOUNDS } from "./support.ts";
+import { ENDED_AT, settled, TEST_RELAY_BOUNDS, TEST_SEAT_BOUNDS, testPoolSize, UNREAD_MEMORY } from "./support.ts";
 
 /** The name of the operation of `request`, for the record of the served operations. */
 function operationName(request: SeatRequest): string {
@@ -83,6 +83,7 @@ class PoolFakes {
 
         return { kind: "started", isolate: { post: (message) => posts.push(message) } };
       },
+      memory: UNREAD_MEMORY,
       bounds: () => TEST_SEAT_BOUNDS,
       clock: () => this.now,
       now: () => this.wall,
@@ -154,7 +155,7 @@ function result(runKey: bigint, json: string): SeatToMain {
 
 async function bootedPool(seats: number): Promise<{ readonly pool: SeatPool; readonly fakes: PoolFakes }> {
   const fakes = new PoolFakes();
-  const started = startSeatPool(seats, fakes.deps());
+  const started = startSeatPool(testPoolSize(seats), fakes.deps());
 
   fakes.readyAll();
   await started.booted;
@@ -169,7 +170,7 @@ function kinds(posts: readonly MainToSeat[]): string[] {
 describe("the boot of the seat pool", () => {
   test("each seat starts its isolate with its index and the shared cells; the boot ends when all are ready", async () => {
     const fakes = new PoolFakes();
-    const started = startSeatPool(3, fakes.deps());
+    const started = startSeatPool(testPoolSize(3), fakes.deps());
     let booted = false;
 
     void started.booted.then(() => {
@@ -188,7 +189,7 @@ describe("the boot of the seat pool", () => {
 
   test("a provider failure in an isolate fails the boot with the provider's name: the hook fails, the child ends with 173", async () => {
     const fakes = new PoolFakes();
-    const started = startSeatPool(2, fakes.deps());
+    const started = startSeatPool(testPoolSize(2), fakes.deps());
 
     fakes.send(1, { kind: "bootFailed", protocol: 1, seatIndex: 1, hookName: "provide #1 openPool", cause: "Error: refused" });
     await assert.rejects(started.booted, /the provider provide #1 openPool failed in the seat isolate 1: Error: refused/);
@@ -196,7 +197,7 @@ describe("the boot of the seat pool", () => {
 
   test("an isolate that ends before it is ready fails the boot", async () => {
     const fakes = new PoolFakes();
-    const started = startSeatPool(1, fakes.deps());
+    const started = startSeatPool(testPoolSize(1), fakes.deps());
 
     fakes.isolate(0).events.error(new SyntaxError("Unexpected token"));
     fakes.isolate(0).events.exit(1);
@@ -265,6 +266,69 @@ describe("runs on the seat pool", () => {
     assert.equal(fakes.isolate(0).posts.find((post) => post.kind === "bodyEnded")?.endedAtEpochNanoseconds, ENDED_AT.epochNanoseconds);
   });
 
+  test("the relay of each isolate takes its in-flight bound from the task-send pool of the child", async () => {
+    const fakes = new PoolFakes();
+    const started = startSeatPool({ seats: 2, taskSendPool: 7 }, fakes.deps());
+
+    fakes.readyAll();
+    await started.booted;
+    assert.deepEqual(
+      fakes.isolates.map((isolate) => isolate.marker.relayBounds),
+      [0, 1].map(() => ({ opsInFlight: 7, opsWaiting: TEST_RELAY_BOUNDS.opsWaiting })),
+    );
+  });
+
+  test("a run with recorded facts holds its seat after its result, and the core's end of its body is the verdict", async () => {
+    const { pool, fakes } = await bootedPool(1);
+    const settledAt = fakes.wall;
+
+    pool.run({ ...runPost(1n), facts: RECORDED_FACTS });
+    fakes.send(0, result(1n, "1"));
+    assert.deepEqual(fakes.settles, [[1n, "crunch", { kind: "value", json: "1" }]]);
+    assert.deepEqual(kinds(fakes.isolate(0).posts), ["run"]);
+    assert.deepEqual(pool.stages(), ["settled"]);
+    fakes.wall = settledAt.add({ seconds: 5 });
+    pool.bodyEnded(TASK_ID, 2, { kind: "cancelled" });
+    assert.deepEqual(fakes.isolate(0).posts.at(-1), {
+      kind: "bodyEnded",
+      protocol: SEAT_PROTOCOL_VERSION,
+      runKey: 1n,
+      end: { kind: "cancelled" },
+      endedAtEpochNanoseconds: settledAt.epochNanoseconds,
+    });
+    assert.deepEqual(pool.stages(), ["free"]);
+  });
+
+  test("the core's end of another run, or of a run with no recorded facts, is left", async () => {
+    const { pool, fakes } = await bootedPool(2);
+
+    pool.run({ ...runPost(1n), facts: RECORDED_FACTS });
+    fakes.send(0, result(1n, "1"));
+    pool.run(runPost(2n));
+    fakes.send(1, result(2n, "1"));
+    pool.bodyEnded(TASK_ID, 3, { kind: "returned" });
+    pool.bodyEnded("0190a5b2-0000-7000-8000-000000000000", 2, { kind: "returned" });
+    assert.deepEqual(kinds(fakes.isolate(0).posts), ["run"]);
+    assert.deepEqual(kinds(fakes.isolate(1).posts), ["run", "bodyEnded"]);
+    assert.deepEqual(pool.stages(), ["settled", "free"]);
+    assert.deepEqual(fakes.defects, []);
+  });
+
+  test("an isolate that ends while its seat is settled is replaced; its run gets no span and its core end is left", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    pool.run({ ...runPost(1n), facts: RECORDED_FACTS });
+    fakes.send(0, result(1n, "1"));
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual(fakes.endedRuns, []);
+    assert.equal(fakes.isolates.length, 2);
+    assert.match(fakes.lines.at(-1) ?? "", /after the run of task crunch .* settled; that run gets no span/);
+    fakes.send(1, { kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
+    pool.bodyEnded(TASK_ID, 2, { kind: "returned" });
+    assert.deepEqual(fakes.isolate(1).posts, []);
+    assert.deepEqual(pool.stages(), ["free"]);
+  });
+
   test("a defect of an isolate goes to the defect rule; a log line of an isolate goes to stderr", async () => {
     const { fakes } = await bootedPool(1);
 
@@ -302,6 +366,38 @@ describe("runs on the seat pool", () => {
 
     fakes.send(0, result(9n, "1"));
     assert.ok(fakes.defects[0] instanceof ClientDefect);
+  });
+});
+
+describe("the runs that the child holds, for its memory watch", () => {
+  test("a pool with no run holds none; a run on a seat is held until its result", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    assert.equal(pool.holdsRuns(), false);
+    pool.run(runPost(1n));
+    assert.equal(pool.holdsRuns(), true);
+    fakes.send(0, result(1n, "1"));
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["free"], false]);
+  });
+
+  test("a run that waits for the new isolate of a seat is held", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    pool.run(runPost(1n));
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["booting"], false]);
+    pool.run(runPost(2n));
+    assert.deepEqual([pool.waiting(), pool.holdsRuns()], [1, true]);
+  });
+
+  test("a settled run with recorded facts is held until the core's end of its body", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    pool.run({ ...runPost(1n), facts: RECORDED_FACTS });
+    fakes.send(0, result(1n, "1"));
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["settled"], true]);
+    pool.bodyEnded(TASK_ID, 2, { kind: "returned" });
+    assert.deepEqual([pool.stages(), pool.holdsRuns()], [["free"], false]);
   });
 });
 
@@ -371,7 +467,7 @@ describe("an isolate that ends", () => {
 
     first.refuseStart = 1;
 
-    await assert.rejects(startSeatPool(2, first.deps()).booted, /the seat isolate 1 did not start: Error: the OS refused a thread/);
+    await assert.rejects(startSeatPool(testPoolSize(2), first.deps()).booted, /the seat isolate 1 did not start: Error: the OS refused a thread/);
 
     const { fakes } = await bootedPool(1);
 
@@ -506,7 +602,7 @@ describe("the flush of the seat isolates at the child's stop", () => {
 
   test("a pool with no isolate that took its runs ends its flush at once", async () => {
     const fakes = new PoolFakes();
-    const started = startSeatPool(1, fakes.deps());
+    const started = startSeatPool(testPoolSize(1), fakes.deps());
 
     await started.pool.flush();
     assert.deepEqual(kinds(fakes.isolate(0).posts), []);

@@ -19,7 +19,7 @@ import { describe, test } from "node:test";
 import { type TaskHandle, TaskId } from "#horsies";
 import { loadAddon } from "#horsies";
 import { threadProvidedState } from "../src/app.ts";
-import type { Instance, ThreadProfile } from "../src/instances.ts";
+import { type Instance, THREAD_MEMORY_BOUND_MB, type ThreadProfile } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as fencing from "../src/tasks/fencing.ts";
 import * as threads from "../src/tasks/threads.ts";
@@ -61,6 +61,12 @@ const SLEEPER_MS = 1_500;
 
 /** The cause that the deadline writes into the cancel cell and gives to the signal. */
 const DEADLINE_LINE = "DEADLINE\n";
+
+/** The exit code of a thread child that its memory watch ended at its bound (core `MEMORY_LIMIT_EXIT_CODE`). */
+const MEMORY_LIMIT_EXIT_CODE = 81;
+
+/** The part of the line of a thread child that its memory watch ended (`child/memory_limit.rs` of the addon). */
+const MEMORY_LIMIT_LINE = `at or above its bound recycle.above = ${String(THREAD_MEMORY_BOUND_MB)} MiB, while it holds runs; the child ends with exit code ${String(MEMORY_LIMIT_EXIT_CODE)} (MEMORY_LIMIT)`;
 
 switch (runtimeName()) {
   case "bun":
@@ -369,6 +375,25 @@ describe("SHARED_THREAD children", () => {
     assert.equal(await threadChildPid(suite), stamps[0]?.pid, "the child was not replaced");
     assert.equal(worker.logCount(LOOP_KILL_LINE), 0, worker.report());
   });
+
+  seatTest("a thread child past its memory bound while it holds a run ends with exit code 81; the run retries in a new child", "thread_profiles", async (suite) => {
+    const worker = await suite.worker("thread-memory-bound-1x1");
+    const token = randomUUID();
+    const handle = await sentHandle("e2e_thread_holds_memory", suite.app.send(threads.threadHoldsMemory, { token }));
+    const retryPid = await succeeded(handle, REPLACED_WAIT_MS);
+    const heldPid = Number(markerText(suite, `${token}-held`));
+    const info = await infoOf(handle);
+    const first = info.attempts.find((attempt) => attempt.attempt === 1);
+
+    assert.notEqual(retryPid, heldPid, "the retry ran in a new child");
+    assert.deepEqual([info.status, info.retryCount], ["COMPLETED", 1]);
+    assert.deepEqual(first?.errorCode, { kind: "recorded", value: "WORKER_CRASHED" });
+    assert.ok(
+      first?.errorMessage.kind === "recorded" && first.errorMessage.value.includes(`child died: exit code ${String(MEMORY_LIMIT_EXIT_CODE)}`),
+      `the worker read the loss of the child with exit code ${String(MEMORY_LIMIT_EXIT_CODE)}: ${JSON.stringify(first?.errorMessage)}`,
+    );
+    assert.equal(worker.logCount(MEMORY_LIMIT_LINE), 1, worker.report());
+  }, REPLACED_WAIT_MS + TEST_LIMIT_MS / 2);
 
   seatTest("a blocked main thread of a thread child gives loop_blocked: the worker kills the child, and the run retries in a new child", "thread_profiles", async (suite) => {
     const worker = await suite.worker("thread-only-1x4");

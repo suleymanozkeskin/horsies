@@ -3,7 +3,9 @@
 // context where the body runs; this package never imports the telemetry code.
 //
 // Order of the calls for one body: `enter` with the facts of the run; `run` with the body call; `thrown` with a value
-// that the body threw or rejected with, before the error mapping; `end` with how the body ended. `cancelled` comes
+// that the body threw or rejected with, before the error mapping; `end` with how the body ended: for a run with
+// recorded facts, the core's end of the body (the core's `bodyEnded` post, after the settle); for a run with none, the
+// end that the body adapter saw. `cancelled` comes
 // when the run's cancel signal fires (the core's `cancelRun` post), before or after the other calls: the core then
 // decided the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the
 // body does later. The child's exit rule awaits `flush`, within its bound.
@@ -11,7 +13,7 @@
 import type { AppContext } from "../app/context.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 
-/** How a body ended, as the adapter saw it. `code` is the text of the stored error code. */
+/** How a body ended: as the core ended it, or, for a run with no recorded facts, as the adapter saw it. `code` is the text of the stored error code. */
 export type BodyEnd =
   | { readonly kind: "returned" }
   | { readonly kind: "failed"; readonly code: string }

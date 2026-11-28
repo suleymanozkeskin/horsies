@@ -120,6 +120,13 @@ A worker starts each child with the runtime that runs the worker: a worker start
 | `SHARED_ASYNC` | Yes | Yes |
 | `SHARED_THREAD` | Yes | No. The worker refuses a profile with `SHARED_THREAD` children with `sharedThreadUnavailable`: see [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/) |
 
+A shared thread child runs each seat in a `worker_threads` thread of its own:
+
+- The JavaScript heap of each seat has the heap limit of the child's main thread: the limit that `--max-old-space-size` on the worker command sets, or the default of V8. The profile has no member for it. A seat at that limit ends alone: its run ends `WORKER_CRASHED`, and a new thread takes the seat.
+- The limit does not cover `ArrayBuffer` and `Buffer` memory. That memory of every seat counts toward the whole child. `recycle.above` bounds the resident memory of the whole child: the worker replaces the child after a task once the child reaches it.
+- While the child holds runs, its main thread reads the resident memory of the child every 100 ms. At or above `recycle.above`, the child writes one log line with the bound and the measured value, and ends with exit code 81. The worker replaces the child. Each run that the child held is lost with it: the run ends `WORKER_CRASHED`, and the retry policy of its task decides the retry. With no `recycle.above`, the child does not read its memory.
+- The sends, reads and workflow calls of a seat go through the main thread of the child. At most `taskSendPool` of them per seat wait for the database at once.
+
 A shared async child watches its event loop. When the loop is blocked, the child names the task that held it: see [A Blocked Event Loop](/horsies/workers/shared-async-tasks/#a-blocked-event-loop). The child marks the task of each synchronous part of a body and of `runtime.spawn` work on both runtimes. The part of a body after an `await` is marked through `v8.promiseHooks`, which only Node has. On Bun, a block after an `await` names no task: it takes the path of a block that no one task held.
 
 ## Child Mode

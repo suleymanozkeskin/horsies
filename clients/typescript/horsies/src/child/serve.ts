@@ -6,6 +6,10 @@
 //   that the core refuses is stored as `RETURN_TYPE_MISMATCH` (`refusedCodeParts`).
 // - `cancelRun` and `stopWork` abort the signals of the run table; `cancelRun` also reaches the body observation of the
 //   run (its `cancelled`), so the observer can end the run's span at the core's decision.
+// - `bodyEnded` gives the body observation of the run that it names (the task id and the attempt) the core's end of
+//   the body. A run with recorded body facts ends its observation only there: the core's end is the verdict, also when
+//   a cancel fires as the body returns. A run with no recorded facts gets no `bodyEnded`; its observation ends with the
+//   body, as the adapter saw it. A `bodyEnded` of a run that this thread does not observe is left.
 // - The post dispatcher never throws: a throw into Node-API ends the process. A defect of the package goes to the
 //   defect rule (in a child: stderr, the log sink, then the abort).
 // - Hook 0 is the child's own: it reads the start facts of the child (its kind); in a `SHARED_THREAD` child it boots the
@@ -19,6 +23,7 @@ import { taskIdFromCore } from "../contract/ids.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
 import type {
   BodySettle,
+  CancelCauseName,
   ChildPost,
   StartFactsRecord,
   StartHookCall,
@@ -59,12 +64,20 @@ export interface ChildServe {
   readonly reportDefect: (defect: CoreDefect) => void;
 }
 
-/** The body observation of each run whose body has not settled, by run key: at most the seats of the child. */
-type RunObservations = Map<bigint, BodyObservation>;
+/**
+ * The body observations of a child, at most the seats of the child: by run key, each run whose body has not settled
+ * or whose core end has not come; and the run key of each run with recorded facts, by its task id and attempt.
+ */
+type RunObservations = { readonly byRunKey: Map<bigint, BodyObservation>; readonly byRun: Map<string, bigint> };
+
+/** The key of the run of task `taskId`, attempt `attempt`, in `RunObservations.byRun`. Pure. */
+function runText(taskId: string, attempt: number): string {
+  return `${taskId} ${String(attempt)}`;
+}
 
 /** The post dispatcher of a child. It never throws. */
 export function postDispatcher(serve: ChildServe): (post: ChildPost) => void {
-  const observations: RunObservations = new Map();
+  const observations: RunObservations = { byRunKey: new Map(), byRun: new Map() };
 
   return (post) => {
     try {
@@ -83,11 +96,15 @@ function dispatch(serve: ChildServe, observations: RunObservations, post: ChildP
       return;
     case "cancelRun":
       serve.table.cancel(post.runKey, post.cause);
-      observations.get(post.runKey)?.cancelled(post.cause);
+      observations.byRunKey.get(post.runKey)?.cancelled(post.cause);
 
       return;
     case "stopWork":
       serve.table.stopWork(post.workKey, post.cause);
+
+      return;
+    case "bodyEnded":
+      endObservation(observations, post);
 
       return;
     default:
@@ -95,8 +112,11 @@ function dispatch(serve: ChildServe, observations: RunObservations, post: ChildP
   }
 }
 
+/** A `runBody` post. */
+type RunBodyPost = Extract<ChildPost, { kind: "runBody" }>;
+
 /** Start the run of a `runBody` post; its settle comes when the body ends. */
-function startRun(serve: ChildServe, observations: RunObservations, post: Extract<ChildPost, { kind: "runBody" }>): void {
+function startRun(serve: ChildServe, observations: RunObservations, post: RunBodyPost): void {
   const implementation = serve.implementations.get(post.taskName);
 
   if (implementation === undefined) {
@@ -114,8 +134,7 @@ function startRun(serve: ChildServe, observations: RunObservations, post: Extrac
   const maxRetries = maxRetriesFromCore(post.maxRetries, "runBody");
   const controls = serve.table.enter({ runKey: post.runKey, taskId, taskName: post.taskName, attempt, maxRetries });
   const observation = serve.observer.enter(post.facts);
-
-  observations.set(post.runKey, observation);
+  const adapterObservation = observedRun(observations, post, observation);
 
   void runBody({
     start: {
@@ -130,10 +149,10 @@ function startRun(serve: ChildServe, observations: RunObservations, post: Extrac
     compiled: compiled.value,
     mark: { taskId, taskName: post.taskName, attempt },
     marks: serve.marks,
-    observation,
+    observation: adapterObservation,
   }).then(
     (outcome) => {
-      observations.delete(post.runKey);
+      settledObservation(observations, post);
       serve.table.leave(post.runKey);
       settleRun(serve, post.runKey, post.taskName, outcome);
     },
@@ -141,6 +160,70 @@ function startRun(serve: ChildServe, observations: RunObservations, post: Extrac
       serve.reportDefect(defectOf("runBody", cause));
     },
   );
+}
+
+/**
+ * Keep the observation of the run of `post`, and give the observation that the body adapter calls: for a run with
+ * recorded facts, the adapter's `end` passes nothing, because the core's `bodyEnded` ends the observation.
+ */
+function observedRun(observations: RunObservations, post: RunBodyPost, observation: BodyObservation): BodyObservation {
+  observations.byRunKey.set(post.runKey, observation);
+
+  switch (post.facts.kind) {
+    case "recorded":
+      observations.byRun.set(runText(post.taskId, post.attempt), post.runKey);
+
+      return coreEndedObservation(observation);
+    case "notRecorded":
+      return observation;
+    default:
+      return unreachable(post.facts, "observedRun");
+  }
+}
+
+/** The body of the run of `post` settled: a run with no recorded facts drops its observation; the others wait for `bodyEnded`. */
+function settledObservation(observations: RunObservations, post: RunBodyPost): void {
+  switch (post.facts.kind) {
+    case "recorded":
+      return;
+    case "notRecorded":
+      observations.byRunKey.delete(post.runKey);
+
+      return;
+    default:
+      unreachable(post.facts, "settledObservation");
+  }
+}
+
+/** End the observation of the run that `post` names with the core's end, and drop it. */
+function endObservation(observations: RunObservations, post: Extract<ChildPost, { kind: "bodyEnded" }>): void {
+  const run = runText(post.taskId, post.attempt);
+  const runKey = observations.byRun.get(run);
+
+  if (runKey === undefined) {
+    return;
+  }
+
+  observations.byRun.delete(run);
+
+  const observation = observations.byRunKey.get(runKey);
+
+  observations.byRunKey.delete(runKey);
+  observation?.end(post.end);
+}
+
+/** The observation of the body adapter for `observation`: `run`, `thrown` and `cancelled` pass on; `end` passes nothing. */
+function coreEndedObservation(observation: BodyObservation): BodyObservation {
+  return Object.freeze({
+    run: <T>(call: () => T): T => observation.run(call),
+    thrown: (cause: unknown): void => {
+      observation.thrown(cause);
+    },
+    end: (): void => undefined,
+    cancelled: (cause: CancelCauseName): void => {
+      observation.cancelled(cause);
+    },
+  });
 }
 
 /**

@@ -104,8 +104,8 @@ mod tests {
     use crate::db::KeptOpen;
     use crate::worker::executor::protocol::{
         ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl as InitUrl,
-        HandlerChild, IsolatedChild, PoolMaxSize, PoolMinSize, SharedThreadChild, TaskSendPool,
-        ThreadSeats,
+        HandlerChild, IsolatedChild, MemoryLimit, PoolMaxSize, PoolMinSize, SharedThreadChild,
+        TaskSendPool, ThreadSeats,
     };
 
     fn init(child_kind: ChildKind, connection: ChildConnection) -> InitFrame {
@@ -189,6 +189,7 @@ mod tests {
                 seats: ThreadSeats::new(4).expect("thread seats"),
                 pool: pool(0, 2, false),
                 task_send_pool: TaskSendPool::new(1).expect("a task-send pool"),
+                recycle_above: MemoryLimit::Off,
             }),
             connection,
         ))

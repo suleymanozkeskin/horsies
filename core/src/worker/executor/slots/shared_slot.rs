@@ -480,7 +480,7 @@ async fn end_child_that_ends_itself(generation: Generation) {
     let exit = generation.channel.await_own_end().await;
     match EndWithoutTask::of(exit) {
         EndWithoutTask::CoreStopped => log_core_stopped_child(pid),
-        EndWithoutTask::Other => {}
+        EndWithoutTask::MemoryLimit | EndWithoutTask::Other => {}
     }
 }
 
@@ -1041,7 +1041,7 @@ async fn lose_child(pool: &SharedPoolShared, mut generation: Generation, lost: C
     match (held, EndWithoutTask::of(exit)) {
         (0, EndWithoutTask::CoreStopped) => log_core_stopped_child(pid),
         (0, EndWithoutTask::Other) => warn_lost_shared_child(pid, held, &lost),
-        (_, EndWithoutTask::CoreStopped | EndWithoutTask::Other) => {}
+        (_, EndWithoutTask::CoreStopped | EndWithoutTask::MemoryLimit | EndWithoutTask::Other) => {}
     }
 }
 

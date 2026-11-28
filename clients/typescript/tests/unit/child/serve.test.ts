@@ -10,7 +10,7 @@ import { postDispatcher } from "../../../horsies/src/child/serve.ts";
 import { StateValues } from "../../../horsies/src/child/state.ts";
 import { implementationOf, implementationParts, type ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
-import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
+import type { BodyFactsRecord, ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import type { Ok } from "../../../horsies/src/wire/result.ts";
@@ -48,8 +48,15 @@ function served(
   return { post, native, defects, table };
 }
 
-function runBody(runKey: bigint, taskName: string, inputJson: string, attempt = 1, maxRetries = 0): ChildPost {
-  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt, maxRetries, facts: { kind: "notRecorded" } };
+function runBody(
+  runKey: bigint,
+  taskName: string,
+  inputJson: string,
+  attempt = 1,
+  maxRetries = 0,
+  facts: BodyFactsRecord = { kind: "notRecorded" },
+): ChildPost {
+  return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt, maxRetries, facts };
 }
 
 describe("the cancel post and the body observation", () => {
@@ -90,6 +97,75 @@ describe("the cancel post and the body observation", () => {
       observation.calls.filter((call) => call.startsWith("cancelled")),
       ["cancelled DEADLINE"],
     );
+  });
+});
+
+/** The recorded facts of a run of `double` of task `RUN_TASK_ID`, attempt `attempt`. */
+function recordedFacts(attempt: number): BodyFactsRecord {
+  return {
+    kind: "recorded",
+    taskId: RUN_TASK_ID,
+    taskName: "double",
+    queueName: "default",
+    attempt,
+    workerId: "worker-1",
+    execution: "SHARED_ASYNC",
+    workflow: { kind: "notInWorkflow" },
+    carrier: { kind: "noCarrier" },
+  };
+}
+
+/** A child that serves `double` with one observation per run, in the order of the runs. */
+function observedChild(): { readonly post: (post: ChildPost) => void; readonly observations: RecordingObservation[] } {
+  const observations: RecordingObservation[] = [];
+
+  const observer: BodyObserver = {
+    enter: () => {
+      const observation = new RecordingObservation();
+
+      observations.push(observation);
+
+      return observation;
+    },
+    flush: async () => undefined,
+  };
+
+  const child = served([implementationParts(implementationOf(double, ({ n }, { ok }) => ok(n * 2), []))], new FakeChildNative(), observer);
+
+  return { post: child.post, observations };
+}
+
+describe("the core's end of a body", () => {
+  test("a run with recorded facts ends its observation with the core's end of the run that the post names, not at its settle", async () => {
+    const child = observedChild();
+
+    child.post(runBody(1n, "double", '{"n":2}', 1, 0, recordedFacts(1)));
+    child.post(runBody(2n, "double", '{"n":3}', 2, 0, recordedFacts(2)));
+    await settled();
+    assert.deepEqual(child.observations.map((observation) => observation.ends), [[], []]);
+    child.post({ kind: "bodyEnded", taskId: RUN_TASK_ID, attempt: 2, end: { kind: "cancelled" } });
+    assert.deepEqual(child.observations.map((observation) => observation.ends), [[], [{ kind: "cancelled" }]]);
+    child.post({ kind: "bodyEnded", taskId: RUN_TASK_ID, attempt: 1, end: { kind: "returned" } });
+    assert.deepEqual(child.observations.map((observation) => observation.ends), [[{ kind: "returned" }], [{ kind: "cancelled" }]]);
+  });
+
+  test("a run with no recorded facts ends its observation at its settle, as the adapter saw it", async () => {
+    const child = observedChild();
+
+    child.post(runBody(1n, "double", '{"n":2}'));
+    await settled();
+    assert.deepEqual(child.observations[0]?.ends, [{ kind: "returned" }]);
+  });
+
+  test("a core end of a run that the child does not observe, and a second end of a run, are left", async () => {
+    const child = observedChild();
+
+    child.post(runBody(1n, "double", '{"n":2}', 1, 0, recordedFacts(1)));
+    await settled();
+    child.post({ kind: "bodyEnded", taskId: RUN_TASK_ID, attempt: 4, end: { kind: "returned" } });
+    child.post({ kind: "bodyEnded", taskId: RUN_TASK_ID, attempt: 1, end: { kind: "timedOut" } });
+    child.post({ kind: "bodyEnded", taskId: RUN_TASK_ID, attempt: 1, end: { kind: "returned" } });
+    assert.deepEqual(child.observations[0]?.ends, [{ kind: "timedOut" }]);
   });
 });
 

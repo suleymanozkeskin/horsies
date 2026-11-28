@@ -78,7 +78,7 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
+pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans};
 pub use ended_spans::{
     EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,

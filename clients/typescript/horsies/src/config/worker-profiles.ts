@@ -134,6 +134,8 @@ export type SharedAsyncSetting = SharedAsyncChildren | NoSharedAsyncChildren;
  * runtime refuses the profile at its start. The JavaScript heap of each seat has the heap limit of its child's main
  * isolate (`--max-old-space-size` on the worker command sets it), and a seat at that limit ends alone with its run.
  * The limit does not cover `ArrayBuffer` and `Buffer` memory: that memory of every seat counts toward the whole child.
+ * `recycle.above` bounds the resident memory of the whole child. The sends of every seat share `taskSendPool`: at most
+ * that many sends of one seat wait for the database at once.
  */
 export interface SharedThreadChildren {
   readonly kind: "sharedThreadChildren";

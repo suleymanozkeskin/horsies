@@ -738,7 +738,8 @@ async fn end_shared_child(context: &HostContext, end: &CoreStopEnd) -> TaskServe
 /// The next step of the serve loop of a shared child: a parent frame, or
 /// the stopped host core that a seat met.
 enum SharedNext {
-    Frame(Option<ParentFrame>),
+    /// Boxed: a parent frame is much larger than a core stop end.
+    Frame(Option<Box<ParentFrame>>),
     CoreStopped(CoreStopEnd),
 }
 
@@ -749,7 +750,7 @@ async fn shared_next(
     tokio::select! {
         biased;
         end = first_core_stop(seen) => SharedNext::CoreStopped(end),
-        frame = frames.recv() => SharedNext::Frame(frame),
+        frame = frames.recv() => SharedNext::Frame(frame.map(Box::new)),
     }
 }
 
@@ -891,7 +892,7 @@ pub(super) async fn serve_shared_async(
     let mut seen = core_stop.subscribe();
     loop {
         let next = match shared_next(frames, &mut seen).await {
-            SharedNext::Frame(frame) => frame,
+            SharedNext::Frame(frame) => frame.map(|boxed| *boxed),
             SharedNext::CoreStopped(end) => return end_shared_child(&context, &end).await,
         };
         let run = match next {
@@ -1470,7 +1471,7 @@ pub(super) async fn serve_shared_thread(
     let mut seen = core_stop.subscribe();
     loop {
         let next = match shared_next(frames, &mut seen).await {
-            SharedNext::Frame(frame) => frame,
+            SharedNext::Frame(frame) => frame.map(|boxed| *boxed),
             SharedNext::CoreStopped(end) => return end_shared_child(&context, &end).await,
         };
         let run = match next {

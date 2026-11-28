@@ -1,8 +1,9 @@
 // Where a child runs its bodies, from its start facts (the child's own start hook, hook 0):
 //
-// - A `SHARED_THREAD` child runs them in its seat isolates: hook 0 boots the seat pool, and each run, cancel and
-//   operation of a seat goes through the pool. The main thread runs no body and no provider, so it sets no run mark:
-//   the main-thread watch of the core names no culprit when this thread stalls.
+// - A `SHARED_THREAD` child runs them in its seat isolates: hook 0 boots the seat pool with the seats and the task-send
+//   pool of the start facts, and each run, cancel, end of a body and operation of a seat goes through the pool. The main thread runs no body and no provider, so it sets no run mark:
+//   the main-thread watch of the core names no culprit when this thread stalls. Hook 0 also starts the memory watch of
+//   the child against `recycleAbove` of the start facts (`memory-watch.ts`): none when it is off.
 // - Every other kind runs them on the main thread: the child's own post dispatcher takes each post.
 //
 // The core posts no run before its start hooks ended, so a post before hook 0 is a defect of the core or the package.
@@ -12,6 +13,7 @@
 import type { ChildPost, StartFactsRecord } from "../native/child/addon.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import { startMemoryWatch } from "./memory-watch.ts";
 import { type SeatPool, type SeatPoolDeps, startSeatPool } from "./pool.ts";
 
 /** Where the bodies of a child run. */
@@ -42,9 +44,15 @@ export class SeatRouter {
 
     switch (facts.kind) {
       case "sharedThread": {
-        const started = startSeatPool(facts.seats, this.#deps);
+        const started = startSeatPool({ seats: facts.seats, taskSendPool: facts.taskSendPool }, this.#deps);
 
         this.#place = { kind: "seats", pool: started.pool };
+        // The watch runs until the process ends; its kind says only whether it started.
+        void startMemoryWatch(facts.recycleAbove, {
+          memory: this.#deps.memory,
+          holdsRuns: () => started.pool.holdsRuns(),
+          timer: this.#deps.timer,
+        });
 
         return started.booted;
       }
@@ -114,6 +122,10 @@ function routeToSeats(pool: SeatPool, post: ChildPost): void {
       return;
     case "cancelRun":
       pool.cancel(post.runKey, post.cause);
+
+      return;
+    case "bodyEnded":
+      pool.bodyEnded(post.taskId, post.attempt, post.end);
 
       return;
     case "stopWork":

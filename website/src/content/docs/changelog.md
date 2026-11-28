@@ -15,6 +15,24 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **A shared thread child ends itself above its memory limit: exit code 81.**
+  `ChildExitCode::MemoryLimit` (81, `MEMORY_LIMIT_EXIT_CODE`) is the code of a
+  shared thread child whose resident memory went above `recycle_above` while
+  it ran; `ChildHostExit::MemoryLimit` exits with it. The worker reads the end
+  as a memory recycle (`ReplaceReason::MemoryLimit`), not as a crash of the
+  child. A run that the child held is lost with it and follows the retry
+  policy of its task.
+- **Core child host: more start facts of a shared thread child, and the run
+  in `BodySpans::close` (Rust core types).**
+  `ChildStartFacts::SharedThread` holds `task_send_pool` (the connections that
+  the task sends of the child share) and `recycle_above` (`MemoryLimit`:
+  `AtMb(limit)` or `Off` for no limit) beside `seats`. The init frame of a
+  shared thread child carries the limit in the new field `recycle_above`
+  (`{"kind":"off"}` or `{"kind":"at_mb","mb":N}`, `N` from 1); the decoder
+  refuses a shared thread init frame without it (`MissingField`).
+  `BodySpans::close` takes the run that it closes as its first argument
+  (`BodyRunKey { task_id, attempt }`, new). A client whose `open` returns
+  `tracing::Span::none()` can name the run that ended.
 - **`StoredTime` stores a time of day in Python's text (Rust).**
   `horsies::StoredTime` wraps a chrono `NaiveTime`. It writes `09:10:12` for a
   whole second, `09:10:12.500000` for a fraction (6 digits) and 9 digits for a

@@ -59,7 +59,9 @@ export type BodyFactsRecord =
  * - `runBody`: run the body of `taskName` for the run `runKey` with the stored input text; `attempt` is the fencing
  *   token's value, from 1, and `maxRetries` is the retry budget of the task row, from 0 to 20;
  * - `cancelRun`: the cancel signal of the run fired;
- * - `stopWork`: a cancel round asks the spawned work `workKey` to stop.
+ * - `stopWork`: a cancel round asks the spawned work `workKey` to stop;
+ * - `bodyEnded`: the core ended the body of the run of task `taskId`, attempt `attempt` (from 1), as `end`. Only a child
+ *   that records its body facts gets it, once for each body that the core opened.
  */
 export type ChildPost =
   | {
@@ -73,7 +75,15 @@ export type ChildPost =
       readonly facts: BodyFactsRecord;
     }
   | { readonly kind: "cancelRun"; readonly runKey: bigint; readonly cause: CancelCauseName }
-  | { readonly kind: "stopWork"; readonly workKey: bigint; readonly cause: WorkStopCauseName };
+  | { readonly kind: "stopWork"; readonly workKey: bigint; readonly cause: WorkStopCauseName }
+  | { readonly kind: "bodyEnded"; readonly taskId: string; readonly attempt: number; readonly end: BodyEndRecord };
+
+/** How the core ended a body. `code` is the text of the stored error code. */
+export type BodyEndRecord =
+  | { readonly kind: "returned" }
+  | { readonly kind: "failed"; readonly code: string }
+  | { readonly kind: "timedOut" }
+  | { readonly kind: "cancelled" };
 
 /** How a settle call ended: `unknownRun` when the run was settled before. */
 export type BodySettle = "settled" | "unknownRun";
@@ -143,7 +153,8 @@ export type ChildExitName =
   | "BOOT_FAILED"
   | "PROTOCOL_MISMATCH"
   | "CHILD_HOOK_FAILED"
-  | "CORE_STOPPED";
+  | "CORE_STOPPED"
+  | "MEMORY_LIMIT";
 
 /** The end of the serve: the exit code of the process and its name. */
 export interface ChildServeEnd {
@@ -155,8 +166,17 @@ export interface ChildServeEnd {
 export type StartFactsRecord =
   | { readonly kind: "isolated" }
   | { readonly kind: "sharedAsync"; readonly seats: number }
-  | { readonly kind: "sharedThread"; readonly seats: number }
+  | {
+      readonly kind: "sharedThread";
+      readonly seats: number;
+      /** The connections that the task sends of the child share, 1 to 1,000. */
+      readonly taskSendPool: number;
+      readonly recycleAbove: MemoryLimitRecord;
+    }
   | { readonly kind: "handler" };
+
+/** The resident-memory limit of a child (`recycle.above` of the profile): none, or `mb` MiB (1 to 4,294,967,295). */
+export type MemoryLimitRecord = { readonly kind: "off" } | { readonly kind: "atMb"; readonly mb: number };
 
 /** One call of the hook dispatcher: the index of the hook in the plan, and the facts of the child. */
 export interface StartHookCall {
@@ -183,6 +203,7 @@ export interface ChildAddon {
   loopTurned(): NativeEnvelope<undefined>;
   loopHold(taskId: string): NativeEnvelope<undefined>;
   loopRelease(): NativeEnvelope<undefined>;
+  endAtMemoryLimit(boundMb: number, measuredMb: number): never;
 }
 
 /** The `child` functions of the addon. Throws as `requireAddon` does. */

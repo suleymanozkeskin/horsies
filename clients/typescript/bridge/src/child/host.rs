@@ -44,7 +44,9 @@ use napi_derive::napi;
 use crate::call::guard::sync_call;
 use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody};
+use crate::child::body::{
+    ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody, RunPosts,
+};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
 use crate::child::exit::{child_process_exit, hold_socket, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
@@ -151,6 +153,9 @@ pub enum ChildExitName {
     ChildHookFailed,
     /// A run met the stopped core of the process: exit 80.
     CoreStopped,
+    /// The resident memory of a `SHARED_THREAD` child reached its bound
+    /// while it held runs: exit 81.
+    MemoryLimit,
 }
 
 impl ChildExitName {
@@ -165,6 +170,7 @@ impl ChildExitName {
             ChildHostExit::ProtocolMismatch => Self::ProtocolMismatch,
             ChildHostExit::ChildHookFailed => Self::ChildHookFailed,
             ChildHostExit::CoreStopped => Self::CoreStopped,
+            ChildHostExit::MemoryLimit => Self::MemoryLimit,
         }
     }
 }
@@ -355,10 +361,8 @@ fn served_app(
                 cause: refused.cause,
             }
         })?;
-    let bodies = Arc::new(ChildBodies {
-        poster,
-        facts: BodyFacts::of(plan.body_facts),
-    });
+    let facts = BodyFacts::of(plan.body_facts, Arc::clone(&poster) as Arc<dyn RunPosts>);
+    let bodies = Arc::new(ChildBodies { poster, facts });
     let host_loop =
         make_host_loop().map_err(|_made| client_defect("a process serves as a child once"))?;
     let app = ChildApp {
@@ -573,6 +577,13 @@ mod tests {
             ChildServeEnd {
                 code: 80,
                 exit: ChildExitName::CoreStopped,
+            }
+        );
+        assert_eq!(
+            serve_end(ChildHostExit::MemoryLimit),
+            ChildServeEnd {
+                code: 81,
+                exit: ChildExitName::MemoryLimit,
             }
         );
     }

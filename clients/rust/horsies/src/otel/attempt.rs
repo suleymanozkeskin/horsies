@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use horsies_core::telemetry::labels::LabelName;
 use horsies_core::{
-    BodyOutcome, BodyRun, BodyScope, BodySpans, Execution, OutcomeCode, RunWorkflow,
+    BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans, Execution, OutcomeCode, RunWorkflow,
 };
 use opentelemetry::global;
 use opentelemetry::trace::Status;
@@ -60,7 +60,7 @@ impl BodySpans for AttemptSpans {
         attempt_span(run, parent)
     }
 
-    fn close(&self, span: &tracing::Span, end: &BodyOutcome<'_>) {
+    fn close(&self, _run: BodyRunKey, span: &tracing::Span, end: &BodyOutcome<'_>) {
         close_attempt_span(span, end);
     }
 }

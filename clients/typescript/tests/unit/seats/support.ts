@@ -13,7 +13,8 @@ import { type IsolatePort, SeatChannel } from "../../../horsies/src/seats/channe
 import type { BodyEnd } from "../../../horsies/src/child/body-observer.ts";
 import type { SeatBounds } from "../../../horsies/src/native/seats/addon.ts";
 import type { SeatIsolateDeps } from "../../../horsies/src/seats/isolate.ts";
-import type { SeatHost } from "../../../horsies/src/seats/pool.ts";
+import type { ChildMemory } from "../../../horsies/src/seats/memory-watch.ts";
+import type { SeatHost, SeatPoolSize } from "../../../horsies/src/seats/pool.ts";
 import {
   type MainToSeat,
   type RelayBounds,
@@ -125,10 +126,17 @@ export async function settled(): Promise<void> {
   }
 }
 
+/** The memory of a child whose memory is not read: a read or an end is a test failure. */
+export const UNREAD_MEMORY: ChildMemory = Object.freeze({
+  residentBytes: () => assert.fail("the child read its resident memory"),
+  endAtLimit: () => assert.fail("the child ended at its memory bound"),
+});
+
 /** The seat host of a child that starts no seat isolate: its start is a test failure. */
 export function unusedSeatHost(): SeatHost {
   return {
     start: () => assert.fail("the child started a seat isolate"),
+    memory: UNREAD_MEMORY,
     bounds: () => TEST_SEAT_BOUNDS,
     clock: () => 0,
     now: () => ENDED_AT,
@@ -140,7 +148,12 @@ export function unusedSeatHost(): SeatHost {
 export const TEST_RELAY_BOUNDS: RelayBounds = Object.freeze({ opsInFlight: 2, opsWaiting: 3 });
 
 /** The seat bounds of the tests. */
-export const TEST_SEAT_BOUNDS: SeatBounds = Object.freeze({ ...TEST_RELAY_BOUNDS, replacementBootBoundMs: 10_000 });
+export const TEST_SEAT_BOUNDS: SeatBounds = Object.freeze({ opsWaiting: TEST_RELAY_BOUNDS.opsWaiting, replacementBootBoundMs: 10_000 });
+
+/** The size of a test pool of `seats` seats: its task-send pool is the in-flight bound of `TEST_RELAY_BOUNDS`. */
+export function testPoolSize(seats: number): SeatPoolSize {
+  return { seats, taskSendPool: TEST_RELAY_BOUNDS.opsInFlight };
+}
 
 /** The main thread's time of each settle in the tests. */
 export const ENDED_AT: Temporal.Instant = Temporal.Instant.from("2026-11-26T10:00:00Z");
