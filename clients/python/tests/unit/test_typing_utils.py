@@ -739,19 +739,21 @@ class TestResolveSourceNodeOkType:
 class TestValidateWorkflowGenericOutputMatch:
     """Tests for validate_workflow_generic_output_match()."""
 
-    def test_no_output_skips_validation(self) -> None:
+    def test_no_output_and_no_generic_is_refused(self) -> None:
         # Arrange: no generic parameter means the declared type is unresolvable.
         mock_cls = MagicMock()
         mock_spec = MagicMock()
         mock_spec.output = None
 
-        # Act / Assert — should not raise
         with patch(
             "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
             autospec=True,
             return_value=None,
         ):
-            validate_workflow_generic_output_match(mock_cls, mock_spec)
+            with pytest.raises(WorkflowValidationError) as exc:
+                validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_outputless_no_workflow_output_declared_type_no_error(self) -> None:
         mock_cls = MagicMock()
@@ -780,7 +782,7 @@ class TestValidateWorkflowGenericOutputMatch:
 
         assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
-    def test_outputless_any_declared_type_no_error(self) -> None:
+    def test_outputless_any_declared_type_is_refused(self) -> None:
         mock_cls = MagicMock()
         mock_spec = MagicMock()
         mock_spec.output = None
@@ -790,7 +792,10 @@ class TestValidateWorkflowGenericOutputMatch:
             autospec=True,
             return_value=Any,
         ):
-            validate_workflow_generic_output_match(mock_cls, mock_spec)
+            with pytest.raises(WorkflowValidationError) as exc:
+                validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_outputless_concrete_declared_type_raises_e025(self) -> None:
         mock_cls = MagicMock()

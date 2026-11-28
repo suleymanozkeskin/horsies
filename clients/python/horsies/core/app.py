@@ -45,7 +45,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     WorkflowSpec,
-    WorkflowTerminalResults,
+    NoWorkflowOutput,
     OnError,
     SuccessPolicy,
     WorkflowHandle,
@@ -2867,7 +2867,7 @@ class Horsies:
         *,
         definition_key: str | None = None,
         workflow_definition: type[Any] | None = None,
-    ) -> WorkflowSpec[WorkflowTerminalResults]: ...
+    ) -> WorkflowSpec[NoWorkflowOutput]: ...
 
     def workflow(
         self,
@@ -2879,7 +2879,7 @@ class Horsies:
         *,
         definition_key: str | None = None,
         workflow_definition: type[Any] | None = None,
-    ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]:
+    ) -> WorkflowSpec[OutT] | WorkflowSpec[NoWorkflowOutput]:
         """
         Create a validated WorkflowSpec with proper queue and priority resolution.
 
@@ -2972,7 +2972,7 @@ class Horsies:
                 original.priority = saved_priority
 
         if output is None:
-            return cast('WorkflowSpec[WorkflowTerminalResults]', spec)
+            return cast('WorkflowSpec[NoWorkflowOutput]', spec)
         return spec
 
     # -------- workflow builder contract --------

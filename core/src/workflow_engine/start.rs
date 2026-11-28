@@ -381,11 +381,48 @@ mod tests {
         assert_eq!(without.facts.execution, Execution::Isolated);
         let thread = node_task_facts(
             &node,
-            Some(r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null}"#),
+            Some(r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null, "timeout_ms": 5000}"#),
             None,
         )
         .expect("a node of the thread class reads");
         assert_eq!(thread.facts.execution, Execution::SharedThread);
+    }
+
+    /// A shared-class task node with no `timeout_ms` (absent or `null`) is refused at the start with the
+    /// validation error that names the node; an `ISOLATED` node with none is accepted.
+    #[test]
+    fn a_shared_class_task_node_without_a_timeout_is_refused() {
+        let mut node = node_with(false, Some(10));
+        node.task_name = "shared_node".to_owned();
+        for options in [
+            r#"{"execution": "SHARED_ASYNC", "cancel_grace_ms": 1000}"#,
+            r#"{"execution": "SHARED_ASYNC", "cancel_grace_ms": 1000, "timeout_ms": null}"#,
+            r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null}"#,
+            r#"{"execution": "SHARED_THREAD", "timeout_ms": null}"#,
+        ] {
+            match node_task_facts(&node, Some(options), None) {
+                Ok(_) => panic!("{options}: the node must be refused"),
+                Err(WorkflowError::Validation(message)) => {
+                    assert!(
+                        message.contains("workflow node 0 (shared_node) refused"),
+                        "{options}: {message}"
+                    );
+                    assert!(
+                        message.contains("timeout_ms is absent for execution"),
+                        "{options}: {message}"
+                    );
+                }
+                Err(other) => panic!("{options}: expected a validation refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_isolated_task_node_without_a_timeout_is_accepted() {
+        let node = node_with(false, Some(10));
+        let isolated = node_task_facts(&node, Some(r#"{"execution": "ISOLATED"}"#), None)
+            .expect("an isolated node needs no timeout");
+        assert_eq!(isolated.facts.execution, Execution::Isolated);
     }
 
     /// Task options that are not JSON (an empty text is not "no options") and an execution class that is

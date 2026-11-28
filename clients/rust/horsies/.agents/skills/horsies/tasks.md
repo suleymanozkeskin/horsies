@@ -72,6 +72,9 @@ Python stores keyword arguments.
   `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text
   (`2026-08-12T09:10:12.500000Z`). A plain chrono value keeps chrono's serde
   text (`…12.500Z`). Both clients read either text to the same value.
+- A time of day of type `horsies::StoredTime` (wraps a chrono `NaiveTime`) is
+  stored in Python's text (`09:10:12.500000`). A plain `NaiveTime` keeps
+  chrono's serde text (`09:10:12.500`).
 
 ## The Generated Module
 
@@ -838,7 +841,7 @@ use horsies::{
     // Task definition
     blocking_task, task, CustomErrorCode, TaskError, TaskErrorCode, TaskRuntime,
     RunCancelState, CancelCause, FencingToken, FencingTokenRefused,
-    StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
+    StoredDateTime, StoredTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Built-in codes
     BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,

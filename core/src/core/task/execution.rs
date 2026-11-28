@@ -277,7 +277,7 @@ fn bounded_grace_error(raw: &Value) -> Option<String> {
 }
 
 /// The `timeout_ms` rule of the class `execution` at a new send
-/// (`CheckedSend::check`): `SHARED_ASYNC` and `SHARED_THREAD` need a timeout,
+/// (`CheckedSend::check`) and at a workflow start (`prepare_workflow_task_facts`): `SHARED_ASYNC` and `SHARED_THREAD` need a timeout,
 /// because a shared child runs other tasks next to this one and the timeout
 /// ends a task that does not return. `ISOLATED` runs with or without one.
 /// The Rust task macro and the Python task decorator refuse the same

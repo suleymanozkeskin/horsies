@@ -5409,7 +5409,7 @@ export interface WorkflowNodeSummary {
 // @public
 export type WorkflowOutput<R extends BuildReturn> = R extends {
     readonly output: AnyNode;
-} ? NodeOutput<R["output"]> : R extends BuildReturnWithoutOutput ? WorkflowTerminalResults : NodeOutput<OutputNode<R>> | WorkflowTerminalResults;
+} ? NodeOutput<R["output"]> : R extends BuildReturnWithoutOutput ? NoWorkflowOutput : NodeOutput<OutputNode<R>> | NoWorkflowOutput;
 
 // @public (undocumented)
 export type WorkflowPlace = "NOT_IN_WORKFLOW" | "WORKFLOW_NOT_KNOWN";
@@ -5600,12 +5600,6 @@ export type WorkflowStatus = (typeof WorkflowStatus)[keyof typeof WorkflowStatus
 // @public
 export type WorkflowTaskRuntime = TaskRuntime & {
     readonly workflowContext: RuntimeWorkflowContext;
-};
-
-// @public
-export type WorkflowTerminalResults = {
-    readonly kind: "terminalResults";
-    readonly byNodeId: ReadonlyMap<string, TaskOutcome<JsonValue, string>>;
 };
 
 // @public

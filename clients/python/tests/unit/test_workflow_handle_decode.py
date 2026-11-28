@@ -14,7 +14,6 @@ Strict-serde phase 5/6 regression coverage. The decode routine must:
 from __future__ import annotations
 
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -26,15 +25,15 @@ from horsies.core.models.outcome import (
     Succeeded,
 )
 from horsies.core.models.tasks import (
-    ContractCode,
     OperationalCode,
     SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.handle import (
-    _OUTPUTLESS_TERMINALS,  # pyright: ignore[reportPrivateUsage]
+    _OUTPUTLESS_WORKFLOW,  # pyright: ignore[reportPrivateUsage]
     _decode_workflow_envelope,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.types.result import Err, Ok
@@ -108,7 +107,7 @@ class TestWorkflowEnvelopeOutputlessMismatch:
         wire = _typed_envelope(ok=42)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            output_type=_OUTPUTLESS_TERMINALS,
+            output_type=_OUTPUTLESS_WORKFLOW,
             app=None,
             workflow_id='wf-2',
         )
@@ -233,42 +232,10 @@ class TestWorkflowEnvelopeErrSlot:
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessPath:
-    """Outputless path decodes per-node envelopes using the app
-    registry. Tests cover the embedded ``task_name_by_id`` mapping."""
+    """An outputless handle reads the outputless envelope as
+    ``NoWorkflowOutput``; the embedded per-node map is not read."""
 
-    @staticmethod
-    def _make_app_with_task(task_name: str, ok_type: Any) -> Any:
-        """Build a mock app whose task registry knows one task."""
-        app = MagicMock()
-        task = MagicMock()
-        task.task_ok_type = ok_type
-        app.tasks = {task_name: task}
-        return app
-
-    def test_per_node_decode_uses_embedded_task_names(self) -> None:
-        app = self._make_app_with_task('task_a', int)
-        wire = _outputless_envelope(
-            results_by_id={
-                'node-0': {
-                    '__h_task_result__': True,
-                    'ok': 7,
-                    'err': None,
-                },
-            },
-            task_name_by_id={'node-0': 'task_a'},
-        )
-        result = _decode_workflow_envelope(
-            cast(Json, wire),
-            output_type=_OUTPUTLESS_TERMINALS,
-            app=app,
-            workflow_id='wf-out',
-        )
-        assert result == Ok(Succeeded({'node-0': Succeeded(7)}))
-
-    def test_unknown_task_name_records_no_type_available(self) -> None:
-        """Source task missing from the registry → ``NO_TYPE_AVAILABLE``
-        sentinel on that node, not a fatal workflow error."""
-        app = self._make_app_with_task('task_a', int)
+    def test_outputless_wire_reads_as_no_workflow_output(self) -> None:
         wire = _outputless_envelope(
             results_by_id={
                 'node-0': {
@@ -281,12 +248,25 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            output_type=_OUTPUTLESS_TERMINALS,
-            app=app,
+            output_type=_OUTPUTLESS_WORKFLOW,
+            app=None,
+            workflow_id='wf-out',
+        )
+        assert result == Ok(Succeeded(NoWorkflowOutput()))
+
+    def test_outputless_wire_with_an_err_slot_reads_as_failed(self) -> None:
+        wire = _outputless_envelope(results_by_id={}, task_name_by_id={})
+        wire['err'] = encode_task_error(
+            TaskError(code=OperationalCode.UNHANDLED_EXCEPTION, message='boom'),
+        )
+        result = _decode_workflow_envelope(
+            cast(Json, wire),
+            output_type=_OUTPUTLESS_WORKFLOW,
+            app=None,
             workflow_id='wf-out',
         )
         match result:
-            case Ok(Succeeded({'node-0': Failed(task_error)})):
-                assert task_error.code == ContractCode.NO_TYPE_AVAILABLE
+            case Ok(Failed(task_error)):
+                assert task_error.message == 'boom'
             case _:
-                pytest.fail(f'expected a NO_TYPE_AVAILABLE node entry, got {result!r}')
+                pytest.fail(f'expected Ok(Failed(...)), got {result!r}')

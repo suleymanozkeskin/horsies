@@ -142,7 +142,8 @@ export type ChildExitName =
   | "BAD_ARGUMENTS"
   | "BOOT_FAILED"
   | "PROTOCOL_MISMATCH"
-  | "CHILD_HOOK_FAILED";
+  | "CHILD_HOOK_FAILED"
+  | "CORE_STOPPED";
 
 /** The end of the serve: the exit code of the process and its name. */
 export interface ChildServeEnd {

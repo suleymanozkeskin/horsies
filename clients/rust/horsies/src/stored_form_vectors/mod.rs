@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::StoredDateTime;
+use crate::{StoredDateTime, StoredTime};
 
 /// The text of the vector file `name` of the core's vector folder.
 pub(crate) fn vector_file(name: &str) -> String {
@@ -207,10 +207,8 @@ fn check_typed(name: &str, type_name: &str, notation: &Value, check: &mut impl T
         "datetime_offset" => check.check(StoredDateTime(offset_datetime(name, notation))),
         "datetime_naive" => check.check(StoredDateTime(naive_datetime(name, notation))),
         "date" => check.check(parsed::<NaiveDate>(name, notation)),
-        // chrono's own serde form of a time of day writes a whole
-        // millisecond with 3 digits: the vector carries that text as a
-        // `rust_drift`.
-        "time" => check.check(parsed::<NaiveTime>(name, notation)),
+        // `StoredTime` writes Python's text for a time of day.
+        "time" => check.check(StoredTime(parsed::<NaiveTime>(name, notation))),
         "uuid" => check.check(parsed::<Uuid>(name, notation)),
         "str_enum" => check.check(color(name, notation)),
         "optional_i64" => check.check(match notation {

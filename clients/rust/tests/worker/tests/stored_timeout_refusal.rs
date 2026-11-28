@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use horsies::{
-    OutputlessResults, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, TypedNodeRef,
+    NoWorkflowOutput, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, TypedNodeRef,
     WorkflowSpecBuilder,
 };
 use horsies_test_support::rows::{self, TaskRow};
@@ -213,7 +213,7 @@ async fn a_refused_timeout_fails_its_workflow_node() {
         .unwrap_or_else(|refused| panic!("build the spec: {refused}"));
     let handle = suite
         .app
-        .start::<OutputlessResults>(&spec)
+        .start::<NoWorkflowOutput>(&spec)
         .await
         .unwrap_or_else(|refused| panic!("start the workflow: {refused}"));
     let workflow_id = handle.workflow_id();

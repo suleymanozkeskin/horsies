@@ -88,6 +88,7 @@ from .handle_types import (
     WorkflowHandleStoredDataInvalid,
     WorkflowHandleNotFound,
 )
+from .no_output import NoWorkflowOutput
 from .nodes import NodeKey
 
 logger = get_logger('workflow.handle')
@@ -315,19 +316,21 @@ def _ended_workflow_error(
             return _decode_stored_workflow_error(workflow_id, status, stored)
 
 
-class _OutputlessTerminals:
+class _OutputlessWorkflow:
     """Sentinel ``output_type`` for workflows without an explicit output node.
 
-    Started handles set ``output_type = _OUTPUTLESS_TERMINALS`` when the
-    workflow spec's ``output`` is ``None``. ``WorkflowHandle.get()``
-    dispatches to a dedicated decode path that walks the per-node
-    ``results_by_id`` map embedded in the outer envelope.
+    Started handles set ``output_type = _OUTPUTLESS_WORKFLOW`` when the
+    workflow spec's ``output`` is ``None``. The stored result of such a
+    workflow is the outputless envelope, which a node that returns
+    ``NoWorkflowOutput`` does not have, so the declared type alone cannot
+    tell the two apart. ``WorkflowHandle.get()`` reads the err slot of the
+    envelope and gives ``Succeeded(NoWorkflowOutput())`` otherwise.
     """
 
     __slots__ = ()
 
 
-_OUTPUTLESS_TERMINALS: Any = _OutputlessTerminals()
+_OUTPUTLESS_WORKFLOW: Any = _OutputlessWorkflow()
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,110 +542,6 @@ def _stored_node_result(
             ))
 
 
-def _outputless_node_outcome(
-    workflow_id: str,
-    node_id: str,
-    per_node_envelope: Json,
-    source_task_name: object,
-    *,
-    app: Any | None,
-    sub_definition_key: object,
-) -> TaskOutcome[Any, TaskError[Any]]:
-    """The entry of one node in the outputless map of ``get()``.
-
-    A node with no payload or no task name, or whose stored value does not
-    decode, is a failed outcome with ``RESULT_DESERIALIZATION_ERROR``; a
-    source that this process does not know is a failed outcome with
-    ``NO_TYPE_AVAILABLE``. A failed entry has the custom codes of its task
-    (``resolve_source_code_type``); a stored code that the task's ``Enum``
-    does not name is a failed outcome with ``RESULT_DESERIALIZATION_ERROR``.
-    The other entries stay readable.
-    """
-    from horsies.core.models.tasks import ContractCode
-    from .typing_utils import resolve_source_code_type, resolve_source_ok_type
-
-    if per_node_envelope is None or not isinstance(source_task_name, str):
-        return Failed(TaskError(
-            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
-            message=(
-                f'Outputless workflow {workflow_id} node '
-                f'{node_id!r} missing payload or task name'
-            ),
-            data={'node_id': node_id},
-        ))
-    source_ok_type = resolve_source_ok_type(
-        app,
-        source_task_name,
-        sub_definition_key=(
-            sub_definition_key if isinstance(sub_definition_key, str) else None
-        ),
-    )
-    if source_ok_type is None:
-        return Failed(TaskError(
-            code=ContractCode.NO_TYPE_AVAILABLE,
-            message=(
-                f'Outputless workflow {workflow_id} node '
-                f'{node_id!r}: source '
-                f'{source_task_name!r} is not a known task or '
-                f'workflow definition'
-            ),
-            data={'node_id': node_id, 'source_task_name': source_task_name},
-        ))
-    try:
-        outcome = decode_task_result(per_node_envelope, source_ok_type)
-    except (StrictJsonError, ValueValidationError) as exc:
-        return Failed(TaskError(
-            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
-            message=f'decode_task_result failed for node {node_id!r}: {exc}',
-            data={'node_id': node_id},
-        ))
-    code_type = resolve_source_code_type(
-        app,
-        source_task_name,
-        sub_definition_key=(
-            sub_definition_key if isinstance(sub_definition_key, str) else None
-        ),
-    )
-    match typed_outcome(outcome, code_type):
-        case Ok(ok_value=typed):
-            return typed
-        case Err(err_value=unknown):
-            return _unknown_code_outcome(node_id, unknown)
-
-
-def _decode_outputless_ok(
-    ok_slot: Json, *, app: Any | None, workflow_id: str,
-) -> ReadResult[Any, TaskError]:
-    """The read of the ok slot of an outputless workflow envelope: the map
-    of each terminal node's outcome, by node id."""
-    if not isinstance(ok_slot, dict):
-        return _unreadable('Outputless workflow envelope ok slot malformed')
-    results_raw = ok_slot.get('results_by_id', {})
-    task_names = ok_slot.get('task_name_by_id', {})
-    definition_keys = ok_slot.get('definition_key_by_id', {})
-    if (
-        not isinstance(results_raw, dict)
-        or not isinstance(task_names, dict)
-        or not isinstance(definition_keys, dict)
-    ):
-        return _unreadable(
-            'Outputless workflow envelope missing or malformed '
-            'results_by_id / task_name_by_id / definition_key_by_id',
-        )
-    decoded_results: dict[str, TaskOutcome[Any, TaskError[Any]]] = {
-        node_id: _outputless_node_outcome(
-            workflow_id,
-            node_id,
-            per_node_envelope,
-            task_names.get(node_id),
-            app=app,
-            sub_definition_key=definition_keys.get(node_id),
-        )
-        for node_id, per_node_envelope in results_raw.items()
-    }
-    return Ok(Succeeded(decoded_results))
-
-
 def _decode_workflow_envelope(
     raw: Json,
     output_type: TypeAnnotation | None,
@@ -656,9 +555,8 @@ def _decode_workflow_envelope(
     - Not an envelope, or an outputless marker that the handle's type does
       not match → ``Err(ReadResultDeserializationError)``.
     - Err slot populated → ``Ok(Failed(task_error))`` (no output_type needed).
-    - output_type is ``_OUTPUTLESS_TERMINALS`` → per-node decode using
-      ``task_name_by_id`` embedded in the envelope and the local task
-      registry on ``app``.
+    - output_type is ``_OUTPUTLESS_WORKFLOW`` →
+      ``Succeeded(NoWorkflowOutput())``.
     - output_type is set → ``decode_task_result(raw, output_type)``.
     - output_type is None and ok slot populated → ``Err(ReadNoTypeAvailable)``.
     """
@@ -681,7 +579,7 @@ def _decode_workflow_envelope(
     # before the err slot ensures a smuggled outputless flag on a typed
     # envelope cannot slip through via the err route either.
     wire_outputless = envelope.get('__h_outputless_terminals__') is True
-    handle_outputless = output_type is _OUTPUTLESS_TERMINALS
+    handle_outputless = output_type is _OUTPUTLESS_WORKFLOW
     if wire_outputless != handle_outputless:
         return _unreadable(
             f'Workflow {workflow_id} outputless/typed envelope '
@@ -703,9 +601,7 @@ def _decode_workflow_envelope(
             return _unreadable(f'TaskError decode failed: {exc}')
 
     if handle_outputless:
-        return _decode_outputless_ok(
-            envelope.get('ok'), app=app, workflow_id=workflow_id,
-        )
+        return Ok(Succeeded(NoWorkflowOutput()))
     if output_type is None:
         return Err(ReadNoTypeAvailable(message=(
             f'Workflow {workflow_id} ok-result decode requires '
@@ -760,8 +656,8 @@ class WorkflowHandle(Generic[OutT]):
     # Strict-serde phase 6: declared OutT for typed result decode.
     # Started handles populate this from the workflow spec (see
     # ``_resolve_source_node_ok_type(spec.output)``). For outputless
-    # workflows, the sentinel ``_OUTPUTLESS_TERMINALS`` routes through
-    # a dedicated per-node decode path. By-id reconstruction without a
+    # workflows, the sentinel ``_OUTPUTLESS_WORKFLOW`` routes through
+    # the outputless envelope read. By-id reconstruction without a
     # registered spec leaves this ``None`` and ``get()`` folds
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
     output_type: TypeAnnotation | None = None
@@ -885,11 +781,11 @@ class WorkflowHandle(Generic[OutT]):
 
         Returns:
             ``Ok(Succeeded(value))``: with an output task, that task's value;
-            without one, the map of each terminal task's outcome by node id.
+            without one, ``NoWorkflowOutput()``. ``results()``, ``nodes()``
+            and ``result_for()`` give the values of the nodes.
             ``Ok(Failed(task_error))``: the workflow failed, was cancelled,
             expired or is paused; a COMPLETED workflow whose output task is
-            SKIPPED gives ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`` (a SKIPPED
-            terminal task has an entry with that same code in the map).
+            SKIPPED gives ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`` .
             ``Err(read_error)``: the checks before any wait come in this
             order: ``ReadInvalidInput`` for a wait_ms that is not None or an
             int from 0 to MAX_TASK_TIMEOUT_MS; ``ReadWaitInsideTask`` in a process

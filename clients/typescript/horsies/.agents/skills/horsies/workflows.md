@@ -328,8 +328,12 @@ export async function refreshed(app: Horsies): Promise<void> {
   const result = await started.value.get({ waitMs: 60_000 });
 
   if (result.ok && result.value.kind === "succeeded") {
-    for (const [nodeId, outcome] of result.value.value.byNodeId) {
-      console.log(nodeId, outcome.kind);
+    const nodes = await started.value.results();
+
+    if (nodes.ok) {
+      for (const [nodeId, node] of nodes.value) {
+        console.log(nodeId, node.kind);
+      }
     }
   }
 }
@@ -337,13 +341,11 @@ export async function refreshed(app: Horsies): Promise<void> {
 
 - `outputType` left out: the build returns no `output`, and the core keeps no
   output node (`NO_OUTPUT`), as Python's `output=None` and Rust's
-  `OutputlessResults`.
-- `get` of a COMPLETED workflow gives `WorkflowTerminalResults`:
-  `{ kind: "terminalResults", byNodeId }`, the outcome of each terminal node by
-  node id. Each value is a `JsonValue` and each custom code is open. A node
-  entry that does not read is a failed outcome with
-  `RESULT_DESERIALIZATION_ERROR` and the node id in `data.node_id`; the other
-  entries stay readable.
+  `NoWorkflowOutput`.
+- `get` of a COMPLETED workflow gives `NoWorkflowOutput`
+  (`{ kind: "noWorkflowOutput" }`) as the success value, or the stored error
+  as a failed outcome. The values of the nodes come from `results()`, `nodes()`
+  and `resultFor`; a SKIPPED node has no stored result.
 - A stored result whose form does not match the definition (the definition
   gained or lost `outputType` between the start and the read) is
   `storedResultUnreadable`.
@@ -453,7 +455,7 @@ process gave; another error is `VALIDATION_FAILED`.
 | Member | Gives |
 |---|---|
 | `workflowId` | The `WorkflowId` |
-| `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound). `O` is `WorkflowTerminalResults` for a workflow with no `outputType` |
+| `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound). `O` is `NoWorkflowOutput` for a workflow with no `outputType` |
 | `resultFor(nodeId)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
 | `status()` | `Result<WorkflowStatus, HandleCoreError>` |
 | `results()` | `Result<ReadonlyMap<string, NodeResult>, HandleCoreError>`: the stored result of each node that has one, by node id |
@@ -624,7 +626,7 @@ import {
   type NodeRef, type AnyNode, type JoinType, type TaskNodeOptions, type SubWorkflowNodeOptions,
   type TaskOutcomeWire, type UpstreamValue, type UpstreamCode,
   type SuccessPolicy, type SuccessCase, type WorkflowOutput, type SubWorkflowOutput,
-  type BuildReturnWithoutOutput, type WorkflowTerminalResults, type NoWorkflowOutput,
+  type BuildReturnWithoutOutput, type NoWorkflowOutput,
   // Starts
   WorkflowId, type StartOptions, type WorkflowStartError, type StartEnqueueFailed,
   // Handles

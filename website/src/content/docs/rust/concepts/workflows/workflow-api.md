@@ -87,7 +87,7 @@ The nodes, the field tokens and the data flow are on [Typed Node Builder](/horsi
 
 | Item | Rule |
 |------|------|
-| `type Output` | The type of the workflow's result: the output node's type, or for a workflow with no output node `OutputlessResults` (the outcome of each node) or `NoWorkflowOutput` (the value of its sub-workflow node, and of a handle that reads no node outcomes) |
+| `type Output` | The type of the workflow's result: the output node's type, or `NoWorkflowOutput` for a workflow with no output node: the value of its sub-workflow node and of `get()` of its handle. The values of the nodes come from `results()`, `nodes()` and `result_for()` |
 | `type Parameters` | The parameters of `build_with` (`Serialize + DeserializeOwned`); `()` for a definition without parameters |
 | `fn name()` | The workflow name, unique in the app |
 | `fn definition_key()` | The stable identity, unique in the app. A start and the engine find the workflow by it |
@@ -283,9 +283,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 - checks the limit first: a `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `InvalidInput`, before any statement;
 - in a worker child, is refused with `WaitInsideTask` before any statement.
 
-A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, CustomCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
-
-A handle typed `NoWorkflowOutput` reads such a workflow as `Succeeded(NoWorkflowOutput)`, or `Failed` with its stored error: the node outcomes are not read. `NoWorkflowOutput` is also the value of the sub-workflow node of a child with no output node (see [Subworkflows](/horsies/rust/concepts/workflows/subworkflows/#a-child-with-no-output-node)).
+A workflow with no output node declares `type Output = NoWorkflowOutput`. Its handle reads it as `Succeeded(NoWorkflowOutput)`, or `Failed` with its stored error: the node outcomes are not in it. `results()`, `nodes()` and `result_for()` give the value of each node; the value of a node in `results()` is its stored text, and `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. `NoWorkflowOutput` is also the value of the sub-workflow node of a child with no output node (see [Subworkflows](/horsies/rust/concepts/workflows/subworkflows/#a-child-with-no-output-node)).
 
 `NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or `Unreadable { cause }`.
 

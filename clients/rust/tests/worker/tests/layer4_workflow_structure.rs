@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use horsies::{
-    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
+    HorsiesError, NoWorkflowOutput, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
     WorkflowSpecBuilder,
 };
 use horsies_test_support::poll;
@@ -144,7 +144,7 @@ async fn test_fanout_parallel_execution() {
     for id in ["b", "c", "d"] {
         let _branch = add(&mut spec, slow_step(&suite, id, 1_000).waits_for(root));
     }
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     let branches = &nodes[1..];
     let latest_start = branches.iter().map(|node| node.started_at).max().flatten();
@@ -237,7 +237,7 @@ async fn test_linear_failure_cascades_to_skip() {
     let a = add(&mut spec, fail(&suite, "a"));
     let b = add(&mut spec, step(&suite, "b").waits_for(a));
     let _c = add(&mut spec, step(&suite, "c").waits_for(b));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED", "SKIPPED"]);
 }
@@ -269,7 +269,7 @@ async fn test_fanout_one_branch_fails() {
     let _b = add(&mut spec, fail(&suite, "b").waits_for(root));
     let _c = add(&mut spec, step(&suite, "c").waits_for(root));
     let _d = add(&mut spec, step(&suite, "d").waits_for(root));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
         statuses(&nodes),
@@ -294,7 +294,7 @@ async fn test_fanin_one_dep_fails_skips_aggregator() {
             .waits_for(b)
             .waits_for(c),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
         statuses(&nodes),

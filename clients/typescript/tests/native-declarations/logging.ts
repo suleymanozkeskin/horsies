@@ -4,7 +4,7 @@
 import type * as Generated from "../../bridge/index.js";
 import type { LoggerName, LogLevel, LogThreshold } from "../../horsies/src/logging.ts";
 import type { LogFormatKind, LogLevelsArg, LogRecordOut, LoggingAddon, NotMadeSpan } from "../../horsies/src/native/logging/addon.ts";
-import type { ForwarderPanicAddon } from "../e2e/src/forwarder-panic.ts";
+import type { ForwarderPanicAddon, TaskChildCoreProbe, TaskChildCoreRead } from "../e2e/src/forwarder-panic.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const setLogLevelsMatches: SameFunction<typeof Generated.setLogLevels, LoggingAddon["setLogLevels"]> = true;
@@ -27,3 +27,10 @@ export const probePanicLogForwarderMatches: SameFunction<
   typeof Generated.probePanicLogForwarder,
   ForwarderPanicAddon["probePanicLogForwarder"]
 > = true;
+
+export const probeReadTaskChildCoreMatches: SameFunction<
+  typeof Generated.probeReadTaskChildCore,
+  TaskChildCoreProbe["probeReadTaskChildCore"]
+> = true;
+
+export const taskChildCoreReadMatches: Mutual<Generated.TaskChildCoreRead, TaskChildCoreRead> = true;

@@ -268,7 +268,7 @@ class WorkflowSpec(Generic[OutT]):
     output: TaskNode[OutT, Any] | SubWorkflowNode[OutT] | None = None
     """
     - Explicit output node: WorkflowHandle.get() returns this node's result
-    - If None: get() returns dict of all terminal node results keyed by node_id
+    - If None: get() returns NoWorkflowOutput; results() gives the node values
     """
 
     success_policy: SuccessPolicy | None = None

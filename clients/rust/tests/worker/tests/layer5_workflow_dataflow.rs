@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use horsies::{
-    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
+    HorsiesError, NoWorkflowOutput, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
     WorkflowSpecBuilder,
 };
 use horsies_test_support::rows::{self, NodeRow};
@@ -232,7 +232,7 @@ async fn test_args_from_failed_dep_skips_and_fails() {
     let mut spec = builder(&suite, "failed_dep_skips");
     let a = add(&mut spec, fail(&suite, "a"));
     let _b = add(&mut spec, double(&suite, "b", a));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED"]);
     assert!(nodes[1].started_at.is_none(), "the skipped node never ran");

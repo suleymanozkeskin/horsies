@@ -28,9 +28,7 @@ use std::sync::Arc;
 use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::OnError;
 
-use super::dependency::{
-    placeholder_context_text, placeholder_result_text, NoWorkflowOutput, OutputlessResults,
-};
+use super::dependency::{placeholder_context_text, placeholder_result_text, NoWorkflowOutput};
 use super::input::NodeInput;
 use super::node::{
     BuilderId, InputCheck, JoinType, NodeDeadline, NodeIdChoice, NodeKey, NodeLinks, NodePriority,
@@ -160,8 +158,7 @@ pub(crate) enum SpecOutput {
         index: usize,
         output: OutputType,
     },
-    /// The workflow's result is the outcome of each node
-    /// ([`OutputlessResults`]).
+    /// The workflow has no output node: its result is [`NoWorkflowOutput`].
     NoOutput,
 }
 
@@ -225,8 +222,7 @@ impl WorkflowSpec {
     }
 
     /// Refuse a spec whose output type is not `T`: the type of its output
-    /// node, or [`OutputlessResults`] or [`NoWorkflowOutput`] for a spec with
-    /// no output node (Python `validate_workflow_generic_output_match`).
+    /// node, or [`NoWorkflowOutput`] for a spec with no output node (Python `validate_workflow_generic_output_match`).
     ///
     /// Errors: `WORKFLOW_OUTPUT_TYPE_MISMATCH` (HRS-025).
     pub(crate) fn check_output_type<T: 'static>(&self) -> Result<(), HorsiesError> {
@@ -235,8 +231,7 @@ impl WorkflowSpec {
             SpecOutput::Node { output, .. } => (output.name(), output == declared),
             SpecOutput::NoOutput => (
                 "no output node",
-                declared == OutputType::of::<OutputlessResults>()
-                    || declared == OutputType::of::<NoWorkflowOutput>(),
+                declared == OutputType::of::<NoWorkflowOutput>(),
             ),
         };
         match matches {
@@ -248,8 +243,8 @@ impl WorkflowSpec {
             ))
             .with_code(HorsiesErrorCode::WorkflowOutputTypeMismatch)
             .with_help(
-                "declare the output node's type, or OutputlessResults or NoWorkflowOutput for a \
-                 workflow with no output node",
+                "declare the output node's type, or NoWorkflowOutput for a workflow with no \
+                 output node",
             )),
         }
     }

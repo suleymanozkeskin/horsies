@@ -27,8 +27,6 @@ if TYPE_CHECKING:
         RuntimeTaskFunction,
         TaskFunction,
     )
-    from horsies.core.models.outcome import TaskOutcome
-    from horsies.core.models.tasks import TaskError
     from .definition import WorkflowDefinition
 
 
@@ -506,10 +504,3 @@ class SuccessPolicy:
                 f"Cannot delete '{name}' on frozen {type(self).__name__}.",
             )
         object.__delattr__(self, name)
-
-
-WorkflowTerminalResults = dict[str, 'TaskOutcome[Any, TaskError[Any]] | None']
-"""
-Aggregated terminal results returned by workflow get()/get_async() when no explicit
-output node is configured.
-"""
