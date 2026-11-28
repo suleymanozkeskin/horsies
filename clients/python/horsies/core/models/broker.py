@@ -110,7 +110,7 @@ class SessionDatabaseSameAsDatabaseUrl(BaseModel):
     """The session pool (schema DDL, partition maintenance, LISTEN/NOTIFY)
     connects to ``database_url``. The default."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['session_database_same_as_database_url'] = (
         'session_database_same_as_database_url'
@@ -122,7 +122,7 @@ class SessionDatabaseSeparate(BaseModel):
     PostgreSQL URL. A ``database_url`` that points at a PgBouncer
     transaction pool needs it."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['session_database_separate'] = 'session_database_separate'
     # SecretStr: the URL can hold a password, as database_url.
@@ -151,7 +151,7 @@ SessionDatabase = Annotated[
 class TcpKeepalivesOff(BaseModel):
     """No TCP keepalives on the core's connections."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['tcp_keepalives_off'] = 'tcp_keepalives_off'
 
@@ -161,7 +161,7 @@ class TcpKeepalivesOn(BaseModel):
     The default: 30 s idle, 10 s between probes, 3 probes. Each value has
     the core's bounds (``horsies._catalog.manifest``)."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['tcp_keepalives_on'] = 'tcp_keepalives_on'
     idle_seconds: int = Field(
@@ -188,7 +188,7 @@ TcpKeepalives = Annotated[
 class TcpUserTimeoutSystemDefault(BaseModel):
     """The operating system's TCP user timeout (libpq ``tcp_user_timeout=0``)."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['tcp_user_timeout_system_default'] = 'tcp_user_timeout_system_default'
 
@@ -198,7 +198,7 @@ class TcpUserTimeoutAfter(BaseModel):
     kernel closes the connection (libpq ``tcp_user_timeout``), from
     ``TCP_USER_TIMEOUT_MS_MIN`` to ``TCP_USER_TIMEOUT_MS_MAX``."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['tcp_user_timeout_after'] = 'tcp_user_timeout_after'
     milliseconds: int = Field(
@@ -219,7 +219,7 @@ class PoolRecycleNever(BaseModel):
     """A pooled connection is never replaced by its age (SQLAlchemy's
     ``pool_recycle=-1``)."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['pool_recycle_never'] = 'pool_recycle_never'
 
@@ -229,7 +229,7 @@ class PoolRecycleAfterSeconds(BaseModel):
     checkout; ``0`` replaces it at every checkout. From
     ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['pool_recycle_after_seconds'] = 'pool_recycle_after_seconds'
     seconds: int = Field(..., description='Age in seconds after which a connection is replaced')
