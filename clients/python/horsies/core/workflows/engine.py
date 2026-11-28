@@ -212,11 +212,11 @@ def terminal_dependency_result(
 
 
 # --- Backward-compat barrel re-exports from lifecycle.py ---
-from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
-
-start_workflow_async = _lifecycle.start_workflow_async
-start_workflow = _lifecycle.start_workflow
-pause_workflow = _lifecycle.pause_workflow
-pause_workflow_async = _lifecycle.pause_workflow_async
-resume_workflow = _lifecycle.resume_workflow
-resume_workflow_async = _lifecycle.resume_workflow_async
+from horsies.core.workflows.lifecycle import (  # noqa: E402
+    pause_workflow as pause_workflow,
+    pause_workflow_async as pause_workflow_async,
+    resume_workflow as resume_workflow,
+    resume_workflow_async as resume_workflow_async,
+    start_workflow as start_workflow,
+    start_workflow_async as start_workflow_async,
+)
