@@ -27,9 +27,11 @@ use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
-use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER};
+use super::auth::{
+    MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, NOT_AUTHORIZED,
+};
 use super::common::ApiError;
-use super::events::{EventBroadcaster, EventFrames};
+use super::events::{EventBroadcaster, EventFrames, EventStreamsRefused};
 use super::fleet_metrics::WebFleetMetrics;
 use super::schema::SchemaProbe;
 use super::spa::{EmbeddedAssets, MonitoringUiConfig};
@@ -267,8 +269,33 @@ impl MonitoringHandler {
     /// answer. The first subscriber starts the broadcaster's subscriptions
     /// on the broker's listener; a broker without a listener, or a listener
     /// that stopped, answers the degraded frame and the end.
+    ///
+    /// A handler with [`MAX_OPEN_EVENT_STREAMS`] open streams answers the
+    /// same: the degraded frame and the end, with a warning in the log. A
+    /// host that tells the refusal apart calls
+    /// [`try_subscribe_events`](Self::try_subscribe_events).
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
     pub async fn subscribe_events(&self) -> EventFrames {
-        EventFrames::new(self.events.subscribe().await, self.heartbeat)
+        match self.try_subscribe_events().await {
+            Ok(frames) => frames,
+            Err(refused) => {
+                tracing::warn!("the monitoring handler refused an event stream: {refused}");
+                EventFrames::degraded(self.heartbeat)
+            }
+        }
+    }
+
+    /// [`subscribe_events`](Self::subscribe_events), with the refusal of a
+    /// handler at its bound of open streams.
+    ///
+    /// Errors: [`EventStreamsRefused`] when [`MAX_OPEN_EVENT_STREAMS`]
+    /// streams are open. Nothing is subscribed.
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
+    pub async fn try_subscribe_events(&self) -> Result<EventFrames, EventStreamsRefused> {
+        let subscription = self.events.subscribe().await?;
+        Ok(EventFrames::new(subscription, self.heartbeat))
     }
 
     /// The access that a request needs: [`route_access`] with the actions
@@ -324,6 +351,45 @@ impl MonitoringHandler {
             Err(never) => match never {},
         };
         response_parts(response).await
+    }
+}
+
+/// The answer to a request that the user's policy refused: 403
+/// `Not authorized.`, the answer of the router's guards. `None` when the
+/// policy did not refuse the request.
+///
+/// `need` is the access of the request ([`route_access`]). A refused view
+/// refuses every request that asks it. A refused act refuses an action
+/// route ([`AccessNeed::ViewAndAct`]); `/api/meta`
+/// ([`AccessNeed::ViewReportAct`]) reports the act verdict and answers 200.
+///
+/// A host that builds its [`MonitoringHandler`] on demand (a broker that
+/// connects at the first request) calls it before the build: a refused
+/// caller gets this answer and learns nothing about the database. Pure: it
+/// reads no request body and no broker.
+pub async fn refusal_by_policy(need: AccessNeed, grant: AccessGrant) -> Option<ResponseParts> {
+    let refused = match (need, grant.view, grant.act) {
+        (AccessNeed::Public, _, _) => false,
+        (_, Verdict::Refused, _) => true,
+        (AccessNeed::ViewAndAct, _, Verdict::Refused) => true,
+        (
+            AccessNeed::View | AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+            Verdict::Allowed | Verdict::NotAsked,
+            Verdict::Allowed | Verdict::NotAsked | Verdict::Refused,
+        ) => false,
+    };
+    match refused {
+        false => None,
+        true => {
+            let refusal = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
+            let mut answer = response_parts(refusal.into_response()).await;
+            // The router's answer carries its length; so does this one.
+            answer.headers.push((
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from(answer.body.len()),
+            ));
+            Some(answer)
+        }
     }
 }
 

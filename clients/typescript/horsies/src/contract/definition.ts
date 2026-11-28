@@ -67,7 +67,9 @@ export type DefinitionRefused =
   /** A task name that cannot be stored. */
   | { readonly rule: "TaskName"; readonly path: "name"; readonly fault: TaskNameFault }
   /** A parameter name that is not an identifier, that the engine fills, or that only the engine writes. */
-  | { readonly rule: "ParameterName"; readonly path: string; readonly detail: string };
+  | { readonly rule: "ParameterName"; readonly path: string; readonly detail: string }
+  /** An `errorCodes` list with no code. */
+  | { readonly rule: "ErrorCodes"; readonly path: "errorCodes"; readonly detail: string };
 
 /** The facts of one contract. Frozen. */
 export type ContractRecord = {
@@ -148,6 +150,7 @@ function recordOf(fields: DefinitionFields): ContractRecord {
 
   const refusals = [
     ...taskNameRefusals(fields.name),
+    ...errorCodesRefusals(fields.errorCodes),
     ...parameters.flatMap((parameter) => parameterNameRefusals(parameter.name, memberPath("input", parameter.name))),
   ];
 
@@ -213,6 +216,13 @@ function taskNameRefusals(name: string): readonly DefinitionRefused[] {
   }
 
   return name.isWellFormed() ? [] : [{ rule: "TaskName", path: "name", fault: "loneSurrogate" }];
+}
+
+/** The refusal of an empty `errorCodes` list, or none: a task that declares no code leaves `errorCodes` out. Pure. */
+function errorCodesRefusals(codes: readonly string[] | undefined): readonly DefinitionRefused[] {
+  return codes !== undefined && codes.length === 0
+    ? [{ rule: "ErrorCodes", path: "errorCodes", detail: "an empty errorCodes declares no code; leave errorCodes out" }]
+    : [];
 }
 
 /** The refusal of a parameter name, or none. Pure. */

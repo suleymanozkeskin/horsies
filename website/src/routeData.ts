@@ -4,21 +4,27 @@ import type { StarlightRouteData } from '@astrojs/starlight/route-data';
 
 /**
  * The section of a page. Shared pages state the behaviour and the guarantees
- * of the core, which both clients run on. Python and Rust pages state the API
- * of one client. Site pages are the landing page, the changelog and the
- * migration guides.
+ * of the core, which every client runs on. Python, Rust and TypeScript pages
+ * state the API of one client. Site pages are the landing page, the changelog
+ * and the migration guides.
  */
-type PageSection = 'shared' | 'python' | 'rust' | 'site';
+type PageSection = 'shared' | 'python' | 'rust' | 'typescript' | 'site';
 
-/** Pages under src/content/docs/rust/ are Rust API pages. */
-const RUST_DIRECTORY = 'rust';
+/** A section that a page has by its directory, and declares no `section` field. */
+type DirectorySection = 'rust' | 'typescript';
+
+/**
+ * Pages under src/content/docs/rust/ are Rust API pages; pages under
+ * src/content/docs/typescript/ are TypeScript API pages.
+ */
+const SECTION_DIRECTORIES: readonly DirectorySection[] = ['rust', 'typescript'];
 /**
  * The id of Starlight's own 404 page. Starlight builds it when the docs hold no
  * `404.md`, so it has no frontmatter; it is a site page.
  */
 const STARLIGHT_404_ENTRY_ID = '404';
 const BASE_PATH = import.meta.env.BASE_URL.replace(/\/$/, '');
-const SHARED_BANNER = 'Shared page: this behaviour holds for the Python client and the Rust client.';
+const SHARED_BANNER = 'Shared page: this behaviour holds for the Python, Rust and TypeScript clients.';
 
 /** The title suffix of each section; `undefined` for no suffix. */
 function titleSuffix(section: PageSection): string | undefined {
@@ -27,6 +33,8 @@ function titleSuffix(section: PageSection): string | undefined {
 			return ' (Python)';
 		case 'rust':
 			return ' (Rust)';
+		case 'typescript':
+			return ' (TypeScript)';
 		case 'shared':
 		case 'site':
 			return undefined;
@@ -37,22 +45,41 @@ function titleSuffix(section: PageSection): string | undefined {
 	}
 }
 
-function isRustEntry(entryId: string): boolean {
-	return entryId === RUST_DIRECTORY || entryId.startsWith(`${RUST_DIRECTORY}/`);
+/** The name of the client of a directory section, as the error messages write it. */
+function clientName(section: DirectorySection): string {
+	switch (section) {
+		case 'rust':
+			return 'Rust';
+		case 'typescript':
+			return 'TypeScript';
+		default: {
+			const unreachable: never = section;
+			throw new Error(`unknown docs directory section ${String(unreachable)}`);
+		}
+	}
+}
+
+/** The section that an entry has by its directory, or `undefined` for an entry outside those directories. */
+function directorySection(entryId: string): DirectorySection | undefined {
+	return SECTION_DIRECTORIES.find((directory) => entryId === directory || entryId.startsWith(`${directory}/`));
 }
 
 /**
- * The section of one entry: `rust` by its path, else its `section` field.
- * Throws, naming the file, for a Rust page that declares a section and for
- * any other page that declares none.
+ * The section of one entry: `rust` or `typescript` by its path, else its
+ * `section` field. Throws, naming the file, for a page under one of those
+ * directories that declares a section and for any other page that declares
+ * none.
  */
 function entrySection(entryId: string, filePath: string, declared: 'shared' | 'python' | 'site' | undefined): PageSection {
 	if (entryId === STARLIGHT_404_ENTRY_ID && declared === undefined) return 'site';
-	if (isRustEntry(entryId)) {
+	const byDirectory = directorySection(entryId);
+	if (byDirectory !== undefined) {
 		if (declared !== undefined) {
-			throw new Error(`${filePath}: a page under ${RUST_DIRECTORY}/ is a Rust API page; remove "section: ${declared}"`);
+			throw new Error(
+				`${filePath}: a page under ${byDirectory}/ is a ${clientName(byDirectory)} API page; remove "section: ${declared}"`,
+			);
 		}
-		return 'rust';
+		return byDirectory;
 	}
 	if (declared === undefined) {
 		throw new Error(`${filePath}: the frontmatter needs "section": shared, python or site`);
@@ -83,8 +110,8 @@ function pageSections(): Promise<ReadonlyMap<string, PageSection>> {
 
 /**
  * Adds the section's suffix to the page heading, the search result title,
- * `<title>` and `og:title`. Python and Rust API pages often share a title,
- * and one search index serves both.
+ * `<title>` and `og:title`. The API pages of the clients often share a
+ * title, and one search index serves them all.
  */
 function labelTitle(route: StarlightRouteData, suffix: string): void {
 	const pageTitle = route.entry.data.title;

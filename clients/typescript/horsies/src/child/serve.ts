@@ -299,3 +299,21 @@ export function taskContextUseOf(contract: object): TaskContextUse {
       return unreachable(context, "taskContextUseOf");
   }
 }
+
+/**
+ * The custom codes that the contract of a task declares, for the core's check of the upstream codes of an `args_from`
+ * result: the `errorCodes` in their order, or none for a contract with no `errorCodes` (the core then checks no code of
+ * the task; an empty `errorCodes` list also declares none). Effects: none.
+ */
+export function declaredCodesOf(contract: object): string[] {
+  const codes = contractRecord(contract).codes;
+
+  switch (codes.kind) {
+    case "open":
+      return [];
+    case "declared":
+      return [...codes.codes];
+    default:
+      return unreachable(codes, "declaredCodesOf");
+  }
+}

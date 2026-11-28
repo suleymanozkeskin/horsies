@@ -187,6 +187,16 @@ describe("definition refusals", () => {
     );
   });
 
+  test("an empty errorCodes list is refused: a task that declares no code leaves errorCodes out", () => {
+    // SAFETY: the static type refuses an empty list; the check at run time refuses it too.
+    const emptyCodes = [] as never;
+    const record = contractRecord(defineTask({ name: "t", input: {}, output: h.null(), errorCodes: emptyCodes }));
+
+    assert.deepEqual(record.refusals, [
+      { rule: "ErrorCodes", path: "errorCodes", detail: "an empty errorCodes declares no code; leave errorCodes out" },
+    ]);
+  });
+
   test("an output of another vendor is kept with its vendor", () => {
     const record = contractRecord(defineTask({ name: "t", input: {}, output: otherVendorSchema }));
 

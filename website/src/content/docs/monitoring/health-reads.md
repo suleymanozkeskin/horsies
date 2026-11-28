@@ -44,6 +44,8 @@ if is_ok(result):
         print(f"{pong.worker_id} on {pong.hostname}:{pong.pid} — {pong.round_trip_ms:.1f} ms")
 ```
 
+`wait_ms` is at most 60,000 (`WORKER_PING_WAIT_BOUND`, 60 s). A larger value is refused with `INVALID_INPUT` (`DatabaseInvalidInput`) before the ping is sent.
+
 `MinResponsesAtLeast(1)` is a fast liveness gate:
 
 ```python
@@ -118,7 +120,7 @@ if is_ok(result):
                 print(f"{snap.worker_id}: the snapshot holds no profile name")
 ```
 
-Read the snapshots of one worker, newest first:
+Read the snapshots of one worker, newest first. A read returns at most 10,000 snapshots (`WORKER_HISTORY_ROW_BOUND`). A `WorkerHistoryLimitNewest(count)` above the bound is refused with `INVALID_INPUT`. `WorkerHistoryLimitAllRetained()` reads every retained snapshot, and is refused with `INVALID_INPUT` when the worker holds more than the bound: no snapshots are returned in part. Read such a worker with `WorkerHistoryLimitNewest(10_000)` or less:
 
 ```python
 from horsies import WorkerHistoryLimitNewest
@@ -218,10 +220,10 @@ if is_ok(states) and is_ok(pongs):
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `target` | `PingTargetEveryWorker() \| PingTargetWorker(worker_id)` | `PingTargetEveryWorker()` | `PingTargetEveryWorker()` sends the ping to all workers; `PingTargetWorker(worker_id)` pings one worker and returns on its reply |
-| `wait_ms` | `int` | `2_000` | The collection window, in milliseconds; 1 to 2**64 - 1 |
+| `wait_ms` | `int` | `2_000` | The collection window, in milliseconds; 1 to 60,000 (`WORKER_PING_WAIT_BOUND`) |
 | `min_responses` | `MinResponsesFullWindow() \| MinResponsesAtLeast(count)` | `MinResponsesFullWindow()` | `MinResponsesAtLeast(count)` returns as soon as `count` distinct workers reply; `count` is 1 or more. `MinResponsesFullWindow()` waits the full window |
 
-**Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `wait_ms` that is not an `int` or is out of range, or a `count` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
+**Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `wait_ms` that is not an `int` or is outside 1 to 60,000, or a `count` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
 
 ### `list_worker_states_async() -> DatabaseResult[list[WorkerStateSnapshot]]`
 
@@ -236,9 +238,9 @@ if is_ok(states) and is_ok(pongs):
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `worker_id` | `str` | — | Worker instance id |
-| `limit` | `WorkerHistoryLimitAllRetained() \| WorkerHistoryLimitNewest(count)` | `WorkerHistoryLimitAllRetained()` | `WorkerHistoryLimitAllRetained()` returns all retained rows; `WorkerHistoryLimitNewest(count)` returns the newest `count` rows. `count` is 1 or more |
+| `limit` | `WorkerHistoryLimitAllRetained() \| WorkerHistoryLimitNewest(count)` | `WorkerHistoryLimitAllRetained()` | `WorkerHistoryLimitAllRetained()` returns all retained rows; `WorkerHistoryLimitNewest(count)` returns the newest `count` rows. `count` is 1 to 10,000 (`WORKER_HISTORY_ROW_BOUND`). `WorkerHistoryLimitAllRetained()` is refused when the worker holds more than 10,000 retained rows |
 
-**Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `count` that is not positive; `Err(MONITORING_QUERY_FAILED)` on a query failure.
+**Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `count` that is not in 1 to 10,000, or on `WorkerHistoryLimitAllRetained()` for a worker that holds more than 10,000 retained rows; `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
 ### `get_stale_tasks_async(threshold_minutes: int) -> DatabaseResult[BoundedTaskList[StaleTaskRow]]`
 

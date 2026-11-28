@@ -50,6 +50,11 @@ not-authorized state. Every mutating route additionally requires `can_act` and
 the header `X-Horsies-Intent: action`; a POST without that header is rejected
 with 403.
 
+The access check runs before anything that needs the database. A caller that
+the policy refuses gets the 403 whatever the state of the database: the answer
+never carries a connect error. This holds in the Python mount and in the Rust
+mount.
+
 A custom policy answers the two questions itself, for example from the host
 app's session, JWT, or RBAC layer.
 
@@ -127,6 +132,8 @@ Each event stream has a bounded queue on the process listener, so a slow
 stream cannot hold the broker's result waiters. The stream's subscriptions
 start on the first SSE subscriber and are held for the app's lifetime, so
 there is no per-request LISTEN churn.
+
+A handler serves at most 256 open event streams (`MAX_OPEN_EVENT_STREAMS`). A stream requested past the bound gets one `degraded` frame and ends, and the handler logs a warning. The dashboard falls back to polling for that viewer. A stream that ends frees its place.
 
 Size the pool for the number of concurrent dashboard viewers, and read
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the

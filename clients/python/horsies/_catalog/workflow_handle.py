@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['WorkflowHandleErrorCode']
 
 
-class WorkflowHandleErrorCode(str, Enum):
+class WorkflowHandleErrorCode(StrEnum):
     """Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
 
     Two error strategies by return type:

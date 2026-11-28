@@ -2,6 +2,8 @@
 // `clients/python/tests/e2e/tasks/workflows.py`). Each task is `ISOLATED` on the default queue, and each declares the
 // codes `WF_CODES`, so a node reads the failure of any upstream node with its code and can pass it on.
 
+import { existsSync } from "node:fs";
+
 import {
   defineTask,
   h,
@@ -12,8 +14,8 @@ import {
 } from "#horsies";
 import { err, ok, type Result } from "../../../../horsies/src/wire/result.ts";
 import { errorCode } from "../../support/outcome.ts";
-import { markerErrorText, nextAttempt } from "../markers.ts";
-import { holdThread } from "./waits.ts";
+import { appendLine, markerErrorText, markerPath, nextAttempt } from "../markers.ts";
+import { holdThread, sleepFor } from "./waits.ts";
 
 /** The shortest run of a node: distinct timestamps between nodes (Python `time.sleep(0.05)`). */
 export const NODE_RUN_MS = 50;
@@ -198,6 +200,40 @@ export const contextReport = defineTask({
   workflowContext: true,
 });
 
+/** The marker that ends the wait of `gate`; the test creates it. */
+export const GATE_MARKER = "upstream-codes-gate";
+
+/** The marker that `readFailWith` and `readOpenFail` append a line to when their body runs. */
+export const READER_RAN_MARKER = "upstream-codes-reader-ran";
+
+/** How long `gate` waits for `GATE_MARKER`, in milliseconds. */
+const GATE_WAIT_LIMIT_MS = 30_000;
+
+/** How often `gate` looks for `GATE_MARKER`, in milliseconds. */
+const GATE_POLL_MS = 50;
+
+/** Waits until `GATE_MARKER` exists, then gives 1: a node that holds its dependants while a test changes a stored result. */
+export const gate = defineTask({ name: "e2e_wf_gate", input: {}, output: h.int(), errorCodes: WF_CODES });
+
+/** Reads the outcome of `failWith`, which declares `WF_CODES`: the core checks the stored code against them. */
+export const readFailWith = defineTask({
+  name: "e2e_wf_read_fail_with",
+  input: { upstream: h.taskOutcome(failWith) },
+  output: h.string(),
+  errorCodes: WF_CODES,
+});
+
+/** Fails with an exception and declares no `errorCodes`: the core checks no stored code of it. */
+export const openFail = defineTask({ name: "e2e_wf_open_fail", input: {}, output: h.int() });
+
+/** Reads the outcome of `openFail`, which declares no `errorCodes`: every stored custom code reaches its body. */
+export const readOpenFail = defineTask({
+  name: "e2e_wf_read_open_fail",
+  input: { upstream: h.taskOutcome(openFail) },
+  output: h.string(),
+  errorCodes: WF_CODES,
+});
+
 /** Every contract of this module. */
 export const WORKFLOW_NODE_CONTRACTS = [
   step,
@@ -219,6 +255,10 @@ export const WORKFLOW_NODE_CONTRACTS = [
   ctxSum,
   mixedReader,
   contextReport,
+  gate,
+  readFailWith,
+  openFail,
+  readOpenFail,
 ] as const;
 
 /** Whether `code` is one of `WF_CODES`. Pure. */
@@ -270,6 +310,35 @@ function contextText(context: RuntimeWorkflowContext, nodeId: string): Result<st
   }
 }
 
+/** The text of the outcome of an upstream that a reader got: its value, or its error code. Pure. */
+function outcomeSummary(outcome: TaskOutcome<number>): string {
+  switch (outcome.kind) {
+    case "succeeded":
+      return `value_${String(outcome.value)}`;
+    case "failed":
+      return `${errorCode(outcome.error).source}_${errorCode(outcome.error).code}`;
+  }
+}
+
+/** Wait until `GATE_MARKER` exists: `true`, or `false` at `GATE_WAIT_LIMIT_MS`. */
+async function gateOpened(): Promise<boolean> {
+  const path = markerPath(GATE_MARKER);
+
+  if (!path.ok) {
+    return false;
+  }
+
+  for (let waited = 0; waited < GATE_WAIT_LIMIT_MS; waited += GATE_POLL_MS) {
+    if (existsSync(path.value)) {
+      return true;
+    }
+
+    await sleepFor(GATE_POLL_MS, "noSignal");
+  }
+
+  return false;
+}
+
 /** The text of the outcome that reached `e2e_wf_check_upstream_skipped`. Pure. */
 function upstreamText(outcome: TaskOutcome<number>): string {
   switch (outcome.kind) {
@@ -288,6 +357,7 @@ export function implementWorkflowNodes(app: Horsies): void {
   implementSteps(app);
   implementDataNodes(app);
   implementContextNodes(app);
+  implementUpstreamCodeNodes(app);
 }
 
 function implementSteps(app: Horsies): void {
@@ -368,6 +438,25 @@ function implementDataNodes(app: Horsies): void {
     const value = outcomeValue(inputResult);
 
     return value.ok ? ok(value.value) : err(value.error);
+  });
+}
+
+function implementUpstreamCodeNodes(app: Horsies): void {
+  app.implement(gate, async (_input, { ok, err }) =>
+    (await gateOpened()) ? ok(1) : err({ code: "MARKER_FAILED", message: `${GATE_MARKER} did not appear` }),
+  );
+  app.implement(readFailWith, ({ upstream }, { ok, err }) => {
+    const appended = appendLine(READER_RAN_MARKER, "readFailWith");
+
+    return appended.ok ? ok(outcomeSummary(upstream)) : err({ code: "MARKER_FAILED", message: markerErrorText(appended.error) });
+  });
+  app.implement(openFail, () => {
+    throw new TypeError("e2e open fail");
+  });
+  app.implement(readOpenFail, ({ upstream }, { ok, err }) => {
+    const appended = appendLine(READER_RAN_MARKER, "readOpenFail");
+
+    return appended.ok ? ok(outcomeSummary(upstream)) : err({ code: "MARKER_FAILED", message: markerErrorText(appended.error) });
   });
 }
 

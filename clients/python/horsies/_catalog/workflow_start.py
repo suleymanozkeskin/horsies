@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['WorkflowStartErrorCode']
 
 
-class WorkflowStartErrorCode(str, Enum):
+class WorkflowStartErrorCode(StrEnum):
     """Categorized workflow start failure codes.
 
     The members are Python's, in Python's order

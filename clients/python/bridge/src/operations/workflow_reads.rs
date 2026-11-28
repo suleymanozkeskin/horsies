@@ -15,8 +15,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
 use horsies_core::{
-    BrokerError, HandleOperation, HandleResult, NodeResultsRead, NodesRead, StoredNode,
-    StoredNodeResult, WorkflowEnd, WorkflowHandleError, WorkflowStatus, WorkflowWait,
+    BrokerError, HandleOperation, HandleResult, NodeResultRead, NodeResultsRead, NodesRead,
+    StoredNode, StoredNodeResult, WorkflowEnd, WorkflowHandleError, WorkflowStatus, WorkflowWait,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -108,11 +108,18 @@ impl WorkflowNodeResultsRead {
     }
 }
 
-/// No node of this id stores a result, or no workflow has the id; the read
-/// does not tell the two apart.
+/// The node of this id exists and stores no result yet.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct NodeResultNotStored {
+    pub workflow_id: Uuid,
+    pub node_id: String,
+}
+
+/// The workflow exists and has no node of this id.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct NodeAbsent {
     pub workflow_id: Uuid,
     pub node_id: String,
 }
@@ -180,6 +187,7 @@ pub enum WorkflowReadOutcome {
     NodeResults(WorkflowNodeResultsRead),
     NodeResult(StoredNodeResultRecord),
     NodeResultNotStored(NodeResultNotStored),
+    NodeAbsent(NodeAbsent),
     Nodes(WorkflowNodesRead),
     Absent(WorkflowAbsent),
     Failed(HandleFailure),
@@ -200,6 +208,7 @@ impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
             Self::NodeResults(read) => read.into_bound_py_any(py),
             Self::NodeResult(read) => read.into_bound_py_any(py),
             Self::NodeResultNotStored(read) => read.into_bound_py_any(py),
+            Self::NodeAbsent(read) => read.into_bound_py_any(py),
             Self::Nodes(read) => read.into_bound_py_any(py),
             Self::Absent(absent) => absent.into_bound_py_any(py),
             Self::Failed(failed) => failed.into_pyobject(py),
@@ -305,14 +314,25 @@ fn node_results_outcome(
 fn node_result_outcome(
     workflow_id: Uuid,
     node_id: String,
-    answer: HandleResult<Option<StoredNodeResult>>,
+    answer: HandleResult<NodeResultRead>,
 ) -> WorkflowReadOutcome {
     match answer {
-        Ok(Some(node)) => WorkflowReadOutcome::NodeResult(StoredNodeResultRecord::from(node)),
-        Ok(None) => WorkflowReadOutcome::NodeResultNotStored(NodeResultNotStored {
+        Ok(NodeResultRead::Stored(node)) => {
+            WorkflowReadOutcome::NodeResult(StoredNodeResultRecord::from(node))
+        }
+        Ok(NodeResultRead::NotStored) => {
+            WorkflowReadOutcome::NodeResultNotStored(NodeResultNotStored {
+                workflow_id,
+                node_id,
+            })
+        }
+        Ok(NodeResultRead::NodeAbsent) => WorkflowReadOutcome::NodeAbsent(NodeAbsent {
             workflow_id,
             node_id,
         }),
+        Ok(NodeResultRead::WorkflowAbsent) => {
+            WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id })
+        }
         Err(error) => failed_read(HandleOperation::ResultFor { node_id }, workflow_id, error),
     }
 }
@@ -380,7 +400,9 @@ pub async fn workflow_node_result_operation(
 ) -> WorkflowReadOutcome {
     match connection.broker().await {
         Ok(broker) => {
-            let answer = broker.workflow_node_result(workflow_id, &node_id).await;
+            let answer = broker
+                .workflow_node_result_read(workflow_id, &node_id)
+                .await;
             node_result_outcome(workflow_id, node_id, answer)
         }
         Err(error) => connect_failed(HandleOperation::ResultFor { node_id }, workflow_id, error),
@@ -516,11 +538,29 @@ mod tests {
     #[test]
     fn a_node_with_no_stored_result_names_the_node() {
         let WorkflowReadOutcome::NodeResultNotStored(read) =
-            node_result_outcome(workflow(), "a".to_owned(), Ok(None))
+            node_result_outcome(workflow(), "a".to_owned(), Ok(NodeResultRead::NotStored))
         else {
             panic!("no stored result gives NodeResultNotStored");
         };
         assert_eq!(read.node_id, "a");
+    }
+
+    #[test]
+    fn a_missing_node_and_a_missing_workflow_are_two_records() {
+        let WorkflowReadOutcome::NodeAbsent(read) =
+            node_result_outcome(workflow(), "a".to_owned(), Ok(NodeResultRead::NodeAbsent))
+        else {
+            panic!("a workflow with no such node gives NodeAbsent");
+        };
+        assert_eq!(read.node_id, "a");
+        assert!(matches!(
+            node_result_outcome(
+                workflow(),
+                "a".to_owned(),
+                Ok(NodeResultRead::WorkflowAbsent)
+            ),
+            WorkflowReadOutcome::Absent(_)
+        ));
     }
 
     /// A failure stays the core's value, with the read's operation: Python

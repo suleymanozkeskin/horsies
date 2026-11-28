@@ -604,6 +604,77 @@ class TestClientReaders:
                 pytest.fail(f'expected an unreadable node, got {result!r}')
 
 
+class TestUnregisteredSource:
+    """A node of a source that this process does not register.
+
+    An err-only envelope needs no ok type, so it reads as ``Failed`` with the
+    stored code and message. Only an ok slot needs the registered type.
+    """
+
+    @staticmethod
+    def _app_without_the_task() -> MagicMock:
+        app = MagicMock()
+        app.tasks = {}
+        return app
+
+    def test_an_err_only_envelope_gives_the_stored_error(self) -> None:
+        result = _decode_per_task_envelope(
+            _envelope({'error_code': 'MY_CODE', 'message': 'broke'}),
+            app=self._app_without_the_task(),
+            task_name='gone',
+            node_id='n1',
+        )
+
+        error = _failed_task_error(result)
+        assert error.code == 'MY_CODE'
+        assert error.message == 'broke'
+
+    def test_an_ok_envelope_is_unreadable_and_names_the_source(self) -> None:
+        result = _decode_per_task_envelope(
+            {'__h_task_result__': True, 'ok': 5, 'err': None},
+            app=self._app_without_the_task(),
+            task_name='gone',
+            node_id='n1',
+        )
+
+        match result:
+            case Err(err_value=unreadable):
+                assert 'not registered' in unreadable.message
+            case Ok():
+                pytest.fail(f'expected an unreadable node, got {result!r}')
+
+    @_REFUSED
+    def test_an_err_slot_that_does_not_decode_is_unreadable(
+        self, err_slot: dict[str, Json], cause: str,
+    ) -> None:
+        result = _decode_per_task_envelope(
+            _envelope(err_slot),
+            app=self._app_without_the_task(),
+            task_name='gone',
+            node_id='n1',
+        )
+
+        match result:
+            case Err(err_value=unreadable):
+                assert cause in unreadable.message
+            case Ok():
+                pytest.fail(f'expected an unreadable node, got {result!r}')
+
+    def test_an_envelope_with_no_marker_is_unreadable(self) -> None:
+        result = _decode_per_task_envelope(
+            {'ok': None, 'err': {'error_code': 'MY_CODE'}},
+            app=self._app_without_the_task(),
+            task_name='gone',
+            node_id='n1',
+        )
+
+        match result:
+            case Err(err_value=unreadable):
+                assert 'envelope invalid' in unreadable.message
+            case Ok():
+                pytest.fail(f'expected an unreadable node, got {result!r}')
+
+
 class TestStoredWorkflowStoppedCode:
     """``WORKFLOW_STOPPED`` is a reserved name and no task code: a stored err
     slot with it does not decode, so a finalize fails the task instead of

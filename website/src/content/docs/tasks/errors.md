@@ -8,7 +8,7 @@ tags: [errors, BuiltInTaskCode, HorsiesErrorCode, reference]
 
 # Errors Reference
 
-Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The two clients use the same codes and names.
+Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The three clients use the same codes and names.
 
 The API of the error types is on the client pages: [Error Types](/horsies/tasks/error-types/) (Python) and [Task Errors](/horsies/rust/tasks/errors/) (Rust).
 
@@ -32,7 +32,7 @@ Errors from task execution, broker, and worker internals.
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `retry_for` |
 | `DATABASE_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
-| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use, or a stored `retry_policy` that does not validate as `RetryPolicy` (this failure does not retry). No user code ran. A stored-data cause does not clear on a retry | Yes, if in `retry_for` |
+| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use, a stored `retry_policy` that does not validate as `RetryPolicy` (this failure does not retry), or an `args_from` result whose stored error holds a custom code that the upstream task does not declare. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after it went to ENQUEUED, while its task was built or enqueued | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
@@ -67,8 +67,9 @@ Codes of the read errors of `handle.get()` / `get_async()`, `result_for()` and t
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
+| `NODE_NOT_FOUND` | The workflow exists and has no node of the id that `result_for()` asked for | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
-| `RESULT_NOT_READY` | Result not yet available; task is still running | No |
+| `RESULT_NOT_READY` | Result not yet available; the task or the workflow node is still running | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `wait_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
@@ -99,7 +100,7 @@ Workflow-specific error codes are distributed across the four families above:
 
 - **OperationalCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
 - **ContractCode**: `WORKFLOW_CONTEXT_MISSING_ID`
-- **RetrievalCode**: `WORKFLOW_NOT_FOUND`
+- **RetrievalCode**: `WORKFLOW_NOT_FOUND`, `NODE_NOT_FOUND`
 - **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUB_WORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
 
 ### Reserved Codes

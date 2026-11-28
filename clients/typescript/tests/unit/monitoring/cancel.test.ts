@@ -74,6 +74,13 @@ describe("cancelTask", () => {
       ],
       [
         {
+          class: "TaskActionOutcomeUnknown",
+          slots: [textSlot("message", "m"), flagSlot("retryable", true), uuidSlot("task_id", TASK_ID), causeSlot(connectionCause("cancel_task", true))],
+        },
+        "OUTCOME_UNKNOWN",
+      ],
+      [
+        {
           class: "TaskActionStoredDataInvalid",
           slots: [
             textSlot("message", "m"),
@@ -90,6 +97,24 @@ describe("cancelTask", () => {
 
       assert.ok(!answer.ok && answer.error.code === code, code);
     }
+  });
+
+  test("a lost reply is outcomeUnknown and retryable, and a failed connect is databaseOperationFailed", async () => {
+    const unknown: RawCatalogError = {
+      class: "TaskActionOutcomeUnknown",
+      slots: [textSlot("message", "m"), flagSlot("retryable", true), uuidSlot("task_id", TASK_ID), causeSlot(connectionCause("cancel_task", true))],
+    };
+
+    const failed: RawCatalogError = {
+      class: "TaskActionDatabaseOperationFailed",
+      slots: [textSlot("message", "m"), flagSlot("retryable", false), uuidSlot("task_id", TASK_ID), causeSlot(connectionCause("cancel_task", false))],
+    };
+
+    const lost = await cancelTask(fakeTarget(refused(unknown)).target, TASK_ID, { policy: "includeRunning" });
+    const notSent = await cancelTask(fakeTarget(refused(failed)).target, TASK_ID, { policy: "includeRunning" });
+
+    assert.ok(!lost.ok && lost.error.kind === "outcomeUnknown" && lost.error.retryable && lost.error.taskId === TASK_ID);
+    assert.ok(!notSent.ok && notSent.error.kind === "databaseOperationFailed" && !notSent.error.retryable);
   });
 
   test("a second cancel names the status CANCELLED, so a repeat tells a committed cancel", async () => {

@@ -527,7 +527,8 @@ const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEnde
 const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
      WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
-     WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
+     NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | \
+     WorkflowHandleStoredDataInvalid";
 const WORKFLOW_NODES_OUTCOME: &str =
     "WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid";
 
@@ -2693,7 +2694,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "EventStreamRefused",
-        doc: "No stream: the handler has no broker. The host writes frame, the degraded frame, and ends\nthe response.",
+        doc: "No stream: the handler has no broker, or it serves its bound of open streams. The host\nwrites frame, the degraded frame, and ends the response.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("message", "str"),
@@ -2745,7 +2746,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
                 name: "subscribe_events_async",
                 parameters: &[],
                 returns: TypeText::FutureOf("EventStream | EventStreamRefused"),
-                doc: "Subscribe one event stream, after an allowed view. A broker without a listener, or a\nstopped listener, gives a stream whose first frame is the degraded frame. Reads only.",
+                doc: "Subscribe one event stream, after an allowed view. A broker without a listener, or a\nstopped listener, gives a stream whose first frame is the degraded frame. A handler with\n256 open streams gives EventStreamRefused. Reads only.",
             },
             StubFunction {
                 name: "close_events_async",
@@ -2899,7 +2900,17 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "NodeResultNotStored",
-        doc: "No node of this id stores a result, or no workflow has the id; the read does not tell\nthe two apart.",
+        doc: "The node of this id exists and stores no result yet.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("node_id", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "NodeAbsent",
+        doc: "The workflow exists and has no node of this id.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("workflow_id", "uuid.UUID"),

@@ -16,6 +16,7 @@ use super::{task_error_of, vector_file};
 use crate::core::codec::{task_result_from_json_str, task_result_to_json_string};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
 use crate::core::workflow::node::SubWorkflowParameters;
+use crate::core::TaskRegistry;
 use crate::core::TaskResult;
 use crate::worker::execution::build_task_input;
 use crate::workflow_engine::child_spec::ChildSpecRequest;
@@ -153,7 +154,7 @@ fn the_child_host_passes_each_envelope_as_stored() {
             args_from_entry(envelope),
         );
 
-        let built = build_task_input(&input, true)
+        let built = build_task_input(&input, true, &TaskRegistry::new())
             .unwrap_or_else(|refused| panic!("{}: the child host refused: {refused}", vector.name));
 
         assert_eq!(

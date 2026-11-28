@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['TaskSendErrorCode', 'SeatRelayCode']
 
 
-class TaskSendErrorCode(str, Enum):
+class TaskSendErrorCode(StrEnum):
     """Categorized task send failure codes.
 
     The members are Python's, in Python's order
@@ -53,7 +53,7 @@ class TaskSendErrorCode(str, Enum):
     """
 
 
-class SeatRelayCode(str, Enum):
+class SeatRelayCode(StrEnum):
     """The failure code of a call that the seat relay of a seat isolate did not
     send.
     """

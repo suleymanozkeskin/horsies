@@ -283,6 +283,10 @@ The result of a sub-workflow node is the result of its child: the child's output
 
 A failed child gives its node a `TaskError` whose `sub_workflow()` returns the `SubWorkflowFailure`: `sub_workflow_id` and `sub_workflow_summary`.
 
+### A child with no output node
+
+A COMPLETED child with no output node stores `Ok(null)` as the result of its node. The node reads as the one value `NoWorkflowOutput`, not as `()`: a child whose output node returns `()` is a different state. A definition whose sub-workflow node is read declares `type Output = NoWorkflowOutput`. A stored value other than `null` does not read as `NoWorkflowOutput`. A definition whose own result is read as the outcome of each node declares `type Output = OutputlessResults`.
+
 ## Nesting Limit
 
 A child is at most 32 levels deep. At run time the engine does not start a deeper child, and the node fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `app.check()` reports a nesting with no wait on its path:

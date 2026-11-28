@@ -19,6 +19,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     SubWorkflowNode,
     SuccessCase,
     SuccessPolicy,
@@ -129,7 +130,7 @@ class TestDefinitionCopy:
         app, work = _app_with_tasks()
         child_definition = _child_definition(work)
 
-        class Parent(WorkflowDefinition[None]):
+        class Parent(WorkflowDefinition[NoWorkflowOutput]):
             name = 'success_policy_sub_parent'
             definition_key = _key('parent')
             child = SubWorkflowNode(workflow_definition=child_definition)

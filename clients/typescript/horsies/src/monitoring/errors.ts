@@ -78,7 +78,10 @@ export type MonitoringQueryError = MonitoringQueryCoreError | SeatRelayFull;
 /** The error of a monitoring read with a query that the read can refuse. */
 export type MonitoringReadError = MonitoringQueryError | QueryRefused;
 
-/** The error of a cancel. */
+/**
+ * The error of a cancel. `databaseOperationFailed`: nothing changed. `outcomeUnknown`: the statement was sent and its
+ * reply was lost; the cancel may have committed, and a repeat tells which.
+ */
 export type CancelTaskError = TaskActionCoreError | SeatRelayFull;
 
 /** The error of a database ping. */

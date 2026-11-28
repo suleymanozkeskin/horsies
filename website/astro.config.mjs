@@ -40,11 +40,6 @@ export default defineConfig({
 		'/rust/scheduling/schedule-patterns': '/horsies/rust/scheduling/schedule-config/',
 		'/rust/monitoring/web-ui-deployment': '/horsies/rust/monitoring/web-ui-mount/',
 		'/rust/operations/cutover-runbook': '/horsies/rust/migrations/switching-to-0-8-0/',
-		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/02-producing-tasks': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/03-defining-workflows': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/04-scheduling': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/quick-start/getting-started/',
 	},
 	integrations: [
 		starlight({
@@ -62,7 +57,7 @@ export default defineConfig({
 					tag: 'meta',
 					attrs: {
 						name: 'description',
-						content: 'PostgreSQL-backed background task queue and workflow engine for Python and Rust.',
+						content: 'PostgreSQL-backed background task queue and workflow engine for Python, Rust and TypeScript.',
 					},
 				},
 			],
@@ -89,9 +84,9 @@ export default defineConfig({
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/suleymanozkeskin/horsies' },
 			],
-			// Three sections: shared behaviour pages for both clients, then the API
+			// Four sections: shared behaviour pages for every client, then the API
 			// pages of each client. The `section` frontmatter of a page outside rust/
-			// names its section; src/routeData.ts reads it.
+			// and typescript/ names its section; src/routeData.ts reads it.
 			sidebar: [
 				{
 					label: 'Shared: Behaviour',
@@ -271,6 +266,7 @@ export default defineConfig({
 								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
 								{ label: 'Code Change Examples', slug: 'operations/code-change-examples' },
 								{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
+								{ label: 'Send from an HTTP Route', slug: 'guides/send-from-http-route' },
 								{ label: 'Testing', slug: 'operations/testing' },
 								{ label: 'CLI Reference', slug: 'cli' },
 							],
@@ -286,6 +282,12 @@ export default defineConfig({
 							label: 'Quick Start',
 							items: [
 								{ label: 'Getting Started', slug: 'rust/quick-start/getting-started' },
+								{ label: 'Configuring Horsies', slug: 'rust/quick-start/01-configuring-horsies' },
+								{ label: 'Producing Tasks', slug: 'rust/quick-start/02-producing-tasks' },
+								{ label: 'Defining Workflows', slug: 'rust/quick-start/03-defining-workflows' },
+								{ label: 'Scheduling', slug: 'rust/quick-start/04-scheduling' },
+								{ label: 'Workflow Patterns', slug: 'rust/quick-start/05-workflow-patterns' },
+								{ label: 'Showcase Application', slug: 'rust/quick-start/06-showcase' },
 							],
 						},
 						{
@@ -345,6 +347,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Rerun in Your Transaction', slug: 'rust/operations/rerun-in-your-transaction' },
 								{ label: 'Async Frameworks', slug: 'rust/guides/async-frameworks' },
+								{ label: 'Send from an HTTP Route', slug: 'rust/guides/send-from-http-route' },
 								{ label: 'Testing', slug: 'rust/operations/testing' },
 								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],
@@ -353,6 +356,67 @@ export default defineConfig({
 							label: 'Migrations',
 							items: [
 								{ label: 'Switching to 0.8.0', slug: 'rust/migrations/switching-to-0-8-0' },
+							],
+						},
+					],
+				},
+				{
+					// The API of the TypeScript client. Every slug is under typescript/.
+					label: 'TypeScript API',
+					items: [
+						{ label: 'Overview', slug: 'typescript' },
+						{
+							label: 'Quick Start',
+							items: [
+								{ label: 'Installation', slug: 'typescript/installation' },
+								{ label: 'Getting Started', slug: 'typescript/quick-start/getting-started' },
+							],
+						},
+						{
+							label: 'Tasks',
+							items: [
+								{ label: 'Wire Types', slug: 'typescript/tasks/wire-types' },
+								{ label: 'Defining Tasks', slug: 'typescript/tasks/defining-tasks' },
+								{ label: 'Task Errors', slug: 'typescript/tasks/errors' },
+								{ label: 'Sending Tasks', slug: 'typescript/tasks/sending-tasks' },
+								{ label: 'Retrieving Results', slug: 'typescript/tasks/retrieving-results' },
+								{ label: 'Cancellation', slug: 'typescript/tasks/cancellation' },
+							],
+						},
+						{
+							label: 'Workflows',
+							items: [
+								{ label: 'Workflow API', slug: 'typescript/concepts/workflows/workflow-api' },
+								{ label: 'Subworkflows', slug: 'typescript/concepts/workflows/subworkflows' },
+							],
+						},
+						{
+							label: 'Configuration',
+							items: [
+								{ label: 'App Config', slug: 'typescript/configuration/app-config' },
+							],
+						},
+						{
+							label: 'Workers',
+							items: [
+								{ label: 'Worker Setup', slug: 'typescript/workers/worker-setup' },
+							],
+						},
+						{
+							label: 'Monitoring',
+							items: [
+								{ label: 'Health Reads', slug: 'typescript/monitoring/health-reads' },
+								{ label: 'Monitoring Queries', slug: 'typescript/monitoring/monitoring-queries' },
+								{ label: 'Web UI Mount', slug: 'typescript/monitoring/web-ui-mount' },
+							],
+						},
+						{
+							label: 'Operations',
+							items: [
+								{ label: 'Rerun', slug: 'typescript/operations/rerun' },
+								{ label: 'Frameworks', slug: 'typescript/guides/frameworks' },
+								{ label: 'Testing', slug: 'typescript/operations/testing' },
+								{ label: 'CLI Reference', slug: 'typescript/cli' },
 							],
 						},
 					],
