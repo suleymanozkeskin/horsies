@@ -191,7 +191,7 @@ The types refuse each rule below in typed code. The run-time checks refuse the s
 | A task that the app does not list | `HRS-302` |
 | A sub-workflow nesting that reaches the depth limit | `HRS-036` |
 | A sub-workflow that includes itself with the same parameters | `HRS-037` |
-| The nesting walk of one root built `MAX_CHECK_SUBWORKFLOW_BUILDS` (320,000: 10,000 nodes times the depth limit of 32) child workflows and stopped | `HRS-039` |
+| The nesting walk of one root built `MAX_CHECK_SUBWORKFLOW_BUILDS` child workflows (`MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`, 320,000) and stopped | `HRS-039` |
 
 The codes are on the [Errors Reference](/horsies/tasks/errors/#workflow-validation-hrs-001-hrs-099).
 
@@ -203,6 +203,7 @@ The `check` command, the worker start and the scheduler start check each workflo
 2. Each build gets the checks of the table above.
 3. The check walks into the sub-workflow nodes of each build. A node with static parameters builds its child with them, and the walk goes on in the child. A node whose parameters come from an upstream node is not walked: its child gets its parameters at run time.
 4. The walk reports a nesting only when it fails for certain, that is, when no node on the path waits for a dependency.
+5. The walk of one root builds at most `MAX_CHECK_SUBWORKFLOW_BUILDS` child workflows. This is `MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`: 10,000 times 32 is 320,000. Past it, the check reports one `HRS-039` for that root and stops the walk of that root. The other roots go on.
 
 | Refused | Code |
 |---------|------|
@@ -211,6 +212,7 @@ The `check` command, the worker start and the scheduler start check each workflo
 | Sub-workflow parameters that do not decode as the child's parameters | `HRS-031` |
 | A nesting past the depth limit (32) | `HRS-036` |
 | A sub-workflow that includes itself with the same parameters | `HRS-037` |
+| The walk of one root built `MAX_CHECK_SUBWORKFLOW_BUILDS` child workflows (`MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`, 320,000) and stopped | `HRS-039` |
 
 Each refusal names its path: `workflow checkout checkCases[1]`, or `workflow checkout > ship > pack` for a node of the walk. The check reports every refusal of the workflows phase, then stops. See [CLI Reference](/horsies/typescript/cli/#check).
 
