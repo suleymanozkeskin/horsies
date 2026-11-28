@@ -13,13 +13,12 @@
 //! - `status`, `results`, `nodes`, `cancel`, `pause` and `resume` return
 //!   `HandleResult`, with Python's handle codes.
 
-use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use horsies_core::core::codec::{check_json_text, from_json_str, object_members};
+use horsies_core::core::codec::{check_json_text, from_json_str};
 use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreConnection;
 use horsies_core::JsonText;
@@ -31,18 +30,13 @@ use horsies_core::{
     WorkflowHandleErrorCode, WorkflowNodeStatus, WorkflowStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
-use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::dependency::NoWorkflowOutput;
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
 use crate::handle::{checked_wait, read_stored_result};
 use crate::process_state::refuse_in_a_fork;
 use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownCustomCode, WaitLimitRefused};
-
-/// The marker key of the result of a workflow with no output node.
-const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
 
 /// Why a workflow read gave no outcome.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -554,63 +548,24 @@ where
     }
 }
 
-/// How a handle's type `T` reads the stored result of a COMPLETED workflow.
-enum ResultReading {
-    /// The output node's type: the typed envelope.
-    OutputNode,
-    /// `NoWorkflowOutput`: the value of a workflow with no output value. The
-    /// stored envelope is typed (a sub-workflow node of an outputless child)
-    /// or outputless (a workflow with no output node).
-    NoOutput,
-}
-
-impl ResultReading {
-    /// The reading of the type `T`.
-    fn of<T: 'static>() -> Self {
-        match TypeId::of::<T>() == TypeId::of::<NoWorkflowOutput>() {
-            true => Self::NoOutput,
-            false => Self::OutputNode,
-        }
-    }
-}
-
-/// The outcome of a COMPLETED workflow's stored result. The outputless
-/// marker of the stored envelope and the handle's type must agree: a
-/// workflow with no output node is read as `NoWorkflowOutput`, any other as
-/// its output type (Python fails a mismatch closed). Pure.
+/// The outcome of a COMPLETED workflow's stored result, read with the
+/// handle's type `T`. A workflow with no output node stores the plain
+/// envelope with `ok` null, which reads as `NoWorkflowOutput`. A result of
+/// the form that migrations before 1009 stored for such a workflow (the key
+/// `__h_outputless_terminals__`) is not an envelope of the strict form: it is
+/// unreadable for every `T`. Pure.
 fn completed_outcome<T>(
     workflow_id: Uuid,
     text: &str,
 ) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
 where
-    T: DeserializeOwned + 'static,
+    T: DeserializeOwned,
 {
-    let unreadable =
-        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
-    check_json_text(text)
-        .map_err(|error| unreadable(format!("the result is not JSON: {error}")))?;
-    // The text is strict JSON: it reads as members only when it is an object.
-    let envelope = object_members(text).ok();
-    let wire_outputless = envelope
-        .as_deref()
-        .and_then(|members| member(members, OUTPUTLESS_TERMINALS_KEY))
-        .is_some_and(|marker| marker.get() == "true");
-    let reading = ResultReading::of::<T>();
-    match (wire_outputless, envelope, reading) {
-        (false, _, ResultReading::OutputNode | ResultReading::NoOutput) => {
-            envelope_outcome(workflow_id, text)
-        }
-        (true, Some(envelope), ResultReading::NoOutput) => {
-            no_output_outcome(workflow_id, &envelope)
-        }
-        (true, None, _) => unreachable!("an outputless marker is a member of an object"),
-        (true, Some(_), ResultReading::OutputNode) => Err(unreadable(
-            "outputless/typed envelope mismatch: wire_outputless=true, \
-             handle_outputless=false; the workflow definition changed between the start and \
-             the read, or the handle has another output type"
-                .to_owned(),
-        )),
-    }
+    check_json_text(text).map_err(|error| WorkflowReadError::ResultDeserializationError {
+        workflow_id,
+        cause: format!("the result is not JSON: {error}"),
+    })?;
+    envelope_outcome(workflow_id, text)
 }
 
 /// The outcome of one stored result envelope, read with `V` and `E`
@@ -635,44 +590,6 @@ where
             .map(TaskOutcome::Failed)
             .map_err(|cause| WorkflowReadError::UnknownCustomCode { workflow_id, cause }),
     }
-}
-
-/// The outcome of the outputless envelope of a COMPLETED workflow, read as
-/// `NoWorkflowOutput`: its error, or the value that says the workflow has no
-/// output value. The per-node map of the envelope is not read: `results()`,
-/// `nodes()` and `result_for()` read the nodes. Pure.
-fn no_output_outcome<T>(
-    workflow_id: Uuid,
-    envelope: &[(String, &RawValue)],
-) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
-where
-    T: 'static,
-{
-    if member(envelope, "__h_task_result__").map(RawValue::get) != Some("true") {
-        return Err(WorkflowReadError::ResultDeserializationError {
-            workflow_id,
-            cause: format!(
-                "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
-            ),
-        });
-    }
-    if let Some(error) = member(envelope, "err").filter(|slot| slot.get() != "null") {
-        return stored_error(workflow_id, error.get()).map(TaskOutcome::Failed);
-    }
-    let value: Box<dyn Any> = Box::new(NoWorkflowOutput);
-    match value.downcast::<T>() {
-        Ok(value) => Ok(TaskOutcome::Succeeded(*value)),
-        Err(_) => unreachable!("the caller reads this result only as NoWorkflowOutput"),
-    }
-}
-
-/// The text of the member `key`, or `None` when the object has no such
-/// member. Pure.
-fn member<'a>(members: &[(String, &'a RawValue)], key: &str) -> Option<&'a RawValue> {
-    members
-        .iter()
-        .find(|(name, _value)| name.as_str() == key)
-        .map(|(_name, value)| *value)
 }
 
 /// The stored error of a workflow, read with custom codes as text (Python

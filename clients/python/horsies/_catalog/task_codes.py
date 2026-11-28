@@ -158,6 +158,4 @@ class OutcomeCode(StrEnum):
     WORKFLOW_SUCCESS_CASE_NOT_MET = 'WORKFLOW_SUCCESS_CASE_NOT_MET'
 
     WORKFLOW_OUTPUT_SKIPPED = 'WORKFLOW_OUTPUT_SKIPPED'
-    """A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
-    SKIPPED.
-    """
+    """A COMPLETED workflow has no output: its output node is SKIPPED."""

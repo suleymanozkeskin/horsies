@@ -239,8 +239,6 @@ Engine-emitted ``__h_*`` keys after phase 6:
 - ``__h_workflow_meta__`` (engine → worker, kwarg position)
 - ``__h_taskresult_envelope__`` (args_from wrapper, kwarg position)
 - ``__h_task_result__`` (workflow / task result envelope, not in kwargs)
-- ``__h_outputless_terminals__`` (outputless workflow result envelope
-  marker, not in kwargs)
 """
 
 

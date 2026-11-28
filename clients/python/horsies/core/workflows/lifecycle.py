@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 from horsies.core.types.result import Ok, Err, Result
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     WorkflowHandle,
     SubWorkflowNode,
     validate_workflow_generic_output_match,
 )
-from horsies.core.models.workflow.handle import _OUTPUTLESS_WORKFLOW
 from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
 from horsies.core.errors import WorkflowValidationError, HorsiesErrorCode
 from horsies.core.models.workflow.handle_types import (
@@ -416,7 +416,7 @@ def _start_answer(
             output_type=(
                 _resolve_source_node_ok_type(spec.output)
                 if spec.output is not None
-                else _OUTPUTLESS_WORKFLOW
+                else NoWorkflowOutput
             ),
         ),
     ))

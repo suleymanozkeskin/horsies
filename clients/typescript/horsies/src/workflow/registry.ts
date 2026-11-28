@@ -14,7 +14,7 @@ import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { SpecAppView, WorkflowLookup } from "./checks.ts";
-import { type OutputDeclaration, type WorkflowRecord, workflowRecord } from "./define.ts";
+import { type WorkflowRecord, workflowRecord } from "./define.ts";
 import type { NodeTarget } from "./node-checks.ts";
 
 /** The deepest child workflow (the core's `MAX_SUBWORKFLOW_DEPTH`). */
@@ -115,45 +115,13 @@ export type OutputReadForm =
   | { readonly kind: "workflowNotListed"; readonly workflowName: string };
 
 /**
- * How `get` reads a workflow's stored result: with the declared output form, as `NoWorkflowOutput` (a
- * workflow with no `outputType`), or not at all (a workflow that the app does not list has no form).
+ * The read form of a workflow's stored result: the output kind that the workflow declares (`outputType`), or the kind
+ * of `NoWorkflowOutput` for a workflow with no `outputType`, with open custom codes. A workflow with no `outputType`
+ * stores the plain envelope with `ok` null, which reads as `NoWorkflowOutput`. A workflow that the app does not list is
+ * `workflowNotListed`. Pure.
  */
-export type WorkflowResultForm =
-  | { readonly kind: "form"; readonly form: ReadForm }
-  | { readonly kind: "noOutput" }
-  | { readonly kind: "workflowNotListed"; readonly workflowName: string };
-
-const NO_OUTPUT_FORM: WorkflowResultForm = Object.freeze({ kind: "noOutput" });
-
-/**
- * The read form of a workflow's stored result: the output kind that the workflow declares (`outputType`), with open
- * custom codes, or `noOutput` for a workflow with no `outputType`. The checks refuse every build whose output
- * node does not fit the declaration (`HRS-025`), so the declaration is the one fact; no build runs. A workflow that the
- * app does not list is `workflowNotListed`. Pure.
- */
-export function workflowResultForm(workflow: object, registry: WorkflowRegistry): WorkflowResultForm {
-  const node = subWorkflowNodeForm(workflow, registry);
-
-  switch (node.kind) {
-    case "workflowNotListed":
-      return node;
-    case "form":
-      return resultFormOf(workflowRecord(workflow).outputDeclaration, node.form);
-    default:
-      return unreachable(node, "workflowResultForm");
-  }
-}
-
-/** The result form of a listed workflow: its node form when it declares an output, else `noOutput`. Pure. */
-function resultFormOf(declaration: OutputDeclaration, form: ReadForm): WorkflowResultForm {
-  switch (declaration.kind) {
-    case "declared":
-      return Object.freeze({ kind: "form", form });
-    case "notDeclared":
-      return NO_OUTPUT_FORM;
-    default:
-      return unreachable(declaration, "resultFormOf");
-  }
+export function workflowResultForm(workflow: object, registry: WorkflowRegistry): OutputReadForm {
+  return subWorkflowNodeForm(workflow, registry);
 }
 
 /**

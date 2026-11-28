@@ -201,7 +201,8 @@ def _completed_without_stored_result(workflow_id: str) -> Err[ReadError]:
 
     The library writes a result in the same statement that sets
     ``COMPLETED``: the output node's stored result, an error envelope for an
-    output node with no result, the outputless envelope, or the JSON text
+    output node with no result, the plain envelope of a workflow with no
+    output node, or the JSON text
     ``null`` when that envelope does not serialize. So a NULL result is
     stored data that does not parse, not a success.
     """
@@ -314,23 +315,6 @@ def _ended_workflow_error(
             )))
         case stored:
             return _decode_stored_workflow_error(workflow_id, status, stored)
-
-
-class _OutputlessWorkflow:
-    """Sentinel ``output_type`` for workflows without an explicit output node.
-
-    Started handles set ``output_type = _OUTPUTLESS_WORKFLOW`` when the
-    workflow spec's ``output`` is ``None``. The stored result of such a
-    workflow is the outputless envelope, which a node that returns
-    ``NoWorkflowOutput`` does not have, so the declared type alone cannot
-    tell the two apart. ``WorkflowHandle.get()`` reads the err slot of the
-    envelope and gives ``Succeeded(NoWorkflowOutput())`` otherwise.
-    """
-
-    __slots__ = ()
-
-
-_OUTPUTLESS_WORKFLOW: Any = _OutputlessWorkflow()
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,12 +536,14 @@ def _decode_workflow_envelope(
     """Decode the workflow's stored result envelope into a ``ReadResult``.
 
     Routes:
-    - Not an envelope, or an outputless marker that the handle's type does
-      not match → ``Err(ReadResultDeserializationError)``.
+    - Not an envelope → ``Err(ReadResultDeserializationError)``.
     - Err slot populated → ``Ok(Failed(task_error))`` (no output_type needed).
-    - output_type is ``_OUTPUTLESS_WORKFLOW`` →
-      ``Succeeded(NoWorkflowOutput())``.
-    - output_type is set → ``decode_task_result(raw, output_type)``.
+    - output_type is set → ``decode_task_result(raw, output_type)``. A
+      workflow with no output node stores the plain envelope with ``ok``
+      null, which ``NoWorkflowOutput`` decodes. A result of the form that
+      migrations before 1009 stored for such a workflow (the key
+      ``__h_outputless_terminals__``) is not an envelope of the strict form,
+      so it is ``Err(ReadResultDeserializationError)``.
     - output_type is None and ok slot populated → ``Err(ReadNoTypeAvailable)``.
     """
     if not isinstance(raw, dict):
@@ -571,24 +557,6 @@ def _decode_workflow_envelope(
             f'Workflow {workflow_id} result missing __h_task_result__ envelope marker',
         )
 
-    # The outputless flag of the wire and the type of the handle must agree
-    # before any per-slot decoding. A mismatch (typed output_type with
-    # outputless payload, or outputless handle reading a typed payload) is a
-    # contract violation: the workflow definition changed between produce
-    # and consume, or the caller wired the wrong handle. Checking this
-    # before the err slot ensures a smuggled outputless flag on a typed
-    # envelope cannot slip through via the err route either.
-    wire_outputless = envelope.get('__h_outputless_terminals__') is True
-    handle_outputless = output_type is _OUTPUTLESS_WORKFLOW
-    if wire_outputless != handle_outputless:
-        return _unreadable(
-            f'Workflow {workflow_id} outputless/typed envelope '
-            f'mismatch: wire_outputless={wire_outputless}, '
-            f'handle_outputless={handle_outputless}. Workflow '
-            f'definition likely changed between produce and '
-            f'consume.',
-        )
-
     err_slot = envelope.get('err')
     if err_slot is not None:
         # Polymorphic decode preserves SubWorkflowFailure fields
@@ -600,8 +568,6 @@ def _decode_workflow_envelope(
         except (StrictJsonError, ValueValidationError) as exc:
             return _unreadable(f'TaskError decode failed: {exc}')
 
-    if handle_outputless:
-        return Ok(Succeeded(NoWorkflowOutput()))
     if output_type is None:
         return Err(ReadNoTypeAvailable(message=(
             f'Workflow {workflow_id} ok-result decode requires '
@@ -656,8 +622,7 @@ class WorkflowHandle(Generic[OutT]):
     # Strict-serde phase 6: declared OutT for typed result decode.
     # Started handles populate this from the workflow spec (see
     # ``_resolve_source_node_ok_type(spec.output)``). For outputless
-    # workflows, the sentinel ``_OUTPUTLESS_WORKFLOW`` routes through
-    # the outputless envelope read. By-id reconstruction without a
+    # workflows, it is ``NoWorkflowOutput``. By-id reconstruction without a
     # registered spec leaves this ``None`` and ``get()`` folds
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
     output_type: TypeAnnotation | None = None

@@ -235,7 +235,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
 | `SUB_WORKFLOW_FAILED` | Subworkflow failed |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
-| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node |
+| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node |
 
 ## Waiting for a Result Inside a Task
 

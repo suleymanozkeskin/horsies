@@ -233,17 +233,12 @@ result of a task node holds its task's error data."""
 WORKFLOW_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
-    paths=(
-        *stored_error_paths((Key(name='err'),)),
-        *stored_error_paths((Key(name='ok'), *_RESULTS_BY_ID_ERROR)),
-    ),
+    paths=stored_error_paths((Key(name='err'),)),
 )
 """A stored workflow result, its error by ``stored_error_paths`` (the
 output-skipped error names the workflow in ``err.data.workflow_id`` and in
-``err.message``). The result of a workflow without an output node holds the
-result of each terminal node in ``ok.results_by_id``
-(``{"__h_outputless_terminals__": true, "ok": {"results_by_id": ...}}``),
-each error by ``stored_error_paths``."""
+``err.message``). The result of a workflow without an output node is the plain
+envelope with ``ok`` and ``err`` null: it holds no error."""
 
 SUB_WORKFLOW_SUMMARY: Final = StoredJson(
     storage=JsonStorage.TEXT,

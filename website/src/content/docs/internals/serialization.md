@@ -36,21 +36,13 @@ Every stored task result is one shape:
 - The `ok` slot carries a JSON value matching the task's declared output type. A structured value (a model, a dataclass, a struct) is stored as its plain JSON form, with no type tag. The reader reconstructs it from its declared type.
 - The `err` slot, when populated, carries the JSON form of the task error: `error_code` (the field `TaskError.code`), `message`, `data`, and the exception in flattened form (`type`, `module`, `message`, `repr`, `traceback`), never a live exception.
 
-Outputless-workflow envelopes wrap an additional marker:
+A workflow with no output node stores the plain envelope with both slots null:
 
 ```json
-{
-  "__h_task_result__": true,
-  "__h_outputless_terminals__": true,
-  "ok": {
-    "results_by_id":   {"<node_id>": <per-node envelope>, ...},
-    "task_name_by_id": {"<node_id>": "<task_name>", ...}
-  },
-  "err": null
-}
+{"__h_task_result__": true, "ok": null, "err": null}
 ```
 
-Each `results_by_id` entry is itself a `__h_task_result__` envelope. The reader decodes each node by its task name: the task name gives the output type in the local registry.
+The same form is the result of the sub-workflow node of such a child. `NoWorkflowOutput` reads the `ok` null. The values of the nodes are in the node rows (`results()`, `nodes()`, `result_for()`). A result written before schema migration 1009 holds the key `__h_outputless_terminals__` and a map of the terminal nodes in `ok`; it is not an envelope of the strict form, and every reader refuses it.
 
 ## Encoding (worker side)
 

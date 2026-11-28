@@ -1370,6 +1370,27 @@ there is no migration contract between pre-1.0 versions.
   process of an earlier build before the first start, and upgrade every
   process together. A process of an earlier build that starts after it is
   refused, and a database at 1008 does not go back to an earlier build.
+- **A workflow with no output node stores the plain envelope: schema
+  migration 1009.** The result of a `COMPLETED` workflow with no output node
+  is `{"__h_task_result__":true,"ok":null,"err":null}`, the form of the
+  sub-workflow node of such a child. It was an envelope with the key
+  `__h_outputless_terminals__` and a map of the terminal nodes in `ok`. The
+  first start of this build applies migration 1009
+  (`core/migrations/1009_outputless_plain_result.sql`). It replaces four
+  functions in place, drops `horsies_workflow_outputless_result` and writes no
+  row. `get()` of such a workflow reads `NoWorkflowOutput` in every client, as
+  before; the values of the nodes are read with `results()`, `nodes()` and
+  `result_for()`. A SKIPPED terminal node of such a workflow no longer
+  produces `WORKFLOW_OUTPUT_SKIPPED`: the code names a SKIPPED output node
+  only. Drain the workflows with no output node before the upgrade. A
+  `COMPLETED` workflow of the old form is not an envelope of the strict form:
+  every client reads it as a `RESULT_DESERIALIZATION_ERROR` (Python
+  `ReadResultDeserializationError`, Rust `ResultDeserializationError`), and a
+  parent node that takes it as the result of a child fails with
+  `RESULT_DESERIALIZATION_ERROR`. Stop every process of an earlier build
+  before the first start, and upgrade every process together. A process of an
+  earlier build that starts after it is refused, and a database at 1009 does
+  not go back to an earlier build.
 
 ### Removed
 
