@@ -4,7 +4,7 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Result } from "../../horsies/src/wire/result.ts";
 import { type BuildFailed, buildPackage, type BuiltPackage, manifestRefusedText } from "../public-api/package.ts";
@@ -27,12 +27,17 @@ const BLOCK_TYPES: readonly string[] = ["node", "bun"];
 
 /**
  * The packages that a block can import besides `horsies`: the optional peers of the package (the versions of the
- * tests workspace) and the types of `pg`, of Node and of Bun. Each one is its folder name in `node_modules` and its folder.
+ * tests workspace), the OpenTelemetry SDK packages that a tracing setup block imports, and the types of `pg`, of Node
+ * and of Bun. Each one is its folder name in `node_modules` and its folder.
  */
 const BLOCK_PACKAGES: readonly (readonly [string, string])[] = [
   ["zod", `${TESTS_DIR}node_modules/zod`],
   ["pg", `${TESTS_DIR}node_modules/pg`],
   ["postgres", `${TESTS_DIR}node_modules/postgres`],
+  ["@opentelemetry/api", `${TESTS_DIR}node_modules/@opentelemetry/api`],
+  ["@opentelemetry/context-async-hooks", `${TESTS_DIR}node_modules/@opentelemetry/context-async-hooks`],
+  ["@opentelemetry/core", `${TESTS_DIR}node_modules/@opentelemetry/core`],
+  ["@opentelemetry/sdk-trace", `${TESTS_DIR}node_modules/@opentelemetry/sdk-trace`],
   ["@types/pg", `${TESTS_DIR}node_modules/@types/pg`],
   ["@types/node", `${WORKSPACE_DIR}node_modules/@types/node`],
   ["@types/bun", `${WORKSPACE_DIR}node_modules/@types/bun`],
@@ -113,11 +118,14 @@ function writeProject(workFolder: string, builtPackage: BuiltPackage, files: rea
 
   try {
     writeFileSync(join(workFolder, "package.json"), JSON.stringify({ private: true, type: "module" }));
-    mkdirSync(join(workFolder, "node_modules", "@types"), { recursive: true });
+    mkdirSync(join(workFolder, "node_modules"));
     symlinkSync(builtPackage.folder, join(workFolder, "node_modules", "horsies"), "dir");
 
     for (const [name, folder] of BLOCK_PACKAGES) {
-      symlinkSync(folder, join(workFolder, "node_modules", name), "dir");
+      const link = join(workFolder, "node_modules", name);
+
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(folder, link, "dir");
     }
 
     mkdirSync(blocksFolder);

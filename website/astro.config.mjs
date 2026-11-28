@@ -400,6 +400,13 @@ export default defineConfig({
 							label: 'Workers',
 							items: [
 								{ label: 'Worker Setup', slug: 'typescript/workers/worker-setup' },
+								{ label: 'Thread Seats', slug: 'typescript/workers/thread-seats' },
+							],
+						},
+						{
+							label: 'Scheduling',
+							items: [
+								{ label: 'Schedule Config', slug: 'typescript/scheduling/schedule-config' },
 							],
 						},
 						{
@@ -408,6 +415,13 @@ export default defineConfig({
 								{ label: 'Health Reads', slug: 'typescript/monitoring/health-reads' },
 								{ label: 'Monitoring Queries', slug: 'typescript/monitoring/monitoring-queries' },
 								{ label: 'Web UI Mount', slug: 'typescript/monitoring/web-ui-mount' },
+								{ label: 'Event Handlers', slug: 'typescript/monitoring/event-handlers' },
+							],
+						},
+						{
+							label: 'Observability',
+							items: [
+								{ label: 'Tracing Setup', slug: 'typescript/observability/tracing-setup' },
 							],
 						},
 						{

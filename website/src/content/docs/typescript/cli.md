@@ -225,6 +225,7 @@ A worker child ends with one of these codes. The worker reads the code to name h
 | 73 | The child mode arguments cannot be used |
 | 75 | The child start failed, after a report that names the cause |
 | 78 | The worker speaks another protocol version |
+| 81 | A shared thread child reached `recycle.above` while it held runs. See [Thread Seats](/horsies/typescript/workers/thread-seats/#the-memory-bound-of-the-child) |
 | 173 | A provider or a child start hook threw, rejected or ran past its bound |
 
 ## The `horsies` Bin

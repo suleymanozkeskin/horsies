@@ -4,7 +4,8 @@ Reference for the health reads on the app, the monitoring reads of
 `app.monitoring`, the task cancel, the web UI (`createMonitoringHandler` and
 the `web` command), the fleet metrics (the `metrics` command and the
 worker's `--metrics-listen`), and the rerun of a terminal task
-(`app.rerunTask`, `app.rerunTaskIn` and the `pg` and `postgres` adapters). The core
+(`app.rerunTask`, `app.rerunTaskIn` and the `pg` and `postgres` adapters), and the
+event handlers of the worker (`app.onEvent`, `app.onHandlerChildStart`). The core
 serves every route, guard and event of the web UI, so a TypeScript app, a
 Python app and a Rust app answer alike.
 
@@ -701,6 +702,86 @@ export async function rerunInPostgres(
   `https://suleymanozkeskin.github.io/horsies/monitoring/action-semantics/`
   ("Task rerun").
 
+## Event Handlers
+
+The worker emits one event at each step of a task and of its children. The
+handlers run in the worker's handler child: the entry file again in child
+mode. A handler never runs in the worker process, so it cannot change a
+task outcome or delay a claim.
+
+<!-- ts-check: alone -->
+```ts
+import { cli, Horsies } from "horsies";
+
+const created = Horsies.create({
+  database: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
+  tasks: [],
+});
+
+if (!created.ok) {
+  process.exit(1);
+}
+
+const app = created.value;
+
+app.onHandlerChildStart(() => {
+  console.log(`handler child ${process.pid} starts`);
+});
+
+app.onEvent("AttemptEnded", { name: "audit.attempt_ended" }, (event) => {
+  switch (event.end.kind) {
+    case "reportedByChild":
+      console.log(`${event.taskId} attempt ${String(event.attempt)}: ${event.end.result.kind}`);
+      break;
+    case "decidedByWorker":
+      console.log(`${event.taskId} attempt ${String(event.attempt)}: ${event.end.reason}`);
+      break;
+    case "notKnown":
+      console.log(`${event.taskId} attempt ${String(event.attempt)}: not known`);
+      break;
+  }
+});
+
+process.exitCode = await cli.run(app);
+```
+
+| Method | Does |
+|---|---|
+| `app.onEvent(eventType, { name }, handler)` | Adds a sync or async handler of one event type. `handler` takes `EventOf<T>`. Calls nothing |
+| `app.onHandlerChildStart(hook)` | Adds a sync or async start hook of the handler child. Calls nothing |
+
+- The event types (`EventTypeName`): `TaskClaimed`, `ClaimReleased`,
+  `AttemptPlaced`, `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`,
+  `TaskRecovered`, `ChildStarted`, `ChildReplaced`, `SlotDown`,
+  `SlotRecovered`. Each event has `kind` and `at` (`Temporal.Instant`), and
+  holds no input, result or error message.
+- `AttemptEnded.end` is `reportedByChild` (`result`: `completed`, `failed`
+  with `errorCode`, `workerFailure`, `timedOut`, `cancelled` with `end`),
+  `decidedByWorker` (`reason: WorkerDecision`) or `notKnown`.
+- `name`: 1 to 255 characters, not `(unknown)`, once per app; at most 32
+  handlers. A refusal is recorded, never thrown: `HRS-222` (unknown type),
+  `HRS-223` (not a function), `HRS-225` (bad name), `HRS-224` (repeated
+  name), `HRS-226` (33rd handler). `check` reports it; the worker refuses to
+  start.
+- Each handler has a queue of 10,000 events and takes one event at a time.
+  A full queue drops the event for that handler
+  (`horsies.telemetry.handler.dropped`). A throw or a rejection is counted
+  (`horsies.telemetry.handler.errors`) and logged; the handler takes its
+  next event. Delivery is at most once.
+- All event handlers of a handler child share one event loop. Sync work in
+  one handler delays every handler. Give each awaited call a timeout.
+- A start hook runs once in each handler child, before the handlers, for at
+  most 10 s. A throw, a rejection or a hook past its bound ends the handler
+  child with exit code 173; the worker keeps it down until the worker
+  restarts and runs its tasks. A hook that is not a function is refused
+  with `HRS-214`.
+- A call of either method after `cli.run` serves the handler child is a
+  defect: `ClientDefect`.
+- The worker starts the handler child when the app has a handler, a
+  handler child start hook, or `workerEndedSpans: "makeSpans"` with tracing
+  on (see `configs.md`).
+
 ## Things to Avoid
 
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
@@ -720,6 +801,9 @@ transaction.
 
 **Do not commit the caller's transaction after a `rerunTaskIn` error.** Roll it
 back.
+
+**Do not use an event handler as the record of a task.** An event can drop.
+Read the outcome from a result read or from `app.monitoring`.
 
 ## All Key Imports
 
@@ -756,6 +840,9 @@ import {
   RerunErrorCode,
   type RerunCommand, type RerunEnqueuePolicy, type RerunDeadline, type RerunRetention, type RerunInputChoice,
   type RerunOutcome, type RerunEnqueued, type RerunError, type CallerRerunError, type CallerTransaction,
+  // Event handlers
+  type EventTypeName, type EventHandler, type EventHandlerOptions, type EventOf, type HandlerChildStartHook,
+  type AnyEvent, type AttemptEnded, type AttemptEnd, type ChildResult, type WorkerDecision, type TaskClaimed,
 } from "horsies";
 import { pgTransaction } from "horsies/rerun/pg";
 import { postgresTransaction } from "horsies/rerun/postgres";
