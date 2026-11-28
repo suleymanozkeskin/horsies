@@ -24,7 +24,12 @@ from horsies.core.models.workflow.limits import (
     MAX_SUBWORKFLOW_DEPTH,
     MAX_WORKFLOW_NODES,
 )
+from horsies._catalog.workflow_bounds import MAX_CHECK_SUBWORKFLOW_BUILDS
 from horsies.core.models.workflow.nesting_check import (
+    BuildGranted,
+    BuildRefusedAgain,
+    BuildRefusedFirst,
+    ChildBuildBudget,
     ChildStart,
     NestingPath,
     NestingStep,
@@ -337,3 +342,31 @@ class TestNestingDecisionAtTheLimit:
 
         assert isinstance(decision, StopWithFinding)
         assert decision.finding.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
+
+
+class TestChildBuildBudget:
+    """The walk of one root spec builds at most MAX_CHECK_SUBWORKFLOW_BUILDS children."""
+
+    def test_the_builds_up_to_the_bound_are_granted(self) -> None:
+        budget = ChildBuildBudget()
+
+        decisions = [budget.take('node') for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS)]
+
+        assert all(isinstance(decision, BuildGranted) for decision in decisions)
+
+    def test_the_first_build_past_the_bound_gives_the_finding(self) -> None:
+        budget = ChildBuildBudget()
+        for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS):
+            budget.take('node')
+
+        decision = budget.take('node')
+
+        assert isinstance(decision, BuildRefusedFirst)
+        assert decision.finding.code == HorsiesErrorCode.WORKFLOW_CHECK_BUILD_LIMIT
+
+    def test_a_later_build_past_the_bound_gives_no_second_finding(self) -> None:
+        budget = ChildBuildBudget()
+        for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS + 1):
+            budget.take('node')
+
+        assert isinstance(budget.take('node'), BuildRefusedAgain)

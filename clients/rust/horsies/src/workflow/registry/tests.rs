@@ -181,6 +181,37 @@ impl WorkflowDefinition for Waiting {
     }
 }
 
+/// A definition with params that includes itself twice, with `n + 1`, after
+/// its task: no wait is skipped, so the depth limit gives no finding and the
+/// builds double at each level.
+struct Fanout;
+
+impl WorkflowDefinition for Fanout {
+    type Output = OutputlessResults;
+    type Parameters = Level;
+
+    fn name() -> &'static str {
+        "fanout"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.fanout.v1"
+    }
+
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
+        builder.definition_key("tests.fanout.v1");
+        let tick = add(&mut builder, task_node::<u32, ()>("tick"));
+        for _ in 0..2 {
+            let next = SubWorkflowParameters::Given(Level { n: params.n + 1 });
+            builder.sub_workflow(Fanout::node(next)?.waits_for(tick));
+        }
+        builder.build()
+    }
+}
+
 /// A definition without params whose one node is `D` with `Level { n: 3 }`.
 struct Root<D>(std::marker::PhantomData<D>);
 
@@ -628,6 +659,39 @@ fn a_nesting_past_the_depth_limit_at_once_is_reported() {
         codes(&registry.check_findings()),
         vec![Some(HorsiesErrorCode::WorkflowSubworkflowDepthLimit)]
     );
+}
+
+#[test]
+fn a_walk_past_the_bound_of_builds_stops_with_one_finding() {
+    let registry = registry();
+    registry
+        .register(Definition::with_params::<Fanout>(&tasks()))
+        .unwrap();
+    registry
+        .register(Definition::without_params::<Root<Fanout>>(&tasks()).unwrap())
+        .unwrap();
+    assert_eq!(
+        codes(&registry.check_findings()),
+        vec![Some(HorsiesErrorCode::WorkflowCheckBuildLimit)]
+    );
+}
+
+#[test]
+fn the_budget_grants_the_bound_then_refuses_once_then_again() {
+    let mut budget = ChildBuildBudget::new();
+    for _ in 0..MAX_CHECK_SUBWORKFLOW_BUILDS {
+        assert!(matches!(budget.take("node"), BuildDecision::Granted));
+    }
+    match budget.take("node") {
+        BuildDecision::RefusedFirst(finding) => {
+            assert_eq!(
+                finding.code,
+                Some(HorsiesErrorCode::WorkflowCheckBuildLimit)
+            );
+        }
+        other => panic!("expected the first refusal, got {other:?}"),
+    }
+    assert!(matches!(budget.take("node"), BuildDecision::RefusedAgain));
 }
 
 #[test]

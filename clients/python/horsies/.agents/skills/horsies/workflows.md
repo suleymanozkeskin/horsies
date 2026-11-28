@@ -678,7 +678,7 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
 node_b = TaskNode(function=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-038)
+## Validation Errors (HRS-001–HRS-039)
 
 <!-- members: HorsiesErrorCode subset -->
 | Code | Name | Trigger |
@@ -720,6 +720,7 @@ node_b = TaskNode(function=process, waits_for=[node_a], args_from={"data": node_
 | HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting with no `waits_for` on its path would start a child workflow deeper than 32 |
 | HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs and with no `waits_for` between, so its nesting never ends |
 | HRS-038 | `WORKFLOW_TOO_MANY_NODES` | A `WorkflowSpec` has more than 10,000 nodes (raised when the spec is built) |
+| HRS-039 | `WORKFLOW_CHECK_BUILD_LIMIT` | `horsies check`: the nesting walk of one root workflow built 1,000 child workflows (`MAX_CHECK_SUBWORKFLOW_BUILDS`) and stopped |
 
 ## Known Constraints
 

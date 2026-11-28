@@ -1165,7 +1165,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 |---|---|---|
 | 1 — Config | `AppConfig` Pydantic validators, every worker profile (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216, HRS-218 |
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
-| 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-038 |
+| 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-039 |
 | 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
 | 3.2 — Builders | Execute `@app.check_workflow_builder` functions | HRS-027–HRS-030 |
 | 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |

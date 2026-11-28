@@ -189,6 +189,11 @@ pub enum HorsiesErrorCode {
     /// A workflow spec has more than `MAX_WORKFLOW_NODES` (10,000) nodes.
     #[code_catalog(value = "HRS-038")]
     WorkflowTooManyNodes,
+    /// The nesting walk of `check` for one root workflow reached its bound of
+    /// builds of child workflows (`MAX_CHECK_SUBWORKFLOW_BUILDS`), so the
+    /// walk stopped and part of the nesting is not checked.
+    #[code_catalog(value = "HRS-039")]
+    WorkflowCheckBuildLimit,
 
     // Task definition (HRS-100-HRS-199)
     /// The task function has no return type.
@@ -400,7 +405,8 @@ impl HorsiesErrorCode {
             | Self::WorkflowNaiveGoodUntil
             | Self::WorkflowSubworkflowDepthLimit
             | Self::WorkflowSubworkflowSelfNesting
-            | Self::WorkflowTooManyNodes => HorsiesErrorCategory::Workflow,
+            | Self::WorkflowTooManyNodes
+            | Self::WorkflowCheckBuildLimit => HorsiesErrorCategory::Workflow,
 
             Self::TaskNoReturnType
             | Self::TaskInvalidReturnType

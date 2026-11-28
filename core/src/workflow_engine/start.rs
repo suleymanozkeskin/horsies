@@ -57,6 +57,11 @@ pub(crate) fn node_task_facts(
 /// `horsies_workflows_depth_range` holds the same bound.
 pub(crate) const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
 
+/// The most builds of child workflows in the nesting walk of `check` for one root workflow. The walk builds each
+/// child of each build down to [`MAX_SUBWORKFLOW_DEPTH`], so the builds grow as the children per build to the
+/// power of the depth; at the bound the walk stops and `check` reports `HRS-039`. Every client uses this one value.
+pub const MAX_CHECK_SUBWORKFLOW_BUILDS: usize = 1_000;
+
 /// The depth of a new child of the workflow `parent_workflow_id` (named `parent_workflow_name`) at
 /// `parent_depth`.
 ///

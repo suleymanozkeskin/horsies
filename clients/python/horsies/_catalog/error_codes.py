@@ -161,6 +161,12 @@ class HorsiesErrorCode(StrEnum):
     WORKFLOW_TOO_MANY_NODES = 'HRS-038'
     """A workflow spec has more than `MAX_WORKFLOW_NODES` (10,000) nodes."""
 
+    WORKFLOW_CHECK_BUILD_LIMIT = 'HRS-039'
+    """The nesting walk of `check` for one root workflow reached its bound of
+    builds of child workflows (`MAX_CHECK_SUBWORKFLOW_BUILDS`), so the
+    walk stopped and part of the nesting is not checked.
+    """
+
     TASK_NO_RETURN_TYPE = 'HRS-100'
     """The task function has no return type."""
 

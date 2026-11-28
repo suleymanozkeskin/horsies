@@ -28,7 +28,7 @@ use horsies_core::{
     build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
     params_refused_error, subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture,
     ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec,
-    NodeInput, RefusedMember, TaskError,
+    NodeInput, RefusedMember, TaskError, MAX_CHECK_SUBWORKFLOW_BUILDS,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -345,7 +345,13 @@ impl WorkflowRegistry {
         if let Err(refused) = client_spec(spec, &self.config) {
             findings.push(refused);
         }
-        self.walk(registered, spec, &[], findings);
+        self.walk(
+            registered,
+            spec,
+            &[],
+            &mut ChildBuildBudget::new(),
+            findings,
+        );
     }
 
     /// The refusals of the sub-workflow nodes of `spec`: a child definition
@@ -373,12 +379,16 @@ impl WorkflowRegistry {
     /// Walk the sub-workflow nodes of `spec`, reached by `path`, into the
     /// children that the check can build (Python `_check_subworkflow_node`).
     /// The walk is at most [`MAX_SUBWORKFLOW_DEPTH`] levels deep: the
-    /// decision stops it at the limit.
+    /// decision stops it at the limit. It builds at most
+    /// [`MAX_CHECK_SUBWORKFLOW_BUILDS`] children for one root: `budget`
+    /// counts them, and the first build past the bound is the finding
+    /// `HRS-039`.
     fn walk(
         &self,
         registered: &Registered,
         spec: &WorkflowSpec,
         path: &[NestingStep],
+        budget: &mut ChildBuildBudget,
         findings: &mut Vec<HorsiesError>,
     ) {
         for node in &spec.nodes {
@@ -412,15 +422,21 @@ impl WorkflowRegistry {
             match decide_nesting(path, &node.node_id, step) {
                 NestingDecision::StopWithoutFinding => {}
                 NestingDecision::StopWithFinding(finding) => findings.push(finding),
-                NestingDecision::WalkChild(child_path) => {
-                    if let Some(child) = child_for_check(node, definition, &params_text, findings) {
-                        findings.extend(self.spec_findings(registered, &child));
-                        if let Err(refused) = client_spec(&child, &self.config) {
-                            findings.push(refused);
+                NestingDecision::WalkChild(child_path) => match budget.take(&node.node_id) {
+                    BuildDecision::Granted => {
+                        if let Some(child) =
+                            child_for_check(node, definition, &params_text, findings)
+                        {
+                            findings.extend(self.spec_findings(registered, &child));
+                            if let Err(refused) = client_spec(&child, &self.config) {
+                                findings.push(refused);
+                            }
+                            self.walk(registered, &child, &child_path, budget, findings);
                         }
-                        self.walk(registered, &child, &child_path, findings);
                     }
-                }
+                    BuildDecision::RefusedFirst(finding) => findings.push(finding),
+                    BuildDecision::RefusedAgain => {}
+                },
             }
         }
     }
@@ -901,6 +917,59 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
         };
     }
     NestingDecision::WalkChild(walked)
+}
+
+/// Whether the walk of one root may build one more child.
+#[derive(Debug)]
+enum BuildDecision {
+    Granted,
+    /// The bound is reached and this is the first refusal: the walk reports
+    /// the finding.
+    RefusedFirst(HorsiesError),
+    /// The bound is reached and the walk reported it already.
+    RefusedAgain,
+}
+
+/// The builds of child specs in the nesting walk of one root spec, at most
+/// [`MAX_CHECK_SUBWORKFLOW_BUILDS`] (Python `ChildBuildBudget`).
+#[derive(Debug)]
+struct ChildBuildBudget {
+    builds: usize,
+    reported: bool,
+}
+
+impl ChildBuildBudget {
+    fn new() -> Self {
+        Self {
+            builds: 0,
+            reported: false,
+        }
+    }
+
+    /// Count one build of the child of node `node_id` and say whether it
+    /// may go on. Changes only the counts of this budget.
+    fn take(&mut self, node_id: &str) -> BuildDecision {
+        match (self.builds < MAX_CHECK_SUBWORKFLOW_BUILDS, self.reported) {
+            (true, _) => {
+                self.builds += 1;
+                BuildDecision::Granted
+            }
+            (false, true) => BuildDecision::RefusedAgain,
+            (false, false) => {
+                self.reported = true;
+                BuildDecision::RefusedFirst(
+                    HorsiesError::new("the subworkflow nesting walk reached its bound of builds")
+                        .with_code(HorsiesErrorCode::WorkflowCheckBuildLimit)
+                        .with_note(format!(
+                            "node '{node_id}': the walk of this workflow built \
+                             {MAX_CHECK_SUBWORKFLOW_BUILDS} child workflows and stopped; the \
+                             rest of its nesting is not checked"
+                        ))
+                        .with_help("nest fewer child workflows in this workflow"),
+                )
+            }
+        }
+    }
 }
 
 /// Whether the engine starts the child of each step with no wait.

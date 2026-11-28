@@ -1,8 +1,8 @@
 ---
 title: Testing
-summary: Test task bodies by calling them, give them a TaskRuntime, a dependency's outcome or a workflow context, check the app without a database, and suppress sends.
+summary: Test task bodies by calling them, give them a TaskRuntime, the facts of a run (TestRun), a dependency's outcome or a workflow context, check the app without a database, and suppress sends.
 related: [../tasks/defining-tasks, ../concepts/workflows/typed-node-builder, ../configuration/app-config, ../cli]
-tags: [rust, testing, unit test, TaskRuntime, WorkflowContext, suppress_sends, check]
+tags: [rust, testing, unit test, TaskRuntime, TestRun, WorkflowContext, suppress_sends, check]
 ---
 
 # Testing
@@ -79,6 +79,60 @@ async fn welcome_reads_the_greeter() {
 
 - `Horsies::new` does no I/O, so the test needs no database.
 - In a direct call there is no run: `cancelled()` never completes, `is_cancelled()` is `false`, `cancel_state()` is `RunCancelState::NotInARun`, and `spawn` refuses with `RunSpawnRefused`.
+
+## Give a Body the Facts of a Run
+
+In a direct call each attempt fact is refused with `TaskAttemptRefused::NotInARun`. `TestRun` installs the facts of a run for the duration of a future or a closure. The reads of `TaskRuntime` give them there, as in a worker child.
+
+```rust
+use horsies::events::AttemptNumber;
+use horsies::{
+    task, AppConfig, CustomErrorCode, Horsies, MaxRetries, TaskError, TaskRuntime, TestRun,
+};
+
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
+enum ChargeCode {
+    NoRun,
+}
+
+#[task("charge_once")]
+async fn charge_once(rt: TaskRuntime, order_id: String) -> Result<String, TaskError<ChargeCode>> {
+    let task_id = rt
+        .task_id()
+        .map_err(|refused| TaskError::custom(ChargeCode::NoRun, refused.to_string()))?;
+    Ok(format!("{order_id}:{task_id}"))
+}
+
+#[tokio::test]
+async fn the_charge_is_keyed_by_the_task_id() {
+    let app = Horsies::new(AppConfig::from_database_url("postgresql://localhost/horsies_test"))
+        .unwrap();
+    let task_id = uuid::Uuid::from_u128(7);
+    let run = TestRun::new(
+        task_id,
+        AttemptNumber::try_from(2).unwrap(),
+        MaxRetries::try_from(3).unwrap(),
+    );
+    let key = run
+        .run(charge_once(app.task_runtime(), "order-1".to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(key, format!("order-1:{task_id}"));
+}
+```
+
+| Item | Does |
+|------|------|
+| `TestRun::new(task_id, attempt, max_retries)` | The facts of attempt `attempt` of the task `task_id`. The cancel state is `NotRequested` |
+| `.with_cancel_state(TestRunCancel::Requested { cause })` | A cancel is requested with `cause` (`CancelCause::Operator` or `CancelCause::Deadline`). `cancelled()` completes at once, `is_cancelled()` is `true` and `cancel_state()` is `Requested { cause }` |
+| `.run(future).await` | Drives the async body `future` with the facts, and gives its output |
+| `.run_blocking(\|\| ...)` | Calls the blocking body on this thread with the facts, and gives its output |
+
+- `task_id()`, `attempt()`, `max_retries()`, `retries_left()` and `fencing_token()` give the facts of the `TestRun`. `retries_left()` is `max_retries - (attempt - 1)`, and 0 past the budget.
+- The facts are gone when the future or the closure ends: the reads give `NotInARun` again.
+- `rt.spawn` works inside `run`. The work it started is aborted when the future ends.
+- Build the future inside the call, as above: the facts are installed only while `run` drives it.
+- The attempt number is an `AttemptNumber`, from 1; `horsies::events::AttemptNumber::try_from(2)` gives it.
 
 ## Pass a Dependency's Outcome
 

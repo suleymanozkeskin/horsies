@@ -129,6 +129,10 @@ from horsies.core.codec.kwargs import (
     fill_build_with_defaults,
 )
 from horsies.core.models.workflow.nesting_check import (
+    BuildGranted,
+    BuildRefusedAgain,
+    BuildRefusedFirst,
+    ChildBuildBudget,
     NestingPath,
     NestingStep,
     StopWithFinding,
@@ -3163,7 +3167,7 @@ class Horsies:
                 )
             else:
                 result._require_definition_key()
-                self._validate_spec_bindings(result, errors, ())
+                self._validate_spec_bindings(result, errors, (), ChildBuildBudget())
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.refusals)
         except HorsiesError as exc:
@@ -3188,6 +3192,7 @@ class Horsies:
         spec: Any,
         errors: list[HorsiesError],
         path: NestingPath,
+        budget: ChildBuildBudget,
     ) -> None:
         """Check the nodes of ``spec`` and append each finding to ``errors``.
 
@@ -3195,11 +3200,12 @@ class Horsies:
         paths use, so an invalid queue fails check instead of surfacing at
         enqueue time. A SubWorkflowNode goes to ``_check_subworkflow_node``.
         ``path`` holds the SubWorkflowNodes from the root spec to ``spec``.
+        ``budget`` counts the child builds of the walk of the root spec.
         Raises nothing for a finding.
         """
         for node in getattr(spec, 'nodes', ()):
             if isinstance(node, SubWorkflowNode):
-                self._check_subworkflow_node(node, errors, path)
+                self._check_subworkflow_node(node, errors, path, budget)
                 continue
             try:
                 resolve_node_queue_and_priority(self, node)
@@ -3211,6 +3217,7 @@ class Horsies:
         node: SubWorkflowNode[Any],
         errors: list[HorsiesError],
         path: NestingPath,
+        budget: ChildBuildBudget,
     ) -> None:
         """Walk the child spec of ``node`` when check can build it.
 
@@ -3218,7 +3225,9 @@ class Horsies:
         its child is not built; register its build_with as a builder for
         coverage. ``decide_nesting`` stops the walk at a repeated definition
         and at the depth limit, and gives a finding only for a nesting that
-        fails for certain. Each finding goes to ``errors``.
+        fails for certain. ``budget`` bounds the builds: at the bound the walk
+        stops and the first refusal is a finding. Each finding goes to
+        ``errors``.
         """
         # Only expand when build_with's inputs are fully static. args_from
         # and from_node() markers are runtime injections (dependency
@@ -3246,11 +3255,21 @@ class Horsies:
             case StopWithFinding(finding=finding):
                 errors.append(finding)
             case WalkChild(path=child_path):
+                match budget.take(node.workflow_name):
+                    case BuildRefusedFirst(finding=finding):
+                        errors.append(finding)
+                        return
+                    case BuildRefusedAgain():
+                        return
+                    case BuildGranted():
+                        pass
                 match self._build_child_spec_for_check(node, wire, errors):
                     case _ChildNotBuilt():
                         return
                     case _ChildBuilt(spec=child_spec):
-                        self._validate_spec_bindings(child_spec, errors, child_path)
+                        self._validate_spec_bindings(
+                            child_spec, errors, child_path, budget,
+                        )
 
     def _build_child_spec_for_check(
         self,

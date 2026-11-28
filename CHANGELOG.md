@@ -10,6 +10,24 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Rust: `TestRun` installs the facts of a run for a unit test.**
+  `TestRun::new(task_id, attempt, max_retries)` (optionally
+  `.with_cancel_state(TestRunCancel::Requested { cause })`) with
+  `run(future).await` for an async body and `run_blocking(|| ...)` for a
+  blocking body. While the future or the closure runs, `task_id()`,
+  `attempt()`, `max_retries()`, `retries_left()`, `fencing_token()`,
+  `cancel_state()`, `is_cancelled()` and `cancelled()` of `TaskRuntime` give
+  the installed facts, as in a worker child; they are gone when it ends.
+  Core: `with_test_run_scope`, `with_test_blocking_run_scope`,
+  `TestRunFacts` and `TestRunCancel`. This is the Rust form of Python's
+  `TaskRuntime.for_test`.
+- **`check` bounds the builds of the sub-workflow nesting walk.** The walk of
+  one root workflow builds at most `MAX_CHECK_SUBWORKFLOW_BUILDS` (1,000)
+  child workflows; the builds grow as the children per build to the power of
+  the depth (32), so the walk had no bound. At the bound the walk stops and
+  `check` reports the new code `HRS-039` (`WORKFLOW_CHECK_BUILD_LIMIT`,
+  Rust `WorkflowCheckBuildLimit`) once for that root. The core defines the
+  bound; Python reads it from the generated `_catalog.workflow_bounds`.
 - **`TaskRuntime` gives the attempt facts of the run.** `task_id` is the
   same on every attempt of a task. `attempt` is the attempt number: 1 is the
   first run, 2 the first retry. `max_retries` is the retry budget of the task
