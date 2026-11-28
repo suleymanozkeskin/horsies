@@ -22,11 +22,10 @@ import type {
   ObjectKind,
   TaggedUnionKind,
   TupleKind,
-  UpstreamCodes,
 } from "../wire/kinds.ts";
 import { lazyTarget } from "../wire/lazy.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
+import type { TaskOutcome } from "../wire/task-error.ts";
 import { outcomeValueKind } from "../wire/task-outcome.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "../_catalog/codec_bounds.ts";
@@ -92,7 +91,7 @@ export function decodeEnvelope(
   text: JsonText,
   form: DecodeForm,
 ): Result<TaskOutcome<unknown>, DecodeRefused> {
-  return decodeOutcome(okKind, OPEN_UPSTREAM_CODES, readTree(text), ROOT_PATH, form);
+  return decodeOutcome(okKind, readTree(text), ROOT_PATH, form);
 }
 
 /**
@@ -105,7 +104,7 @@ export function decodeEnvelopeNode(
   path: string,
   form: DecodeForm,
 ): Result<TaskOutcome<unknown>, DecodeRefused> {
-  return decodeOutcome(okKind, OPEN_UPSTREAM_CODES, node, path, form);
+  return decodeOutcome(okKind, node, path, form);
 }
 
 /** The parameters of a stored task input. Pure; see `decodeValue`. */
@@ -170,7 +169,7 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
     case "json":
       return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
     case "taskOutcome":
-      return decodeOutcome(outcomeValueKind(kind, path), kind.codes, node, path, form);
+      return decodeOutcome(outcomeValueKind(kind, path), node, path, form);
     case "conversion":
       return decodeConverted(kind, node, path, depth, form);
     case "checked":
@@ -218,7 +217,6 @@ function decodeText<T>(
  */
 function decodeOutcome(
   okKind: Kind,
-  codes: UpstreamCodes,
   node: TreeValue,
   path: string,
   form: DecodeForm,
@@ -236,39 +234,11 @@ function decodeOutcome(
       return value.ok ? ok(Object.freeze({ kind: "succeeded", value: value.value })) : value;
     }
 
-    case "err": {
-      const error = slots.value.error;
-      const undeclared = undeclaredCodeRefusal(codes, error, memberPath(memberPath(path, "err"), "error_code"));
-
-      return undeclared === undefined ? ok(Object.freeze({ kind: "failed", error })) : err(undeclared);
-    }
+    case "err":
+      return ok(Object.freeze({ kind: "failed", error: slots.value.error }));
 
     default:
       return unreachable(slots.value, "decodeOutcome");
-  }
-}
-
-/** The upstream outcome of a workflow context read: every custom code is allowed there (the read checks its own). */
-const OPEN_UPSTREAM_CODES: UpstreamCodes = Object.freeze({ state: "open" });
-
-/**
- * The refusal of a stored error whose custom code the upstream contract does not declare; `undefined` when the
- * code is allowed: a built-in code, any custom code of an `open` upstream, or a declared custom code. Pure.
- */
-function undeclaredCodeRefusal(codes: UpstreamCodes, error: TaskError, path: string): DecodeRefused | undefined {
-  switch (codes.state) {
-    case "open":
-      return undefined;
-    case "declared":
-      return error.kind === "custom" && !codes.codes.includes(error.code)
-        ? decodeRefused(
-            "NotAMember",
-            path,
-            `the error code ${error.code} is not declared in the errorCodes of ${codes.upstream}`,
-          )
-        : undefined;
-    default:
-      return unreachable(codes, "undeclaredCodeRefusal");
   }
 }
 

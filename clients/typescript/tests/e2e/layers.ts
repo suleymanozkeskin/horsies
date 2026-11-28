@@ -14,6 +14,7 @@ export const LAYER_FILES: readonly LayerFile[] = [
   { name: "layer5-workflow-dataflow", boundSeconds: 600 },
   { name: "layer6-workflow-advanced", boundSeconds: 900 },
   { name: "layer7-subworkflows", boundSeconds: 1_200 },
+  { name: "upstream-codes", boundSeconds: 600 },
   { name: "child-model", boundSeconds: 1_200 },
   { name: "typescript-child", boundSeconds: 1_200 },
   { name: "shared-thread", boundSeconds: 1_200 },

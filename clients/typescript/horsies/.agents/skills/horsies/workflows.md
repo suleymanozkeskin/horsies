@@ -92,10 +92,12 @@ The input of a node has one member per parameter:
   contract it takes a sub-workflow node of that workflow. The node waits for
   that source, and the body gets the source's outcome, typed by the
   contract (`outcome.value`, `outcome.error.code`).
-- At run time, a stored custom code that the `errorCodes` of the contract
-  do not declare fails the input decode: the run ends with
-  `WORKER_SERIALIZATION_ERROR` and the body does not run. A built-in code
-  always decodes. A contract with no `errorCodes` accepts every custom code.
+- At run time, the core checks the stored custom code of an upstream error
+  against the `errorCodes` of the upstream task. A code that the task does
+  not declare ends the run with `WORKER_SERIALIZATION_ERROR` and the body
+  does not run. A built-in code is always accepted. A task with no
+  `errorCodes` accepts every custom code. An empty `errorCodes` list is
+  refused; leave `errorCodes` out.
 - An `.optional()` or defaulted parameter may be left out.
 - A node for a plain parameter, a value for an `h.taskOutcome` parameter, a
   missing parameter, an unknown parameter, a source of another output type

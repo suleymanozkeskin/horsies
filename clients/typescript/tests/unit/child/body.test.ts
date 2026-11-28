@@ -65,29 +65,6 @@ describe("the input of a body", () => {
     assert.match(dataText(error), /"expected_type":"add\.input"/u);
     assert.deepEqual(run.observation.calls, ["end"]);
   });
-
-  test("an upstream error with a custom code that the upstream contract does not declare is WORKER_SERIALIZATION_ERROR", async () => {
-    const downstream = defineTask({ name: "settle", input: { sum: h.taskOutcome(add) }, output: h.null() });
-    let bodyRan = false;
-
-    const run = await adapterRun(
-      parts(downstream, (_input, { ok }) => {
-        bodyRan = true;
-
-        return ok(null);
-      }),
-      '{"sum":{"__h_task_result__":true,"ok":null,"err":{"error_code":"OLD_CODE","message":null,"data":null,"exception":null}}}',
-    );
-
-    const error = errorParts(run.outcome);
-
-    assert.deepEqual(error.code, { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" });
-    assert.equal(
-      error.message.kind === "text" ? error.message.text : "",
-      "task input does not decode as settle.input: $.sum.err.error_code: the error code OLD_CODE is not declared in the errorCodes of the task add [NotAMember]",
-    );
-    assert.equal(bodyRan, false);
-  });
 });
 
 describe("the value of a body", () => {
