@@ -43,9 +43,9 @@ use horsies_core::monitoring::database_failure_status;
 use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded};
 use horsies_core::web::{
-    route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem, MonitoringHandler,
-    MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict, HEARTBEAT,
-    MAX_REQUEST_BODY_BYTES,
+    refusal_by_policy, route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem,
+    MonitoringHandler, MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict,
+    DEGRADED_FRAME, HEARTBEAT, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use tokio::sync::OnceCell;
@@ -95,8 +95,16 @@ pub fn router<P>(app: &Horsies, config: MonitoringConfig, authorization_policy: 
 where
     P: MonitoringAuthorizationPolicy,
 {
+    Router::new()
+        .fallback(serve::<P>)
+        .with_state(mount_of(app, config, authorization_policy))
+}
+
+/// The state of one mount: no I/O; the core handler is built at the first
+/// request that the policy does not refuse.
+fn mount_of<P>(app: &Horsies, config: MonitoringConfig, authorization_policy: P) -> Arc<Mount<P>> {
     let fleet_labels = fleet_labels_of(app);
-    let mount = Arc::new(Mount {
+    Arc::new(Mount {
         handle: app.reads_handle(),
         workflows: Arc::clone(app.workflows()),
         settings: MonitoringHandlerConfig {
@@ -108,8 +116,7 @@ where
         },
         policy: authorization_policy,
         handler: OnceCell::new(),
-    });
-    Router::new().fallback(serve::<P>).with_state(mount)
+    })
 }
 
 /// The label names of `/metrics`: the queues and the schedules of the app's
@@ -174,14 +181,24 @@ where
     let (head, body) = request.into_parts();
     let access = route_access(mount.settings.actions, &head.method, head.uri.path());
     let grant = grant_of(&mount.policy, access.need, MonitoringRequest::of(&head)).await;
+    // A refused caller gets the refusal before the broker connects, so the
+    // answer shows nothing of the database.
+    if let Some(refusal) = refusal_by_policy(access.need, grant).await {
+        return into_response(refusal);
+    }
     let handler = match mount.handler().await {
         Ok(handler) => handler,
         Err(error) => return handler_build_failed(&error),
     };
     match (access.form, grant.view) {
-        (ResponseForm::EventStream, Verdict::Allowed) => {
-            event_stream(handler.subscribe_events().await)
-        }
+        (ResponseForm::EventStream, Verdict::Allowed) => match handler.try_subscribe_events().await
+        {
+            Ok(frames) => event_stream(frames),
+            Err(refused) => {
+                tracing::warn!("the monitoring handler refused an event stream: {refused}");
+                degraded_event_stream()
+            }
+        },
         (ResponseForm::OneResponse, _)
         | (ResponseForm::EventStream, Verdict::Refused | Verdict::NotAsked) => {
             let body = match read_body(body).await {
@@ -314,7 +331,18 @@ fn event_stream(frames: EventFrames) -> Response {
             EventStreamItem::Ended => None,
         }
     });
-    let mut response = Response::new(Body::from_stream(stream));
+    event_stream_response(Body::from_stream(stream))
+}
+
+/// The event stream response of a refused subscription: the degraded frame,
+/// then the end. Pure.
+fn degraded_event_stream() -> Response {
+    event_stream_response(Body::from(DEGRADED_FRAME))
+}
+
+/// `body` with the headers of Python's `/api/events`. Pure.
+fn event_stream_response(body: Body) -> Response {
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
     let _previous = headers.insert(
         CONTENT_TYPE,

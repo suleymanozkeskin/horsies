@@ -66,6 +66,18 @@ where
     }
 }
 
+/// The value of a sub-workflow node whose child workflow has no output node.
+/// The core stores the node's result as `Ok(null)`; the read gives this one
+/// value, so a reader never takes `null` for a value that the child returned.
+/// A stored value other than `null` does not read as `NoWorkflowOutput`.
+///
+/// A definition with no output node declares `type Output =
+/// NoWorkflowOutput` when its sub-workflow node is read, and `type Output =
+/// OutputlessResults` when its own result is read as the outcome of each
+/// node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct NoWorkflowOutput;
+
 /// The result of a workflow with no output node (Python's outputless
 /// result): the outcome of each node by node id, with the value as its
 /// stored text (`JsonText::decode` reads it with the node's type) and the

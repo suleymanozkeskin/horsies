@@ -25,16 +25,16 @@ use horsies_core::handle::CoreConnection;
 use horsies_core::JsonText;
 use horsies_core::{
     process_role, wait_inside_task_message, BuiltInTaskCode, CustomCode, HandleOperation,
-    HandleResult, NodeResultsRead, NodesRead, OperationalCode, OutcomeCode, PostgresBroker,
-    ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult, TerminalErrorStatus,
-    WaitLimit, WorkflowEnd, WorkflowError, WorkflowHandleError, WorkflowHandleErrorCode,
-    WorkflowNodeStatus, WorkflowStatus, WorkflowWait,
+    HandleResult, NodeResultRead, NodeResultsRead, NodesRead, OperationalCode, OutcomeCode,
+    PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult,
+    TerminalErrorStatus, WaitLimit, WorkflowEnd, WorkflowError, WorkflowHandleError,
+    WorkflowHandleErrorCode, WorkflowNodeStatus, WorkflowStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::dependency::OutputlessResults;
+use super::dependency::{NoWorkflowOutput, OutputlessResults};
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
 use crate::handle::{checked_wait, read_stored_result};
@@ -55,8 +55,12 @@ pub enum WorkflowReadError {
     /// `WORKFLOW_NOT_FOUND`: no workflow has the id.
     #[error("workflow {workflow_id} not found")]
     WorkflowNotFound { workflow_id: Uuid },
-    /// `RESULT_NOT_READY`: the node stores no result yet, or the workflow
-    /// has no node of this id.
+    /// `NODE_NOT_FOUND`: the workflow exists and has no node of this id.
+    /// The same id gives the same error on every read.
+    #[error("workflow {workflow_id} has no node '{node_id}'")]
+    NodeNotFound { workflow_id: Uuid, node_id: String },
+    /// `RESULT_NOT_READY`: the node exists and stores no result yet. A later
+    /// read may find one.
     #[error("node '{node_id}' of workflow {workflow_id} stores no result")]
     ResultNotReady { workflow_id: Uuid, node_id: String },
     /// `RESULT_DESERIALIZATION_ERROR`: the stored value does not read with
@@ -104,6 +108,7 @@ impl WorkflowReadError {
         match self {
             Self::WaitTimeout { .. } => RetrievalCode::WaitTimeout.into(),
             Self::WorkflowNotFound { .. } => RetrievalCode::WorkflowNotFound.into(),
+            Self::NodeNotFound { .. } => RetrievalCode::NodeNotFound.into(),
             Self::ResultNotReady { .. } => RetrievalCode::ResultNotReady.into(),
             Self::ResultDeserializationError { .. } => {
                 OperationalCode::ResultDeserializationError.into()
@@ -342,7 +347,9 @@ impl<T> WorkflowHandle<T> {
     /// The outcome of the node `key`, read with its output type `V` and the
     /// code type `E` (Python `result_for`). Not a wait.
     ///
-    /// Errors: `ResultNotReady` while the node stores no result;
+    /// Errors: `WorkflowNotFound` when no workflow has the id;
+    /// `NodeNotFound` when the workflow has no node of the key's id;
+    /// `ResultNotReady` while the node stores no result;
     /// `ResultDeserializationError`; `UnknownCustomCode`; `DatabaseError`.
     pub async fn result_for<V, E>(
         &self,
@@ -359,17 +366,24 @@ impl<T> WorkflowHandle<T> {
             .broker("result_for", operation)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
-        let stored = broker
-            .workflow_node_result(self.workflow_id, key.node_id())
+        let read = broker
+            .workflow_node_result_read(self.workflow_id, key.node_id())
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
-        let Some(stored) = stored else {
-            return Err(WorkflowReadError::ResultNotReady {
+        match read {
+            NodeResultRead::Stored(stored) => envelope_outcome(self.workflow_id, &stored.result),
+            NodeResultRead::NotStored => Err(WorkflowReadError::ResultNotReady {
                 workflow_id: self.workflow_id,
                 node_id: key.node_id().to_owned(),
-            });
-        };
-        envelope_outcome(self.workflow_id, &stored.result)
+            }),
+            NodeResultRead::NodeAbsent => Err(WorkflowReadError::NodeNotFound {
+                workflow_id: self.workflow_id,
+                node_id: key.node_id().to_owned(),
+            }),
+            NodeResultRead::WorkflowAbsent => Err(WorkflowReadError::WorkflowNotFound {
+                workflow_id: self.workflow_id,
+            }),
+        }
     }
 
     fn not_found(&self) -> WorkflowHandleError {
@@ -541,10 +555,39 @@ where
     }
 }
 
+/// How a handle's type `T` reads the stored result of a COMPLETED workflow.
+enum ResultReading {
+    /// The output node's type: the typed envelope.
+    OutputNode,
+    /// `OutputlessResults`: the outcome of each node of a workflow with no
+    /// output node.
+    NodeOutcomes,
+    /// `NoWorkflowOutput`: the value of a workflow with no output value. The
+    /// stored envelope is typed (a sub-workflow node of an outputless child)
+    /// or outputless (a workflow with no output node).
+    NoOutput,
+}
+
+impl ResultReading {
+    /// The reading of the type `T`.
+    fn of<T: 'static>() -> Self {
+        let id = TypeId::of::<T>();
+        match (
+            id == TypeId::of::<OutputlessResults>(),
+            id == TypeId::of::<NoWorkflowOutput>(),
+        ) {
+            (true, _) => Self::NodeOutcomes,
+            (false, true) => Self::NoOutput,
+            (false, false) => Self::OutputNode,
+        }
+    }
+}
+
 /// The outcome of a COMPLETED workflow's stored result. The outputless
 /// marker of the stored envelope and the handle's type must agree: a
-/// workflow with no output node is read as `OutputlessResults`, any other
-/// as its output type (Python fails a mismatch closed). Pure.
+/// workflow with no output node is read as `OutputlessResults` or
+/// `NoWorkflowOutput`, any other as its output type (Python fails a mismatch
+/// closed). Pure.
 fn completed_outcome<T>(
     workflow_id: Uuid,
     text: &str,
@@ -562,15 +605,23 @@ where
         .as_deref()
         .and_then(|members| member(members, OUTPUTLESS_TERMINALS_KEY))
         .is_some_and(|marker| marker.get() == "true");
-    let handle_outputless = TypeId::of::<T>() == TypeId::of::<OutputlessResults>();
-    match (wire_outputless, envelope, handle_outputless) {
-        (false, _, false) => envelope_outcome(workflow_id, text),
-        (true, Some(envelope), true) => outputless_outcome(workflow_id, &envelope),
+    let reading = ResultReading::of::<T>();
+    match (wire_outputless, envelope, reading) {
+        (false, _, ResultReading::OutputNode | ResultReading::NoOutput) => {
+            envelope_outcome(workflow_id, text)
+        }
+        (true, Some(envelope), ResultReading::NodeOutcomes) => {
+            outputless_outcome(workflow_id, &envelope)
+        }
+        (true, Some(envelope), ResultReading::NoOutput) => {
+            no_output_outcome(workflow_id, &envelope)
+        }
         (true, None, _) => unreachable!("an outputless marker is a member of an object"),
-        (wire, _, handle) => Err(unreadable(format!(
+        (wire, _, reading) => Err(unreadable(format!(
             "outputless/typed envelope mismatch: wire_outputless={wire}, \
-             handle_outputless={handle}; the workflow definition changed between the start and \
-             the read, or the handle has another output type"
+             handle_outputless={}; the workflow definition changed between the start and \
+             the read, or the handle has another output type",
+            matches!(reading, ResultReading::NodeOutcomes)
         ))),
     }
 }
@@ -654,6 +705,34 @@ where
     match results.downcast::<T>() {
         Ok(results) => Ok(TaskOutcome::Succeeded(*results)),
         Err(_) => unreachable!("the caller reads an outputless result only as OutputlessResults"),
+    }
+}
+
+/// The outcome of the outputless envelope of a COMPLETED workflow, read as
+/// `NoWorkflowOutput`: its error, or the value that says the workflow has no
+/// output value. The terminal results are not read. Pure.
+fn no_output_outcome<T>(
+    workflow_id: Uuid,
+    envelope: &[(String, &RawValue)],
+) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
+where
+    T: 'static,
+{
+    if member(envelope, "__h_task_result__").map(RawValue::get) != Some("true") {
+        return Err(WorkflowReadError::ResultDeserializationError {
+            workflow_id,
+            cause: format!(
+                "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
+            ),
+        });
+    }
+    if let Some(error) = member(envelope, "err").filter(|slot| slot.get() != "null") {
+        return stored_error(workflow_id, error.get()).map(TaskOutcome::Failed);
+    }
+    let value: Box<dyn Any> = Box::new(NoWorkflowOutput);
+    match value.downcast::<T>() {
+        Ok(value) => Ok(TaskOutcome::Succeeded(*value)),
+        Err(_) => unreachable!("the caller reads this result only as NoWorkflowOutput"),
     }
 }
 

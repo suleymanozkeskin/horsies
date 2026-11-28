@@ -63,14 +63,14 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 | `app.pingWorkers(options?)` | `readonly WorkerPong[]` (`workerId`, `hostname`, `pid`, `roundTripMs`), the distinct replies by worker id |
 | `app.monitoring.listWorkerStates()` | `readonly WorkerStateSnapshot[]`: the latest snapshot of each worker that wrote one |
 | `app.monitoring.getWorkerState(workerId)` | `WorkerStateRead`: `{ kind: "found", snapshot }` or `{ kind: "notFound", workerId }` |
-| `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }` |
+| `app.monitoring.getWorkerStateHistory(workerId, limit?)` | `readonly WorkerStateSnapshot[]`, newest first. `WorkerHistoryLimit`: `{ kind: "allRetained" }` (default) or `{ kind: "newest", count }`. A `count` above 10,000 is refused with `INVALID_INPUT`; so is `allRetained` for a worker that holds more than 10,000 snapshots (no row is returned in part) |
 | `app.monitoring.getStaleTasks({ thresholdMinutes })` | `BoundedTaskList<StaleTaskRow>`: `RUNNING` tasks with no beat for `thresholdMinutes` (whole minutes, 0 to 525,600) |
 | `app.monitoring.getExpiredTasks()` | `BoundedTaskList<ExpiredTaskRow>`: `PENDING` tasks past their `goodUntil`, oldest deadline first |
 | `app.monitoring.getExecutionClassCoverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending stream (a queue and an execution class) |
 | `app.monitoring.getExecutionClassReport()` | `ExecutionClassReport`: the pending streams, the budget load of each live worker, and `liveWindow` (how recent a snapshot of a live worker is) |
 
 - `PingWorkersOptions`: `target` (`{ kind: "everyWorker" }`, the default, or
-  `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0,
+  `{ kind: "worker", workerId }`), `waitMs` (a whole number above 0, at most 60,000;
   default `DEFAULT_PING_WAIT_MS`, 2,000), `minResponses`
   (`{ kind: "fullWindow" }`, the default, or `{ kind: "atLeast", count }`).
   The ping returns at the first of: the target worker replied, `count`
@@ -245,6 +245,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
       return false;
     case "isWorkflowTask":
     case "databaseOperationFailed":
+    case "outcomeUnknown":
     case "storedDataInvalid":
     case "seatRelayFull":
       console.error(cancelled.error.message);
@@ -283,7 +284,8 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
 | `TASK_NOT_FOUND` | No live or history row has the id. Nothing changed |
 | `TASK_NOT_CANCELLABLE` | Terminal, or `RUNNING` with `pendingOrClaimedOnly`; `currentStatus` is the status found. Nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | The task belongs to a workflow; `currentStatus` is the status found. Nothing changed |
-| `DATABASE_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DATABASE_OPERATION_FAILED` | The connect failed, the statement was not sent, or the server refused it. Nothing changed; `retryable` follows the cause |
+| `OUTCOME_UNKNOWN` | The statement was sent and its reply was lost; `retryable` follows the cause. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`, and a cancel that did not commit cancels the task |
 | `STORED_DATA_INVALID` | Stored data does not parse. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (Rerun, below).
@@ -295,7 +297,7 @@ There is no manual retry action. Re-execution is a rerun (Rerun, below).
 `Bun.serve`, Hono, a Next.js route handler, or any server that gives a
 `Request`.
 
-<!-- ts-check: skip partial -- Bun.serve needs the Bun types, and the docs check loads the Node types only -->
+<!-- ts-check: alone -->
 ```ts
 import { createMonitoringHandler, type Horsies, trustedHeader } from "horsies";
 
@@ -595,10 +597,13 @@ Errors (each with `kind`, the code in camelCase, `code` and `message`;
 | `IDEMPOTENCY_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
 | `ID_MINT_REFUSED` | both | The task id source refused to mint the new id |
 | `CLIENT_FAMILY_MISMATCH`, `UNKNOWN_STORED_FAMILY` | both | Another client family installed the database, or its family row is not a family |
+| `RETRY_CODE_NOT_DECLARED` | both | The stored retry list of the source names a custom code that the contract of `taskName` does not declare in `errorCodes` (`retryCode`). Nothing is written |
+| `TASK_NOT_REGISTERED` | both | The stored retry list names a custom code, and the app does not list the contract of `taskName`. Nothing is written |
 | `CONTRACT_VIOLATION` | both | A row or stored data broke the rerun's contract. Nothing committed |
 | `CONNECT_FAILED` | `RerunError` | The app's handle could not connect or install the schema. Nothing ran |
 | `STATEMENT_FAILED` | `RerunError` | A statement failed; `stateAfter` is `"notCommitted"` or `"unknown"` (the `COMMIT` reply was lost: a keyed rerun sent again answers `keyReplay` if the first one committed) |
 | `FAMILY_CHECK_FAILED` | `RerunError` | The family row could not be read |
+| `SEAT_RELAY_FULL` | `RerunError` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing ran |
 | `DRIVER_FAILED` | `CallerRerunError` | A statement failed in the caller's driver: `statement`, `driverError`. The transaction is aborted: roll it back |
 | `NO_OPEN_TRANSACTION` | `CallerRerunError` | The connection had no open transaction, so the statement did not run; `state` tells why (`idle`, `failedTransaction`, `notConnected`, `unrecognized`) |
 | `RESULT_NOT_TEXT` | `CallerRerunError` | The driver gave a column in a format other than text (`column`, `format`), for example a `pg` client with `binary: true`. Roll back |

@@ -177,7 +177,9 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 ///
 /// Errors: `TASK_NOT_FOUND`, `TASK_IS_WORKFLOW_TASK`,
 /// `TASK_NOT_CANCELLABLE` (with the current status), `STORED_DATA_INVALID`,
-/// and `DATABASE_OPERATION_FAILED`, also for a failed connect (nothing written).
+/// `DATABASE_OPERATION_FAILED` (nothing changed; also for a failed connect),
+/// and `OUTCOME_UNKNOWN` (the statement was sent and its reply was lost: the
+/// cancel may have committed).
 pub async fn cancel_task(
     app: &Horsies,
     task_id: Uuid,

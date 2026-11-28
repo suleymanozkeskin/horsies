@@ -1388,6 +1388,7 @@ def _prepare_task_call(
         inner = envelope.get('inner')
         source_definition_key = envelope.get('source_definition_key')
         from horsies.core.models.workflow.typing_utils import (
+            resolve_source_code_type,
             resolve_source_ok_type,
         )
 
@@ -1418,6 +1419,32 @@ def _prepare_task_call(
                     f'(source task {source_task_name!r}): {exc}'
                 ),
             )
+        # The stored error of the upstream outcome holds a custom code that
+        # the upstream task declares, or the input does not decode.
+        match typed_outcome(
+            decoded_result,
+            resolve_source_code_type(
+                app, source_task_name,
+                sub_definition_key=(
+                    source_definition_key
+                    if isinstance(source_definition_key, str)
+                    else None
+                ),
+            ),
+        ):
+            case Ok():
+                pass
+            case Err(err_value=undeclared):
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'kwarg {key!r}: the upstream outcome of '
+                        f'{source_task_name!r} holds a custom code that '
+                        f'the task does not declare: {undeclared.message}'
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
         target_ok_type = declared_outcome_ok_type(underlying_fn, key)
         if target_ok_type is not None and target_ok_type != source_ok_type:
             match conform_to_target(decoded_result, target_ok_type):

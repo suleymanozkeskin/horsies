@@ -260,6 +260,7 @@ base of the defects.
 ```bash
 node app.ts worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]
 node app.ts check [--live] [--log-level LEVEL]
+node app.ts scheduler [--log-level LEVEL]
 node app.ts web [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]
 node app.ts metrics --metrics-listen HOST:PORT [--log-level LEVEL]
 npx horsies get-docs [--output DIR] [--ref main]

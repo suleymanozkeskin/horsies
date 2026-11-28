@@ -24,6 +24,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
 )
 
+from .no_output import NoWorkflowOutput
 from .nodes import TaskNode, SubWorkflowNode
 
 if TYPE_CHECKING:
@@ -342,7 +343,7 @@ def validate_workflow_generic_output_match(
         return
 
     if spec.output is None:
-        if declared_ok is type(None):
+        if declared_ok is NoWorkflowOutput:
             return
         raise WorkflowValidationError(
             code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
@@ -353,12 +354,12 @@ def validate_workflow_generic_output_match(
             ),
             notes=[
                 f'declared generic: {_format_type_name(declared_ok)}',
-                'actual output type: None',
+                'actual output type: NoWorkflowOutput',
             ],
             help_text=(
                 'set config.output to a node that produces the declared type, '
-                'or declare WorkflowDefinition[None] for an outputless '
-                'orchestration workflow'
+                'or declare WorkflowDefinition[NoWorkflowOutput] for an '
+                'outputless orchestration workflow'
             ),
         )
 

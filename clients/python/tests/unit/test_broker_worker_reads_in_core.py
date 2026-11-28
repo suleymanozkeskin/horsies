@@ -387,7 +387,26 @@ class TestHistoryLimit:
                 raise AssertionError(f'expected INVALID_INPUT, got {result!r}')
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('limit', [2 ** 70, True], ids=['above-64-bits', 'true'])
+    @pytest.mark.parametrize(
+        'limit', [10_001, 2 ** 70], ids=['above-the-bound', 'above-64-bits'],
+    )
+    async def test_a_limit_above_the_bound_is_invalid_input_before_any_core_call(
+        self, limit: int,
+    ) -> None:
+        broker = cast(PostgresBroker, _make_broker())
+
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=limit),
+        )
+
+        match result:
+            case Err(DatabaseInvalidInput(message=message, cause=NoCause())):
+                assert message == f'limit must be at most 10000 when set, got {limit}'
+            case _:
+                raise AssertionError(f'expected INVALID_INPUT, got {result!r}')
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('limit', [True], ids=['true'])
     async def test_a_limit_that_postgres_refuses_is_a_query_failure_before_any_core_call(
         self, limit: int,
     ) -> None:
@@ -705,13 +724,21 @@ class TestWorkerPing:
                 'ping_workers request refused: wait_ms must be an int, not bool',
             ),
             (
+                60_001,
+                MinResponsesFullWindow(),
+                'wait_ms must be at most 60000, got 60001',
+            ),
+            (
                 2 ** 64,
                 MinResponsesFullWindow(),
-                f'wait_ms must be at most {2 ** 64 - 1}, got {2 ** 64}',
+                f'wait_ms must be at most 60000, got {2 ** 64}',
             ),
             (1_000, MinResponsesAtLeast(count=0), 'min_responses must be >= 1 when set, got 0'),
         ],
-        ids=['zero', 'negative', 'float', 'bool', 'above-the-range', 'no-replies'],
+        ids=[
+            'zero', 'negative', 'float', 'bool', 'above-the-bound', 'above-the-range',
+            'no-replies',
+        ],
     )
     async def test_a_refused_argument_is_invalid_input_before_any_core_call(
         self, wait_ms: object, min_responses: MinResponses, message: str,

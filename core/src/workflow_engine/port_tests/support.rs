@@ -51,8 +51,8 @@ use crate::workflow_engine::engine::{
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::resume_client_workflow;
 use crate::workflow_engine::query::{
-    wait_workflow_end, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
-    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+    wait_workflow_end, NodeResultRead, NodeResultsRead, NodesRead, StoredNode, TerminalErrorStatus,
+    WorkflowEnd, WorkflowWait,
 };
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
 use crate::workflow_engine::steps::{advance_parents, OwedParentAdvances, ParentAdvance};
@@ -852,14 +852,11 @@ impl WorkflowOps {
         }
     }
 
-    /// The stored result of the node `node_id`
-    /// (`PostgresBroker::workflow_node_result`).
-    pub(super) async fn node_result(
-        &self,
-        node_id: &str,
-    ) -> HandleResult<Option<StoredNodeResult>> {
+    /// The result of the node `node_id`
+    /// (`PostgresBroker::workflow_node_result_read`).
+    pub(super) async fn node_result(&self, node_id: &str) -> HandleResult<NodeResultRead> {
         self.broker
-            .workflow_node_result(self.workflow_id, node_id)
+            .workflow_node_result_read(self.workflow_id, node_id)
             .await
     }
 
@@ -870,12 +867,12 @@ impl WorkflowOps {
         &self,
         node_id: &str,
     ) -> HandleResult<TaskResult<V>> {
-        let stored = self.node_result(node_id).await?.unwrap_or_else(|| {
+        let NodeResultRead::Stored(stored) = self.node_result(node_id).await? else {
             panic!(
                 "node {node_id} of workflow {} stores no result",
                 self.workflow_id
             )
-        });
+        };
         Ok(match stored_result(&stored.result) {
             TaskResult::Ok(value) => {
                 TaskResult::Ok(serde_json::from_value(value).unwrap_or_else(|error| {

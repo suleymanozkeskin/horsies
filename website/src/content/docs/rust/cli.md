@@ -170,7 +170,7 @@ An unknown command, or no command, is an argument error: exit code 2.
 | `--live` | off | Also connect to the database, and compare each worker profile with the connection limit of the server |
 | `--log-level LEVEL` | `WARNING` | See [Logs](#logs) |
 
-A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema.
+A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema. It connects with a handle of its own in the schema mode `ObserveOnly`, whatever the schema mode of the app, and closes it at the end.
 
 ### `metrics`
 

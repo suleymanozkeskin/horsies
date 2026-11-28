@@ -37,6 +37,7 @@ from horsies.monitoring.task_actions import (
     TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
     TaskActionNotFound,
+    TaskActionOutcomeUnknown,
     TaskActionStoredDataInvalid,
     TaskCancelled,
     cancel_task,
@@ -62,6 +63,9 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
             message=message, task_id=TASK_ID, current_status=TaskStatus.FAILED,
         ),
         TaskActionDatabaseOperationFailed(
+            message=message, retryable=True, task_id=TASK_ID, cause=cause,
+        ),
+        TaskActionOutcomeUnknown(
             message=message, retryable=True, task_id=TASK_ID, cause=cause,
         ),
         TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, cause=cause),
@@ -116,11 +120,11 @@ class TestVariantCatalog:
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,
     )
-    def test_only_a_database_failure_can_be_retryable(
+    def test_only_a_database_failure_or_an_unknown_outcome_can_be_retryable(
         self, error: TaskActionError,
     ) -> None:
         match error:
-            case TaskActionDatabaseOperationFailed():
+            case TaskActionDatabaseOperationFailed() | TaskActionOutcomeUnknown():
                 assert error.retryable is True
             case _:
                 assert error.retryable is False
@@ -185,6 +189,14 @@ def _core_errors() -> list[TaskActionError]:
             task_id=TASK_ID,
             cause=CoreConnectionError(
                 'cancel_task', f'connection failed: {CAUSE_MARKER}', True,
+            ),
+        ),
+        TaskActionOutcomeUnknown(
+            message=f'Task cancel failed: database error: {CAUSE_MARKER}',
+            retryable=True,
+            task_id=TASK_ID,
+            cause=CoreConnectionError(
+                'cancel_task', f'database error: {CAUSE_MARKER}', True,
             ),
         ),
         TaskActionStoredDataInvalid(

@@ -8,8 +8,12 @@
 //!   read (`WORKER_PING_FAILED`, else `MONITORING_QUERY_FAILED`) and the
 //!   text `<read> failed: <cause>`.
 //! - A value that the read refuses (a ping window or a response count that
-//!   is not a whole number above 0, a history limit or a stale threshold
-//!   outside its rule) is `INVALID_INPUT`, answered at once with no connect.
+//!   is not a whole number above 0, a ping window above
+//!   `WORKER_PING_WAIT_BOUND`, a history limit above
+//!   `WORKER_HISTORY_ROW_BOUND` or a stale threshold outside its rule) is
+//!   `INVALID_INPUT`, answered at once with no connect. A history read of
+//!   every retained snapshot of a worker that holds more than the bound is
+//!   `INVALID_INPUT` too; the core refuses it after the read.
 //! - The reads write nothing but the schema install. Failures are the raw
 //!   record of the core's `DatabaseOperationError`, with the read as the
 //!   subject of its exception.
@@ -20,9 +24,9 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    checked_history_limit, ping_listener_disabled, BrokerError, BrokerOperationSource,
-    DatabaseOperationError, DatabaseOperationFailedCode, PostgresBroker, StaleMinutes,
-    StaleThresholdRefusal,
+    checked_history_limit, checked_ping_wait, ping_listener_disabled, BrokerError,
+    BrokerOperationSource, DatabaseOperationError, DatabaseOperationFailedCode, PostgresBroker,
+    StaleMinutes, StaleThresholdRefusal,
 };
 use napi::bindgen_prelude::{Object, ToNapiValue};
 use napi::Env;
@@ -101,7 +105,8 @@ pub enum WorkerStateRead {
     NotFound,
 }
 
-/// A ping window: a whole number of milliseconds above 0.
+/// A ping window: a whole number of milliseconds above 0, at most
+/// `WORKER_PING_WAIT_BOUND`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PingRequest {
     target: PingTargetArg,
@@ -393,7 +398,7 @@ fn ping_request(
     listener: HandleListener,
 ) -> Result<PingRequest, DatabaseOperationError> {
     let window = match positive_count(wait_ms) {
-        Some(milliseconds) => Duration::from_millis(milliseconds),
+        Some(milliseconds) => checked_ping_wait(Duration::from_millis(milliseconds))?,
         None => return Err(refused_count("waitMs", wait_ms)),
     };
     let min_responses = match min_responses {
@@ -461,7 +466,7 @@ fn refused_count(field: &str, value: f64) -> DatabaseOperationError {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::DatabaseErrorCode;
+    use horsies_core::{DatabaseErrorCode, WORKER_HISTORY_ROW_BOUND, WORKER_PING_WAIT_BOUND};
 
     use super::*;
 
@@ -506,6 +511,30 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    #[test]
+    fn a_ping_window_above_the_bound_is_invalid_input_and_the_bound_is_kept() {
+        let bound_ms = WORKER_PING_WAIT_BOUND.as_millis() as f64;
+        let at_bound = ping_request(
+            PingTargetArg::EveryWorker,
+            bound_ms,
+            &MinResponsesArg::FullWindow,
+            HandleListener::Process,
+        );
+        assert_eq!(
+            at_bound.ok().map(|request| request.window),
+            Some(WORKER_PING_WAIT_BOUND)
+        );
+        assert_eq!(
+            code_of(ping_request(
+                PingTargetArg::EveryWorker,
+                bound_ms + 1.0,
+                &MinResponsesArg::FullWindow,
+                HandleListener::Process
+            )),
+            DatabaseErrorCode::InvalidInput
+        );
     }
 
     #[test]
@@ -559,7 +588,12 @@ mod tests {
             history_limit(&HistoryLimitArg::Newest { count: 5.0 }).ok(),
             Some(Some(5))
         );
-        for refused in [0.0, -1.0, 2.5] {
+        let bound = WORKER_HISTORY_ROW_BOUND as f64;
+        assert_eq!(
+            history_limit(&HistoryLimitArg::Newest { count: bound }).ok(),
+            Some(Some(WORKER_HISTORY_ROW_BOUND))
+        );
+        for refused in [0.0, -1.0, 2.5, bound + 1.0] {
             assert_eq!(
                 code_of(history_limit(&HistoryLimitArg::Newest { count: refused })),
                 DatabaseErrorCode::InvalidInput,

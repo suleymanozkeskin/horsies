@@ -22,6 +22,7 @@ from horsies import (
     ReadError,
     ReadInvalidInput,
     ReadNoTypeAvailable,
+    ReadNodeNotFound,
     ReadResult,
     ReadResultDeserializationError,
     ReadResultNotAvailable,
@@ -95,6 +96,7 @@ def every_read_error(error: ReadError) -> bool:
             return True
         case (
             ReadWorkflowNotFound()
+            | ReadNodeNotFound()
             | ReadResultNotAvailable()
             | ReadWaitInsideTask()
             | ReadAsyncContext()

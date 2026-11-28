@@ -54,6 +54,7 @@ from horsies.core.codec.wire_shape import (
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import NotATaskErrorType, TaskError, custom_code_type_of
 from horsies.core.task_runtime import TaskRuntime
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
@@ -82,6 +83,7 @@ _DOCS_URL = 'https://suleymanozkeskin.github.io/horsies/internals/serialization/
 _SCHEMA_HOOK = '__get_pydantic_core_schema__'
 
 INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
+    NoWorkflowOutput,
     TaskError,
     WorkflowContext,
     WorkflowMetadata,
@@ -488,8 +490,11 @@ def _reject_schema_hook(item: object) -> None:
 
     A hook replaces the node of the type, so no schema rule can see what it does:
     it could accept a str as an int. This reads the hook as pydantic reads it, on
-    the object, and judges the owner. A hook from pydantic is a known form.
+    the object, and judges the owner. A hook from pydantic is a known form, and a
+    library type in `INTERNAL_CODEC_TYPES` keeps its own.
     """
+    if isinstance(item, type) and item in INTERNAL_CODEC_TYPES:
+        return
     hook = getattr(item, _SCHEMA_HOOK, None)
     if hook is None:
         return

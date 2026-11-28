@@ -71,7 +71,9 @@ use crate::core::lifecycle::{
     UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
-use crate::db::{CheckoutClass, ParameterType, StatementBound, Transience, TypedStatement};
+use crate::db::{
+    CheckoutClass, ParameterType, StatementBound, StatementFailure, Transience, TypedStatement,
+};
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::execution::{mark_task_finalizing, FinalizingMark};
 use crate::worker::finalize_batch::statement::complete_plain_successes;
@@ -109,13 +111,17 @@ pub enum CancelTaskError {
     /// The pools could not open, the client family check refused or could
     /// not read ([`BrokerError::PoolSettings`],
     /// [`BrokerError::ClientFamilyMismatch`], [`BrokerError::Statement`]):
-    /// nothing was sent. Or the statement failed
-    /// ([`BrokerError::Statement`]): it wrote nothing, or, for
-    /// `OutcomeUnknown`, it may have committed; a repeated cancel tells
-    /// which, because a committed cancel answers
-    /// [`CancelAnswer::NotCancellable`] with CANCELLED.
+    /// nothing was sent. Or the statement failed with `NotSent` or
+    /// `StatementRefused` ([`BrokerError::Statement`]): it wrote nothing.
+    /// The cancel changed nothing.
     #[error(transparent)]
     Broker(BrokerError),
+    /// The statement went to the server and its reply was lost
+    /// (`StatementFailure::OutcomeUnknown`): the cancel may have committed.
+    /// A repeated cancel tells which, because a committed cancel answers
+    /// [`CancelAnswer::NotCancellable`] with CANCELLED.
+    #[error(transparent)]
+    OutcomeUnknown(StatementFailure),
     /// The outcome row does not decode: stored data that does not parse,
     /// for example a history status that is not a task status. The function
     /// refused the task, so nothing changed; a repeat gives the same answer
@@ -472,7 +478,7 @@ impl PostgresBroker {
                 StatementBound::ConnectionTimeouts,
             )
             .await
-            .map_err(|failure| CancelTaskError::Broker(BrokerError::from(failure)))?;
+            .map_err(cancel_statement_failure)?;
         let [row] = rows.as_slice() else {
             panic!(
                 "horsies_cancel_task returned {} rows for task {task_id}; it returns one",
@@ -644,6 +650,21 @@ fn cancel_answer(task_id: Uuid, outcome: &TerminalizationOutcome) -> CancelAnswe
     }
 }
 
+/// The error of a failed cancel statement: a reply lost after the send is
+/// [`CancelTaskError::OutcomeUnknown`]; a statement that was not sent or that
+/// the server refused wrote nothing, and is [`CancelTaskError::Broker`]. Pure.
+fn cancel_statement_failure(failure: StatementFailure) -> CancelTaskError {
+    match failure {
+        unknown @ StatementFailure::OutcomeUnknown { .. } => {
+            CancelTaskError::OutcomeUnknown(unknown)
+        }
+        not_committed @ (StatementFailure::NotSent { .. }
+        | StatementFailure::StatementRefused { .. }) => {
+            CancelTaskError::Broker(BrokerError::from(not_committed))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -684,6 +705,38 @@ mod tests {
             .await
             .expect("a check with no queue sends nothing, so it cannot fail");
         assert_eq!(starts, QueueStarts::default());
+    }
+
+    /// A statement that was not sent wrote nothing.
+    #[test]
+    fn a_cancel_statement_that_was_not_sent_is_a_broker_error() {
+        let error = cancel_statement_failure(StatementFailure::NotSent {
+            statement: "cancel_task",
+            cause: crate::db::NotSentCause::TransactionAborted {
+                failed_statement: "earlier",
+            },
+        });
+        assert!(matches!(
+            error,
+            CancelTaskError::Broker(BrokerError::Statement(StatementFailure::NotSent { .. }))
+        ));
+    }
+
+    /// A reply lost after the send leaves the cancel's outcome unknown.
+    #[test]
+    fn a_cancel_statement_with_a_lost_reply_is_an_unknown_outcome() {
+        let error = cancel_statement_failure(StatementFailure::OutcomeUnknown {
+            statement: "cancel_task",
+            cause: crate::db::UnknownOutcomeCause::NoReplyWithinBound {
+                bound: std::time::Duration::from_secs(1),
+                grace: std::time::Duration::from_secs(1),
+                cancel: crate::db::CancelRequestOutcome::Sent,
+            },
+        });
+        assert!(matches!(
+            error,
+            CancelTaskError::OutcomeUnknown(StatementFailure::OutcomeUnknown { .. })
+        ));
     }
 
     #[test]

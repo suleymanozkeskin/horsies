@@ -39,10 +39,11 @@ use horsies_core::telemetry::declared::{
     warn_folded_names, DeclaredNames, Folded, FoldedNames, QueueName, ScheduleName,
 };
 use horsies_core::web::{
-    route_access as core_route_access, AccessGrant, AccessNeed, Actions, Bytes, EventFrames,
-    EventStreamItem, Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig,
-    MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts, RouteAccess, TraceLink,
-    TraceLinkRefusal, TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    refusal_by_policy, route_access as core_route_access, AccessGrant, AccessNeed, Actions, Bytes,
+    EventFrames, EventStreamItem, Method, MonitoringHandler as CoreHandler,
+    MonitoringHandlerConfig, MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts,
+    RouteAccess, TraceLink, TraceLinkRefusal, TraceLinkTemplate, Verdict, DEGRADED_FRAME,
+    MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use napi::bindgen_prelude::{Object, ToNapiValue, Uint8Array};
@@ -646,9 +647,10 @@ impl MonitoringHandler {
 
     /// Subscribe one event stream, after the user's policy allowed the view.
     /// A broker without a listener, a stopped listener, a handler whose
-    /// broker cannot be built (logged as one WARNING record), or a handler
-    /// that closed its events gives a stream whose first frame is the
-    /// degraded frame. Reads only.
+    /// broker cannot be built or that serves `MAX_OPEN_EVENT_STREAMS` open
+    /// streams (each logged as one WARNING record), or a handler that closed
+    /// its events gives a stream whose first frame is the degraded frame.
+    /// Reads only.
     #[napi(ts_return_type = "Promise<NativeEnvelope<MonitoringEventStream>>")]
     pub fn subscribe_events<'env>(&self, env: &'env Env) -> napi::Result<Object<'env>> {
         let state = Arc::clone(&self.state);
@@ -678,13 +680,18 @@ impl MonitoringHandler {
     }
 }
 
-/// `handle`: the core handler's response, or the answer of a broker that
-/// could not be built.
+/// `handle`: the 403 of a refused grant before the broker builds, else the
+/// core handler's response, or the answer of a broker that could not be
+/// built.
 async fn handle_operation(
     state: Arc<HandlerState>,
     request: RequestParts,
     grant: AccessGrant,
 ) -> MonitoringResponseRecord {
+    let need = core_route_access(state.config.actions, &request.method, &request.path).need;
+    if let Some(refusal) = refusal_by_policy(need, grant).await {
+        return ResponseFacts::of(refusal).into_record();
+    }
     let facts = match state.built().await {
         Ok(handler) => ResponseFacts::of(handler.handle(request, grant).await),
         Err(error) => ResponseFacts::broker_failed(&error),
@@ -699,7 +706,16 @@ async fn subscribe_operation(state: Arc<HandlerState>) -> MonitoringEventStream 
         return MonitoringEventStream::of_slot(FrameSlot::DegradedFrameNext);
     }
     let frames = match state.built().await {
-        Ok(handler) => handler.subscribe_events().await,
+        Ok(handler) => match handler.try_subscribe_events().await {
+            Ok(frames) => frames,
+            Err(refused) => {
+                tracing::warn!(
+                    target: "horsies.web",
+                    "the event stream is refused and answers the degraded frame: {refused}"
+                );
+                return MonitoringEventStream::of_slot(FrameSlot::DegradedFrameNext);
+            }
+        },
         Err(error) => {
             tracing::warn!(
                 target: "horsies.web",

@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['HorsiesErrorCode']
 
 
-class HorsiesErrorCode(str, Enum):
+class HorsiesErrorCode(StrEnum):
     """Error codes for startup/validation errors.
 
     Organized by category:

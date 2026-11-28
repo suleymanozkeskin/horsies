@@ -262,7 +262,7 @@ mod tests {
         );
     }
 
-    /// 37 members, `RetrievalCode.ASYNC_CONTEXT` included: the blocking-form
+    /// 38 members, `RetrievalCode.ASYNC_CONTEXT` included: the blocking-form
     /// mark does not remove a built-in code.
     #[test]
     fn the_model_s_built_in_code_values_hold_every_member() {
@@ -272,7 +272,7 @@ mod tests {
             .iter()
             .map(|catalog| catalog.members.len())
             .sum();
-        assert_eq!(members, 37);
+        assert_eq!(members, 38);
         assert_eq!(text.lines().count(), members + 3);
         assert!(text.contains(" \"ASYNC_CONTEXT\", "));
         assert!(text.contains("\n  RetrievalCode.ASYNC_CONTEXT,\n"));

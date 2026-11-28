@@ -94,7 +94,7 @@ Each method returns `Result<TaskNode<T, I>, HorsiesError>`. The text of `input_j
 `.arg_from(field, source)` gives the outcome of `source` to a parameter of type `TaskOutcome<S, E>`, and the node waits for `source`.
 
 - `S` is the output type of `source`. A source of another output type is a compile error.
-- `E` reads the custom codes of the source's task. `horsies::CustomCode` reads any custom code as checked text. A stored custom code that `E` does not name fails the input decode of the run with `WORKER_SERIALIZATION_ERROR`.
+- `E` reads the custom codes of the source's task. `horsies::CustomCode` reads any custom code as checked text. A stored custom code that `E` does not name fails the input decode of the run with `WORKER_SERIALIZATION_ERROR`. The same failure follows a stored custom code that the source's task does not declare, when the task declares codes, whatever `E` is; a source task that declares no code reads any code.
 - `arg_from` refuses nothing when it is called. `build` checks the node.
 
 What the parameter gets:

@@ -161,7 +161,7 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 
       // SAFETY: the reader decodes with the node's contract: its output type and its codes are the node's types.
       return (
-        target === undefined ? err(resultNotReady()) : targetOutcome(facts, nodeId, target)
+        target === undefined ? err(nodeNotFound()) : targetOutcome(facts, nodeId, target)
       ) as never;
     },
   });
@@ -290,7 +290,17 @@ function notListedError(workflowName: string): WorkflowReadError {
   return Object.freeze({ kind: "noTypeAvailable", code: ContractCode.NO_TYPE_AVAILABLE, workflowName });
 }
 
-/** `RESULT_NOT_READY`: the node stores no result yet, or the workflow has no node of the id. Pure. */
+/** `WORKFLOW_NOT_FOUND`: no workflow has the id. Pure. */
+function workflowNotFoundRead(): WorkflowReadError {
+  return Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND });
+}
+
+/** `NODE_NOT_FOUND`: the workflow has no node of the id. Pure. */
+function nodeNotFound(): WorkflowReadError {
+  return Object.freeze({ kind: "nodeNotFound", code: RetrievalCode.NODE_NOT_FOUND });
+}
+
+/** `RESULT_NOT_READY`: the node exists and stores no result yet. Pure. */
 function resultNotReady(): WorkflowReadError {
   return Object.freeze({ kind: "resultNotReady", code: RetrievalCode.RESULT_NOT_READY });
 }
@@ -310,7 +320,7 @@ export function endOutcome(workflowId: string, read: WorkflowWaitRead, reading: 
     case "timedOut":
       return err(Object.freeze({ kind: "waitTimeout", code: RetrievalCode.WAIT_TIMEOUT }));
     case "notFound":
-      return err(Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND }));
+      return err(workflowNotFoundRead());
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
     default:
@@ -462,8 +472,12 @@ async function nodeOutcome(facts: HandleFacts, nodeId: string, form: ReadForm): 
   const read = await facts.core.nodeResult(facts.workflowId, nodeId);
 
   switch (read.kind) {
-    case "notReady":
+    case "notStored":
       return err(resultNotReady());
+    case "nodeAbsent":
+      return err(nodeNotFound());
+    case "workflowAbsent":
+      return err(workflowNotFoundRead());
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
     case "seatRelayFull":
