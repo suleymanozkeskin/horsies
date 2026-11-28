@@ -6,15 +6,23 @@
 //   that ends before `ready`, or an isolate that does not start fails the boot. The boot is one start hook of the
 //   child, so the core bounds it (10 s) and ends the child with 173 when it fails.
 // - A run (the core's `runBody` post of a seat thread) goes to a free isolate: the pool clears the seat's cancel cell
-//   and posts `run`. The `result` settles the run, then `bodyEnded` gives the isolate the verdict (from the cancel cause
-//   that the run got, and from its outcome) and the time of the settle, and the seat is free again. The core takes at
-//   most `seats` runs at once and a seat thread ends only when its body returned, so a run finds a free isolate while
-//   no isolate ended.
+//   and posts `run`. The `result` settles the run. Then `bodyEnded` gives the isolate the verdict and the time of the
+//   settle, and the seat is free again:
+//   - A run with recorded body facts gets the core's end of its body: the core's `bodyEnded` post, which names the
+//     task id and the attempt. Until it comes, the seat is `settled` and takes no run. The core posts it before its
+//     seat thread takes the next run, so a seat whose run settled is free again before the core posts a run for it.
+//   - A run with no recorded facts gets the verdict at its settle, from the cancel cause that the run got and from its
+//     outcome (the core posts no `bodyEnded` for it).
+//   The core takes at most `seats` runs at once and a seat thread ends only when its body returned, so a run finds a
+//   free isolate while no isolate ended.
+// - The relay of each isolate takes its in-flight bound from the child's task-send pool (the start facts), so the
+//   operations of one isolate that wait for I/O at once are at most the connections of the pool that serves them.
 // - A cancel writes the cause into the cell of the run's seat, then posts `cancel`. A cancel of a run that is not on a
 //   seat and not waiting is left: the run ended and the cancel crossed it.
 // - An isolate that ends during a run: the run ends `WORKER_CRASHED` (`isolate-end.ts`), the seat body observer of the
 //   main thread gets the run's facts and times (`isolateEnded`: the isolate's own span never ends), and a new isolate
-//   takes the seat; it runs the providers before it takes a run. A run that comes while no isolate is free waits for that
+//   takes the seat. An isolate that ends while its seat is `settled` ran a run that the core ended already: that run
+//   gets no span, the core's `bodyEnded` for it is left, and a new isolate takes the seat; it runs the providers before it takes a run. A run that comes while no isolate is free waits for that
 //   isolate; the pool logs the length of each wait. A new isolate that fails its providers, ends before `ready`, does
 //   not start, or is not ready within the start-hook bound ends the child with 173.
 // - Once the pool ends the child, it is `ending`: the child ends after its exit flush, so a run or a cancel that the
@@ -41,6 +49,7 @@ import {
   parseSeatToMain,
   SEAT_PROTOCOL_VERSION,
   type SeatAnswer,
+  type RelayBounds,
   type SeatMarker,
   type SeatOutcome,
   type SeatRequest,
@@ -163,15 +172,22 @@ type RunCancel = { readonly kind: "notRequested" } | { readonly kind: "requested
 /** A run on a seat, with the cancel that it got. */
 type SeatRun = { readonly post: SeatRunPost; readonly cancel: RunCancel };
 
-/** The stage of a seat: its isolate boots, is free, runs a run; or the seat has no isolate (the child ends). */
-export type SeatStage = "booting" | "free" | "running" | "ended";
+/**
+ * The stage of a seat: its isolate boots, is free, runs a run, or holds a settled run whose end the core has not given;
+ * or the seat has no isolate (the child ends).
+ */
+export type SeatStage = "booting" | "free" | "running" | "settled" | "ended";
 
 /** The state of one seat. */
 type SeatState =
   | { readonly kind: "booting"; readonly isolate: StartedIsolate; readonly boot: Boot }
   | { readonly kind: "free"; readonly isolate: StartedIsolate }
   | { readonly kind: "running"; readonly isolate: StartedIsolate; readonly run: SeatRun; readonly startedAt: Temporal.Instant }
+  | { readonly kind: "settled"; readonly isolate: StartedIsolate; readonly post: SeatRunPost; readonly settledAt: Temporal.Instant }
   | { readonly kind: "ended" };
+
+/** The size of a pool, from the start facts of its child: the seats, and the connections of its task-send pool. */
+export type SeatPoolSize = { readonly seats: number; readonly taskSendPool: number };
 
 /** A run that waits for a free isolate, since `since` (the clock). */
 type WaitingRun = { readonly run: SeatRun; readonly since: number };
@@ -184,17 +200,18 @@ const NOT_REQUESTED: RunCancel = Object.freeze({ kind: "notRequested" });
 /** The pool and the end of its boot. */
 export type StartedPool = { readonly pool: SeatPool; readonly booted: Promise<void> };
 
-/** Start the pool of `seats` isolates. `booted` resolves when every isolate is ready, and rejects at a failed boot. */
-export function startSeatPool(seats: number, deps: SeatPoolDeps): StartedPool {
+/** Start the pool of `size.seats` isolates. `booted` resolves when every isolate is ready, and rejects at a failed boot. */
+export function startSeatPool(size: SeatPoolSize, deps: SeatPoolDeps): StartedPool {
   const boot = Promise.withResolvers<void>();
 
-  return { pool: new SeatPool(seats, deps, boot), booted: boot.promise };
+  return { pool: new SeatPool(size, deps, boot), booted: boot.promise };
 }
 
 /** The isolates of one child and the runs on them. */
 export class SeatPool {
   readonly #deps: SeatPoolDeps;
   readonly #bounds: SeatBounds;
+  readonly #relayBounds: RelayBounds;
   readonly #cells: Int32Array;
   readonly #seats: SeatState[];
   readonly #waiting: WaitingRun[] = [];
@@ -202,9 +219,12 @@ export class SeatPool {
   #booting: number;
   #stage: PoolStage = "serving";
 
-  constructor(seats: number, deps: SeatPoolDeps, boot: PromiseWithResolvers<void>) {
+  constructor(size: SeatPoolSize, deps: SeatPoolDeps, boot: PromiseWithResolvers<void>) {
+    const seats = size.seats;
+
     this.#deps = deps;
     this.#bounds = deps.bounds();
+    this.#relayBounds = Object.freeze({ opsInFlight: size.taskSendPool, opsWaiting: this.#bounds.opsWaiting });
     this.#cells = newCancelCells(seats);
     this.#boot = boot;
     this.#booting = seats;
@@ -257,6 +277,28 @@ export class SeatPool {
     }
   }
 
+  /**
+   * The core ended the body of the run of task `taskId`, attempt `attempt`, as `end`: the isolate of the seat that holds
+   * that settled run gets the verdict, and the seat is free again. An end of a run that no seat holds is left: the run
+   * had no recorded facts, or its isolate ended. Left while the child ends.
+   */
+  bodyEnded(taskId: string, attempt: number, end: BodyEnd): void {
+    if (this.#stage === "ending") {
+      return;
+    }
+
+    const seat = this.#seats.findIndex((state) => state.kind === "settled" && state.post.taskId === taskId && state.post.attempt === attempt);
+    const state = this.#seats[seat];
+
+    if (state === undefined || state.kind !== "settled") {
+      return;
+    }
+
+    this.#seats[seat] = { kind: "free", isolate: state.isolate };
+    this.#postVerdict(state.isolate, state.post.runKey, end, state.settledAt);
+    this.#nextWaiting(seat);
+  }
+
   /** The stage of each seat, in seat order. */
   stages(): readonly SeatStage[] {
     return this.#seats.map((state) => state.kind);
@@ -281,6 +323,7 @@ export class SeatPool {
       switch (state.kind) {
         case "free":
         case "running":
+        case "settled":
           return [state.isolate.flush()];
         case "booting":
         case "ended":
@@ -301,7 +344,7 @@ export class SeatPool {
       seatIndex: seat,
       protocol: SEAT_PROTOCOL_VERSION,
       cancelCells: this.#cells,
-      relayBounds: { opsInFlight: this.#bounds.opsInFlight, opsWaiting: this.#bounds.opsWaiting },
+      relayBounds: this.#relayBounds,
     };
 
     const started = this.#deps.start(marker, this.#events(seat, isolate));
@@ -464,16 +507,30 @@ export class SeatPool {
       throw poolDefect(`the seat isolate ${String(seat)} sent the result of the run ${String(runKey)}, which does not run there`);
     }
 
-    this.#seats[seat] = { kind: "free", isolate: state.isolate };
-    this.#deps.settle(runKey, state.run.post.taskName, outcome);
-    state.isolate.post({
-      kind: "bodyEnded",
-      protocol: SEAT_PROTOCOL_VERSION,
-      runKey,
-      end: verdictOf(state.run.cancel, outcome),
-      endedAtEpochNanoseconds: this.#deps.now().epochNanoseconds,
-    });
-    this.#nextWaiting(seat);
+    const post = state.run.post;
+    const settledAt = this.#deps.now();
+
+    this.#deps.settle(runKey, post.taskName, outcome);
+
+    switch (post.facts.kind) {
+      case "recorded":
+        this.#seats[seat] = { kind: "settled", isolate: state.isolate, post, settledAt };
+
+        return;
+      case "notRecorded":
+        this.#seats[seat] = { kind: "free", isolate: state.isolate };
+        this.#postVerdict(state.isolate, runKey, verdictOf(state.run.cancel, outcome), settledAt);
+        this.#nextWaiting(seat);
+
+        return;
+      default:
+        unreachable(post.facts, "SeatPool.onResult");
+    }
+  }
+
+  /** Give the isolate the verdict `end` of its run `runKey`, which settled at `settledAt`. */
+  #postVerdict(isolate: StartedIsolate, runKey: bigint, end: BodyEnd, settledAt: Temporal.Instant): void {
+    isolate.post({ kind: "bodyEnded", protocol: SEAT_PROTOCOL_VERSION, runKey, end, endedAtEpochNanoseconds: settledAt.epochNanoseconds });
   }
 
   #serve(isolate: StartedIsolate, requestId: number, request: SeatRequest): void {
@@ -508,6 +565,14 @@ export class SeatPool {
         return;
       case "free":
         this.#deps.writeLine(`horsies child: ${ended}; a new isolate takes the seat`);
+        this.#replace(seat);
+
+        return;
+      case "settled":
+        this.#deps.writeLine(
+          `horsies child: ${ended}, after the run of task ${state.post.taskName} (task ${state.post.taskId}, attempt ${String(state.post.attempt)}) settled; that run gets no span, and a new isolate takes the seat`,
+        );
+        this.#seats[seat] = { kind: "ended" };
         this.#replace(seat);
 
         return;

@@ -49,9 +49,9 @@ describe("the memory cap of a seat isolate", () => {
     const outcomes = new Map<bigint, SeatOutcome>();
     const ends: number[] = [];
 
-    const started = startSeatPool(1, {
+    const started = startSeatPool({ seats: 1, taskSendPool: 2 }, {
       start: workerIsolates(ENTRY, { maxOldGenerationSizeMb: SMALL_CAP_MB }),
-      bounds: () => ({ opsInFlight: 2, opsWaiting: 10_000, replacementBootBoundMs: 10_000 }),
+      bounds: () => ({ opsWaiting: 10_000, replacementBootBoundMs: 10_000 }),
       clock: () => performance.now(),
       now: () => Temporal.Now.instant(),
       timer: (milliseconds, callback) => {

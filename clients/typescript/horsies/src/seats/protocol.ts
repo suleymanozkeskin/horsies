@@ -52,8 +52,8 @@ export const SEAT_PROTOCOL_VERSION = 1;
 export type SeatProtocolVersion = typeof SEAT_PROTOCOL_VERSION;
 
 /**
- * The bounds of the relay of one isolate: the operations that wait for I/O of the main thread at once, and the
- * operations of each lane that wait in the isolate. Whole numbers from 1.
+ * The bounds of the relay of one isolate: the operations that wait for I/O of the main thread at once (the child's
+ * task-send pool), and the operations of each lane that wait in the isolate. Whole numbers from 1.
  */
 export type RelayBounds = { readonly opsInFlight: number; readonly opsWaiting: number };
 

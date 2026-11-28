@@ -1,7 +1,7 @@
 // Where a child runs its bodies, from its start facts (the child's own start hook, hook 0):
 //
-// - A `SHARED_THREAD` child runs them in its seat isolates: hook 0 boots the seat pool, and each run, cancel and
-//   operation of a seat goes through the pool. The main thread runs no body and no provider, so it sets no run mark:
+// - A `SHARED_THREAD` child runs them in its seat isolates: hook 0 boots the seat pool with the seats and the task-send
+//   pool of the start facts, and each run, cancel, end of a body and operation of a seat goes through the pool. The main thread runs no body and no provider, so it sets no run mark:
 //   the main-thread watch of the core names no culprit when this thread stalls.
 // - Every other kind runs them on the main thread: the child's own post dispatcher takes each post.
 //
@@ -42,7 +42,7 @@ export class SeatRouter {
 
     switch (facts.kind) {
       case "sharedThread": {
-        const started = startSeatPool(facts.seats, this.#deps);
+        const started = startSeatPool({ seats: facts.seats, taskSendPool: facts.taskSendPool }, this.#deps);
 
         this.#place = { kind: "seats", pool: started.pool };
 
@@ -114,6 +114,10 @@ function routeToSeats(pool: SeatPool, post: ChildPost): void {
       return;
     case "cancelRun":
       pool.cancel(post.runKey, post.cause);
+
+      return;
+    case "bodyEnded":
+      pool.bodyEnded(post.taskId, post.attempt, post.end);
 
       return;
     case "stopWork":

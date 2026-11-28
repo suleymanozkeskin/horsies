@@ -9,14 +9,15 @@
 //!   `runBody` post. The span that the core enters is
 //!   `tracing::Span::none()`: the attempt span is the JavaScript body
 //!   observer's.
-//! - `close` records nothing: the core gives it no run (the span of every
-//!   run is `Span::none()`), so the JavaScript side takes the core's end of a
-//!   run from the run's settle call and its `cancelRun` post. The core fires
-//!   a run's cancel signal when it decides `TimedOut` (the deadline won) or
-//!   `Cancelled` (an operator cancel), and the cancel watch posts
-//!   `cancelRun` with that cause; the body observer ends the attempt span of
-//!   a `SHARED_ASYNC` run there, so a body that never settles still gets its
-//!   span with the core's end.
+//! - At `close` the core names the run (`BodyRunKey`) and how it ended
+//!   (`BodyOutcome`). The recorder drops the facts of that run that no body
+//!   call took, and posts `bodyEnded` with the task id, the attempt and the
+//!   core's end. The JavaScript side ends the attempt span of that run with
+//!   the core's end, so a cancel that fires when the body returns ends the
+//!   span as the core ended the run. A `bodyEnded` post that Node-API
+//!   refuses is logged at ERROR: the span of that run does not end. A post
+//!   while the JavaScript environment closes is left: the span ends with
+//!   the environment.
 //! - The table holds at most [`RECORDED_FACTS_BOUND`] runs. A body call takes
 //!   its facts at its start, so the table holds only the runs whose bodies
 //!   start now; past the bound the oldest entry is dropped.
@@ -26,10 +27,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use horsies_core::frame_protocol::MAX_SEATS_PER_SHARED_ASYNC_CHILD;
 use horsies_core::{
-    BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans, Execution, FencingToken, RunWorkflow,
+    BodyCarrier, BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans, Execution, FencingToken,
+    RunWorkflow,
 };
 use napi_derive::napi;
 use uuid::Uuid;
+
+use crate::child::body::{ChildPost, PostRefused, RunPosts};
 
 /// The most runs whose facts wait for their body call: the most seats of a
 /// child.
@@ -186,19 +190,61 @@ impl BodyFactsRecord {
     }
 }
 
+/// How the core ended a body, for the body observer. `code` is the text of
+/// the stored error code.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BodyEndRecord {
+    /// The body returned a value.
+    Returned,
+    /// The body returned an error, or panicked.
+    Failed { code: String },
+    /// The deadline of the run came before the end of the body.
+    TimedOut,
+    /// An operator cancelled the task before the end of the body.
+    Cancelled,
+}
+
+impl BodyEndRecord {
+    /// The record of the core's end. Pure.
+    fn of(end: &BodyOutcome<'_>) -> Self {
+        match end {
+            BodyOutcome::Returned => Self::Returned,
+            BodyOutcome::Failed { error_code } => Self::Failed {
+                code: error_code.to_string(),
+            },
+            BodyOutcome::TimedOut => Self::TimedOut,
+            BodyOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// The run of one entry: its task id and its attempt.
 type RunOfFacts = (Uuid, u32);
+
+/// The run of `key`. Pure.
+fn run_of_key(key: BodyRunKey) -> RunOfFacts {
+    (key.task_id, key.attempt.get())
+}
 
 /// The recorder of the body facts of a child.
 pub struct BodyFactsRecorder {
     /// The facts in the order the core opened their runs.
     recorded: Mutex<VecDeque<(RunOfFacts, BodyFactsRecord)>>,
+    /// Where the `bodyEnded` posts go.
+    posts: Arc<dyn RunPosts>,
 }
 
 impl BodyFactsRecorder {
-    pub fn new() -> Self {
+    /// The recorder whose `bodyEnded` posts go to `posts`.
+    pub fn new(posts: Arc<dyn RunPosts>) -> Self {
         Self {
             recorded: Mutex::new(VecDeque::new()),
+            posts,
         }
     }
 
@@ -220,7 +266,11 @@ impl BodyFactsRecorder {
     /// The facts of the run of `token`, taken out of the table. A run that
     /// the core did not open has none: `notRecorded`.
     fn take(&self, token: FencingToken) -> BodyFactsRecord {
-        let run = (token.task_id(), token.value().get());
+        self.take_run((token.task_id(), token.value().get()))
+    }
+
+    /// The facts of `run`, taken out of the table, or `notRecorded`.
+    fn take_run(&self, run: RunOfFacts) -> BodyFactsRecord {
         let mut recorded = self.lock();
         match recorded.iter().position(|(kept, _facts)| *kept == run) {
             Some(index) => recorded
@@ -231,21 +281,35 @@ impl BodyFactsRecorder {
     }
 }
 
-impl Default for BodyFactsRecorder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl BodySpans for BodyFactsRecorder {
     fn open(&self, run: &BodyRun<'_>) -> tracing::Span {
         self.record((run.task_id, run.attempt.get()), BodyFactsRecord::of(run));
         tracing::Span::none()
     }
 
-    /// Nothing to record: the core's end of a run reaches JavaScript
-    /// through the run's settle call and its `cancelRun` post (module docs).
-    fn close(&self, _span: &tracing::Span, _end: &BodyOutcome<'_>) {}
+    /// Drop the facts of `run` that no body call took, and post the core's
+    /// end of `run` (module docs).
+    fn close(&self, run: BodyRunKey, _span: &tracing::Span, end: &BodyOutcome<'_>) {
+        let _facts_no_body_took = self.take_run(run_of_key(run));
+        let post = ChildPost::BodyEnded {
+            task_id: run.task_id.to_string(),
+            attempt: run.attempt.get(),
+            end: BodyEndRecord::of(end),
+        };
+        match self.posts.post_run(post) {
+            Ok(()) | Err(PostRefused::Closing) => {}
+            Err(refused @ (PostRefused::QueueFull | PostRefused::NodeApi { .. })) => {
+                tracing::error!(
+                    task_id = %run.task_id,
+                    attempt = run.attempt.get(),
+                    "the bodyEnded post of task {} attempt {} did not reach the JavaScript \
+                     thread: {refused}; the attempt span of that run does not end",
+                    run.task_id,
+                    run.attempt.get(),
+                );
+            }
+        }
+    }
 }
 
 /// What the bodies of a child do with the body facts.
@@ -255,11 +319,12 @@ pub enum BodyFacts {
 }
 
 impl BodyFacts {
-    /// The body facts of `mode`.
-    pub fn of(mode: BodyFactsMode) -> Self {
+    /// The body facts of `mode`; the `bodyEnded` posts of `Spans` go to
+    /// `posts`.
+    pub fn of(mode: BodyFactsMode, posts: Arc<dyn RunPosts>) -> Self {
         match mode {
             BodyFactsMode::NoScope => Self::NoScope,
-            BodyFactsMode::Spans => Self::Spans(Arc::new(BodyFactsRecorder::new())),
+            BodyFactsMode::Spans => Self::Spans(Arc::new(BodyFactsRecorder::new(posts))),
         }
     }
 
@@ -285,7 +350,49 @@ impl BodyFacts {
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::core::task::error::{OperationalCode, TaskErrorCode};
+    use horsies_core::events::AttemptNumber;
+
     use super::*;
+
+    /// The posts of a test: each post, or the refusal of every post.
+    struct RecordedPosts {
+        posts: Mutex<Vec<ChildPost>>,
+        refusal: Option<PostRefused>,
+    }
+
+    impl RunPosts for RecordedPosts {
+        fn post_run(&self, post: ChildPost) -> Result<(), PostRefused> {
+            match self.refusal {
+                Some(refused) => Err(refused),
+                None => {
+                    self.posts
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(post);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn recorded_posts(refusal: Option<PostRefused>) -> Arc<RecordedPosts> {
+        Arc::new(RecordedPosts {
+            posts: Mutex::new(Vec::new()),
+            refusal,
+        })
+    }
+
+    fn run_key(task_id: Uuid, attempt: u32) -> BodyRunKey {
+        BodyRunKey {
+            task_id,
+            attempt: AttemptNumber::try_from(attempt).expect("an attempt from 1"),
+        }
+    }
+
+    fn recorder_of(posts: &Arc<RecordedPosts>) -> BodyFactsRecorder {
+        BodyFactsRecorder::new(Arc::clone(posts) as Arc<dyn RunPosts>)
+    }
 
     fn facts(name: &str) -> BodyFactsRecord {
         BodyFactsRecord::Recorded {
@@ -302,7 +409,7 @@ mod tests {
 
     #[test]
     fn the_oldest_facts_go_at_the_bound() {
-        let recorder = BodyFactsRecorder::new();
+        let recorder = recorder_of(&recorded_posts(None));
         let first = (Uuid::new_v4(), 1);
         recorder.record(first, facts("first"));
         for _ in 1..RECORDED_FACTS_BOUND {
@@ -341,13 +448,102 @@ mod tests {
 
     #[test]
     fn no_scope_gives_the_core_no_scope_and_records_nothing() {
+        let posts = recorded_posts(None);
         assert!(matches!(
-            BodyFacts::of(BodyFactsMode::NoScope).scope(),
+            BodyFacts::of(
+                BodyFactsMode::NoScope,
+                Arc::clone(&posts) as Arc<dyn RunPosts>
+            )
+            .scope(),
             BodyScope::NoScope
         ));
         assert!(matches!(
-            BodyFacts::of(BodyFactsMode::Spans).scope(),
+            BodyFacts::of(
+                BodyFactsMode::Spans,
+                Arc::clone(&posts) as Arc<dyn RunPosts>
+            )
+            .scope(),
             BodyScope::Spans(_)
         ));
+    }
+
+    #[test]
+    fn a_close_posts_the_end_of_the_run_that_it_names() {
+        let posts = recorded_posts(None);
+        let recorder = recorder_of(&posts);
+        let task_id = Uuid::new_v4();
+        recorder.close(
+            run_key(task_id, 3),
+            &tracing::Span::none(),
+            &BodyOutcome::Cancelled,
+        );
+        assert_eq!(
+            *posts.posts.lock().unwrap_or_else(PoisonError::into_inner),
+            vec![ChildPost::BodyEnded {
+                task_id: task_id.to_string(),
+                attempt: 3,
+                end: BodyEndRecord::Cancelled,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_close_drops_the_facts_of_its_run_only() {
+        let posts = recorded_posts(None);
+        let recorder = recorder_of(&posts);
+        let task_id = Uuid::new_v4();
+        recorder.record((task_id, 1), facts("first attempt"));
+        recorder.record((task_id, 2), facts("second attempt"));
+        recorder.close(
+            run_key(task_id, 2),
+            &tracing::Span::none(),
+            &BodyOutcome::Returned,
+        );
+        assert_eq!(
+            recorder.take_run((task_id, 2)),
+            BodyFactsRecord::NotRecorded
+        );
+        assert_eq!(recorder.take_run((task_id, 1)), facts("first attempt"));
+    }
+
+    #[test]
+    fn each_end_of_the_core_has_its_record() {
+        let code = TaskErrorCode::from(OperationalCode::UnhandledException);
+        for (end, record) in [
+            (BodyOutcome::Returned, BodyEndRecord::Returned),
+            (
+                BodyOutcome::Failed { error_code: &code },
+                BodyEndRecord::Failed {
+                    code: "UNHANDLED_EXCEPTION".to_owned(),
+                },
+            ),
+            (BodyOutcome::TimedOut, BodyEndRecord::TimedOut),
+            (BodyOutcome::Cancelled, BodyEndRecord::Cancelled),
+        ] {
+            assert_eq!(BodyEndRecord::of(&end), record);
+        }
+    }
+
+    #[test]
+    fn a_refused_end_post_posts_nothing_and_the_close_returns() {
+        for refused in [
+            PostRefused::Closing,
+            PostRefused::QueueFull,
+            PostRefused::NodeApi {
+                status: napi::Status::GenericFailure,
+            },
+        ] {
+            let posts = recorded_posts(Some(refused));
+            recorder_of(&posts).close(
+                run_key(Uuid::new_v4(), 1),
+                &tracing::Span::none(),
+                &BodyOutcome::Returned,
+            );
+            assert!(posts
+                .posts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty());
+        }
     }
 }

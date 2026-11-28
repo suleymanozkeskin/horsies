@@ -13,7 +13,7 @@ import { type IsolatePort, SeatChannel } from "../../../horsies/src/seats/channe
 import type { BodyEnd } from "../../../horsies/src/child/body-observer.ts";
 import type { SeatBounds } from "../../../horsies/src/native/seats/addon.ts";
 import type { SeatIsolateDeps } from "../../../horsies/src/seats/isolate.ts";
-import type { SeatHost } from "../../../horsies/src/seats/pool.ts";
+import type { SeatHost, SeatPoolSize } from "../../../horsies/src/seats/pool.ts";
 import {
   type MainToSeat,
   type RelayBounds,
@@ -140,7 +140,12 @@ export function unusedSeatHost(): SeatHost {
 export const TEST_RELAY_BOUNDS: RelayBounds = Object.freeze({ opsInFlight: 2, opsWaiting: 3 });
 
 /** The seat bounds of the tests. */
-export const TEST_SEAT_BOUNDS: SeatBounds = Object.freeze({ ...TEST_RELAY_BOUNDS, replacementBootBoundMs: 10_000 });
+export const TEST_SEAT_BOUNDS: SeatBounds = Object.freeze({ opsWaiting: TEST_RELAY_BOUNDS.opsWaiting, replacementBootBoundMs: 10_000 });
+
+/** The size of a test pool of `seats` seats: its task-send pool is the in-flight bound of `TEST_RELAY_BOUNDS`. */
+export function testPoolSize(seats: number): SeatPoolSize {
+  return { seats, taskSendPool: TEST_RELAY_BOUNDS.opsInFlight };
+}
 
 /** The main thread's time of each settle in the tests. */
 export const ENDED_AT: Temporal.Instant = Temporal.Instant.from("2026-11-26T10:00:00Z");

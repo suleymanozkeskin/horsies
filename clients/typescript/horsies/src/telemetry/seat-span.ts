@@ -4,10 +4,11 @@
 //
 // - The SDK is the isolate's own: each isolate has its own globals, and the app entry that it evaluates sets them, so
 //   an SDK set at the top of the entry (or in a provider, which runs in each isolate) reaches it.
-// - The facts come in the `run` message. The end comes in the `bodyEnded` message: the main thread's verdict and the
-//   main thread's time of the settle (`endedAt`), which is the end time of the span. The start time is this isolate's
+// - The facts come in the `run` message. The end comes in the `bodyEnded` message: the verdict (the core's end of the
+//   body, which the main thread passes on) and the main thread's time of the settle (`endedAt`), which is the end time
+//   of the span. The start time is this isolate's
 //   wall clock at the open, so the start and the end come from one clock (the system clock of the child).
-// - The run's cancel signal ends nothing: a seat run ends at its settle, with the verdict of its cancel cause. A sync
+// - The run's cancel signal ends nothing: a seat run ends with the core's end of its body, at the time of its settle. A sync
 //   body that holds its isolate past its deadline ends its span at that settle, not at the deadline.
 // - A run whose isolate ends has its span made by the main thread of the child (`isolateEnded`): the span that the
 //   isolate opened is never exported. Same name, kind, parent and attributes, with `horsies.span.source` = `worker`

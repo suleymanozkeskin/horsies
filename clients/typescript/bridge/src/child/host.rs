@@ -44,7 +44,9 @@ use napi_derive::napi;
 use crate::call::guard::sync_call;
 use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody};
+use crate::child::body::{
+    ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody, RunPosts,
+};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
 use crate::child::exit::{child_process_exit, hold_socket, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
@@ -355,10 +357,8 @@ fn served_app(
                 cause: refused.cause,
             }
         })?;
-    let bodies = Arc::new(ChildBodies {
-        poster,
-        facts: BodyFacts::of(plan.body_facts),
-    });
+    let facts = BodyFacts::of(plan.body_facts, Arc::clone(&poster) as Arc<dyn RunPosts>);
+    let bodies = Arc::new(ChildBodies { poster, facts });
     let host_loop =
         make_host_loop().map_err(|_made| client_defect("a process serves as a child once"))?;
     let app = ChildApp {

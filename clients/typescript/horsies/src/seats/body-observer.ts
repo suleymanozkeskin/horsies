@@ -4,9 +4,10 @@
 //
 // Order of the calls for one body: `enter` with the facts of the run (from the `run` message); `run` with the body
 // call; `thrown` with a value that the body threw or rejected with, before the error mapping; `end` with the verdict of
-// the run and its time (`endedAt`), from the `bodyEnded` message of the main thread. The main thread gives the verdict
-// from the run's cancel cause (a deadline is `timedOut`, an operator cancel `cancelled`) and from its outcome, at its
-// settle; `endedAt` is the main thread's time of that settle. A sync body that runs past its deadline ends late in the
+// the run and its time (`endedAt`), from the `bodyEnded` message of the main thread. For a run with recorded facts the
+// verdict is the core's end of the body (the core's `bodyEnded` post); for a run with none, the main thread gives it
+// from the run's cancel cause (a deadline is `timedOut`, an operator cancel `cancelled`) and from its outcome.
+// `endedAt` is the main thread's time of the run's settle. A sync body that runs past its deadline ends late in the
 // isolate, and its observation ends at its settle.
 // `cancelled` comes when the `cancel` message of the run comes, before or after the other calls: the core then decided
 // the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the body does

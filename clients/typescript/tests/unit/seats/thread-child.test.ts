@@ -10,7 +10,7 @@ import { provideFor } from "../../../horsies/src/child/app-members.ts";
 import { type ChildModeDeps, runChildMode } from "../../../horsies/src/child/host.ts";
 import { LOOP_TURN_TICK_MS } from "../../../horsies/src/child/loop-marks.ts";
 import { thrownError } from "../../../horsies/src/native/call/envelope.ts";
-import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
+import type { BodyFactsRecord, ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { EnqueueRequest } from "../../../horsies/src/native/sends/addon.ts";
 import {
   type EndedSeatRun,
@@ -102,8 +102,8 @@ function threadDeps(native: FakeChildNative): ChildModeDeps & Recorded {
   };
 }
 
-function runBodyPost(runKey: bigint): ChildPost {
-  return { kind: "runBody", runKey, taskName: "crunch", inputJson: '{"n":1}', taskId: TASK_ID, attempt: 1, maxRetries: 0, facts: { kind: "notRecorded" } };
+function runBodyPost(runKey: bigint, facts: BodyFactsRecord = { kind: "notRecorded" }): ChildPost {
+  return { kind: "runBody", runKey, taskName: "crunch", inputJson: '{"n":1}', taskId: TASK_ID, attempt: 1, maxRetries: 0, facts };
 }
 
 /** A served thread child of `seats` seats whose hook 0 ran with every isolate ready. */
@@ -118,7 +118,7 @@ async function servedThreadChild(seats: number, observer: SeatBodyObserver = NO_
 
   void runChildMode(app, CHILD_ARGUMENTS, deps).catch(() => undefined);
   await settled();
-  native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats } });
+  native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats, taskSendPool: 2, recycleAbove: { kind: "off" } } });
 
   for (const isolate of deps.isolates) {
     isolate.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: isolate.marker.seatIndex });
@@ -141,17 +141,61 @@ describe("a SHARED_THREAD child", () => {
 
     void runChildMode(app, CHILD_ARGUMENTS, deps).catch(() => undefined);
     await settled();
-    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 2 } });
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 2, taskSendPool: 2, recycleAbove: { kind: "off" } } });
     await settled();
     assert.equal(deps.isolates.length, 2);
     assert.deepEqual(deps.settlements, []);
     deps.isolates[0]?.events.message({ kind: "ready", protocol: 1, seatIndex: 0 });
     deps.isolates[1]?.events.message({ kind: "ready", protocol: 1, seatIndex: 1 });
     await settled();
-    native.serves[0]?.hook(2n, { index: 1, facts: { kind: "sharedThread", seats: 2 } });
+    native.serves[0]?.hook(2n, { index: 1, facts: { kind: "sharedThread", seats: 2, taskSendPool: 2, recycleAbove: { kind: "off" } } });
     await settled();
     assert.deepEqual(deps.settlements, ["1 returned ended", "2 returned ended"]);
     assert.deepEqual(built, []);
+  });
+
+  test("the task-send pool of the start facts bounds the relay of each isolate; the core's end of a body reaches its seat", async () => {
+    const app = seatApp();
+
+    app.implement(crunch, ({ n }, { ok }) => ok(n));
+
+    const native = new FakeChildNative();
+    const deps = threadDeps(native);
+
+    void runChildMode(app, CHILD_ARGUMENTS, deps).catch(() => undefined);
+    await settled();
+    native.serves[0]?.hook(1n, {
+      index: 0,
+      facts: { kind: "sharedThread", seats: 1, taskSendPool: 5, recycleAbove: { kind: "atMb", mb: 1536 } },
+    });
+    assert.deepEqual(
+      deps.isolates.map((isolate) => isolate.marker.relayBounds.opsInFlight),
+      [5],
+    );
+    deps.isolates[0]?.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
+    await settled();
+
+    const facts = {
+      kind: "recorded",
+      taskId: TASK_ID,
+      taskName: "crunch",
+      queueName: "default",
+      attempt: 1,
+      workerId: "worker-1",
+      execution: "SHARED_THREAD",
+      workflow: { kind: "notInWorkflow" },
+      carrier: { kind: "noCarrier" },
+    } as const;
+
+    native.serves[0]?.post(runBodyPost(5n, facts));
+    deps.isolates[0]?.events.message({ kind: "result", protocol: SEAT_PROTOCOL_VERSION, runKey: 5n, outcome: { kind: "value", json: "1" } });
+    native.serves[0]?.post({ kind: "bodyEnded", taskId: TASK_ID, attempt: 1, end: { kind: "timedOut" } });
+    await settled();
+    assert.deepEqual(
+      deps.isolates[0]?.posts.flatMap((post) => (post.kind === "bodyEnded" ? [post.end] : [])),
+      [{ kind: "timedOut" }],
+    );
+    assert.deepEqual(deps.defects, []);
   });
 
   test("a provider failure in an isolate is the failure of hook 0: the core ends the child with 173", async () => {
@@ -160,7 +204,7 @@ describe("a SHARED_THREAD child", () => {
 
     void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
     await settled();
-    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1 } });
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1, taskSendPool: 2, recycleAbove: { kind: "off" } } });
     deps.isolates[0]?.events.message({ kind: "bootFailed", protocol: 1, seatIndex: 0, hookName: "provide #1 openPool", cause: "Error: refused" });
     await settled();
     assert.deepEqual(deps.settlements, ["1 threw the provider provide #1 openPool failed in the seat isolate 0: Error: refused"]);
@@ -264,7 +308,7 @@ describe("a SHARED_THREAD child", () => {
 
     void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
     await settled();
-    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 2 } });
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 2, taskSendPool: 2, recycleAbove: { kind: "off" } } });
 
     for (const isolate of deps.isolates) {
       isolate.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: isolate.marker.seatIndex });
@@ -298,7 +342,7 @@ describe("a SHARED_THREAD child", () => {
 
     void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
     await settled();
-    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1 } });
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1, taskSendPool: 2, recycleAbove: { kind: "off" } } });
     deps.isolates[0]?.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
     await settled();
     native.endServe(0);

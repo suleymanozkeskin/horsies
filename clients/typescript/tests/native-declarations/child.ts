@@ -4,6 +4,7 @@
 import type * as Generated from "../../bridge/index.js";
 import type {
   BodyCarrierRecord,
+  BodyEndRecord,
   BodyExecution,
   BodyFactsMode,
   BodyFactsRecord,
@@ -19,6 +20,7 @@ import type {
   ChildPost,
   ChildServeEnd,
   ChildTaskEntry,
+  MemoryLimitRecord,
   RunCancelStateRecord,
   SpawnEnd,
   SpawnRegistration,
@@ -49,6 +51,8 @@ export const carrierEntryMatches: Mutual<Generated.CarrierEntry, CarrierEntry> =
 export const carrierMatches: Mutual<Generated.BodyCarrierRecord, BodyCarrierRecord> = true;
 export const factsMatches: Mutual<Generated.BodyFactsRecord, BodyFactsRecord> = true;
 export const postMatches: Mutual<Generated.ChildPost, ChildPost> = true;
+export const bodyEndMatches: Mutual<Generated.BodyEndRecord, BodyEndRecord> = true;
+export const memoryLimitMatches: Mutual<Generated.MemoryLimitRecord, MemoryLimitRecord> = true;
 export const settleMatches: Mutual<Generated.BodySettle, BodySettle> = true;
 export const cancelStateRecordMatches: Mutual<Generated.RunCancelStateRecord, RunCancelStateRecord> = true;
 export const registrationMatches: Mutual<Generated.SpawnRegistration, SpawnRegistration> = true;

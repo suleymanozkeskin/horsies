@@ -8,8 +8,9 @@
 //   `--max-old-space-size` on the worker command sets for every child, or V8's own default. An isolate whose
 //   JavaScript heap reaches it ends alone with `ERR_WORKER_OUT_OF_MEMORY`, and the child lives. The cap holds for the
 //   JavaScript heap only: `ArrayBuffer` and `Buffer` memory is outside it, so a body that keeps buffers grows the whole
-//   child (Node has no cap of that memory per isolate). The start facts of a child give no memory value of the worker
-//   profile.
+//   child (Node has no cap of that memory per isolate). This is the rule for the cap of a seat isolate: the worker
+//   profile has no member for it. The bound of the whole child is `recycle.above` of the profile, as for the other
+//   execution classes: the worker replaces the child after a task once its resident memory reaches it.
 // - Each isolate has an `error` listener: an isolate that ends with an error must not throw on this thread. A message
 //   of an isolate that does not deserialize goes to the pool as a defect. A `Worker` that the runtime does not start
 //   (for example at a thread limit of the OS) is an isolate that did not start, not a throw.
