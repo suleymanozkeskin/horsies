@@ -1108,7 +1108,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         """
         app = _make_custom_app(('scraping', 30))
 
-        class Recur(WorkflowDefinition[Any]):
+        class Recur(WorkflowDefinition[NoWorkflowOutput]):
             name = 'recur_pv'
             definition_key = 'recur_pv.v1'
 
