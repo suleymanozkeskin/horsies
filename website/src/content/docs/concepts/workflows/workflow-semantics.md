@@ -508,7 +508,7 @@ If the node is also the parent's output node, the parent stores the same error, 
 
 **A child result that does not parse.** A COMPLETED child whose stored result is not a well-formed result envelope, or that stores no result, also makes a FAILED node. The node holds an error envelope with `RESULT_DESERIALIZATION_ERROR` that names the child and the cause, so each reader of the node, the parent's `get()` and the next level report that code. The stored text stays in the `result` column of the child workflow.
 
-An outputless workflow has no output node, so its terminal nodes are its output. In its `get()` map, the entry of a SKIPPED terminal node holds `WORKFLOW_OUTPUT_SKIPPED`, and `data` names that node.
+An outputless workflow has no output node. Its `get()` gives `Succeeded(NoWorkflowOutput())`. A SKIPPED node has no stored result: `nodes()` shows its status, and `results()` leaves it out.
 
 ## Best Practices
 

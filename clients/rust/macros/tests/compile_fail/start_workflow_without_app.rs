@@ -1,11 +1,11 @@
 // A workflow start names the app that it goes through: the crate has no
 // process-wide start of a definition.
-use horsies::{OutputlessResults, WorkflowDefinition};
+use horsies::{NoWorkflowOutput, WorkflowDefinition};
 
 struct Nightly;
 
 impl WorkflowDefinition for Nightly {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {

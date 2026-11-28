@@ -21,7 +21,6 @@ from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     SubWorkflowSummary,
-    WorkflowTerminalResults,
     WorkflowSpec,
     WorkflowContext,
     WorkflowMetadata,
@@ -2147,7 +2146,7 @@ class TestWorkflowDefinition:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        class SimpleWorkflow(WorkflowDefinition):
+        class SimpleWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'simple'
             definition_key = _definition_key('simple_workflow')
             fetch = TaskNode(function=fn_a, kwargs={'payload': 1})
@@ -2178,7 +2177,7 @@ class TestWorkflowDefinition:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        class NodeIdWorkflow(WorkflowDefinition):
+        class NodeIdWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'node_id_test'
             definition_key = _definition_key('node_id_workflow')
             fetch = TaskNode(function=fn_a)
@@ -2207,7 +2206,7 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class ExplicitIdWorkflow(WorkflowDefinition):
+        class ExplicitIdWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'explicit_id'
             definition_key = _definition_key('explicit_id_workflow')
             fetch = TaskNode(function=fn_a, node_id='my_custom_id')
@@ -2264,7 +2263,7 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class PauseWorkflow(WorkflowDefinition):
+        class PauseWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'pause_test'
             definition_key = _definition_key('pause_workflow')
             fetch = TaskNode(function=fn_a)
@@ -2292,7 +2291,7 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class NoNameWorkflow(WorkflowDefinition):
+        class NoNameWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             definition_key = _definition_key('no_name_workflow')
             # name not defined
             fetch = TaskNode(function=fn_a)
@@ -2316,7 +2315,7 @@ class TestWorkflowDefinition:
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
 
-        class EmptyWorkflow(WorkflowDefinition):
+        class EmptyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'empty'
             definition_key = _definition_key('empty_workflow')
             # No TaskNode attributes
@@ -2342,7 +2341,7 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class MissingTypeWorkflow(WorkflowDefinition):
+        class MissingTypeWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'missing_type'
             fetch = TaskNode(function=fn_a)
 
@@ -2367,7 +2366,7 @@ class TestWorkflowDefinition:
 
         fn_fetch = MockTaskWrapper(task_name='fetch')
 
-        class MultiFetchWorkflow(WorkflowDefinition):
+        class MultiFetchWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'multi_fetch'
             definition_key = _definition_key('multi_fetch_workflow')
             fetch_a = TaskNode(function=fn_fetch, kwargs={'url': 'url_a'})
@@ -2411,7 +2410,7 @@ class TestWorkflowDefinition:
             workflow_context_from=[fetch_node, parse_node],
         )
 
-        class CtxWorkflow(WorkflowDefinition):
+        class CtxWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'ctx_test'
             definition_key = _definition_key('ctx_workflow')
             fetch = fetch_node
@@ -2571,35 +2570,41 @@ class TestWorkflowOutputTypeMismatch:
         assert exc.value.help_text is not None
         assert 'NoWorkflowOutput' in exc.value.help_text
 
-    def test_any_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[Any] may omit config.output as a compatibility escape hatch."""
+    def test_any_output_type_is_refused_for_an_outputless_definition(self) -> None:
+        """WorkflowDefinition[Any] without config.output is refused."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
-        class NoOutputWorkflow(WorkflowDefinition[Any]):
+        class AnyOutputWorkflow(WorkflowDefinition[Any]):
             name = 'any_outputless_workflow'
             definition_key = _definition_key('any_outputless_workflow')
             task_a = TaskNode(function=fn_a)
 
-        spec = NoOutputWorkflow.build(app)
-        assert spec.output is None
+        with pytest.raises(WorkflowValidationError) as exc:
+            AnyOutputWorkflow.build(app)
 
-    def test_terminal_results_output_type_requires_explicit_output(self) -> None:
-        """WorkflowTerminalResults is top-level handle behavior, not a subworkflow output."""
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'Any' in exc.value.message
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
+
+    def test_no_generic_is_refused_for_an_outputless_definition(self) -> None:
+        """A subclass with no generic parameter and no config.output is refused."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
-        class NoOutputWorkflow(WorkflowDefinition[WorkflowTerminalResults]):
-            name = 'terminal_results_outputless_workflow'
-            definition_key = _definition_key('terminal_results_outputless_workflow')
+        class UndeclaredWorkflow(WorkflowDefinition):  # pyright: ignore[reportMissingTypeArgument]
+            name = 'undeclared_outputless_workflow'
+            definition_key = _definition_key('undeclared_outputless_workflow')
             task_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
-            NoOutputWorkflow.build(app)
+            UndeclaredWorkflow.build(app)
 
-        err = exc.value
-        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
-        assert 'config.output' in err.message
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'no generic parameter' in exc.value.message
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
 
     def test_subclass_compatible_output_accepted(self) -> None:
         """Subclass of declared type is compatible."""

@@ -23,6 +23,7 @@ from horsies.core.models.tasks import (
     TaskError,
 )
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     OnError,
     SubWorkflowNode,
     SubWorkflowSummary,
@@ -32,13 +33,13 @@ from horsies.core.models.workflow import (
     WorkflowHandle,
     WorkflowStatus,
     WorkflowNodeStatus,
-    WorkflowTerminalResults,
 )
 from horsies.core.types.result import Ok, Result, is_err, is_ok
 from tests.e2e.helpers.assertions import (
     assert_failed,
     assert_succeeded,
     failed_error,
+    node_outcomes_of,
     outcome_error,
     outcome_of,
     outcome_value,
@@ -580,7 +581,8 @@ async def test_outputless_success_policy_keeps_failed_subworkflow_result(
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, wait_ms=2000)
-        terminal_results = cast(WorkflowTerminalResults, succeeded_value(result))
+        assert succeeded_value(result) == NoWorkflowOutput()
+        terminal_results = await node_outcomes_of(handle)
 
         ok_result = terminal_results[wf_tasks.node_e2e_sub_outputless_ok.node_id]
         assert ok_result == Succeeded('required_ok')
@@ -1711,7 +1713,8 @@ async def test_subworkflow_recovery_outputless_recovery(
     ) == 'COMPLETED'
 
     result = await asyncio.to_thread(handle.get, wait_ms=2000)
-    terminal_results = cast(WorkflowTerminalResults, succeeded_value(result))
+    assert succeeded_value(result) == NoWorkflowOutput()
+    terminal_results = await node_outcomes_of(handle)
     assert terminal_results[wf_tasks.node_e2e_sub_outputless_ok.node_id] == Succeeded(
         'required_ok',
     )
@@ -2101,7 +2104,8 @@ async def test_subworkflow_deep_outputless_nested_failed_optional(
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, wait_ms=2000)
-        terminal_results = cast(WorkflowTerminalResults, succeeded_value(result))
+        assert succeeded_value(result) == NoWorkflowOutput()
+        terminal_results = await node_outcomes_of(handle)
         assert terminal_results[required.node_id or ''] == Succeeded('required_ok')
         nested_child_id = await _wait_for_subworkflow_id(
             broker, str(handle.workflow_id), nested_fail.node_id or '',
@@ -2203,7 +2207,8 @@ async def test_subworkflow_deep_mixed_paths(
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, wait_ms=2000)
-        terminal_results = cast(WorkflowTerminalResults, succeeded_value(result))
+        assert succeeded_value(result) == NoWorkflowOutput()
+        terminal_results = await node_outcomes_of(handle)
         assert terminal_results[ok_sub.node_id or ''] == Succeeded(11)
 
         report = terminal_results[allow_failed_sub.node_id or '']

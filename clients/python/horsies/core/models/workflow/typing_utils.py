@@ -335,25 +335,28 @@ def validate_workflow_generic_output_match(
     a TaskNode[str].
 
     Raises WorkflowValidationError (HRS-025) on mismatch.
-    Skips validation when either side is unresolvable or Any.
+    With no config.output, only WorkflowDefinition[NoWorkflowOutput] is
+    accepted: no generic parameter and Any are refused too. With a
+    config.output, validation is skipped when either side is unresolvable or
+    Any.
     """
     declared_ok = _resolve_workflow_def_ok_type(workflow_cls)
-    if declared_ok is None or declared_ok is Any:
-        # No generic parameter or explicitly Any — nothing to check
-        return
-
     if spec.output is None:
         if declared_ok is NoWorkflowOutput:
             return
+        declared_text = (
+            'no generic parameter'
+            if declared_ok is None
+            else f'WorkflowDefinition[{_format_type_name(declared_ok)}]'
+        )
         raise WorkflowValidationError(
             code=HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
-                f"workflow '{spec.name}' declares WorkflowDefinition"
-                f'[{_format_type_name(declared_ok)}] but has no '
+                f"workflow '{spec.name}' declares {declared_text} but has no "
                 'config.output'
             ),
             notes=[
-                f'declared generic: {_format_type_name(declared_ok)}',
+                f'declared generic: {declared_text}',
                 'actual output type: NoWorkflowOutput',
             ],
             help_text=(
@@ -362,6 +365,10 @@ def validate_workflow_generic_output_match(
                 'outputless orchestration workflow'
             ),
         )
+
+    if declared_ok is None or declared_ok is Any:
+        # No generic parameter or explicitly Any — nothing to check
+        return
 
     actual_ok = _resolve_source_node_ok_type(spec.output)
     if actual_ok is None or actual_ok is Any:

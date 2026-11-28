@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use horsies::{
-    HorsiesError, NodeKey, OnError, OutputlessResults, SubWorkflowParameters, SuccessCase,
+    HorsiesError, NoWorkflowOutput, NodeKey, OnError, SubWorkflowParameters, SuccessCase,
     SuccessPolicy, TaskNode, TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle,
     WorkflowSpecBuilder,
 };
@@ -341,7 +341,7 @@ async fn test_quorum_ctx_gating() {
             .workflow_context_from([c])
             .join_quorum(2),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     assert_eq!(statuses(&nodes), vec!["COMPLETED"; 4]);
     assert!(
@@ -374,7 +374,7 @@ async fn test_quorum_impossible_skips() {
             .waits_for(c)
             .join_quorum(3),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
         statuses(&nodes),
@@ -395,7 +395,7 @@ async fn test_join_any_all_deps_fail_skips() {
         &mut spec,
         step(&suite, "c").waits_for_all([a, b]).join_any(),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "FAILED", "SKIPPED"]);
 }
@@ -411,7 +411,7 @@ async fn test_pause_blocks_ready_transitions() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausable(&suite)).await;
     let workflow_id = handle.workflow_id();
     wait_for_pause_point(&client, workflow_id).await;
     assert!(handle.pause().await.expect("pause"), "the workflow paused");
@@ -434,7 +434,7 @@ async fn test_resume_continues_workflow() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausable(&suite)).await;
     let workflow_id = handle.workflow_id();
     wait_for_pause_point(&client, workflow_id).await;
     assert!(handle.pause().await.expect("pause"), "the workflow paused");
@@ -463,7 +463,7 @@ async fn test_pause_then_cancel() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausable(&suite)).await;
     wait_for_pause_point(&client, handle.workflow_id()).await;
     assert!(handle.pause().await.expect("pause"), "the workflow paused");
     handle.cancel().await.expect("cancel the workflow");
@@ -479,7 +479,7 @@ async fn test_pause_idempotent() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausable(&suite)).await;
     wait_for_pause_point(&client, handle.workflow_id()).await;
     assert!(handle.pause().await.expect("pause"), "the first pause");
     assert!(
@@ -495,7 +495,7 @@ async fn test_resume_on_running_noop() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausable(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausable(&suite)).await;
     rows::wait_for_workflow_status(&client, handle.workflow_id(), "RUNNING", WORKFLOW_WAIT).await;
     assert!(
         !handle.resume().await.expect("resume"),
@@ -510,7 +510,7 @@ async fn test_on_error_pause_stops_workflow() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausing_on_error(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausing_on_error(&suite)).await;
     rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
     let nodes = rows::workflow_nodes(&client, handle.workflow_id()).await;
     assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED", "PENDING"]);
@@ -525,7 +525,7 @@ async fn test_on_error_pause_resume_completes() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let handle = start::<OutputlessResults>(&suite, pausing_on_error(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, pausing_on_error(&suite)).await;
     rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
     assert!(
         handle.resume().await.expect("resume"),
@@ -577,7 +577,7 @@ async fn test_success_policy_satisfied() {
     let b = add(&mut spec, fail_with(&suite, "b", "OPTIONAL_FAIL"));
     let _policy =
         spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([a])]).optional([b]));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED"]);
 }
@@ -600,7 +600,7 @@ fn policy_not_met(suite: &Suite) -> WorkflowSpecBuilder {
 async fn test_success_policy_not_met() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let handle = start::<OutputlessResults>(&suite, policy_not_met(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, policy_not_met(&suite)).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["COMPLETED", "FAILED"]);
 }
@@ -612,7 +612,7 @@ async fn test_success_policy_not_met() {
 async fn test_success_policy_not_met_error_content() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let handle = start::<OutputlessResults>(&suite, policy_not_met(&suite)).await;
+    let handle = start::<NoWorkflowOutput>(&suite, policy_not_met(&suite)).await;
     let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(failed_code(&handle).await, "REQUIRED_FAIL");
 }
@@ -632,7 +632,7 @@ async fn test_success_policy_multiple_cases() {
         SuccessCase::new([a]),
         SuccessCase::new([b]),
     ]));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "COMPLETED"]);
 }
@@ -689,7 +689,7 @@ async fn test_recovery_recomputes_first_failed_error() {
     let mut spec = builder(&suite, "recovery_first_error");
     let _first = add(&mut spec, fail_with(&suite, "first", "FIRST_ERROR"));
     let _second = add(&mut spec, fail_with(&suite, "second", "SECOND_ERROR"));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let workflow_id = handle.workflow_id();
     let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
     let changed = client
@@ -749,7 +749,7 @@ async fn test_workflow_recovers_after_worker_crash() {
             .waits_for(e)
             .queue("recovery"),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let workflow_id = handle.workflow_id();
     rows::wait_for_node_status(&client, workflow_id, 1, "COMPLETED", WORKFLOW_WAIT).await;
     for task_index in [2, 3] {

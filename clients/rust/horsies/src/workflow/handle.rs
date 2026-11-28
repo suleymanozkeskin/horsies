@@ -34,12 +34,11 @@ use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::dependency::{NoWorkflowOutput, OutputlessResults};
+use super::dependency::NoWorkflowOutput;
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
 use crate::handle::{checked_wait, read_stored_result};
 use crate::process_state::refuse_in_a_fork;
-use crate::task::body::value_free_decode_text;
 use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownCustomCode, WaitLimitRefused};
 
 /// The marker key of the result of a workflow with no output node.
@@ -462,7 +461,7 @@ where
     /// (`WaitLimit::NoLimit` waits until it ends) (Python `get`).
     ///
     /// The inner value is the workflow's outcome: its output read as `T`
-    /// (`OutputlessResults` for a workflow with no output node), or its
+    /// (`NoWorkflowOutput` for a workflow with no output node), or its
     /// error: the stored error of a FAILED, CANCELLED or EXPIRED workflow,
     /// the code of its status when it stored none, and `WORKFLOW_PAUSED` for
     /// a PAUSED workflow, which a resume can continue.
@@ -559,9 +558,6 @@ where
 enum ResultReading {
     /// The output node's type: the typed envelope.
     OutputNode,
-    /// `OutputlessResults`: the outcome of each node of a workflow with no
-    /// output node.
-    NodeOutcomes,
     /// `NoWorkflowOutput`: the value of a workflow with no output value. The
     /// stored envelope is typed (a sub-workflow node of an outputless child)
     /// or outputless (a workflow with no output node).
@@ -571,23 +567,17 @@ enum ResultReading {
 impl ResultReading {
     /// The reading of the type `T`.
     fn of<T: 'static>() -> Self {
-        let id = TypeId::of::<T>();
-        match (
-            id == TypeId::of::<OutputlessResults>(),
-            id == TypeId::of::<NoWorkflowOutput>(),
-        ) {
-            (true, _) => Self::NodeOutcomes,
-            (false, true) => Self::NoOutput,
-            (false, false) => Self::OutputNode,
+        match TypeId::of::<T>() == TypeId::of::<NoWorkflowOutput>() {
+            true => Self::NoOutput,
+            false => Self::OutputNode,
         }
     }
 }
 
 /// The outcome of a COMPLETED workflow's stored result. The outputless
 /// marker of the stored envelope and the handle's type must agree: a
-/// workflow with no output node is read as `OutputlessResults` or
-/// `NoWorkflowOutput`, any other as its output type (Python fails a mismatch
-/// closed). Pure.
+/// workflow with no output node is read as `NoWorkflowOutput`, any other as
+/// its output type (Python fails a mismatch closed). Pure.
 fn completed_outcome<T>(
     workflow_id: Uuid,
     text: &str,
@@ -610,19 +600,16 @@ where
         (false, _, ResultReading::OutputNode | ResultReading::NoOutput) => {
             envelope_outcome(workflow_id, text)
         }
-        (true, Some(envelope), ResultReading::NodeOutcomes) => {
-            outputless_outcome(workflow_id, &envelope)
-        }
         (true, Some(envelope), ResultReading::NoOutput) => {
             no_output_outcome(workflow_id, &envelope)
         }
         (true, None, _) => unreachable!("an outputless marker is a member of an object"),
-        (wire, _, reading) => Err(unreadable(format!(
-            "outputless/typed envelope mismatch: wire_outputless={wire}, \
-             handle_outputless={}; the workflow definition changed between the start and \
-             the read, or the handle has another output type",
-            matches!(reading, ResultReading::NodeOutcomes)
-        ))),
+        (true, Some(_), ResultReading::OutputNode) => Err(unreadable(
+            "outputless/typed envelope mismatch: wire_outputless=true, \
+             handle_outputless=false; the workflow definition changed between the start and \
+             the read, or the handle has another output type"
+                .to_owned(),
+        )),
     }
 }
 
@@ -650,67 +637,10 @@ where
     }
 }
 
-/// The outcome of the outputless envelope of a COMPLETED workflow: its
-/// error, or the outcome of each node in its `results_by_id` (Python's
-/// handle). `results_by_id`, `task_name_by_id` and `definition_key_by_id`
-/// are objects when present; a missing one is empty. A node entry that is
-/// `null`, has no task name, or does not read is a
-/// `RESULT_DESERIALIZATION_ERROR` outcome with the node in its message and
-/// in `data.node_id`; the other entries stay readable. The envelope is read
-/// as the texts of its members, so each value keeps its stored text. Pure.
-fn outputless_outcome<T>(
-    workflow_id: Uuid,
-    envelope: &[(String, &RawValue)],
-) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
-where
-    T: 'static,
-{
-    let unreadable =
-        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
-    if member(envelope, "__h_task_result__").map(RawValue::get) != Some("true") {
-        return Err(unreadable(format!(
-            "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
-        )));
-    }
-    if let Some(error) = member(envelope, "err").filter(|slot| slot.get() != "null") {
-        return stored_error(workflow_id, error.get()).map(TaskOutcome::Failed);
-    }
-    let Some(ok) = member(envelope, "ok").and_then(|slot| object_members(slot.get()).ok()) else {
-        return Err(unreadable(
-            "Outputless workflow envelope ok slot malformed".to_owned(),
-        ));
-    };
-    let maps = (
-        map_members(&ok, "results_by_id"),
-        map_members(&ok, "task_name_by_id"),
-        map_members(&ok, "definition_key_by_id"),
-    );
-    let (Some(entries), Some(task_names), Some(_definition_keys)) = maps else {
-        return Err(unreadable(
-            "Outputless workflow envelope missing or malformed results_by_id / \
-             task_name_by_id / definition_key_by_id"
-                .to_owned(),
-        ));
-    };
-    let by_node_id = entries
-        .into_iter()
-        .map(|(node_id, entry)| {
-            let named =
-                member(&task_names, &node_id).is_some_and(|name| name.get().starts_with('"'));
-            let outcome = outputless_entry(workflow_id, &node_id, entry, named);
-            (node_id, outcome)
-        })
-        .collect();
-    let results: Box<dyn Any> = Box::new(OutputlessResults::new(by_node_id));
-    match results.downcast::<T>() {
-        Ok(results) => Ok(TaskOutcome::Succeeded(*results)),
-        Err(_) => unreachable!("the caller reads an outputless result only as OutputlessResults"),
-    }
-}
-
 /// The outcome of the outputless envelope of a COMPLETED workflow, read as
 /// `NoWorkflowOutput`: its error, or the value that says the workflow has no
-/// output value. The terminal results are not read. Pure.
+/// output value. The per-node map of the envelope is not read: `results()`,
+/// `nodes()` and `result_for()` read the nodes. Pure.
 fn no_output_outcome<T>(
     workflow_id: Uuid,
     envelope: &[(String, &RawValue)],
@@ -743,44 +673,6 @@ fn member<'a>(members: &[(String, &'a RawValue)], key: &str) -> Option<&'a RawVa
         .iter()
         .find(|(name, _value)| name.as_str() == key)
         .map(|(_name, value)| *value)
-}
-
-/// The members of the object member `key` of `members`: empty when the
-/// member is missing, `None` when it is not an object. Pure.
-fn map_members<'a>(
-    members: &[(String, &'a RawValue)],
-    key: &str,
-) -> Option<Vec<(String, &'a RawValue)>> {
-    match member(members, key) {
-        None => Some(Vec::new()),
-        Some(map) => object_members(map.get()).ok(),
-    }
-}
-
-/// The outcome of one entry of an outputless result; `named` tells whether
-/// `task_name_by_id` names its task. The value keeps its stored text. Pure.
-fn outputless_entry(
-    workflow_id: Uuid,
-    node_id: &str,
-    entry: &RawValue,
-    named: bool,
-) -> TaskOutcome<JsonText, CustomCode> {
-    let missing = |cause: String| {
-        TaskOutcome::Failed(
-            TaskError::built_in(
-                OperationalCode::ResultDeserializationError,
-                format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
-            )
-            .with_data(serde_json::json!({ "node_id": node_id })),
-        )
-    };
-    match (entry.get(), named) {
-        ("null", _) | (_, false) => missing("missing payload or task name".to_owned()),
-        (entry, true) => serde_json::from_str::<TaskOutcome<JsonText, CustomCode>>(entry)
-            .unwrap_or_else(|error| {
-                missing(format!("does not read: {}", value_free_decode_text(&error)))
-            }),
-    }
 }
 
 /// The stored error of a workflow, read with custom codes as text (Python

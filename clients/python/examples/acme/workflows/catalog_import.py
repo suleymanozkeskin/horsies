@@ -35,8 +35,8 @@ class CatalogImport(WorkflowDefinition[NoWorkflowOutput]):
     """Fan out a catalog import over many slow chunks.
 
     Declared `WorkflowDefinition[NoWorkflowOutput]` with no `config.output`: there is no
-    single result worth naming, and `handle.get()` returns the terminal results
-    of every chunk keyed by node id.
+    single result worth naming. `handle.get()` returns `NoWorkflowOutput()`, and
+    `handle.results()` returns the outcome of every chunk keyed by node id.
     """
 
     name = 'catalog_import'
@@ -53,9 +53,8 @@ class CatalogImport(WorkflowDefinition[NoWorkflowOutput]):
     ) -> WorkflowSpec[Any]:
         """Build a fresh spec with `chunks` independent nodes.
 
-        Returns `WorkflowSpec[Any]`: an outputless workflow's `handle.get()`
-        yields the terminal results of every node keyed by node id, not one
-        typed value, which is what `WorkflowDefinition[NoWorkflowOutput]` declares.
+        Returns `WorkflowSpec[Any]`: `build_with` of a definition declares no
+        narrower spec type.
         """
         nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = [
             TaskNode(

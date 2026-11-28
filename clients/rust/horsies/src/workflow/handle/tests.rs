@@ -154,66 +154,25 @@ fn outputless() -> serde_json::Value {
     })
 }
 
-#[test]
-fn an_outputless_result_reads_each_node() {
-    let outcome =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(outputless()))).unwrap();
-    let TaskOutcome::Succeeded(results) = outcome else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results.get("fetch"),
-        Some(&TaskOutcome::Succeeded(JsonText::parse("3").unwrap()))
-    );
-    assert_eq!(
-        code_text(results.get("lost").unwrap()),
-        "RESULT_DESERIALIZATION_ERROR"
-    );
-}
-
-/// Each value of an outputless result and of an untyped node result keeps
-/// its stored text: an integer outside the `i64` and `u64` range keeps every
-/// digit and decodes as `u128` or `i128`.
+/// The value of an untyped node result keeps its stored text: an integer
+/// outside the `i64` and `u64` range keeps every digit and decodes as `u128`.
 #[test]
 fn an_untyped_value_keeps_its_stored_text() {
     let wide = "340282366920938463463374607431768211455";
-    let below = "-9223372036854775809";
-    let stored = format!(
-        r#"{{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{{"results_by_id":{{"wide":{{"__h_task_result__":true,"ok":{wide},"err":null}},"below":{{"__h_task_result__":true,"ok":{below},"err":null}}}},"task_name_by_id":{{"wide":"wide","below":"below"}},"definition_key_by_id":{{}}}},"err":null}}"#
-    );
-    let outcome = completed_outcome::<OutputlessResults>(workflow(), &stored).unwrap();
-    let TaskOutcome::Succeeded(results) = outcome else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    let Some(TaskOutcome::Succeeded(value)) = results.get("wide") else {
-        panic!("the wide entry reads");
-    };
-    assert_eq!(value.get(), wide);
-    assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
-    let Some(TaskOutcome::Succeeded(value)) = results.get("below") else {
-        panic!("the below entry reads");
-    };
-    assert_eq!(value.decode::<i128>().unwrap(), i128::from(i64::MIN) - 1);
     let node = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
     let NodeResult::Outcome(TaskOutcome::Succeeded(value)) = node_result(&node) else {
         panic!("the node result reads");
     };
     assert_eq!(value.get(), wide);
+    assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
 }
 
-/// Python fails closed when the stored form and the handle's type disagree.
+/// Python fails closed when the stored form and the handle's type disagree:
+/// an outputless result is read as `NoWorkflowOutput` only.
 #[test]
-fn an_outputless_result_read_as_a_type_and_the_reverse_are_unreadable() {
+fn an_outputless_result_read_as_an_output_node_type_is_unreadable() {
     assert!(matches!(
         end_outcome::<u32>(workflow(), completed(Some(outputless()))),
-        Err(WorkflowReadError::ResultDeserializationError { .. })
-    ));
-    let typed = completed(Some(
-        json!({"__h_task_result__": true, "ok": 1, "err": null}),
-    ));
-    assert!(matches!(
-        end_outcome::<OutputlessResults>(workflow(), typed),
         Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
@@ -409,96 +368,6 @@ fn a_handle_error_maps_to_its_read_failure() {
         }),
         WorkflowReadError::AsyncContext { .. }
     ));
-}
-
-/// Python's handle: an outputless entry that is `null`, has no task name,
-/// or is not a result envelope is a `RESULT_DESERIALIZATION_ERROR` outcome
-/// with its node in `data.node_id`; the other entries stay readable.
-#[test]
-fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_node() {
-    let stored = json!({
-        "__h_task_result__": true,
-        "__h_outputless_terminals__": true,
-        "ok": {
-            "results_by_id": {
-                "a": {"__h_task_result__": true, "ok": 1, "err": null},
-                "b": null,
-                "c": {"not": "an envelope"},
-                "d": {"__h_task_result__": true, "ok": 2, "err": null},
-            },
-            "task_name_by_id": {"a": "t", "b": "t", "c": "t"},
-            "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null},
-        },
-        "err": null,
-    });
-    let TaskOutcome::Succeeded(results) =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(stored))).unwrap()
-    else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    let Some(TaskOutcome::Succeeded(value)) = results.get("a") else {
-        panic!("entry a reads as Succeeded");
-    };
-    assert_eq!(
-        value
-            .decode::<serde_json::Value>()
-            .expect("the stored value decodes"),
-        json!(1)
-    );
-    for node in ["b", "c", "d"] {
-        let Some(TaskOutcome::Failed(error)) = results.get(node) else {
-            panic!("entry {node} reads as Failed");
-        };
-        assert_eq!(
-            error.code().as_str(),
-            "RESULT_DESERIALIZATION_ERROR",
-            "{node}"
-        );
-        assert_eq!(
-            error
-                .data()
-                .map(|data| data.decode::<serde_json::Value>().unwrap()),
-            Some(json!({ "node_id": node })),
-            "{node}"
-        );
-    }
-}
-
-/// Python's handle refuses an outputless envelope whose `ok` slot is not an
-/// object, or whose `results_by_id`, `task_name_by_id` or
-/// `definition_key_by_id` is not an object; a missing map is empty.
-#[test]
-fn a_malformed_outputless_envelope_is_unreadable_and_a_missing_map_is_empty() {
-    let envelope = |ok: serde_json::Value| {
-        json!({
-            "__h_task_result__": true,
-            "__h_outputless_terminals__": true,
-            "ok": ok,
-            "err": null,
-        })
-    };
-    for ok in [
-        json!(5),
-        json!({"results_by_id": [1]}),
-        json!({"results_by_id": {}, "task_name_by_id": [1]}),
-        json!({"results_by_id": {}, "definition_key_by_id": "x"}),
-    ] {
-        let read =
-            end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(ok.clone()))));
-        assert!(
-            matches!(
-                read,
-                Err(WorkflowReadError::ResultDeserializationError { .. })
-            ),
-            "{ok}"
-        );
-    }
-    let TaskOutcome::Succeeded(results) =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(json!({}))))).unwrap()
-    else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    assert!(results.is_empty());
 }
 
 /// A stored result that is not JSON is unreadable.

@@ -1,8 +1,9 @@
-//! The catalog import: one node per chunk and no output node. Its result
-//! is the outcome of every chunk by node id (`OutputlessResults`).
+//! The catalog import: one node per chunk and no output node. It declares
+//! `NoWorkflowOutput`; `results()` of its handle gives the outcome of every
+//! chunk by node id.
 
 use horsies::{
-    HorsiesError, OutputlessResults, WorkflowDefinition, WorkflowDefinitionConfig,
+    HorsiesError, NoWorkflowOutput, WorkflowDefinition, WorkflowDefinitionConfig,
     WorkflowSpecBuilder,
 };
 
@@ -16,7 +17,7 @@ pub const IMPORT_ID: &str = "CHECK-IMPORT";
 pub struct CatalogImport;
 
 impl WorkflowDefinition for CatalogImport {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
