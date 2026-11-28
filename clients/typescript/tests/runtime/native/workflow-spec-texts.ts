@@ -33,6 +33,9 @@ export interface NodeTimeFacts {
   readonly timeoutMs: number | null | "absent";
 }
 
+/** The `cancel_grace_ms` of a `SHARED_ASYNC` node: the class requires it, and the checks of these tests are about the timeout. */
+const SHARED_ASYNC_GRACE_MS = 1000;
+
 /** The spec data text of one task node whose stored options hold the class and the timeout of `facts`. */
 export function taskNodeTimeText(facts: NodeTimeFacts): string {
   const options = {
@@ -40,7 +43,7 @@ export function taskNodeTimeText(facts: NodeTimeFacts): string {
     good_until: null,
     ...(facts.timeoutMs === "absent" ? {} : { timeout_ms: facts.timeoutMs }),
     execution: facts.execution,
-    cancel_grace_ms: null,
+    cancel_grace_ms: facts.execution === "SHARED_ASYNC" ? SHARED_ASYNC_GRACE_MS : null,
   };
 
   const node = {
