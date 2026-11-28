@@ -125,7 +125,11 @@ class MonitoringAuthorizationPolicy(Protocol):
 Built-ins: `AllowAll`, `ViewOnly`, `TrustedHeader(header_name, actions=Actions.ENABLED | Actions.DISABLED)`.
 Every `/api` route requires `can_view` (false → 403). Mutating routes also
 require `can_act` **and** the header `X-Horsies-Intent: action` (CSRF guard —
-not authentication). Implement the protocol to delegate to a host session/RBAC.
+not authentication). A refused caller gets the 403 before the database is
+touched, so the answer never shows a connect error. A read route refuses an unknown
+query parameter with 422 `extra_forbidden` (`loc` `["query", name]`, `ctx.known_keys`
+the known parameters); the table is on the docs page `monitoring/action-semantics`.
+Implement the protocol to delegate to a host session/RBAC.
 
 ## Schema Compatibility — the No-DDL Rule
 

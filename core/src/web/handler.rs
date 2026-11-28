@@ -27,7 +27,9 @@ use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
-use super::auth::{MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER};
+use super::auth::{
+    MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, NOT_AUTHORIZED,
+};
 use super::common::ApiError;
 use super::events::{EventBroadcaster, EventFrames, EventStreamsRefused};
 use super::fleet_metrics::WebFleetMetrics;
@@ -349,6 +351,45 @@ impl MonitoringHandler {
             Err(never) => match never {},
         };
         response_parts(response).await
+    }
+}
+
+/// The answer to a request that the user's policy refused: 403
+/// `Not authorized.`, the answer of the router's guards. `None` when the
+/// policy did not refuse the request.
+///
+/// `need` is the access of the request ([`route_access`]). A refused view
+/// refuses every request that asks it. A refused act refuses an action
+/// route ([`AccessNeed::ViewAndAct`]); `/api/meta`
+/// ([`AccessNeed::ViewReportAct`]) reports the act verdict and answers 200.
+///
+/// A host that builds its [`MonitoringHandler`] on demand (a broker that
+/// connects at the first request) calls it before the build: a refused
+/// caller gets this answer and learns nothing about the database. Pure: it
+/// reads no request body and no broker.
+pub async fn refusal_by_policy(need: AccessNeed, grant: AccessGrant) -> Option<ResponseParts> {
+    let refused = match (need, grant.view, grant.act) {
+        (AccessNeed::Public, _, _) => false,
+        (_, Verdict::Refused, _) => true,
+        (AccessNeed::ViewAndAct, _, Verdict::Refused) => true,
+        (
+            AccessNeed::View | AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+            Verdict::Allowed | Verdict::NotAsked,
+            Verdict::Allowed | Verdict::NotAsked | Verdict::Refused,
+        ) => false,
+    };
+    match refused {
+        false => None,
+        true => {
+            let refusal = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
+            let mut answer = response_parts(refusal.into_response()).await;
+            // The router's answer carries its length; so does this one.
+            answer.headers.push((
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from(answer.body.len()),
+            ));
+            Some(answer)
+        }
     }
 }
 

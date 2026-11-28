@@ -370,3 +370,34 @@ async fn a_handler_build_failure_answers_by_the_retry_rule_of_its_error() {
         "{body:?}"
     );
 }
+
+/// A caller that the policy refuses gets the 403 without a build of the
+/// core handler: its answer shows nothing of the broker.
+#[tokio::test]
+async fn a_refused_caller_does_not_build_the_handler() {
+    let mount = mount_of(&app(), MonitoringConfig::default(), trusted());
+    let response = serve(
+        State(Arc::clone(&mount)),
+        request(Method::GET, "/api/tasks"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(json(&body)["detail"], "Not authorized.");
+    assert!(mount.handler.get().is_none());
+}
+
+/// A caller that the policy allows reaches the build of the core handler.
+#[tokio::test]
+async fn an_allowed_caller_builds_the_handler() {
+    let mount = mount_of(&app(), MonitoringConfig::default(), AllowAll);
+    let response = serve(
+        State(Arc::clone(&mount)),
+        request(Method::GET, "/api/tasks/not-a-uuid"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(mount.handler.get().is_some());
+}
