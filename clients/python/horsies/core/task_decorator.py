@@ -871,13 +871,17 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
     def resend(
         self,
         error: TaskSendResendable,
-    ) -> TaskSendResult['TaskHandle[T, C]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']:
+        """Send the stored payload of a failed send again, with the same task id."""
+        ...
 
     @abstractmethod
     async def resend_async(
         self,
         error: TaskSendResendable,
-    ) -> TaskSendResult['TaskHandle[T, C]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']:
+        """Async variant of resend() for callers on an event loop."""
+        ...
 
     @abstractmethod
     def node(
@@ -1075,14 +1079,18 @@ class TaskFunctionWithOptions(Protocol[P, T, C]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T, C]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']:
+        """Send the task with the options of with_options(). Returns the send result."""
+        ...
 
     @abstractmethod
     async def send_async(
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T, C]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']:
+        """Async variant of send() with the same per-send options."""
+        ...
 
 
 # ---- Broker-to-TaskSendError mapping ----
