@@ -214,7 +214,7 @@ pub enum TaskSendError {
         retryable: bool,
         /// The exception of the failure.
         #[error_slot(cause)]
-        cause: EnqueueFailureCause,
+        cause: Box<EnqueueFailureCause>,
     },
     /// The task id exists with a different command or idempotency key. Nothing was written.
     ///
@@ -481,7 +481,7 @@ pub fn send_error_from_enqueue(
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
-            cause: EnqueueFailureCause::Check,
+            cause: Box::new(EnqueueFailureCause::Check),
         },
         BrokerError::PayloadMismatch { .. } => TaskSendError::PayloadMismatch {
             task_id,
@@ -522,7 +522,7 @@ pub fn send_error_from_enqueue(
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
-            cause: EnqueueFailureCause::of_error(error),
+            cause: Box::new(EnqueueFailureCause::of_error(error)),
         },
     }
 }
@@ -572,11 +572,11 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "connection refused".to_owned(),
             retryable: true,
-            cause: EnqueueFailureCause::Error {
+            cause: Box::new(EnqueueFailureCause::Error {
                 text: "connection refused".to_owned(),
                 retryable: true,
                 failure: FailureCause::Connection,
-            },
+            }),
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive input
@@ -1109,7 +1109,7 @@ mod tests {
                 payload: Box::new(payload.clone()),
                 message: "the write failed".to_owned(),
                 retryable: true,
-                cause: cause.clone(),
+                cause: Box::new(cause.clone()),
             };
             assert_eq!(
                 named_slots(&error),

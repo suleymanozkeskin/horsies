@@ -877,11 +877,11 @@ mod tests {
             payload: Box::new(payload),
             message: "connection refused".to_owned(),
             retryable: true,
-            cause: EnqueueFailureCause::Error {
+            cause: Box::new(EnqueueFailureCause::Error {
                 text: "connection refused".to_owned(),
                 retryable: true,
                 failure: FailureCause::Connection,
-            },
+            }),
         }
     }
 

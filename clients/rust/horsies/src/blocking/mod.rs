@@ -227,11 +227,11 @@ fn start_failed_send(
         payload: Box::new(payload),
         message: message.clone(),
         retryable: true,
-        cause: EnqueueFailureCause::Error {
+        cause: Box::new(EnqueueFailureCause::Error {
             text: message,
             retryable: true,
             failure: FailureCause::PreconditionFailed,
-        },
+        }),
     }
 }
 
