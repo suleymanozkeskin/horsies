@@ -49,7 +49,7 @@ use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
-use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ItemType, ValueType};
 use crate::telemetry::labels::DeclaredSource;
 use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};
@@ -78,7 +78,7 @@ macro_rules! bounded_count {
         pub struct $name(pub $inner);
 
         impl ManifestValue for $name {
-            const PYTHON: PythonValue = PythonValue::Int(IntBound {
+            const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
                 name: $bound,
                 min: <$inner>::SMALLEST.get() as u64,
                 max: <$inner>::LARGEST.get() as u64,
@@ -201,7 +201,7 @@ impl From<WorkerManifestVersion> for u32 {
 }
 
 impl ManifestValue for WorkerManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: WORKER_MANIFEST_VERSION as u64,
         max: WORKER_MANIFEST_VERSION as u64,
@@ -253,7 +253,7 @@ impl From<DrainTimeoutMs> for u64 {
 }
 
 impl ManifestValue for DrainTimeoutMs {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "DRAIN_TIMEOUT_MS",
         min: MIN_DRAIN_TIMEOUT_MS,
         max: MAX_DRAIN_TIMEOUT_MS,
@@ -335,7 +335,7 @@ impl From<HandlerNameText> for String {
 }
 
 impl ManifestValue for HandlerNameText {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// One event handler of the app.
@@ -409,7 +409,7 @@ impl From<HandlerList> for Vec<HandlerManifest> {
 }
 
 impl ManifestValue for HandlerList {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Named("HandlerManifest"));
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Named("HandlerManifest"));
 }
 
 /// The event handlers that the app registered.
@@ -487,7 +487,7 @@ pub struct TaskManifest {
 
 /// The declared codes of a task are a tuple of code texts in Python.
 impl ManifestValue for DeclaredErrorCodes {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Str);
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Str);
 }
 
 /// The connection settings of a worker. The pool of the worker process

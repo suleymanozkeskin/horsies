@@ -2,10 +2,10 @@
 //!
 //! Each catalog is a code enum with `#[derive(horsies_core_derive::CodeCatalog)]`.
 //! The derive records the members, their wire values and their docs.
-//! `horsies-codegen` reads [`CODE_CATALOGS`] and renders the Python enum
-//! classes, so a code is defined once, here in Rust.
+//! `horsies-codegen` reads [`CODE_CATALOGS`] and renders the enum types of
+//! each client, so a code is defined once, here in Rust.
 //!
-//! Adding a code enum to the Python package: derive `CodeCatalog` on it, add
+//! Adding a code enum to the clients: derive `CodeCatalog` on it, add
 //! it to [`CODE_CATALOGS`], and add a test below that pins its wire values
 //! to the enum's own text form. A lifecycle status also marks its terminal
 //! variants, and a test pins them to the enum's own terminal rule.
@@ -28,14 +28,15 @@ use crate::{
     WorkflowStatus,
 };
 
-/// The Python base class of a generated enum.
+/// What the value of a member of a catalog is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythonEnumBase {
-    /// `class X(StrEnum)`: members compare equal to their text, and `str()`
-    /// and `f"{member}"` give the text.
-    StrEnum,
-    /// `class X(Enum)`.
-    PlainEnum,
+pub enum EnumValues {
+    /// A member is equal to its text, and its text form is the text. A
+    /// client renders the type so that a member compares equal to its text.
+    EqualText,
+    /// A member is a distinct value that is not its text. The text of a
+    /// member is its wire value, and a client reads it by name.
+    Opaque,
 }
 
 /// The call forms of a client that give a code.
@@ -43,8 +44,8 @@ pub enum PythonEnumBase {
 pub enum CallForms {
     /// A call of any form can give the code.
     AnyForm,
-    /// Only a blocking call form gives the code: a sync call of the Python
-    /// client or a blocking call of the Rust client, on a thread that runs an
+    /// Only a blocking call form gives the code: a sync call of a Python
+    /// client or a blocking call of a Rust client, on a thread that runs an
     /// event loop or a tokio runtime. A client whose calls are all async never
     /// gives it. The variant sets `#[code_catalog(blocking_form_only)]`.
     BlockingFormOnly,
@@ -53,9 +54,9 @@ pub enum CallForms {
 /// One member of a catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogMember {
-    /// The Python member name: the variant name in SCREAMING_SNAKE_CASE.
+    /// The member name: the variant name in SCREAMING_SNAKE_CASE.
     pub name: &'static str,
-    /// The wire value: the Python member name, unless the variant sets
+    /// The wire value: the member name, unless the variant sets
     /// `#[code_catalog(value = "...")]`.
     pub value: &'static str,
     /// The member doc, from the variant's `///` lines.
@@ -68,15 +69,15 @@ pub struct CatalogMember {
 /// variants of its enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalStates {
-    /// The catalog is not a lifecycle: no member is terminal, and the Python
-    /// class has no `is_terminal`.
+    /// The catalog is not a lifecycle: no member is terminal, and the type
+    /// has no terminal test.
     NotALifecycle,
-    /// The catalog is a lifecycle status. The Python class gets the
-    /// `is_terminal` property and a module constant with these members.
+    /// The catalog is a lifecycle status. The type gets a terminal test
+    /// and a constant with these members.
     Lifecycle {
-        /// The Python name of the `frozenset` constant.
+        /// The name of the constant of the terminal members.
         constant: &'static str,
-        /// The Python member names of the terminal members, in declaration
+        /// The member names of the terminal members, in declaration
         /// order.
         members: &'static [&'static str],
     },
@@ -85,11 +86,13 @@ pub enum TerminalStates {
 /// One closed code catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeCatalog {
-    /// The module under `horsies._catalog` that holds the class.
-    pub python_module: &'static str,
-    pub python_class: &'static str,
-    pub python_base: PythonEnumBase,
-    /// The class doc, from the enum's `///` lines.
+    /// The module that holds the type.
+    pub module: &'static str,
+    /// The name of the type.
+    pub type_name: &'static str,
+    /// What the value of a member is.
+    pub values: EnumValues,
+    /// The type doc, from the enum's `///` lines.
     pub doc: &'static str,
     /// The members in declaration order.
     pub members: &'static [CatalogMember],
@@ -97,7 +100,7 @@ pub struct CodeCatalog {
 }
 
 impl CodeCatalog {
-    /// The member whose Python member name is `name`, or `None` when the
+    /// The member whose name is `name`, or `None` when the
     /// catalog has no such member. An error class names its `code` member
     /// this way (`ErrorSlot::CodeMember`). Pure.
     pub fn member_named(&self, name: &str) -> Option<&'static CatalogMember> {
@@ -115,7 +118,7 @@ pub trait CodeEnum: Sized + 'static {
     fn wire_value(&self) -> &'static str;
 }
 
-/// Every catalog that the Python package gets, in render order.
+/// Every catalog that the clients get, in render order.
 pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <DatabaseErrorCode as CodeEnum>::CATALOG,
     <TaskSendErrorCode as CodeEnum>::CATALOG,
@@ -152,7 +155,7 @@ mod tests {
             E::VARIANTS.len(),
             E::CATALOG.members.len(),
             "{}",
-            E::CATALOG.python_class
+            E::CATALOG.type_name
         );
         for (variant, member) in E::VARIANTS.iter().zip(E::CATALOG.members) {
             assert_eq!(variant.wire_value(), member.value);
@@ -160,7 +163,7 @@ mod tests {
                 text_form(variant),
                 member.value,
                 "{}",
-                E::CATALOG.python_class
+                E::CATALOG.type_name
             );
         }
     }
@@ -215,7 +218,7 @@ mod tests {
         // clients have no seat relay.
         assert_eq!(SeatRelayCode::SeatRelayFull.wire_value(), "SEAT_RELAY_FULL");
         assert_eq!(
-            <SeatRelayCode as CodeEnum>::CATALOG.python_module,
+            <SeatRelayCode as CodeEnum>::CATALOG.module,
             "task_send"
         );
     }
@@ -268,7 +271,7 @@ mod tests {
             .iter()
             .map(|member| member.value)
             .collect();
-        assert_eq!(core, python, "{}", E::CATALOG.python_class);
+        assert_eq!(core, python, "{}", E::CATALOG.type_name);
     }
 
     #[test]
@@ -474,7 +477,7 @@ mod tests {
         match catalog.terminal_states {
             TerminalStates::Lifecycle { constant, members } => (constant, members),
             TerminalStates::NotALifecycle => {
-                panic!("{} records no terminal members", catalog.python_class)
+                panic!("{} records no terminal members", catalog.type_name)
             }
         }
     }
@@ -489,7 +492,7 @@ mod tests {
             .map(|(_variant, member)| member.name)
             .collect();
         let (_constant, members) = lifecycle(E::CATALOG);
-        assert_eq!(members, rule.as_slice(), "{}", E::CATALOG.python_class);
+        assert_eq!(members, rule.as_slice(), "{}", E::CATALOG.type_name);
     }
 
     #[test]
@@ -522,7 +525,7 @@ mod tests {
                 TerminalStates::Lifecycle { .. } => true,
                 TerminalStates::NotALifecycle => false,
             })
-            .map(|catalog| catalog.python_class)
+            .map(|catalog| catalog.type_name)
             .collect();
         assert_eq!(
             lifecycles,
@@ -535,9 +538,9 @@ mod tests {
         let mut classes = HashSet::new();
         for catalog in CODE_CATALOGS {
             assert!(
-                classes.insert(catalog.python_class),
+                classes.insert(catalog.type_name),
                 "{}",
-                catalog.python_class
+                catalog.type_name
             );
             let mut names = HashSet::new();
             let mut values = HashSet::new();
@@ -545,13 +548,13 @@ mod tests {
                 assert!(
                     names.insert(member.name),
                     "{}.{}",
-                    catalog.python_class,
+                    catalog.type_name,
                     member.name
                 );
                 assert!(
                     values.insert(member.value),
                     "{}.{} = {}",
-                    catalog.python_class,
+                    catalog.type_name,
                     member.name,
                     member.value
                 );
@@ -571,11 +574,11 @@ mod tests {
         };
         for catalog in CODE_CATALOGS {
             assert!(
-                identifier(catalog.python_module),
+                identifier(catalog.module),
                 "{}",
-                catalog.python_module
+                catalog.module
             );
-            assert!(identifier(catalog.python_class), "{}", catalog.python_class);
+            assert!(identifier(catalog.type_name), "{}", catalog.type_name);
             for member in catalog.members {
                 assert!(identifier(member.name), "{}", member.name);
             }
@@ -596,11 +599,11 @@ mod tests {
                 let async_context = member.name == "ASYNC_CONTEXT";
                 match member.forms {
                     CallForms::BlockingFormOnly => {
-                        assert!(async_context, "{}.{}", catalog.python_class, member.name);
-                        marked.push(catalog.python_class);
+                        assert!(async_context, "{}.{}", catalog.type_name, member.name);
+                        marked.push(catalog.type_name);
                     }
                     CallForms::AnyForm => {
-                        assert!(!async_context, "{}.{}", catalog.python_class, member.name);
+                        assert!(!async_context, "{}.{}", catalog.type_name, member.name);
                     }
                 }
             }
@@ -625,13 +628,13 @@ mod tests {
             Some(ErrorSlot::CodeMember { member }) => vec![
                 codes
                     .member_named(member)
-                    .unwrap_or_else(|| panic!("{}: {member} is not a member", class.python_class))
+                    .unwrap_or_else(|| panic!("{}: {member} is not a member", class.type_name))
                     .forms,
             ],
             Some(ErrorSlot::CodeSubset { subset }) => code_subsets()
                 .into_iter()
                 .find(|known| known.name == *subset)
-                .unwrap_or_else(|| panic!("{}: {subset} is not a code subset", class.python_class))
+                .unwrap_or_else(|| panic!("{}: {subset} is not a code subset", class.type_name))
                 .members
                 .into_iter()
                 .map(|value| {
@@ -640,12 +643,12 @@ mod tests {
                         .iter()
                         .find(|member| member.value == value)
                         .unwrap_or_else(|| {
-                            panic!("{}: {value} is not a member", class.python_class)
+                            panic!("{}: {value} is not a member", class.type_name)
                         })
                         .forms
                 })
                 .collect(),
-            other => panic!("{} starts with {other:?}, not its code", class.python_class),
+            other => panic!("{} starts with {other:?}, not its code", class.type_name),
         }
     }
 
@@ -660,9 +663,9 @@ mod tests {
                         forms,
                         [CallForms::BlockingFormOnly],
                         "{}",
-                        class.python_class
+                        class.type_name
                     );
-                    marked.push(class.python_class);
+                    marked.push(class.type_name);
                 }
             }
         }

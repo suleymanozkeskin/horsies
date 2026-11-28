@@ -25,7 +25,7 @@ use crate::failure_cause::FailureCause;
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "broker", base = "str_enum")]
+#[code_catalog(module = "broker", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DatabaseErrorCode {
     SchemaInitFailed,
@@ -157,13 +157,13 @@ pub enum DatabaseOperationError {
         class = "DatabaseOperationFailed",
         code_field = "code",
         code_subset = "DatabaseOperationFailedCode",
-        exception = "BaseException"
+        cause = "required"
     )]
     OperationFailed {
         code: DatabaseOperationFailedCode,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
         /// What the operation met.
         #[error_slot(cause)]
@@ -178,12 +178,12 @@ pub enum DatabaseOperationError {
     #[error_class(
         class = "DatabaseEnqueueFailed",
         code = "EnqueueFailed",
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     EnqueueFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
         /// The broker error of the write, or the check that found the
         /// conflicting row gone.
@@ -199,7 +199,7 @@ pub enum DatabaseOperationError {
         never_retryable
     )]
     PayloadMismatch {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The idempotency key is reserved by another task with a different command.
@@ -215,9 +215,9 @@ pub enum DatabaseOperationError {
         never_retryable
     )]
     IdempotencyKeyConflict {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         owner_task_id: Uuid,
     },
     /// Stored JSON failed strict validation. The stored data is unchanged.
@@ -228,10 +228,10 @@ pub enum DatabaseOperationError {
         class = "DatabaseInvalidJsonPayload",
         code = "InvalidJsonPayload",
         never_retryable,
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     InvalidJsonPayload {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
         /// The error that refused the value, or the check of the core.
         #[error_slot(cause)]
@@ -246,10 +246,10 @@ pub enum DatabaseOperationError {
         class = "DatabaseInvalidTaskOptions",
         code = "InvalidTaskOptions",
         never_retryable,
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     InvalidTaskOptions {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
         /// The check of the core, the text that does not read as JSON, or
         /// the rule that refused the value.
@@ -265,10 +265,10 @@ pub enum DatabaseOperationError {
         class = "DatabaseInvalidInput",
         code = "InvalidInput",
         never_retryable,
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     InvalidInput {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
         /// The check of the core, the text that does not read as JSON, or
         /// the rule that refused the value.
@@ -281,7 +281,7 @@ pub enum DatabaseOperationError {
     /// ``*_async`` form.
     #[error_class(class = "DatabaseAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The broker has no listener, so the operation cannot run. Nothing ran.
@@ -294,7 +294,7 @@ pub enum DatabaseOperationError {
         never_retryable
     )]
     ListenerDisabled {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// A result wait was called in a process that runs task bodies. Nothing ran.
@@ -307,7 +307,7 @@ pub enum DatabaseOperationError {
         never_retryable
     )]
     WaitInsideTask {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
 }

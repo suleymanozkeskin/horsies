@@ -62,7 +62,7 @@ impl std::fmt::Display for HorsiesErrorCategory {
     Deserialize,
     horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "error_codes", base = "str_enum")]
+#[code_catalog(module = "error_codes", values = "equal_text")]
 pub enum HorsiesErrorCode {
     // Workflow validation (HRS-001-HRS-099)
     /// The workflow has no name.

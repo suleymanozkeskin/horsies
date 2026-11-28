@@ -91,8 +91,8 @@ pub fn catalog_error<'py, E: ErrorClassValues>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let class = catalog_class(
         py,
-        <E as ErrorEnum>::ERROR_CATALOG.python_module,
-        ErrorEnum::python_class(error),
+        <E as ErrorEnum>::ERROR_CATALOG.module,
+        ErrorEnum::type_name(error),
     )?;
     let fields = PyDict::new(py);
     for slot in error.slot_values() {
@@ -115,7 +115,7 @@ fn slot_object<'py>(
         SlotData::Uuid(id) => id.into_bound_py_any(py),
         SlotData::UuidText(id) => id.to_string().into_bound_py_any(py),
         SlotData::CodeMember { catalog, value } => {
-            catalog_class(py, catalog.python_module, catalog.python_class)?.call1((value,))
+            catalog_class(py, catalog.module, catalog.type_name)?.call1((value,))
         }
         SlotData::Exception(exception) => exception_object(py, subject, exception),
     }
@@ -129,8 +129,8 @@ fn slot_object<'py>(
 fn payload_object<'py>(py: Python<'py>, payload: &TaskSendPayload) -> PyResult<Bound<'py, PyAny>> {
     let class = catalog_class(
         py,
-        TASK_SEND_PAYLOAD.python_module,
-        TASK_SEND_PAYLOAD.python_class,
+        TASK_SEND_PAYLOAD.module,
+        TASK_SEND_PAYLOAD.type_name,
     )?;
     let fields = PyDict::new(py);
     for field in payload.record_values() {
@@ -172,7 +172,7 @@ fn exception_object<'py>(
             cause,
         } => FailureException::new(subject, text, retryable, cause).into_pyobject(py),
         ExceptionValue::Generated { class, text } => {
-            catalog_class(py, class.python_module, class.python_class)?.call1((text,))
+            catalog_class(py, class.module, class.type_name)?.call1((text,))
         }
         ExceptionValue::ClientClass { class, text } => client_class(py, class)?.call1((text,)),
         ExceptionValue::NoCause => catalog_class(py, NO_CAUSE_MODULE, NO_CAUSE_CLASS)?.call0(),

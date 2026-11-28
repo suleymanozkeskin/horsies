@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "task_send", base = "str_enum")]
+#[code_catalog(module = "task_send", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SeatRelayCode {
     /// The seat relay holds its bound of waiting calls; nothing was sent;

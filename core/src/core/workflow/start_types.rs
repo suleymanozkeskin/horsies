@@ -13,7 +13,7 @@ use crate::FailureCause;
 /// The members are Python's, in Python's order
 /// (`clients/python/horsies/core/workflows/start_types.py`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
-#[code_catalog(module = "workflow_start", base = "str_enum")]
+#[code_catalog(module = "workflow_start", values = "equal_text")]
 pub enum WorkflowStartErrorCode {
     /// Config error: no broker attached.
     BrokerNotConfigured,
@@ -75,14 +75,14 @@ pub enum WorkflowStartError {
         class = "WorkflowStartValidationFailed",
         code = "ValidationFailed",
         never_retryable,
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     ValidationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         workflow_name: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
         /// The error that refused the start, or a check.
         #[error_slot(cause)]
@@ -99,13 +99,13 @@ pub enum WorkflowStartError {
         never_retryable
     )]
     IdConflict {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         workflow_name: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         existing_workflow_name: String,
     },
     /// The workflow id holds a run that another start command started. Nothing was written.
@@ -123,11 +123,11 @@ pub enum WorkflowStartError {
         never_retryable
     )]
     CommandConflict {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         workflow_name: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
     },
     /// Schema initialization or the start transaction failed with a database or driver error.
@@ -140,16 +140,16 @@ pub enum WorkflowStartError {
     #[error_class(
         class = "WorkflowStartEnqueueFailed",
         code = "EnqueueFailed",
-        exception = "BaseException"
+        cause = "required"
     )]
     EnqueueFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         workflow_name: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
         /// The failed connect, schema install, client family check,
         /// statement or child build.
@@ -169,11 +169,11 @@ pub enum WorkflowStartError {
         never_retryable
     )]
     AsyncContext {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Str")]
+        #[error_slot(slot_type = "Str")]
         workflow_name: String,
-        #[error_slot(python = "UuidText")]
+        #[error_slot(slot_type = "UuidText")]
         workflow_id: Uuid,
     },
 }
@@ -647,12 +647,12 @@ mod tests {
     #[test]
     fn the_start_classes_have_python_s_slots_in_python_s_order() {
         let catalog = <WorkflowStartError as ErrorEnum>::ERROR_CATALOG;
-        assert_eq!(catalog.python_module, "workflow_start_errors");
+        assert_eq!(catalog.module, "workflow_start_errors");
         assert_eq!(catalog.union, "WorkflowStartCoreError");
         let names: Vec<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(
             names,
@@ -666,12 +666,12 @@ mod tests {
         );
         let field = |name: &'static str, repr: SlotRepr| ErrorSlot::Field {
             name,
-            python_type: SlotType::Str,
+            slot_type: SlotType::Str,
             repr,
         };
         let workflow_id = ErrorSlot::Field {
             name: "workflow_id",
-            python_type: SlotType::UuidText,
+            slot_type: SlotType::UuidText,
             repr: SlotRepr::Shown,
         };
         assert_eq!(
@@ -685,7 +685,7 @@ mod tests {
                 field("workflow_name", SlotRepr::Shown),
                 workflow_id,
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::ExceptionOrNoCause
+                    cause_type: ExceptionType::ExceptionOrNoCause
                 },
             ]
         );
@@ -723,13 +723,13 @@ mod tests {
                 field("message", SlotRepr::Hidden),
                 ErrorSlot::Field {
                     name: "retryable",
-                    python_type: SlotType::Bool,
+                    slot_type: SlotType::Bool,
                     repr: SlotRepr::Shown,
                 },
                 field("workflow_name", SlotRepr::Shown),
                 workflow_id,
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::Exception
+                    cause_type: ExceptionType::Exception
                 },
             ]
         );

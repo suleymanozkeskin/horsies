@@ -17,7 +17,7 @@ use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::history::identity::keys::IDEMPOTENCY_WINDOW_DEFAULT_MICROS;
 use crate::core::{mask_database_url, PostgresConfig};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 mod producer_builder;
 
@@ -87,7 +87,7 @@ impl From<ManifestVersion> for u32 {
 }
 
 impl ManifestValue for ManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: PRODUCER_MANIFEST_VERSION as u64,
         max: PRODUCER_MANIFEST_VERSION as u64,
@@ -157,7 +157,7 @@ impl DatabaseUrl {
 }
 
 impl ManifestValue for DatabaseUrl {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 impl std::fmt::Debug for DatabaseUrl {
@@ -201,7 +201,7 @@ impl From<PoolSize> for u32 {
 }
 
 impl ManifestValue for PoolSize {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "POOL_SIZE",
         min: 1,
         max: MAX_POOL_CONNECTIONS as u64,
@@ -239,7 +239,7 @@ impl From<PoolConnections> for u32 {
 }
 
 impl ManifestValue for PoolConnections {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "POOL_CONNECTIONS",
         min: 0,
         max: MAX_POOL_CONNECTIONS as u64,
@@ -286,7 +286,7 @@ impl PoolRecycle {
 }
 
 impl ManifestValue for WholeSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "WHOLE_SECONDS",
         min: 0,
         max: u32::MAX as u64,
@@ -379,7 +379,7 @@ impl From<ReservationWindowMicros> for u64 {
 }
 
 impl ManifestValue for ReservationWindowMicros {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "RESERVATION_WINDOW_MICROS",
         min: 1,
         max: MAX_RESERVATION_WINDOW_MICROS,

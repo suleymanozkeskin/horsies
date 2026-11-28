@@ -11,7 +11,7 @@ use crate::core::history::errors::HistoryError;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "monitoring", base = "str_enum")]
+#[code_catalog(module = "monitoring", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryErrorCode {
     /// The read failed with a database or driver error, or the core of this
@@ -35,7 +35,7 @@ pub enum MonitoringQueryErrorCode {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "monitoring", base = "str_enum")]
+#[code_catalog(module = "monitoring", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryRefusalCode {
     /// A value of the query is refused; no connect and no statement ran.
@@ -96,12 +96,12 @@ pub enum MonitoringQueryError {
     #[error_class(
         class = "MonitoringQueryDatabaseOperationFailed",
         code = "DatabaseOperationFailed",
-        exception = "BaseException"
+        cause = "required"
     )]
     DatabaseOperationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
         /// The error that the read met; the exception is the core's class
         /// of its cause, with its text.
@@ -122,10 +122,10 @@ pub enum MonitoringQueryError {
         class = "MonitoringQueryHistoryContractViolation",
         code = "HistoryContractViolation",
         never_retryable,
-        exception = "BaseException"
+        cause = "required"
     )]
     HistoryContractViolation {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
         /// The error that the read met; the exception is a
         /// `HistoryContractError` with its text.

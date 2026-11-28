@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[code_catalog(
     module = "status",
-    base = "enum",
+    values = "opaque",
     terminal_states = "TASK_TERMINAL_STATES"
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -126,7 +126,7 @@ impl std::str::FromStr for TaskStatus {
     Deserialize,
     horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "status", base = "str_enum")]
+#[code_catalog(module = "status", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskAttemptOutcome {
     /// Task completed successfully.

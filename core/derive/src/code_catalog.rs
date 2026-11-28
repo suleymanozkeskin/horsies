@@ -1,23 +1,23 @@
 //! `#[derive(CodeCatalog)]`: the static data of a closed code enum, read by
-//! the Python code generator.
+//! the code generators.
 //!
 //! The enum is the one source: its unit variants are the members, their
 //! `///` comments are the member docs, and the enum's `///` comment is the
-//! class doc. The Python member name of a variant is its name in
+//! class doc. The member name of a variant is its name in
 //! SCREAMING_SNAKE_CASE (serde's `rename_all = "SCREAMING_SNAKE_CASE"` rule).
 //! Its wire value is the same text, unless the variant sets
 //! `#[code_catalog(value = "...")]`.
 //!
-//! Container attribute: `#[code_catalog(module = "...", base = "...")]`,
-//! with `base` one of `str_enum` (`class X(StrEnum)`) and `enum`
-//! (`class X(Enum)`), and an optional `class = "..."` when the Python class
-//! name differs from the enum name.
+//! Container attribute: `#[code_catalog(module = "...", values = "...")]`,
+//! with `values` one of `equal_text` (a member's value equals its text) and
+//! `opaque` (a member's value is not its text), and an optional
+//! `class = "..."` when the type name differs from the enum name.
 //!
 //! A lifecycle status names its terminal members: each terminal variant
 //! sets `#[code_catalog(terminal)]`, and the enum sets
-//! `terminal_states = "..."`, the Python name of the frozenset constant of
-//! those members. One without the other is refused. The constant holds the
-//! Python member names of the terminal variants.
+//! `terminal_states = "..."`, the name of the constant of those members. One
+//! without the other is refused. The constant holds the member names of the
+//! terminal variants.
 //!
 //! A member that only a blocking call form gives (a sync call of the Python
 //! client, a blocking call of the Rust client) sets
@@ -30,17 +30,19 @@ use quote::quote;
 use syn::meta::ParseNestedMeta;
 use syn::{Attribute, Data, DataEnum, DeriveInput, Expr, ExprLit, Fields, Lit, LitStr, Meta};
 
-/// The Python base class of a generated enum.
-enum PythonBase {
-    StrEnum,
-    PlainEnum,
+/// The `values` key of the container: what a member's value is.
+enum EnumValuesKey {
+    /// `values = "equal_text"`.
+    EqualText,
+    /// `values = "opaque"`.
+    Opaque,
 }
 
 /// The container settings of one catalog.
 struct ContainerSettings {
     module: String,
     class: Option<String>,
-    base: PythonBase,
+    values: EnumValuesKey,
     terminal_states: TerminalConstant,
 }
 
@@ -88,9 +90,9 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
     let settings = container_settings(&input.attrs, ident)?;
     let class = settings.class.unwrap_or_else(|| ident.to_string());
     let module = settings.module;
-    let base = match settings.base {
-        PythonBase::StrEnum => quote!(::horsies_core::catalog::PythonEnumBase::StrEnum),
-        PythonBase::PlainEnum => quote!(::horsies_core::catalog::PythonEnumBase::PlainEnum),
+    let enum_values = match settings.values {
+        EnumValuesKey::EqualText => quote!(::horsies_core::catalog::EnumValues::EqualText),
+        EnumValuesKey::Opaque => quote!(::horsies_core::catalog::EnumValues::Opaque),
     };
     let enum_doc = doc_text(&input.attrs);
 
@@ -108,9 +110,9 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
         impl ::horsies_core::catalog::CodeEnum for #ident {
             const CATALOG: ::horsies_core::catalog::CodeCatalog =
                 ::horsies_core::catalog::CodeCatalog {
-                    python_module: #module,
-                    python_class: #class,
-                    python_base: #base,
+                    module: #module,
+                    type_name: #class,
+                    values: #enum_values,
                     doc: #enum_doc,
                     members: &[
                         #(::horsies_core::catalog::CatalogMember {
@@ -137,14 +139,14 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
 /// The members of an enum, in declaration order.
 struct Members<'a> {
     variants: Vec<&'a syn::Ident>,
-    /// The Python member names.
+    /// The member names.
     names: Vec<String>,
     /// The wire values.
     values: Vec<String>,
     docs: Vec<String>,
     /// The `CallForms` value of each member.
     forms: Vec<TokenStream>,
-    /// The Python member names of the `#[code_catalog(terminal)]` variants.
+    /// The member names of the `#[code_catalog(terminal)]` variants.
     terminal_names: Vec<String>,
 }
 
@@ -219,7 +221,7 @@ fn terminal_states(
 fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<ContainerSettings> {
     let mut module: Option<String> = None;
     let mut class: Option<String> = None;
-    let mut base: Option<PythonBase> = None;
+    let mut enum_values: Option<EnumValuesKey> = None;
     let mut terminal_states = TerminalConstant::NotNamed;
     for attr in attrs
         .iter()
@@ -237,15 +239,15 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
                 "terminal_states" => {
                     terminal_states = TerminalConstant::Named(text_value(&meta)?.value());
                 }
-                "base" => {
+                "values" => {
                     let value = text_value(&meta)?;
-                    base = Some(match value.value().as_str() {
-                        "str_enum" => PythonBase::StrEnum,
-                        "enum" => PythonBase::PlainEnum,
+                    enum_values = Some(match value.value().as_str() {
+                        "equal_text" => EnumValuesKey::EqualText,
+                        "opaque" => EnumValuesKey::Opaque,
                         _ => {
                             return Err(syn::Error::new_spanned(
                                 &value,
-                                "base must be \"str_enum\" or \"enum\"",
+                                "values must be \"equal_text\" or \"opaque\"",
                             ))
                         }
                     });
@@ -257,23 +259,23 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
                 }
                 _ => {
                     return Err(meta.error(
-                        "unknown code_catalog key; the keys are module, class, base and terminal_states",
+                        "unknown code_catalog key; the keys are module, class, values and terminal_states",
                     ))
                 }
             }
             Ok(())
         })?;
     }
-    match (module, base) {
-        (Some(module), Some(base)) => Ok(ContainerSettings {
+    match (module, enum_values) {
+        (Some(module), Some(values)) => Ok(ContainerSettings {
             module,
             class,
-            base,
+            values,
             terminal_states,
         }),
         (None, _) | (_, None) => Err(syn::Error::new_spanned(
             ident,
-            "CodeCatalog needs #[code_catalog(module = \"...\", base = \"...\")]",
+            "CodeCatalog needs #[code_catalog(module = \"...\", values = \"...\")]",
         )),
     }
 }
@@ -370,7 +372,7 @@ mod tests {
     #[test]
     fn terminal_variants_and_their_constant_give_a_lifecycle() {
         let text = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "status", base = "enum", terminal_states = "RUN_TERMINAL_STATES")]
+            #[code_catalog(module = "status", values = "opaque", terminal_states = "RUN_TERMINAL_STATES")]
             enum RunStatus {
                 Pending,
                 #[code_catalog(terminal)]
@@ -388,7 +390,7 @@ mod tests {
     #[test]
     fn a_member_is_named_after_its_variant_and_a_value_key_sets_only_its_value() {
         let text = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "error_codes", base = "str_enum")]
+            #[code_catalog(module = "error_codes", values = "equal_text")]
             enum StartCode {
                 /// The workflow has no name.
                 #[code_catalog(value = "HRS-001")]
@@ -409,7 +411,7 @@ mod tests {
     #[test]
     fn an_enum_without_terminal_variants_is_not_a_lifecycle() {
         let text = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "broker", base = "str_enum")]
+            #[code_catalog(module = "broker", values = "equal_text")]
             enum BrokerCode {
                 EnqueueFailed,
             }
@@ -423,7 +425,7 @@ mod tests {
     #[test]
     fn a_terminal_variant_without_the_constant_is_refused() {
         let error = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "status", base = "enum")]
+            #[code_catalog(module = "status", values = "opaque")]
             enum RunStatus {
                 Pending,
                 #[code_catalog(terminal)]
@@ -437,7 +439,7 @@ mod tests {
     #[test]
     fn a_constant_without_terminal_variants_is_refused() {
         let error = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "status", base = "enum", terminal_states = "RUN_TERMINAL_STATES")]
+            #[code_catalog(module = "status", values = "opaque", terminal_states = "RUN_TERMINAL_STATES")]
             enum RunStatus {
                 Pending,
             }
@@ -449,7 +451,7 @@ mod tests {
     #[test]
     fn an_unknown_variant_key_is_refused() {
         let error = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "status", base = "enum")]
+            #[code_catalog(module = "status", values = "opaque")]
             enum RunStatus {
                 #[code_catalog(closing)]
                 Pending,
@@ -465,7 +467,7 @@ mod tests {
     #[test]
     fn a_blocking_form_only_variant_is_marked_and_every_other_member_is_any_form() {
         let text = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "task_send", base = "str_enum")]
+            #[code_catalog(module = "task_send", values = "equal_text")]
             enum SendCode {
                 #[code_catalog(blocking_form_only)]
                 AsyncContext,
@@ -484,7 +486,7 @@ mod tests {
     #[test]
     fn blocking_form_only_on_the_enum_is_refused() {
         let error = derive_text(syn::parse_quote! {
-            #[code_catalog(module = "task_send", base = "str_enum", blocking_form_only)]
+            #[code_catalog(module = "task_send", values = "equal_text", blocking_form_only)]
             enum SendCode {
                 AsyncContext,
             }

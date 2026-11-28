@@ -1,21 +1,19 @@
 //! The manifest types as static data for clients.
 //!
 //! `#[derive(horsies_core_derive::ManifestSchema)]` on a manifest struct or enum
-//! records its Python form from the type itself:
-//! - a struct of named fields is a frozen dataclass;
-//! - an enum with a serde `tag` is one frozen dataclass per variant, with a
-//!   `Literal` tag field, and a union alias of the variants;
-//! - an enum of unit variants is a `Literal` alias of its wire values.
+//! records its schema from the type itself:
+//! - a struct of named fields is a record;
+//! - an enum with a serde `tag` is one record per variant, with a tag field,
+//!   and a union of the variants;
+//! - an enum of unit variants is a set of its wire values.
 //!
-//! A field's Python type comes from [`ManifestValue`] of its Rust type. A
+//! A field's type comes from [`ManifestValue`] of its Rust type. A
 //! newtype with a bound implements it by hand next to its parser, so the
-//! bound has one definition. A `Vec` is a Python tuple and a `BTreeMap`
-//! with `String` keys a Python `dict` of its values; their items are not
-//! containers. `horsies-codegen` renders [`PRODUCER_MANIFEST`] as
-//! `_catalog/manifest.py`, [`WORKER_MANIFEST`] as
-//! `_catalog/worker_manifest.py`, [`SCHEDULER_MANIFEST`] as
-//! `_catalog/scheduler_manifest.py` and [`WORKFLOW_SPEC_DATA`] as
-//! `_catalog/workflow_spec.py`.
+//! bound has one definition. A `Vec` is a list and a `BTreeMap`
+//! with `String` keys a map of its values; their items are not
+//! containers. `horsies-codegen` renders [`PRODUCER_MANIFEST`],
+//! [`WORKER_MANIFEST`], [`SCHEDULER_MANIFEST`] and [`WORKFLOW_SPEC_DATA`]
+//! for each client.
 //!
 //! [`SCHEDULE_PATTERN`] is the schema of the `pattern_json` text of the
 //! scheduler manifest. The Python package keeps its own pattern models, so
@@ -23,8 +21,8 @@
 //! rendered manifest uses: a variant that holds the fields of a record type
 //! ([`VariantFields::OfRecord`]), a generic enum recorded once per use, a
 //! field with a serde default ([`MemberDefault`]), a time of day
-//! ([`PythonValue::TimeOfDay`]), a length of time in whole seconds
-//! ([`PythonValue::Duration`]), and an integer field whose bound the type
+//! ([`ValueType::TimeOfDay`]), a length of time in whole seconds
+//! ([`ValueType::Duration`]), and an integer field whose bound the type
 //! that holds it names ([`bounded_int`]).
 
 use std::collections::BTreeMap;
@@ -64,7 +62,7 @@ use crate::workflow_engine::spec_data::{
     WORKFLOW_SPEC_DATA_VERSION,
 };
 
-/// An inclusive integer range with the name of its Python constants
+/// An inclusive integer range with the name of its constants
 /// (`<name>_MIN` and `<name>_MAX`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IntBound {
@@ -73,40 +71,38 @@ pub struct IntBound {
     pub max: u64,
 }
 
-/// The Python type of a manifest value.
+/// The type of a manifest value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythonValue {
+pub enum ValueType {
     Bool,
     Str,
     Int(IntBound),
-    /// A manifest type of the same module, by its Python name.
+    /// A manifest type of the same module, by its name.
     Named(&'static str),
-    /// A tuple of items of one type (a Rust `Vec`).
-    List(PythonItem),
-    /// A `dict` from text keys to values of one type (a Rust `BTreeMap`
+    /// A list of items of one type (a Rust `Vec`).
+    List(ItemType),
+    /// A map from text keys to values of one type (a Rust `BTreeMap`
     /// with `String` keys).
-    Map(PythonItem),
-    /// An item or no value (a Rust `Option`). Python's form writes `null`
-    /// for no value; the reader takes `null` and a missing member as no
-    /// value.
-    Optional(PythonItem),
+    Map(ItemType),
+    /// An item or no value (a Rust `Option`). The writer writes `null` for
+    /// no value; the reader takes `null` and a missing member as no value.
+    Optional(ItemType),
     /// A time of day in whole seconds, as the text `HH:MM:SS` (a Rust
-    /// `NaiveTime`, a Python `datetime.time`). The reader of each type that
+    /// `NaiveTime`). The reader of each type that
     /// holds one refuses a fraction of a second and a UTC offset.
     TimeOfDay,
     /// A length of time in whole seconds inside the bound, as ISO 8601
     /// duration text with days, hours, minutes and seconds only (`PT30S`,
-    /// `P1DT2H`; a Rust `std::time::Duration`, a Python
-    /// `datetime.timedelta`). The writer puts the largest unit first and
+    /// `P1DT2H`; a Rust `std::time::Duration`). The writer puts the largest unit first and
     /// writes no zero part; the reader refuses years, months, weeks, a
     /// fraction and a sign.
     Duration(IntBound),
 }
 
-/// The Python type of an item of a tuple or a value of a `dict`: a value
-/// that is not a container.
+/// The type of an item of a list or a value of a map: a value that is not
+/// a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythonItem {
+pub enum ItemType {
     Bool,
     Str,
     Int(IntBound),
@@ -115,64 +111,64 @@ pub enum PythonItem {
     Duration(IntBound),
 }
 
-impl PythonItem {
+impl ItemType {
     /// The item form of `value`. A container of containers is not a
     /// manifest form, and an optional value is a container here: the build
     /// fails where a manifest field has one.
-    pub const fn of(value: PythonValue) -> PythonItem {
+    pub const fn of(value: ValueType) -> ItemType {
         match value {
-            PythonValue::Bool => PythonItem::Bool,
-            PythonValue::Str => PythonItem::Str,
-            PythonValue::Int(bound) => PythonItem::Int(bound),
-            PythonValue::Named(name) => PythonItem::Named(name),
-            PythonValue::TimeOfDay => PythonItem::TimeOfDay,
-            PythonValue::Duration(bound) => PythonItem::Duration(bound),
-            PythonValue::List(_) | PythonValue::Map(_) | PythonValue::Optional(_) => {
+            ValueType::Bool => ItemType::Bool,
+            ValueType::Str => ItemType::Str,
+            ValueType::Int(bound) => ItemType::Int(bound),
+            ValueType::Named(name) => ItemType::Named(name),
+            ValueType::TimeOfDay => ItemType::TimeOfDay,
+            ValueType::Duration(bound) => ItemType::Duration(bound),
+            ValueType::List(_) | ValueType::Map(_) | ValueType::Optional(_) => {
                 panic!("a manifest container holds no container")
             }
         }
     }
 
     /// The value form of this item.
-    pub const fn value(self) -> PythonValue {
+    pub const fn value(self) -> ValueType {
         match self {
-            PythonItem::Bool => PythonValue::Bool,
-            PythonItem::Str => PythonValue::Str,
-            PythonItem::Int(bound) => PythonValue::Int(bound),
-            PythonItem::Named(name) => PythonValue::Named(name),
-            PythonItem::TimeOfDay => PythonValue::TimeOfDay,
-            PythonItem::Duration(bound) => PythonValue::Duration(bound),
+            ItemType::Bool => ValueType::Bool,
+            ItemType::Str => ValueType::Str,
+            ItemType::Int(bound) => ValueType::Int(bound),
+            ItemType::Named(name) => ValueType::Named(name),
+            ItemType::TimeOfDay => ValueType::TimeOfDay,
+            ItemType::Duration(bound) => ValueType::Duration(bound),
         }
     }
 }
 
 /// A Rust type that a manifest field can have.
 pub trait ManifestValue {
-    const PYTHON: PythonValue;
+    const VALUE_TYPE: ValueType;
 }
 
 impl ManifestValue for bool {
-    const PYTHON: PythonValue = PythonValue::Bool;
+    const VALUE_TYPE: ValueType = ValueType::Bool;
 }
 
 impl ManifestValue for String {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 impl<T: ManifestValue> ManifestValue for Vec<T> {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::of(T::PYTHON));
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::of(T::VALUE_TYPE));
 }
 
 impl<T: ManifestValue> ManifestValue for BTreeMap<String, T> {
-    const PYTHON: PythonValue = PythonValue::Map(PythonItem::of(T::PYTHON));
+    const VALUE_TYPE: ValueType = ValueType::Map(ItemType::of(T::VALUE_TYPE));
 }
 
 impl<T: ManifestValue> ManifestValue for Option<T> {
-    const PYTHON: PythonValue = PythonValue::Optional(PythonItem::of(T::PYTHON));
+    const VALUE_TYPE: ValueType = ValueType::Optional(ItemType::of(T::VALUE_TYPE));
 }
 
 impl ManifestValue for NaiveTime {
-    const PYTHON: PythonValue = PythonValue::TimeOfDay;
+    const VALUE_TYPE: ValueType = ValueType::TimeOfDay;
 }
 
 /// How an integer field holds its integers.
@@ -218,17 +214,17 @@ impl IntField for std::time::Duration {
 }
 
 /// The value of a field of the Rust type `F` inside `bound`. Pure.
-pub const fn bounded_int<F: IntField>(bound: IntBound) -> PythonValue {
+pub const fn bounded_int<F: IntField>(bound: IntBound) -> ValueType {
     match F::FORM {
-        IntFieldForm::One => PythonValue::Int(bound),
-        IntFieldForm::Optional => PythonValue::Optional(PythonItem::Int(bound)),
-        IntFieldForm::List => PythonValue::List(PythonItem::Int(bound)),
-        IntFieldForm::WholeSeconds => PythonValue::Duration(bound),
+        IntFieldForm::One => ValueType::Int(bound),
+        IntFieldForm::Optional => ValueType::Optional(ItemType::Int(bound)),
+        IntFieldForm::List => ValueType::List(ItemType::Int(bound)),
+        IntFieldForm::WholeSeconds => ValueType::Duration(bound),
     }
 }
 
 /// What the reader takes when a text does not hold a member (serde's
-/// `default = "<const fn>"`). Python's form writes every member, this one
+/// `default = "<const fn>"`). The writer writes every member, this one
 /// too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberDefault {
@@ -243,9 +239,9 @@ impl MemberDefault {
     /// The default `default` of a field whose value is `field`. A default is
     /// modeled on an integer field only, inside the field's bound: any other
     /// default is a defect of the type, and the build stops here. Pure.
-    pub const fn int(field: PythonValue, default: u64) -> MemberDefault {
+    pub const fn int(field: ValueType, default: u64) -> MemberDefault {
         match field {
-            PythonValue::Int(bound) => {
+            ValueType::Int(bound) => {
                 assert!(
                     default >= bound.min,
                     "a field default is below the field's bound"
@@ -256,14 +252,14 @@ impl MemberDefault {
                 );
                 MemberDefault::Int(default)
             }
-            PythonValue::Bool
-            | PythonValue::Str
-            | PythonValue::Named(_)
-            | PythonValue::List(_)
-            | PythonValue::Map(_)
-            | PythonValue::Optional(_)
-            | PythonValue::TimeOfDay
-            | PythonValue::Duration(_) => {
+            ValueType::Bool
+            | ValueType::Str
+            | ValueType::Named(_)
+            | ValueType::List(_)
+            | ValueType::Map(_)
+            | ValueType::Optional(_)
+            | ValueType::TimeOfDay
+            | ValueType::Duration(_) => {
                 panic!("a field default is modeled on an integer field only")
             }
         }
@@ -277,7 +273,7 @@ pub struct ManifestField {
     pub name: &'static str,
     /// The field doc, from the field's `///` lines.
     pub doc: &'static str,
-    pub value: PythonValue,
+    pub value: ValueType,
     pub default: MemberDefault,
 }
 
@@ -297,18 +293,18 @@ pub enum VariantFields {
 /// here. Pure.
 pub const fn record_name(item: ManifestType) -> &'static str {
     match item.shape {
-        ManifestShape::Record { .. } => item.python_name,
+        ManifestShape::Record { .. } => item.type_name,
         ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
             panic!("a tagged variant holds the fields of a record type only")
         }
     }
 }
 
-/// One variant of a tagged enum: a dataclass whose tag field holds
+/// One variant of a tagged enum: a record whose tag field holds
 /// `tag_value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaggedVariant {
-    pub python_class: &'static str,
+    pub type_name: &'static str,
     pub tag_value: &'static str,
     pub doc: &'static str,
     pub fields: VariantFields,
@@ -321,25 +317,26 @@ pub struct ChoiceValue {
     pub doc: &'static str,
 }
 
-/// How a manifest type is written in Python.
+/// The shape of a manifest type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestShape {
-    /// A frozen dataclass.
+    /// A record of named fields.
     Record { fields: &'static [ManifestField] },
-    /// One frozen dataclass per variant and a union alias.
+    /// One record per variant and a union of them.
     Tagged {
         tag_field: &'static str,
         variants: &'static [TaggedVariant],
     },
-    /// A `Literal` alias.
+    /// A set of wire values.
     Choice { values: &'static [ChoiceValue] },
 }
 
-/// One manifest type that has its own Python definition.
+/// One manifest type that has its own definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestType {
-    /// The class name, or the alias name of a tagged or unit enum.
-    pub python_name: &'static str,
+    /// The name of the type: the record, or the union or set of a tagged or
+    /// unit enum.
+    pub type_name: &'static str,
     /// The type doc, from the type's `///` lines.
     pub doc: &'static str,
     pub shape: ManifestShape,
@@ -353,7 +350,7 @@ pub trait ManifestItem: ManifestValue {
 /// The manifest of one process kind, as the generator renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestModule {
-    /// The Python name of the root type, which the dump function takes.
+    /// The name of the root type, which the dump function takes.
     pub root: &'static str,
     /// The manifest version this core reads.
     pub version: u32,
@@ -513,11 +510,11 @@ pub const WORKFLOW_SPEC_DATA: ManifestModule = ManifestModule {
 };
 
 impl ManifestModule {
-    /// The type of `python_name`, if the module has one.
-    pub fn type_named(&self, python_name: &str) -> Option<&'static ManifestType> {
+    /// The type of `type_name`, if the module has one.
+    pub fn type_named(&self, type_name: &str) -> Option<&'static ManifestType> {
         self.types
             .iter()
-            .find(|manifest_type| manifest_type.python_name == python_name)
+            .find(|manifest_type| manifest_type.type_name == type_name)
     }
 
     /// Every integer bound of the module's fields, the items of their
@@ -527,34 +524,34 @@ impl ManifestModule {
         for manifest_type in self.types {
             for field in type_fields(manifest_type) {
                 let bound = match field.value {
-                    PythonValue::Int(bound)
-                    | PythonValue::Duration(bound)
-                    | PythonValue::List(PythonItem::Int(bound) | PythonItem::Duration(bound))
-                    | PythonValue::Map(PythonItem::Int(bound) | PythonItem::Duration(bound))
-                    | PythonValue::Optional(PythonItem::Int(bound) | PythonItem::Duration(bound)) => {
+                    ValueType::Int(bound)
+                    | ValueType::Duration(bound)
+                    | ValueType::List(ItemType::Int(bound) | ItemType::Duration(bound))
+                    | ValueType::Map(ItemType::Int(bound) | ItemType::Duration(bound))
+                    | ValueType::Optional(ItemType::Int(bound) | ItemType::Duration(bound)) => {
                         bound
                     }
-                    PythonValue::Bool
-                    | PythonValue::Str
-                    | PythonValue::Named(_)
-                    | PythonValue::TimeOfDay
-                    | PythonValue::List(
-                        PythonItem::Bool
-                        | PythonItem::Str
-                        | PythonItem::Named(_)
-                        | PythonItem::TimeOfDay,
+                    ValueType::Bool
+                    | ValueType::Str
+                    | ValueType::Named(_)
+                    | ValueType::TimeOfDay
+                    | ValueType::List(
+                        ItemType::Bool
+                        | ItemType::Str
+                        | ItemType::Named(_)
+                        | ItemType::TimeOfDay,
                     )
-                    | PythonValue::Map(
-                        PythonItem::Bool
-                        | PythonItem::Str
-                        | PythonItem::Named(_)
-                        | PythonItem::TimeOfDay,
+                    | ValueType::Map(
+                        ItemType::Bool
+                        | ItemType::Str
+                        | ItemType::Named(_)
+                        | ItemType::TimeOfDay,
                     )
-                    | PythonValue::Optional(
-                        PythonItem::Bool
-                        | PythonItem::Str
-                        | PythonItem::Named(_)
-                        | PythonItem::TimeOfDay,
+                    | ValueType::Optional(
+                        ItemType::Bool
+                        | ItemType::Str
+                        | ItemType::Named(_)
+                        | ItemType::TimeOfDay,
                     ) => continue,
                 };
                 if !bounds.iter().any(|known| known.name == bound.name) {
@@ -648,26 +645,26 @@ mod tests {
     const SAMPLE_TIME_OF_DAY: &str = "09:30:00";
 
     /// A sample value of `value`.
-    fn sample(sampling: Sampling, value: PythonValue, depth: usize) -> Value {
+    fn sample(sampling: Sampling, value: ValueType, depth: usize) -> Value {
         assert!(depth <= MAX_SAMPLE_DEPTH, "the manifest nests too deep");
         match value {
-            PythonValue::Bool => Value::Bool(sampling.pick % 2 == 1),
-            PythonValue::Str => Value::String(SAMPLE_TEXT.to_owned()),
-            PythonValue::Int(bound) => match sampling.end {
+            ValueType::Bool => Value::Bool(sampling.pick % 2 == 1),
+            ValueType::Str => Value::String(SAMPLE_TEXT.to_owned()),
+            ValueType::Int(bound) => match sampling.end {
                 IntEnd::Min => Value::from(bound.min),
                 IntEnd::Max => Value::from(bound.max),
             },
-            PythonValue::Named(name) => {
+            ValueType::Named(name) => {
                 let manifest_type = sampling
                     .module
                     .type_named(name)
                     .unwrap_or_else(|| panic!("{name} is not a manifest type"));
                 sample_type(sampling, manifest_type, depth + 1)
             }
-            PythonValue::List(item) => {
+            ValueType::List(item) => {
                 Value::Array(vec![sample(sampling, item.value(), depth + 1)])
             }
-            PythonValue::Map(item) => {
+            ValueType::Map(item) => {
                 let mut object = Map::new();
                 object.insert(
                     "sample".to_owned(),
@@ -675,9 +672,9 @@ mod tests {
                 );
                 Value::Object(object)
             }
-            PythonValue::Optional(item) => sample(sampling, item.value(), depth + 1),
-            PythonValue::TimeOfDay => Value::String(SAMPLE_TIME_OF_DAY.to_owned()),
-            PythonValue::Duration(bound) => match sampling.end {
+            ValueType::Optional(item) => sample(sampling, item.value(), depth + 1),
+            ValueType::TimeOfDay => Value::String(SAMPLE_TIME_OF_DAY.to_owned()),
+            ValueType::Duration(bound) => match sampling.end {
                 IntEnd::Min => Value::String(format!("PT{}S", bound.min)),
                 IntEnd::Max => Value::String(format!("PT{}S", bound.max)),
             },
@@ -750,7 +747,7 @@ mod tests {
     }
 
     fn root_sample(sampling: Sampling) -> Value {
-        sample(sampling, PythonValue::Named(sampling.module.root), 0)
+        sample(sampling, ValueType::Named(sampling.module.root), 0)
     }
 
     #[test]
@@ -784,7 +781,7 @@ mod tests {
                     continue;
                 };
                 for field in fields {
-                    let PythonValue::Int(bound) = field.value else {
+                    let ValueType::Int(bound) = field.value else {
                         continue;
                     };
                     let outside = [
@@ -850,40 +847,40 @@ mod tests {
                 let count = module
                     .types
                     .iter()
-                    .filter(|other| other.python_name == manifest_type.python_name)
+                    .filter(|other| other.type_name == manifest_type.type_name)
                     .count();
-                assert_eq!(count, 1, "{}", manifest_type.python_name);
+                assert_eq!(count, 1, "{}", manifest_type.type_name);
                 for field in type_fields(manifest_type) {
                     let named = match field.value {
-                        PythonValue::Named(name)
-                        | PythonValue::List(PythonItem::Named(name))
-                        | PythonValue::Map(PythonItem::Named(name))
-                        | PythonValue::Optional(PythonItem::Named(name)) => name,
-                        PythonValue::Bool
-                        | PythonValue::Str
-                        | PythonValue::Int(_)
-                        | PythonValue::TimeOfDay
-                        | PythonValue::Duration(_)
-                        | PythonValue::List(
-                            PythonItem::Bool
-                            | PythonItem::Str
-                            | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay
-                            | PythonItem::Duration(_),
+                        ValueType::Named(name)
+                        | ValueType::List(ItemType::Named(name))
+                        | ValueType::Map(ItemType::Named(name))
+                        | ValueType::Optional(ItemType::Named(name)) => name,
+                        ValueType::Bool
+                        | ValueType::Str
+                        | ValueType::Int(_)
+                        | ValueType::TimeOfDay
+                        | ValueType::Duration(_)
+                        | ValueType::List(
+                            ItemType::Bool
+                            | ItemType::Str
+                            | ItemType::Int(_)
+                            | ItemType::TimeOfDay
+                            | ItemType::Duration(_),
                         )
-                        | PythonValue::Map(
-                            PythonItem::Bool
-                            | PythonItem::Str
-                            | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay
-                            | PythonItem::Duration(_),
+                        | ValueType::Map(
+                            ItemType::Bool
+                            | ItemType::Str
+                            | ItemType::Int(_)
+                            | ItemType::TimeOfDay
+                            | ItemType::Duration(_),
                         )
-                        | PythonValue::Optional(
-                            PythonItem::Bool
-                            | PythonItem::Str
-                            | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay
-                            | PythonItem::Duration(_),
+                        | ValueType::Optional(
+                            ItemType::Bool
+                            | ItemType::Str
+                            | ItemType::Int(_)
+                            | ItemType::TimeOfDay
+                            | ItemType::Duration(_),
                         ) => continue,
                     };
                     assert!(module.type_named(named).is_some(), "{named}");
@@ -929,7 +926,7 @@ mod tests {
         assert_eq!(tag_field, "kind");
         let tags: Vec<(&str, &str)> = variants
             .iter()
-            .map(|variant| (variant.python_class, variant.tag_value))
+            .map(|variant| (variant.type_name, variant.tag_value))
             .collect();
         assert_eq!(
             tags,
@@ -1039,26 +1036,26 @@ mod tests {
     }
 
     #[test]
-    fn a_container_item_keeps_its_python_type() {
+    fn a_container_item_keeps_its_type() {
         assert_eq!(
-            <Vec<String> as ManifestValue>::PYTHON,
-            PythonValue::List(PythonItem::Str)
+            <Vec<String> as ManifestValue>::VALUE_TYPE,
+            ValueType::List(ItemType::Str)
         );
         assert_eq!(
-            <BTreeMap<String, Execution> as ManifestValue>::PYTHON,
-            PythonValue::Map(PythonItem::Named("Execution"))
+            <BTreeMap<String, Execution> as ManifestValue>::VALUE_TYPE,
+            ValueType::Map(ItemType::Named("Execution"))
         );
-        assert_eq!(PythonItem::of(PythonValue::Bool).value(), PythonValue::Bool);
+        assert_eq!(ItemType::of(ValueType::Bool).value(), ValueType::Bool);
         assert_eq!(
-            PythonItem::of(PythonValue::TimeOfDay).value(),
-            PythonValue::TimeOfDay
+            ItemType::of(ValueType::TimeOfDay).value(),
+            ValueType::TimeOfDay
         );
     }
 
     #[test]
     #[should_panic(expected = "a manifest container holds no container")]
     fn an_optional_value_is_not_an_item() {
-        let _refused = PythonItem::of(PythonValue::Optional(PythonItem::Str));
+        let _refused = ItemType::of(ValueType::Optional(ItemType::Str));
     }
 
     const SAMPLE_BOUND: IntBound = IntBound {
@@ -1071,30 +1068,30 @@ mod tests {
     fn an_integer_field_takes_the_bound_that_its_type_names() {
         assert_eq!(
             bounded_int::<u32>(SAMPLE_BOUND),
-            PythonValue::Int(SAMPLE_BOUND)
+            ValueType::Int(SAMPLE_BOUND)
         );
         assert_eq!(
             bounded_int::<Option<u32>>(SAMPLE_BOUND),
-            PythonValue::Optional(PythonItem::Int(SAMPLE_BOUND))
+            ValueType::Optional(ItemType::Int(SAMPLE_BOUND))
         );
         assert_eq!(
             bounded_int::<Vec<i64>>(SAMPLE_BOUND),
-            PythonValue::List(PythonItem::Int(SAMPLE_BOUND))
+            ValueType::List(ItemType::Int(SAMPLE_BOUND))
         );
         assert_eq!(
             bounded_int::<std::time::Duration>(SAMPLE_BOUND),
-            PythonValue::Duration(SAMPLE_BOUND)
+            ValueType::Duration(SAMPLE_BOUND)
         );
         assert_eq!(
-            PythonItem::of(PythonValue::Duration(SAMPLE_BOUND)).value(),
-            PythonValue::Duration(SAMPLE_BOUND)
+            ItemType::of(ValueType::Duration(SAMPLE_BOUND)).value(),
+            ValueType::Duration(SAMPLE_BOUND)
         );
     }
 
     #[test]
     fn a_default_inside_the_bound_of_an_integer_field_is_its_default() {
         assert_eq!(
-            MemberDefault::int(PythonValue::Int(SAMPLE_BOUND), 9),
+            MemberDefault::int(ValueType::Int(SAMPLE_BOUND), 9),
             MemberDefault::Int(9)
         );
     }
@@ -1102,13 +1099,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "a field default is above the field's bound")]
     fn a_default_above_the_bound_is_refused() {
-        let _refused = MemberDefault::int(PythonValue::Int(SAMPLE_BOUND), 10);
+        let _refused = MemberDefault::int(ValueType::Int(SAMPLE_BOUND), 10);
     }
 
     #[test]
     #[should_panic(expected = "a field default is modeled on an integer field only")]
     fn a_default_of_a_field_that_is_not_an_integer_is_refused() {
-        let _refused = MemberDefault::int(PythonValue::Str, 1);
+        let _refused = MemberDefault::int(ValueType::Str, 1);
     }
 
     #[test]
@@ -1148,7 +1145,7 @@ mod tests {
     }
 
     /// The name and the value of each field.
-    fn field_values(fields: &[ManifestField]) -> Vec<(&'static str, PythonValue)> {
+    fn field_values(fields: &[ManifestField]) -> Vec<(&'static str, ValueType)> {
         fields
             .iter()
             .map(|field| (field.name, field.value))
@@ -1169,7 +1166,7 @@ mod tests {
         assert_eq!(tag_field, "kind");
         let kinds: Vec<(&str, &str, VariantFields)> = variants
             .iter()
-            .map(|variant| (variant.python_class, variant.tag_value, variant.fields))
+            .map(|variant| (variant.type_name, variant.tag_value, variant.fields))
             .collect();
         assert_eq!(
             kinds,
@@ -1216,7 +1213,7 @@ mod tests {
         ] {
             let (tag_field, variants) = tagged_variants(name);
             assert_eq!(tag_field, "kind");
-            let forms: Vec<(&str, Vec<(&str, PythonValue)>)> = variants
+            let forms: Vec<(&str, Vec<(&str, ValueType)>)> = variants
                 .iter()
                 .map(|variant| (variant.tag_value, field_values(own_fields(variant.fields))))
                 .collect();
@@ -1226,19 +1223,19 @@ mod tests {
                     ("every", Vec::new()),
                     (
                         "enum_values",
-                        vec![("values", PythonValue::List(PythonItem::Named(item)))],
+                        vec![("values", ValueType::List(ItemType::Named(item)))],
                     ),
                     (
                         "enum_range",
                         vec![
-                            ("start", PythonValue::Named(item)),
-                            ("end", PythonValue::Named(item)),
-                            ("step", PythonValue::Int(CRON_ENUM_STEP)),
+                            ("start", ValueType::Named(item)),
+                            ("end", ValueType::Named(item)),
+                            ("step", ValueType::Int(CRON_ENUM_STEP)),
                         ],
                     ),
                     (
                         "enum_step",
-                        vec![("step", PythonValue::Int(CRON_ENUM_STEP))]
+                        vec![("step", ValueType::Int(CRON_ENUM_STEP))]
                     ),
                 ],
                 "{name}"
@@ -1250,7 +1247,7 @@ mod tests {
     fn the_numeric_cron_term_takes_the_bounds_of_every_numeric_field() {
         let (tag_field, variants) = tagged_variants("CronNumericTerm");
         assert_eq!(tag_field, "kind");
-        let forms: Vec<(&str, Vec<(&str, PythonValue)>)> = variants
+        let forms: Vec<(&str, Vec<(&str, ValueType)>)> = variants
             .iter()
             .map(|variant| (variant.tag_value, field_values(own_fields(variant.fields))))
             .collect();
@@ -1258,20 +1255,20 @@ mod tests {
             forms,
             [
                 ("every", Vec::new()),
-                ("step", vec![("step", PythonValue::Int(CRON_NUMERIC_STEP))]),
+                ("step", vec![("step", ValueType::Int(CRON_NUMERIC_STEP))]),
                 (
                     "values",
                     vec![(
                         "values",
-                        PythonValue::List(PythonItem::Int(CRON_NUMERIC_VALUE))
+                        ValueType::List(ItemType::Int(CRON_NUMERIC_VALUE))
                     )],
                 ),
                 (
                     "range",
                     vec![
-                        ("start", PythonValue::Int(CRON_NUMERIC_VALUE)),
-                        ("end", PythonValue::Int(CRON_NUMERIC_VALUE)),
-                        ("step", PythonValue::Int(CRON_NUMERIC_STEP)),
+                        ("start", ValueType::Int(CRON_NUMERIC_VALUE)),
+                        ("end", ValueType::Int(CRON_NUMERIC_VALUE)),
+                        ("step", ValueType::Int(CRON_NUMERIC_STEP)),
                     ],
                 ),
             ]
@@ -1285,7 +1282,7 @@ mod tests {
     fn the_length_of_an_interval_is_a_duration_of_whole_seconds() {
         assert_eq!(
             field_values(record_fields("IntervalSchedule")),
-            [("every", PythonValue::Duration(INTERVAL_EVERY_SECONDS))]
+            [("every", ValueType::Duration(INTERVAL_EVERY_SECONDS))]
         );
         assert_eq!(
             (INTERVAL_EVERY_SECONDS.min, INTERVAL_EVERY_SECONDS.max),
@@ -1312,8 +1309,8 @@ mod tests {
     #[test]
     fn an_optional_field_is_an_item_or_no_value() {
         assert_eq!(
-            <Option<String> as ManifestValue>::PYTHON,
-            PythonValue::Optional(PythonItem::Str)
+            <Option<String> as ManifestValue>::VALUE_TYPE,
+            ValueType::Optional(ItemType::Str)
         );
     }
 
@@ -1322,8 +1319,8 @@ mod tests {
         assert_eq!(
             field_values(record_fields("HourlySchedule")),
             [
-                ("minute", PythonValue::Int(HOURLY_MINUTE)),
-                ("second", PythonValue::Int(HOURLY_SECOND)),
+                ("minute", ValueType::Int(HOURLY_MINUTE)),
+                ("second", ValueType::Int(HOURLY_SECOND)),
             ]
         );
         assert_eq!(
@@ -1359,23 +1356,23 @@ mod tests {
     fn a_time_of_day_field_is_a_time_of_day() {
         assert_eq!(
             field_values(record_fields("DailySchedule")),
-            [("time", PythonValue::TimeOfDay)]
+            [("time", ValueType::TimeOfDay)]
         );
         assert_eq!(
             field_values(record_fields("WeeklySchedule")),
             [
-                ("weekdays", PythonValue::List(PythonItem::Named("Weekday"))),
-                ("time", PythonValue::TimeOfDay),
+                ("weekdays", ValueType::List(ItemType::Named("Weekday"))),
+                ("time", ValueType::TimeOfDay),
             ]
         );
         assert_eq!(
             field_values(record_fields("MonthlySchedule")),
             [
-                ("day_of_month", PythonValue::Int(MONTHLY_DAY)),
-                ("time", PythonValue::TimeOfDay),
+                ("day_of_month", ValueType::Int(MONTHLY_DAY)),
+                ("time", ValueType::TimeOfDay),
             ]
         );
-        assert_eq!(<NaiveTime as ManifestValue>::PYTHON, PythonValue::TimeOfDay);
+        assert_eq!(<NaiveTime as ManifestValue>::VALUE_TYPE, ValueType::TimeOfDay);
     }
 
     #[test]
@@ -1489,13 +1486,13 @@ mod tests {
     /// tagged variant that it holds to `seen`. Panics where the text and the
     /// schema differ: a member name, the member order, a tag value, or the
     /// kind of a value.
-    fn walk_value(form: PythonValue, value: &Value, seen: &mut Vec<&'static str>, depth: usize) {
+    fn walk_value(form: ValueType, value: &Value, seen: &mut Vec<&'static str>, depth: usize) {
         assert!(depth <= MAX_SAMPLE_DEPTH, "the pattern nests too deep");
         match (form, value) {
-            (PythonValue::Bool, Value::Bool(_))
-            | (PythonValue::Str, Value::String(_))
-            | (PythonValue::Optional(_), Value::Null) => {}
-            (PythonValue::Int(bound), Value::Number(number)) => {
+            (ValueType::Bool, Value::Bool(_))
+            | (ValueType::Str, Value::String(_))
+            | (ValueType::Optional(_), Value::Null) => {}
+            (ValueType::Int(bound), Value::Number(number)) => {
                 let whole = number
                     .as_u64()
                     .unwrap_or_else(|| panic!("{number} is not a whole number"));
@@ -1504,13 +1501,13 @@ mod tests {
                     "{whole} is outside {bound:?}"
                 );
             }
-            (PythonValue::TimeOfDay, Value::String(text)) => {
+            (ValueType::TimeOfDay, Value::String(text)) => {
                 assert!(
                     NaiveTime::parse_from_str(text, "%H:%M:%S").is_ok(),
                     "{text} is not HH:MM:SS"
                 );
             }
-            (PythonValue::Duration(bound), Value::String(text)) => {
+            (ValueType::Duration(bound), Value::String(text)) => {
                 let every = parse_interval_text(text)
                     .unwrap_or_else(|refused| panic!("{text} is not a duration: {refused}"));
                 assert_eq!(every.subsec_nanos(), 0, "{text} is not whole seconds");
@@ -1519,15 +1516,15 @@ mod tests {
                     "{text} is outside {bound:?}"
                 );
             }
-            (PythonValue::Optional(item), present) => {
+            (ValueType::Optional(item), present) => {
                 walk_value(item.value(), present, seen, depth + 1);
             }
-            (PythonValue::List(item), Value::Array(items)) => {
+            (ValueType::List(item), Value::Array(items)) => {
                 for listed in items {
                     walk_value(item.value(), listed, seen, depth + 1);
                 }
             }
-            (PythonValue::Named(name), present) => walk_type(name, present, seen, depth + 1),
+            (ValueType::Named(name), present) => walk_type(name, present, seen, depth + 1),
             (form, other) => panic!("{other} is not a value of {form:?}"),
         }
     }
@@ -1560,7 +1557,7 @@ mod tests {
                     .iter()
                     .find(|variant| variant.tag_value == tag)
                     .unwrap_or_else(|| panic!("{tag} is not a variant of {name}"));
-                seen.push(variant.python_class);
+                seen.push(variant.type_name);
                 let fields = match variant.fields {
                     VariantFields::Own(fields) => fields,
                     VariantFields::OfRecord(record) => record_fields(record),
@@ -1600,7 +1597,7 @@ mod tests {
             assert!(parsed.is_ok(), "{parsed:?}\n{text}");
             let value: Value = serde_json::from_str(&text).expect("a pattern text is JSON");
             walk_value(
-                PythonValue::Named(SCHEDULE_PATTERN.root),
+                ValueType::Named(SCHEDULE_PATTERN.root),
                 &value,
                 &mut seen,
                 0,
@@ -1612,9 +1609,9 @@ mod tests {
             };
             for variant in variants {
                 assert!(
-                    seen.contains(&variant.python_class),
+                    seen.contains(&variant.type_name),
                     "no Python text holds {}",
-                    variant.python_class
+                    variant.type_name
                 );
             }
         }

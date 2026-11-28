@@ -21,7 +21,7 @@ use crate::core::config::{
     PausedWorkflowAge, PayloadPolicy, RecoveryConfig, RetentionConfig, WorkerResilienceConfig,
 };
 use crate::core::history::periods::{MAX_RETENTION_DAYS, MIN_RETENTION_DAYS};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 /// The largest `worker_state_snapshot_interval_ms` as the bound of its
 /// manifest field. Half the live window fits a `u32`.
@@ -186,7 +186,7 @@ impl From<PausedAgeMicros> for u64 {
 }
 
 impl ManifestValue for PausedAgeMicros {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "PAUSED_AGE_MICROS",
         min: 1,
         max: MAX_PAUSED_AGE_MICROS,
@@ -223,7 +223,7 @@ impl From<PayloadBytes> for u64 {
 }
 
 impl ManifestValue for PayloadBytes {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "PAYLOAD_BYTES",
         min: 1,
         max: MAX_PAYLOAD_BYTES,

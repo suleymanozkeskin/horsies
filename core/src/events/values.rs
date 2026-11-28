@@ -107,7 +107,7 @@ pub type SlotIndex = BoundedU32<0, MAX_SLOT_INDEX>;
 /// The four built-in task code catalogs. Their wire values are unique
 /// across them.
 pub const BUILT_IN_TASK_CODES: CodeUnion = CodeUnion {
-    python_name: "BuiltInTaskCode",
+    alias_name: "BuiltInTaskCode",
     doc: "A built-in task error code: a member of one of the four built-in code catalogs.",
     catalogs: &[
         <OperationalCode as CodeEnum>::CATALOG,
@@ -127,7 +127,7 @@ impl EventValue for BuiltInTaskCode {
     fn from_wire(wire: &WireValue) -> Result<Self, DecodeRefusal> {
         let text = wire_text(wire)?;
         BuiltInTaskCode::parse(text)
-            .ok_or_else(|| DecodeRefusal::unknown_name(BUILT_IN_TASK_CODES.python_name, text))
+            .ok_or_else(|| DecodeRefusal::unknown_name(BUILT_IN_TASK_CODES.alias_name, text))
     }
 }
 

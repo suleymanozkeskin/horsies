@@ -1,6 +1,6 @@
 //! The public lifecycle events of the core worker: one Rust type per event,
 //! their wire form, and the data that `horsies-codegen` renders into the
-//! Python classes and their decoder (`horsies/_catalog/events.py`).
+//! types and the decoder of each client.
 //!
 //! Rules of the contract:
 //!
@@ -178,15 +178,15 @@ macro_rules! event_union {
             $($event,)+
         }
 
-        /// A Python `Literal` of the names, with the doc of each type.
+        /// A set of the names, with the doc of each type.
         impl crate::manifest_schema::ManifestValue for EventTypeName {
-            const PYTHON: crate::manifest_schema::PythonValue =
-                crate::manifest_schema::PythonValue::Named("EventTypeName");
+            const VALUE_TYPE: crate::manifest_schema::ValueType =
+                crate::manifest_schema::ValueType::Named("EventTypeName");
         }
 
         impl crate::manifest_schema::ManifestItem for EventTypeName {
             const ITEM: crate::manifest_schema::ManifestType = crate::manifest_schema::ManifestType {
-                python_name: "EventTypeName",
+                type_name: "EventTypeName",
                 doc: "The name of one event type: the tag of its wire form. A handler takes the \
                       events of one type.",
                 shape: crate::manifest_schema::ManifestShape::Choice {

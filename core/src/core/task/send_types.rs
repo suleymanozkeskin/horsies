@@ -19,7 +19,7 @@ use crate::FailureCause;
 /// (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
 /// one variant per member.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
-#[code_catalog(module = "task_send", base = "str_enum")]
+#[code_catalog(module = "task_send", values = "equal_text")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
@@ -154,7 +154,7 @@ pub enum TaskSendError {
     /// methods refuse this error.
     #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
     Suppressed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// A sync send ran inside a running event loop. Nothing was written.
@@ -166,11 +166,11 @@ pub enum TaskSendError {
     // runtime; the core's enqueue never does.
     #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The input was refused before anything was written.
@@ -181,10 +181,10 @@ pub enum TaskSendError {
     #[error_class(
         class = "TaskSendValidationFailed",
         code = "ValidationFailed",
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     ValidationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
         /// What refused the input: a rule, a text that does not read as JSON,
         /// or a check of the core.
@@ -201,16 +201,16 @@ pub enum TaskSendError {
     #[error_class(
         class = "TaskSendEnqueueFailed",
         code = "EnqueueFailed",
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     EnqueueFailed {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
         /// The exception of the failure.
         #[error_slot(cause)]
@@ -221,11 +221,11 @@ pub enum TaskSendError {
     /// The message names which one differs. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
     PayloadMismatch {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
@@ -234,11 +234,11 @@ pub enum TaskSendError {
     /// the configured limit. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
     PayloadTooLarge {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Int")]
+        #[error_slot(slot_type = "Int")]
         size_bytes: u64,
-        #[error_slot(python = "Int")]
+        #[error_slot(slot_type = "Int")]
         limit_bytes: u64,
     },
     /// The idempotency key is reserved by another task with a different command.
@@ -255,13 +255,13 @@ pub enum TaskSendError {
         never_retryable
     )]
     IdempotencyKeyConflict {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         owner_task_id: Uuid,
     },
 }
@@ -652,15 +652,15 @@ mod tests {
                         | ErrorSlot::Field { .. }
                         | ErrorSlot::Exception { .. } => false,
                     })
-                    .map(|slot| (class.python_class, slot))
+                    .map(|slot| (class.type_name, slot))
             })
             .collect();
 
         assert_eq!(
             fixed,
             [
-                (async_context.python_class(), &ErrorSlot::NeverRetryable),
-                (conflict.python_class(), &ErrorSlot::NeverRetryable),
+                (async_context.type_name(), &ErrorSlot::NeverRetryable),
+                (conflict.type_name(), &ErrorSlot::NeverRetryable),
             ]
         );
         assert!(!conflict.retryable());
@@ -890,7 +890,7 @@ mod tests {
         let found = TaskSendError::ERROR_CATALOG
             .classes
             .iter()
-            .find(|candidate| candidate.python_class == class)
+            .find(|candidate| candidate.type_name == class)
             .expect("the class is in the catalog");
         found
             .slots
@@ -915,7 +915,7 @@ mod tests {
             .map(|slot| (slot.name, slot.value))
             .collect();
         let names: Vec<&'static str> = named.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, catalog_slot_names(error.python_class()));
+        assert_eq!(names, catalog_slot_names(error.type_name()));
         named
     }
 

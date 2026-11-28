@@ -10,7 +10,7 @@
 //! - An enum without a tag becomes `Choice`; every variant must be a unit
 //!   variant.
 //!
-//! A field's value is `ManifestValue::PYTHON` of its Rust type. An integer
+//! A field's value is `ManifestValue::VALUE_TYPE` of its Rust type. An integer
 //! field, or a length of time in whole seconds, whose bound is a rule of the
 //! type that holds it names that bound,
 //! `#[manifest_schema(int_bound = <IntBound constant>)]`; its value is then
@@ -71,7 +71,7 @@ enum TypeParameter {
 
 /// Where the value of a field comes from.
 enum FieldBound {
-    /// `ManifestValue::PYTHON` of the field type.
+    /// `ManifestValue::VALUE_TYPE` of the field type.
     FromType,
     /// `bounded_int::<FieldType>(bound)`: the field names its bound.
     Named(Path),
@@ -94,9 +94,9 @@ pub fn derive_manifest_schema(input: DeriveInput) -> syn::Result<TokenStream> {
     let uses = generic_uses(&input.attrs)?;
     match (type_parameter(&input.generics)?, uses.as_slice()) {
         (TypeParameter::NoParameter, []) => {
-            let python_name = ident.to_string();
-            let shape = shape(&input, &python_name, &settings)?;
-            Ok(schema_impls(&quote!(#ident), &python_name, &doc, &shape))
+            let type_name = ident.to_string();
+            let shape = shape(&input, &type_name, &settings)?;
+            Ok(schema_impls(&quote!(#ident), &type_name, &doc, &shape))
         }
         (TypeParameter::NoParameter, [_, ..]) => Err(syn::Error::new_spanned(
             ident,
@@ -109,9 +109,9 @@ pub fn derive_manifest_schema(input: DeriveInput) -> syn::Result<TokenStream> {
         (TypeParameter::One(parameter), [_, ..]) => {
             let mut impls = TokenStream::new();
             for used in &uses {
-                let python_name = format!("{ident}{}", use_name(used)?);
-                let shape = shape(&input, &python_name, &settings)?;
-                let schema = schema_impls(&quote!(#ident<#parameter>), &python_name, &doc, &shape);
+                let type_name = format!("{ident}{}", use_name(used)?);
+                let shape = shape(&input, &type_name, &settings)?;
+                let schema = schema_impls(&quote!(#ident<#parameter>), &type_name, &doc, &shape);
                 impls.extend(quote! {
                     const _: () = {
                         type #parameter = #used;
@@ -127,20 +127,20 @@ pub fn derive_manifest_schema(input: DeriveInput) -> syn::Result<TokenStream> {
 /// The `ManifestValue` and `ManifestItem` impls of `self_type`.
 fn schema_impls(
     self_type: &TokenStream,
-    python_name: &str,
+    type_name: &str,
     doc: &str,
     shape: &TokenStream,
 ) -> TokenStream {
     quote! {
         impl ::horsies_core::manifest_schema::ManifestValue for #self_type {
-            const PYTHON: ::horsies_core::manifest_schema::PythonValue =
-                ::horsies_core::manifest_schema::PythonValue::Named(#python_name);
+            const VALUE_TYPE: ::horsies_core::manifest_schema::ValueType =
+                ::horsies_core::manifest_schema::ValueType::Named(#type_name);
         }
 
         impl ::horsies_core::manifest_schema::ManifestItem for #self_type {
             const ITEM: ::horsies_core::manifest_schema::ManifestType =
                 ::horsies_core::manifest_schema::ManifestType {
-                    python_name: #python_name,
+                    type_name: #type_name,
                     doc: #doc,
                     shape: #shape,
                 };
@@ -148,17 +148,17 @@ fn schema_impls(
     }
 }
 
-/// The `ManifestShape` of the derived type, whose name is `python_name`.
+/// The `ManifestShape` of the derived type, whose name is `type_name`.
 fn shape(
     input: &DeriveInput,
-    python_name: &str,
+    type_name: &str,
     settings: &SerdeSettings,
 ) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     match &input.data {
         Data::Struct(data) => record_shape(ident, &data.fields, settings.tag.as_ref()),
         Data::Enum(data) => match &settings.tag {
-            Some(tag) => tagged_shape(python_name, tag, &settings.variant_names, data),
+            Some(tag) => tagged_shape(type_name, tag, &settings.variant_names, data),
             None => choice_shape(&settings.variant_names, data),
         },
         Data::Union(_) => Err(syn::Error::new_spanned(
@@ -254,12 +254,12 @@ fn tagged_shape(
             }
         };
         let rust_name = variant.ident.to_string();
-        let python_class = format!("{enum_name}{rust_name}");
+        let type_name = format!("{enum_name}{rust_name}");
         let tag_value = wire_name(&rust_name, names);
         let doc = doc_text(&variant.attrs);
         variants.push(quote! {
             ::horsies_core::manifest_schema::TaggedVariant {
-                python_class: #python_class,
+                type_name: #type_name,
                 tag_value: #tag_value,
                 doc: #doc,
                 fields: #fields,
@@ -328,7 +328,7 @@ fn field_list(fields: &FieldsNamed) -> syn::Result<TokenStream> {
         let field_type = &field.ty;
         let value = match field_bound(&field.attrs)? {
             FieldBound::FromType => {
-                quote!(<#field_type as ::horsies_core::manifest_schema::ManifestValue>::PYTHON)
+                quote!(<#field_type as ::horsies_core::manifest_schema::ManifestValue>::VALUE_TYPE)
             }
             FieldBound::Named(bound) => {
                 quote!(::horsies_core::manifest_schema::bounded_int::<#field_type>(#bound))
@@ -577,7 +577,7 @@ mod tests {
 
     /// A unit variant of a tagged enum with `deserialize_with` and the
     /// function `no_member_after_the_tag`, by its name or by a path, has
-    /// the Python form of the same variant without the attribute.
+    /// the schema of the same variant without the attribute.
     #[test]
     fn a_unit_variant_that_refuses_a_member_after_the_tag_keeps_its_form() {
         let plain = derive_text(syn::parse_quote! {
@@ -670,7 +670,7 @@ mod tests {
         .expect("the derive accepts the enum");
         assert!(
             text.contains(
-                "::horsies_core::manifest_schema::TaggedVariant{python_class:\"SchedulePatternInterval\",tag_value:\"interval\",doc:\"\",fields:::horsies_core::manifest_schema::VariantFields::OfRecord(::horsies_core::manifest_schema::record_name(<IntervalScheduleas::horsies_core::manifest_schema::ManifestItem>::ITEM)),}"
+                "::horsies_core::manifest_schema::TaggedVariant{type_name:\"SchedulePatternInterval\",tag_value:\"interval\",doc:\"\",fields:::horsies_core::manifest_schema::VariantFields::OfRecord(::horsies_core::manifest_schema::record_name(<IntervalScheduleas::horsies_core::manifest_schema::ManifestItem>::ITEM)),}"
             ),
             "{text}"
         );
@@ -697,19 +697,19 @@ mod tests {
                 "{text}"
             );
             assert!(
-                text.contains(&format!("PythonValue::Named(\"{name}\")")),
+                text.contains(&format!("ValueType::Named(\"{name}\")")),
                 "{text}"
             );
             assert!(
                 text.contains(&format!(
-                    "python_class:\"{name}EnumValues\",tag_value:\"enum_values\""
+                    "type_name:\"{name}EnumValues\",tag_value:\"enum_values\""
                 )),
                 "{text}"
             );
         }
         assert!(text.contains("forCronEnumTerm<T>{"), "{text}");
         assert!(
-            text.contains("value:<Vec<T>as::horsies_core::manifest_schema::ManifestValue>::PYTHON"),
+            text.contains("value:<Vec<T>as::horsies_core::manifest_schema::ManifestValue>::VALUE_TYPE"),
             "{text}"
         );
     }
@@ -785,7 +785,7 @@ mod tests {
         .expect("the derive accepts the struct");
         assert!(
             text.contains(
-                "name:\"time\",doc:\"\",value:<NaiveTimeas::horsies_core::manifest_schema::ManifestValue>::PYTHON,default:::horsies_core::manifest_schema::MemberDefault::NoDefault,"
+                "name:\"time\",doc:\"\",value:<NaiveTimeas::horsies_core::manifest_schema::ManifestValue>::VALUE_TYPE,default:::horsies_core::manifest_schema::MemberDefault::NoDefault,"
             ),
             "{text}"
         );

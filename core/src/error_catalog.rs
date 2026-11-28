@@ -1,47 +1,46 @@
 //! The error classes of the core's catalogs, as static data for clients.
 //!
-//! An error enum of the core has one variant per Python class that the core
+//! An error enum of the core has one variant per error class that the core
 //! produces. `#[derive(horsies_core_derive::ErrorCatalog)]` records, per
-//! variant, the Python class: its name, its doc (the variant's `///` lines),
-//! and its slots in order. `horsies-codegen` renders the frozen dataclasses
+//! variant, the class: its name, its doc (the variant's `///` lines),
+//! and its slots in order. `horsies-codegen` renders the classes
 //! and the union of each catalog from [`ERROR_CATALOGS`], so a class is
-//! named once, here. The classes that only a Python client produces stay in
-//! Python; each public union of Python is a generated union plus them.
+//! named once, here. The classes that only one client produces stay in
+//! that client; each public union of a client is a generated union plus them.
 //!
 //! The slots of a class, in order:
 //!
-//! 1. `code`: a `ClassVar` member of the code catalog, or an instance field
-//!    typed by a `Literal` subset of it ([`CodeSubset`]);
-//! 2. `retryable: ClassVar[bool] = False` for a class whose call a repeat
-//!    does not complete, or `retryable: ClassVar[bool] = True` for a class
-//!    whose same call, unchanged, can succeed later;
+//! 1. `code`: a fixed member of the code catalog, or an instance field
+//!    typed by a subset of it ([`CodeSubset`]);
+//! 2. `retryable`, false for a class whose call a repeat does not
+//!    complete, or true for a class whose same call, unchanged, can succeed
+//!    later;
 //! 3. the fields of the variant, in declaration order, each with its
-//!    Python type and whether `repr` shows it;
-//! 4. `cause`, the core's exception class of the cause, for a class
-//!    that has one.
+//!    type and whether the text form of the class shows it;
+//! 4. `cause`, the core's failure of the cause, for a class that has one.
 //!
 //! Adding an error enum: derive `ErrorCatalog` on it, add it to
 //! [`ERROR_CATALOGS`], and name its per-operation unions in
 //! [`ERROR_UNIONS`].
 //!
 //! A field type of a class that is a record of its own (the payload of a
-//! send) is a [`RecordClass`] in [`ERROR_RECORDS`], and a `NewType` that a
+//! send) is a [`RecordClass`] in [`ERROR_RECORDS`], and a text type that a
 //! record field holds is a [`TextNewType`] in [`TEXT_NEW_TYPES`]. They are
-//! written by hand here, in Python's shape: the core's own structs hold the
-//! same facts in Rust types.
+//! written by hand here: the core's own structs hold the same facts in Rust
+//! types.
 //!
 //! A client builds the class of a value from [`ErrorClassValues`]
 //! (`#[derive(horsies_core_derive::ErrorClassValues)]`): the values of the
 //! instance slots, by name, in the class's order. The `cause` slot is
 //! built from the variant's typed cause (`#[error_slot(cause)]`, an
-//! [`ExceptionCause`]), so the exception keeps the cause's own text. A
-//! refusal whose Python exception is a class that the client defines (a
-//! `ValueError` of a rule, a `SerializationError` of a JSON text) names
-//! that class ([`ClientExceptionClass`]).
+//! [`ExceptionCause`]), so the class keeps the cause's own text. A
+//! refusal whose cause is a class that the client defines (a rule of a
+//! value, a JSON text that does not read) names that class
+//! ([`ClientExceptionClass`]).
 //!
 //! [`EXCEPTION_CLASSES`] are the exception classes that the core defines
-//! for its clients (for example `OutcomeDecodeError`): `Exception`
-//! subclasses whose one argument is their message.
+//! for its clients (for example `OutcomeDecodeError`): failures whose one
+//! argument is their message.
 
 use uuid::Uuid;
 
@@ -58,22 +57,22 @@ use crate::monitoring::{
 use crate::workflow_engine::error::WorkflowError;
 use crate::{DatabaseOperationError, DatabaseOperationFailedCode, WorkflowHandleError};
 
-/// The Python type of an instance field of a generated class.
+/// The type of an instance field of a generated class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotType {
-    /// `str`.
+    /// Text.
     Str,
-    /// `bool`.
+    /// A truth value.
     Bool,
-    /// `int`.
+    /// A whole number.
     Int,
-    /// `uuid.UUID`.
+    /// A UUID.
     Uuid,
-    /// `str` holding the text of a UUID: a workflow id of the Python client.
+    /// The text of a UUID: a workflow id of the Python client.
     UuidText,
-    /// `TaskStatus`, the code catalog of `horsies._catalog.status`.
+    /// A task status, the code catalog of the `status` module.
     TaskStatus,
-    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`] in the module of
+    /// The send payload, the record [`TASK_SEND_PAYLOAD`] in the module of
     /// the class.
     TaskSendPayload,
 }
@@ -82,64 +81,64 @@ pub enum SlotType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotRepr {
     Shown,
-    /// `field(repr=False)`: a message or a cause, which can be long or hold
-    /// data of the caller.
+    /// A message or a cause, which the text form of the class leaves out
+    /// because it can be long or hold data of the caller.
     Hidden,
 }
 
-/// The Python type of the `cause` slot. The runtime class is the class
-/// that the cause names ([`ExceptionValue`]): the core's exception class of
-/// the cause (`horsies._core.CoreFailure` and its subclasses), a generated
-/// exception class, or a class that the client defines; the declared type
-/// is Python's.
+/// Whether the `cause` slot always has a cause. The cause is the value that
+/// [`ExceptionValue`] names: the core's failure class of the cause, a
+/// generated exception class, or a class that the client defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExceptionType {
-    /// `BaseException`.
+    /// The slot always holds a cause.
     Exception,
-    /// `BaseException | NoCause`.
+    /// The slot holds a cause, or [`ExceptionValue::NoCause`] when a check
+    /// of the core found the failure.
     ExceptionOrNoCause,
 }
 
 /// One slot of a generated class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSlot {
-    /// `code: ClassVar[<CodeEnum>] = <CodeEnum>.<member>`.
+    /// `code` is a fixed member of the code catalog.
     CodeMember { member: &'static str },
-    /// `code: <subset>`: an instance field typed by a `Literal` subset of
-    /// the code catalog, named by [`CodeSubset::name`].
+    /// `code` is an instance field typed by a subset of the code catalog,
+    /// named by [`CodeSubset::name`].
     CodeSubset { subset: &'static str },
-    /// `retryable: ClassVar[bool] = False`: a repeat of the same call does
-    /// not complete it. The caller must change the call.
+    /// `retryable` is false: a repeat of the same call does not complete
+    /// it. The caller must change the call.
     NeverRetryable,
-    /// `retryable: ClassVar[bool] = True`: a repeat of the same call,
-    /// unchanged, can succeed later. It does not say that a repeat is safe.
+    /// `retryable` is true: a repeat of the same call, unchanged, can
+    /// succeed later. It does not say that a repeat is safe.
     AlwaysRetryable,
     /// An instance field of the variant.
     Field {
         name: &'static str,
-        python_type: SlotType,
+        slot_type: SlotType,
         repr: SlotRepr,
     },
-    /// `cause: <type> = field(repr=False)`, built from the cause of the
-    /// variant (`failure_cause()`).
-    Exception { python_type: ExceptionType },
+    /// `cause`, built from the cause of the variant (`failure_cause()`).
+    /// The text form of the class leaves it out.
+    Exception { cause_type: ExceptionType },
 }
 
-/// The Python class of one variant.
+/// The class of one variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorClass {
-    pub python_class: &'static str,
+    /// The name of the class.
+    pub type_name: &'static str,
     /// The class doc, from the variant's `///` lines.
     pub doc: &'static str,
-    /// The slots in their Python order.
+    /// The slots in their order.
     pub slots: &'static [ErrorSlot],
 }
 
 /// The classes of one error enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorCatalog {
-    /// The module under `horsies._catalog` that holds the classes.
-    pub python_module: &'static str,
+    /// The module that holds the classes.
+    pub module: &'static str,
     /// The code catalog of the `code` slots.
     pub code_catalog: CodeCatalog,
     /// The name of the union of every class of the enum.
@@ -157,8 +156,8 @@ pub trait ErrorEnum: 'static {
     const ERROR_CATALOG: ErrorCatalog;
     /// The catalog code of this value.
     fn error_code(&self) -> Self::Code;
-    /// The Python class of this value's variant.
-    fn python_class(&self) -> &'static str;
+    /// The class name of this value's variant.
+    fn type_name(&self) -> &'static str;
 }
 
 /// An error enum whose instance slot values the derive generates
@@ -166,8 +165,8 @@ pub trait ErrorEnum: 'static {
 /// a `cause` slot carries its typed cause.
 pub trait ErrorClassValues: ErrorEnum {
     /// The values of the instance slots of this value's class
-    /// ([`ErrorEnum::python_class`]), by name, in the class's slot order:
-    /// the `code` field of a `Literal` subset, the fields, then
+    /// ([`ErrorEnum::type_name`]), by name, in the class's slot order:
+    /// the `code` field of a subset, the fields, then
     /// `cause`. The class values (`code` of one member, the fixed
     /// `retryable` of a class) are not instance slots. Pure.
     fn slot_values(&self) -> Vec<SlotValue<'_>>;
@@ -180,24 +179,24 @@ pub struct SlotValue<'a> {
     pub value: SlotData<'a>,
 }
 
-/// The value of an instance slot, by the Python type of the slot.
+/// The value of an instance slot, by the type of the slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotData<'a> {
-    /// `str`.
+    /// Text.
     Str(&'a str),
-    /// `bool`.
+    /// A truth value.
     Bool(bool),
-    /// `int`: any integer field of 64 bits or less, widened.
+    /// A whole number: any integer field of 64 bits or less, widened.
     Int(i128),
-    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`]: a client builds
+    /// The send payload, the record [`TASK_SEND_PAYLOAD`]: a client builds
     /// it from [`TaskSendPayload::record_values`].
     TaskSendPayload(&'a TaskSendPayload),
-    /// `uuid.UUID`.
+    /// A UUID.
     Uuid(Uuid),
-    /// `str` holding the text of the UUID.
+    /// The text of the UUID.
     UuidText(Uuid),
-    /// A member of a code catalog: the Python enum class of `catalog`,
-    /// called with the wire value `value`.
+    /// A member of a code catalog: the type of `catalog`, with the wire
+    /// value `value`.
     CodeMember {
         catalog: CodeCatalog,
         value: &'static str,
@@ -219,9 +218,8 @@ impl<'a> SlotData<'a> {
 /// The exception that a client builds from a typed cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExceptionValue {
-    /// The core's exception class of `cause` (Python: the `CoreFailure`
-    /// leaf classes of `horsies._core`), with the operation that failed as
-    /// its subject. `text` is the cause's own text; for a server error the
+    /// The core's failure class of `cause`, with the operation that failed
+    /// as its subject. `text` is the cause's own text; for a server error the
     /// class carries the server's primary message instead.
     CoreFailure {
         text: String,
@@ -238,9 +236,9 @@ pub enum ExceptionValue {
         class: ClientExceptionClass,
         text: String,
     },
-    /// No exception: a check of the core found the failure (Python:
-    /// `horsies._catalog.error_detail.NoCause()`). Only a slot of the type
-    /// `BaseException | NoCause` holds it.
+    /// No exception: a check of the core found the failure. Only a slot
+    /// with an optional cause ([`ExceptionType::ExceptionOrNoCause`]) holds
+    /// it.
     NoCause,
 }
 
@@ -249,11 +247,9 @@ pub enum ExceptionValue {
 /// member to its own class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientExceptionClass {
-    /// A rule refused a value; the text is the rule (Python: the built-in
-    /// `ValueError`).
+    /// A rule refused a value; the text is the rule.
     ValueError,
-    /// A text does not read as JSON; the text is the reader's error
-    /// (Python: `horsies.core.codec.json_io.SerializationError`).
+    /// A text does not read as JSON; the text is the reader's error.
     SerializationError,
 }
 
@@ -406,9 +402,10 @@ impl ExceptionCause for OutcomeDecodeError {
 /// whose one argument is its message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExceptionClass {
-    /// The module under `horsies._catalog` that holds the class.
-    pub python_module: &'static str,
-    pub python_class: &'static str,
+    /// The module that holds the class.
+    pub module: &'static str,
+    /// The name of the class.
+    pub type_name: &'static str,
     /// The class doc.
     pub doc: &'static str,
 }
@@ -417,8 +414,8 @@ pub struct ExceptionClass {
 /// (Python `horsies.core.lifecycle.outcomes.OutcomeDecodeError`;
 /// [`OutcomeDecodeError`] in the core).
 pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
-    python_module: "lifecycle_errors",
-    python_class: "OutcomeDecodeError",
+    module: "lifecycle_errors",
+    type_name: "OutcomeDecodeError",
     doc: "The returned row does not satisfy the wire contract.\n\n\
           Never raised for a task outcome — only when the database returned\n\
           something this code cannot interpret, which means one side is running\n\
@@ -429,31 +426,30 @@ pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
 /// `horsies.core.history.errors.HistoryContractError`; the core's
 /// [`HistoryContractSource`]).
 pub const HISTORY_CONTRACT_ERROR: ExceptionClass = ExceptionClass {
-    python_module: "history_errors",
-    python_class: "HistoryContractError",
+    module: "history_errors",
+    type_name: "HistoryContractError",
     doc: "The database state violates an invariant this subsystem relies on.",
 };
 
-/// Every exception class of the core for the Python package, in render
-/// order.
+/// Every exception class of the core for the clients, in render order.
 pub const EXCEPTION_CLASSES: &[ExceptionClass] = &[OUTCOME_DECODE_ERROR, HISTORY_CONTRACT_ERROR];
 
 /// A union of some classes of one catalog: the failures of one operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorUnion {
     /// The module of the catalog of its classes.
-    pub python_module: &'static str,
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     /// The class names, each a class of the catalog.
     pub members: &'static [&'static str],
 }
 
-/// A `Literal` subset of a code catalog: the type of a `code` field.
+/// A subset of a code catalog: the type of a `code` field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeSubset {
     /// The module of the catalog that uses it.
-    pub python_module: &'static str,
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     /// The code catalog of the members.
@@ -462,7 +458,7 @@ pub struct CodeSubset {
     pub members: Vec<&'static str>,
 }
 
-/// Every error catalog that the Python package gets, in render order.
+/// Every error catalog that the clients get, in render order.
 pub const ERROR_CATALOGS: &[ErrorCatalog] = &[
     <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG,
     <WorkflowHandleError as ErrorEnum>::ERROR_CATALOG,
@@ -472,22 +468,22 @@ pub const ERROR_CATALOGS: &[ErrorCatalog] = &[
     <WorkflowStartError as ErrorEnum>::ERROR_CATALOG,
 ];
 
-/// The Python type of a field of a generated record class.
+/// The type of a field of a generated record class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordFieldType {
-    /// `str`.
+    /// Text.
     Str,
-    /// `int`.
+    /// A whole number.
     Int,
-    /// `datetime`.
+    /// A point in time.
     DateTime,
-    /// `str | None`.
+    /// Text, or no value.
     OptionalStr,
-    /// `int | None`.
+    /// A whole number, or no value.
     OptionalInt,
-    /// `datetime | None`.
+    /// A point in time, or no value.
     OptionalDateTime,
-    /// `RetentionClassKey | None`, the [`RETENTION_CLASS_KEY`] new type.
+    /// A [`RETENTION_CLASS_KEY`], or no value.
     OptionalRetentionClassKey,
 }
 
@@ -496,7 +492,7 @@ pub enum RecordFieldType {
 pub enum FieldDefault {
     /// No default: the caller gives the value.
     Required,
-    /// `None`.
+    /// No value.
     NoneValue,
     /// [`DEFAULT_RETENTION_CLASS`], a constant of [`RETENTION_CLASS_KEY`].
     DefaultRetentionClassKey,
@@ -506,20 +502,20 @@ pub enum FieldDefault {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordField {
     pub name: &'static str,
-    pub python_type: RecordFieldType,
+    pub field_type: RecordFieldType,
     pub default: FieldDefault,
     /// Comment lines above the field; empty for none.
     pub note: &'static str,
 }
 
-/// A frozen dataclass that a field of an error class holds.
+/// A record that a field of an error class holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordClass {
-    /// The module under `horsies._catalog` that holds the record.
-    pub python_module: &'static str,
-    pub python_class: &'static str,
+    /// The module that holds the record.
+    pub module: &'static str,
+    pub type_name: &'static str,
     pub doc: &'static str,
-    /// The fields in their Python order: each field with a default comes
+    /// The fields in their order: each field with a default comes
     /// after every field without one.
     pub fields: &'static [RecordField],
 }
@@ -532,11 +528,11 @@ pub struct NewTypeConstant {
     pub value: &'static str,
 }
 
-/// A `NewType` of `str`, with its named values.
+/// A named text type, with its named values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextNewType {
-    /// The module under `horsies._catalog` that holds it.
-    pub python_module: &'static str,
+    /// The module that holds it.
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     pub constants: &'static [NewTypeConstant],
@@ -544,7 +540,7 @@ pub struct TextNewType {
 
 /// The key of a retention class, and the key of the default class.
 pub const RETENTION_CLASS_KEY: TextNewType = TextNewType {
-    python_module: "retention_class",
+    module: "retention_class",
     name: "RetentionClassKey",
     doc: "The key of a finite period class. ``period_class_key`` of\n\
           ``horsies.core.history.periods`` builds it.\n\
@@ -566,15 +562,15 @@ pub const DEFAULT_RETENTION_CLASS: NewTypeConstant = NewTypeConstant {
     value: DEFAULT_RETENTION_CLASS_KEY,
 };
 
-/// Every `NewType` that the Python package gets, in render order.
+/// Every text type that the clients get, in render order.
 pub const TEXT_NEW_TYPES: &[TextNewType] = &[RETENTION_CLASS_KEY];
 
 /// The payload of a send that the resend methods send again (Python
 /// `TaskSendPayload`). The core's [`crate::core::task::send_types::TaskSendPayload`]
 /// holds the same facts with a resolved retention.
 pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
-    python_module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.python_module,
-    python_class: "TaskSendPayload",
+    module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.module,
+    type_name: "TaskSendPayload",
     doc: "Serialized envelope for an idempotent resend.\n\
           \n\
           All value fields are pre-serialized to avoid round-trip issues.\n\
@@ -582,56 +578,56 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
     fields: &[
         RecordField {
             name: "task_name",
-            python_type: RecordFieldType::Str,
+            field_type: RecordFieldType::Str,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "queue_name",
-            python_type: RecordFieldType::Str,
+            field_type: RecordFieldType::Str,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "priority",
-            python_type: RecordFieldType::Int,
+            field_type: RecordFieldType::Int,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "input_json",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::Required,
             note: "The task input as JSON text: the keyword arguments as one object, or\n\
                    None for a send with none (stored as ``{}``).",
         },
         RecordField {
             name: "sent_at",
-            python_type: RecordFieldType::DateTime,
+            field_type: RecordFieldType::DateTime,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "good_until",
-            python_type: RecordFieldType::OptionalDateTime,
+            field_type: RecordFieldType::OptionalDateTime,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "enqueue_delay_seconds",
-            python_type: RecordFieldType::OptionalInt,
+            field_type: RecordFieldType::OptionalInt,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "task_options",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "idempotency_key",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::NoneValue,
             note: "The caller's idempotency key, distinct from task identity. Riding the\n\
                    payload keeps the uncertain-commit resend keyed: a replayed send\n\
@@ -639,7 +635,7 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
         },
         RecordField {
             name: "retention_class_key",
-            python_type: RecordFieldType::OptionalRetentionClassKey,
+            field_type: RecordFieldType::OptionalRetentionClassKey,
             default: FieldDefault::DefaultRetentionClassKey,
             note: "The retention class snapshotted at enqueue. ``None`` means forever,\n\
                    so the field defaults to the immutable 30-day class rather than to\n\
@@ -649,26 +645,26 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
     ],
 };
 
-/// Every record class that the Python package gets, in render order.
+/// Every record class that the clients get, in render order.
 pub const ERROR_RECORDS: &[RecordClass] = &[TASK_SEND_PAYLOAD];
 
 /// The value of one field of a generated record class, by the field's
-/// Python type ([`RecordFieldType`]).
+/// type ([`RecordFieldType`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordValue<'a> {
-    /// `str`.
+    /// Text.
     Str(&'a str),
-    /// `int`.
+    /// A whole number.
     Int(i64),
-    /// `datetime`, aware, in UTC.
+    /// A point in time, in UTC.
     DateTime(chrono::DateTime<chrono::Utc>),
-    /// `str | None`.
+    /// Text, or no value.
     OptionalStr(Option<&'a str>),
-    /// `int | None`.
+    /// A whole number, or no value.
     OptionalInt(Option<i64>),
-    /// `datetime | None`, aware, in UTC.
+    /// A point in time in UTC, or no value.
     OptionalDateTime(Option<chrono::DateTime<chrono::Utc>>),
-    /// `RetentionClassKey | None`: the key text, or `None` for forever.
+    /// A retention class key: the key text, or `None` for forever.
     OptionalRetentionClassKey(Option<String>),
 }
 
@@ -680,10 +676,10 @@ pub struct RecordFieldValue<'a> {
 }
 
 /// The unions of the failures of one operation that the core produces, in
-/// render order. Python's public union of the operation adds its
-/// client-only classes.
+/// render order. The public union of a client adds its client-only
+/// classes.
 pub const ERROR_UNIONS: &[ErrorUnion] = &[ErrorUnion {
-    python_module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.python_module,
+    module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.module,
     name: "DatabaseCoreEnqueueError",
     doc: "Every failure of an enqueue that the core gives.",
     members: &[
@@ -695,10 +691,10 @@ pub const ERROR_UNIONS: &[ErrorUnion] = &[ErrorUnion {
     ],
 }];
 
-/// The `Literal` subsets that the `code` field of a class holds.
+/// The subsets that the `code` field of a class holds.
 pub fn code_subsets() -> Vec<CodeSubset> {
     vec![CodeSubset {
-        python_module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.python_module,
+        module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.module,
         name: "DatabaseOperationFailedCode",
         doc: "The operation codes of ``DatabaseOperationFailed``.",
         code_catalog: <crate::DatabaseErrorCode as CodeEnum>::CATALOG,
@@ -719,7 +715,7 @@ mod tests {
     fn class_names() -> Vec<&'static str> {
         ERROR_CATALOGS
             .iter()
-            .flat_map(|catalog| catalog.classes.iter().map(|class| class.python_class))
+            .flat_map(|catalog| catalog.classes.iter().map(|class| class.type_name))
             .collect()
     }
 
@@ -742,16 +738,16 @@ mod tests {
             for class in catalog.classes {
                 match class.slots.first() {
                     Some(ErrorSlot::CodeMember { member }) => {
-                        assert!(members.contains(member), "{}: {member}", class.python_class);
+                        assert!(members.contains(member), "{}: {member}", class.type_name);
                     }
                     Some(ErrorSlot::CodeSubset { subset }) => {
                         assert!(
                             code_subsets().iter().any(|known| known.name == *subset),
                             "{}: {subset}",
-                            class.python_class
+                            class.type_name
                         );
                     }
-                    other => panic!("{} starts with {other:?}, not its code", class.python_class),
+                    other => panic!("{} starts with {other:?}, not its code", class.type_name),
                 }
             }
         }
@@ -771,9 +767,9 @@ mod tests {
                 match exceptions.as_slice() {
                     [] => {}
                     [position] => {
-                        assert_eq!(*position, class.slots.len() - 1, "{}", class.python_class);
+                        assert_eq!(*position, class.slots.len() - 1, "{}", class.type_name);
                     }
-                    more => panic!("{} has {} exception slots", class.python_class, more.len()),
+                    more => panic!("{} has {} exception slots", class.type_name, more.len()),
                 }
             }
         }
@@ -784,14 +780,14 @@ mod tests {
         for union in ERROR_UNIONS {
             let catalog = ERROR_CATALOGS
                 .iter()
-                .find(|catalog| catalog.python_module == union.python_module)
-                .unwrap_or_else(|| panic!("{}: no catalog in {}", union.name, union.python_module));
+                .find(|catalog| catalog.module == union.module)
+                .unwrap_or_else(|| panic!("{}: no catalog in {}", union.name, union.module));
             for member in union.members {
                 assert!(
                     catalog
                         .classes
                         .iter()
-                        .any(|class| class.python_class == *member),
+                        .any(|class| class.type_name == *member),
                     "{}: {member}",
                     union.name
                 );
@@ -828,12 +824,12 @@ mod tests {
         let class = |name: &str| {
             classes
                 .iter()
-                .find(|class| class.python_class == name)
+                .find(|class| class.type_name == name)
                 .unwrap_or_else(|| panic!("no class {name}"))
         };
         let message = ErrorSlot::Field {
             name: "message",
-            python_type: SlotType::Str,
+            slot_type: SlotType::Str,
             repr: SlotRepr::Hidden,
         };
         assert_eq!(
@@ -845,11 +841,11 @@ mod tests {
                 message,
                 ErrorSlot::Field {
                     name: "retryable",
-                    python_type: SlotType::Bool,
+                    slot_type: SlotType::Bool,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::Exception
+                    cause_type: ExceptionType::Exception
                 },
             ]
         );
@@ -863,7 +859,7 @@ mod tests {
                 message,
                 ErrorSlot::Field {
                     name: "owner_task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
             ]
@@ -881,12 +877,12 @@ mod tests {
         let class = |name: &str| {
             classes
                 .iter()
-                .find(|class| class.python_class == name)
+                .find(|class| class.type_name == name)
                 .unwrap_or_else(|| panic!("no class {name}"))
         };
         let message = ErrorSlot::Field {
             name: "message",
-            python_type: SlotType::Str,
+            slot_type: SlotType::Str,
             repr: SlotRepr::Hidden,
         };
         assert_eq!(
@@ -897,22 +893,22 @@ mod tests {
                 },
                 ErrorSlot::Field {
                     name: "task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Field {
                     name: "payload",
-                    python_type: SlotType::TaskSendPayload,
+                    slot_type: SlotType::TaskSendPayload,
                     repr: SlotRepr::Hidden,
                 },
                 message,
                 ErrorSlot::Field {
                     name: "retryable",
-                    python_type: SlotType::Bool,
+                    slot_type: SlotType::Bool,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::ExceptionOrNoCause
+                    cause_type: ExceptionType::ExceptionOrNoCause
                 },
             ]
         );
@@ -925,12 +921,12 @@ mod tests {
                 message,
                 ErrorSlot::Field {
                     name: "size_bytes",
-                    python_type: SlotType::Int,
+                    slot_type: SlotType::Int,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Field {
                     name: "limit_bytes",
-                    python_type: SlotType::Int,
+                    slot_type: SlotType::Int,
                     repr: SlotRepr::Shown,
                 },
             ]
@@ -944,23 +940,23 @@ mod tests {
                 ErrorSlot::NeverRetryable,
                 ErrorSlot::Field {
                     name: "task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Field {
                     name: "payload",
-                    python_type: SlotType::TaskSendPayload,
+                    slot_type: SlotType::TaskSendPayload,
                     repr: SlotRepr::Hidden,
                 },
                 message,
                 ErrorSlot::Field {
                     name: "owner_task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
             ]
         );
-        let names: Vec<&str> = classes.iter().map(|class| class.python_class).collect();
+        let names: Vec<&str> = classes.iter().map(|class| class.type_name).collect();
         assert_eq!(
             names,
             [
@@ -1003,7 +999,7 @@ mod tests {
         assert_eq!(names, record_names);
         for (value, field) in values.iter().zip(TASK_SEND_PAYLOAD.fields) {
             let in_its_form = matches!(
-                (&value.value, field.python_type),
+                (&value.value, field.field_type),
                 (RecordValue::Str(_), RecordFieldType::Str)
                     | (RecordValue::Int(_), RecordFieldType::Int)
                     | (RecordValue::DateTime(_), RecordFieldType::DateTime)
@@ -1021,7 +1017,7 @@ mod tests {
             assert!(
                 in_its_form,
                 "{}: {:?} for {:?}",
-                field.name, value.value, field.python_type
+                field.name, value.value, field.field_type
             );
         }
         assert_eq!(
@@ -1055,7 +1051,7 @@ mod tests {
                     .iter()
                     .all(|field| field.default != FieldDefault::Required),
                 "{}",
-                record.python_class
+                record.type_name
             );
         }
     }
@@ -1070,14 +1066,14 @@ mod tests {
                     matches!(
                         slot,
                         ErrorSlot::Field {
-                            python_type: SlotType::TaskSendPayload,
+                            slot_type: SlotType::TaskSendPayload,
                             ..
                         }
                     )
                 })
             });
             match holds_payload {
-                true => assert_eq!(catalog.python_module, TASK_SEND_PAYLOAD.python_module),
+                true => assert_eq!(catalog.module, TASK_SEND_PAYLOAD.module),
                 false => {}
             }
         }
@@ -1090,7 +1086,7 @@ mod tests {
         let fields: Vec<(&str, RecordFieldType, FieldDefault)> = TASK_SEND_PAYLOAD
             .fields
             .iter()
-            .map(|field| (field.name, field.python_type, field.default))
+            .map(|field| (field.name, field.field_type, field.default))
             .collect();
         assert_eq!(
             fields,
@@ -1145,13 +1141,13 @@ mod tests {
                 crate::BrokerError::ConnectionFailed("lost".to_owned()),
             )),
         };
-        assert_eq!(failed.python_class(), "DatabaseOperationFailed");
+        assert_eq!(failed.type_name(), "DatabaseOperationFailed");
         assert_eq!(failed.error_code(), crate::DatabaseErrorCode::CloseFailed);
         let conflict = DatabaseOperationError::IdempotencyKeyConflict {
             message: "held".to_owned(),
             owner_task_id: uuid::Uuid::nil(),
         };
-        assert_eq!(conflict.python_class(), "DatabaseIdempotencyKeyConflict");
+        assert_eq!(conflict.type_name(), "DatabaseIdempotencyKeyConflict");
         assert_eq!(
             conflict.error_code(),
             crate::DatabaseErrorCode::IdempotencyKeyConflict
@@ -1161,7 +1157,7 @@ mod tests {
             task_id: uuid::Uuid::nil(),
             current_status: crate::TaskStatus::Completed,
         };
-        assert_eq!(refused.python_class(), "TaskActionNotCancellable");
+        assert_eq!(refused.type_name(), "TaskActionNotCancellable");
         assert_eq!(
             refused.error_code(),
             crate::monitoring::TaskActionErrorCode::TaskNotCancellable
@@ -1257,16 +1253,16 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
@@ -1402,7 +1398,7 @@ mod tests {
     fn the_exception_classes_are_named_once_with_python_s_doc() {
         let names: HashSet<&str> = EXCEPTION_CLASSES
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(names.len(), EXCEPTION_CLASSES.len());
         assert!(OUTCOME_DECODE_ERROR
@@ -1437,16 +1433,16 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
@@ -1558,16 +1554,16 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
@@ -1736,16 +1732,16 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
@@ -1907,9 +1903,9 @@ mod tests {
                 name: "cause",
                 value: SlotData::Exception(exception),
             }) => exception,
-            other => panic!("{} ends with {other:?}", error.python_class()),
+            other => panic!("{} ends with {other:?}", error.type_name()),
         };
-        (error.python_class(), error.message(), exception)
+        (error.type_name(), error.message(), exception)
     }
 
     /// Python's refusal of a send before any statement: the code of the
@@ -2077,7 +2073,7 @@ mod tests {
             SENT_TASK,
             BrokerError::PayloadMismatch { task_id: TASK },
         );
-        assert_eq!(mismatch.python_class(), "DatabasePayloadMismatch");
+        assert_eq!(mismatch.type_name(), "DatabasePayloadMismatch");
         assert_eq!(
             mismatch.slot_values(),
             vec![SlotValue {
@@ -2098,7 +2094,7 @@ mod tests {
                 task_id: owner,
             },
         );
-        assert_eq!(conflict.python_class(), "DatabaseIdempotencyKeyConflict");
+        assert_eq!(conflict.type_name(), "DatabaseIdempotencyKeyConflict");
         assert_eq!(
             conflict.slot_values(),
             vec![
@@ -2198,7 +2194,7 @@ mod tests {
                 ],
                 "{text}"
             );
-            assert_eq!(failed.python_class(), "DatabaseEnqueueFailed");
+            assert_eq!(failed.type_name(), "DatabaseEnqueueFailed");
             assert_eq!(failed.failure_cause(), cause, "{text}");
             assert!(std::error::Error::source(&failed).is_some());
         }
@@ -2303,32 +2299,32 @@ mod tests {
         by_class.extend(
             every_broker_error()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
         by_class.extend(
             every_handle_error()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
         by_class.extend(
             every_monitoring_query_error()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
         by_class.extend(
             every_task_action_error()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
         by_class.extend(
             fixed_send_errors()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
         by_class.extend(
             every_start_error()
                 .iter()
-                .map(|error| (error.python_class(), error.retryable())),
+                .map(|error| (error.type_name(), error.retryable())),
         );
 
         let mut checked = 0_usize;
@@ -2345,14 +2341,14 @@ mod tests {
                 let Some(flag) = fixed else { continue };
                 let values: Vec<bool> = by_class
                     .iter()
-                    .filter(|(name, _)| *name == class.python_class)
+                    .filter(|(name, _)| *name == class.type_name)
                     .map(|(_, retryable)| *retryable)
                     .collect();
-                assert!(!values.is_empty(), "no value of {}", class.python_class);
+                assert!(!values.is_empty(), "no value of {}", class.type_name);
                 assert!(
                     values.iter().all(|retryable| *retryable == flag),
                     "{}: the flag is {flag}, the retry function gives {values:?}",
-                    class.python_class
+                    class.type_name
                 );
                 checked += 1;
             }

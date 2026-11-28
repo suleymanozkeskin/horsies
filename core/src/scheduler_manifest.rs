@@ -36,7 +36,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::config::schedule::{MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN};
 use crate::core::config::{EnqueueRetention, SchedulePattern};
 use crate::manifest::{parse_manifest, ManifestRefused};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 use crate::worker_manifest::QueuePriority;
 
 /// The one scheduler manifest version this core reads.
@@ -79,7 +79,7 @@ impl TryFrom<u32> for SchedulerManifestVersion {
 }
 
 impl ManifestValue for SchedulerManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: SCHEDULER_MANIFEST_VERSION as u64,
         max: SCHEDULER_MANIFEST_VERSION as u64,
@@ -94,7 +94,7 @@ pub struct CheckIntervalSeconds(
 );
 
 impl ManifestValue for CheckIntervalSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "CHECK_INTERVAL_SECONDS",
         min: MIN_CHECK_INTERVAL_SECONDS as u64,
         max: MAX_CHECK_INTERVAL_SECONDS as u64,
@@ -108,7 +108,7 @@ impl ManifestValue for CheckIntervalSeconds {
 pub struct CatchUpRuns(pub BoundedU32<MAX_CATCH_UP_RUNS_MIN, MAX_CATCH_UP_RUNS_MAX>);
 
 impl ManifestValue for CatchUpRuns {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MAX_CATCH_UP_RUNS",
         min: MAX_CATCH_UP_RUNS_MIN as u64,
         max: MAX_CATCH_UP_RUNS_MAX as u64,
@@ -150,7 +150,7 @@ impl TryFrom<String> for PatternJson {
 }
 
 impl ManifestValue for PatternJson {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// A retention class key: `forever`, or `standard_<days>d` of a period of
@@ -178,7 +178,7 @@ impl TryFrom<String> for RetentionClassKey {
 }
 
 impl ManifestValue for RetentionClassKey {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// The options of the task that each slot sends.
