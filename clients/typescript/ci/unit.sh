@@ -134,9 +134,10 @@ bun test
 # zones through the engine's Temporal (V8 on Node, JavaScriptCore on Bun), so
 # the schedule tests run on Node too. The tests of the `horsies` bin run on Node
 # (`node:test`) and start the bin on Node and on Bun. The seat isolates of SHARED_THREAD
-# children run on Node, so their tests run there too.
-print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule, tool and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/unit/tools/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# children run on Node, so their tests run there too. The import that selects the open
+# step of the platform package resolves by runtime, so its test runs on Node too.
+print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule, tool, platform open and stored-form tests on Node"
+node --test 'tests/runtime/native-platform-open.test.ts' 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/unit/tools/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.

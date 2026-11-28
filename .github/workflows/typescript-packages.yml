@@ -314,7 +314,9 @@ jobs:
   # package loader, resolves each entry point, requires the skill files and
   # the bin file, pings PostgreSQL through app.pingDatabase(), and, on the
   # Linux x86_64 glibc row, serves the monitoring page and its script from an
-  # app on a refused database URL (tests/packages/consumer-check.ts).
+  # app on a refused database URL (tests/packages/consumer-check.ts). Each
+  # Bun row also runs a program made by `bun build --compile` in a folder
+  # with no node_modules (tests/packages/compile-check.ts).
   # For a held row, horsies does not list the platform package, so the check
   # installs it by name beside horsies.
   check-npm:
@@ -439,6 +441,37 @@ jobs:
               --release "$RELEASE" \
               --web-page "$WEB_PAGE" \
               --all-platform-packages "$ALL_PLATFORM_PACKAGES"
+
+      # Per Bun row: a program that creates an app and pings PostgreSQL is
+      # compiled with `bun build --compile` in a project that installs horsies
+      # from the registry; the file is copied to a new folder, the project and
+      # its node_modules are removed, and the file runs there
+      # (tests/packages/compile-check.ts).
+      - name: Compile a program with bun build --compile and run it with no node_modules, in a container of the platform
+        if: matrix.installer == 'bun' && matrix.place == 'container'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network host \
+            --volume "$GITHUB_WORKSPACE/clients/typescript:/ts:ro" \
+            --env HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            "$IMAGE" \
+            bun /ts/tests/packages/compile-check.ts \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE"
+
+      - name: Compile a program with bun build --compile and run it with no node_modules, on the runner
+        if: matrix.installer == 'bun' && matrix.place == 'runner'
+        working-directory: clients/typescript
+        run: |
+          HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            bun tests/packages/compile-check.ts \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE"
 
       - name: Show the requests of the registry
         if: always()

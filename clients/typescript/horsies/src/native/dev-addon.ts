@@ -10,7 +10,8 @@
 
 import { isAbsolute } from "node:path";
 
-import { keptLoad, loadedFrom, openAddonFile } from "./load.ts";
+import { openAddonFile } from "./addon-file.ts";
+import { keptLoad, loadedFrom } from "./load.ts";
 import type { AddonLoad } from "./load.ts";
 
 /** The environment variable that names the dev build of the addon: the absolute path of its `.node` file. */

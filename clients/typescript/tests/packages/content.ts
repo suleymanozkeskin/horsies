@@ -61,7 +61,7 @@ export function entryPointSpecifiers(exportsMap: ParsedJson | undefined): readon
 /** The problems of the paths that the `horsies` tarball holds. Pure. */
 export function horsiesFileProblems(files: readonly string[], targets: readonly string[], skills: SkillFolder): readonly string[] {
   const problems = [
-    ...targets.filter((target) => !files.includes(target)).map((target) => `the exports map names ${target}, which is not packed`),
+    ...targets.filter((target) => !files.includes(target)).map((target) => `the manifest names ${target}, which is not packed`),
     ...files.filter((file) => file.endsWith(".node")).map((file) => `holds the addon file ${file}`),
     ...files.filter((file) => file.startsWith("src/")).map((file) => `holds the source file ${file}`),
     ...files.filter((file) => file.includes("dev-addon")).map((file) => `holds the dev-only entry ${file}`),

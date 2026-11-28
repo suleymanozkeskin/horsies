@@ -33,6 +33,12 @@
     },
     "./package.json": "./package.json"
   },
+  "imports": {
+    "#native/platform-open": {
+      "bun": "./src/native/platform-open/bun.ts",
+      "default": "./src/native/platform-open/node.ts"
+    }
+  },
   "bin": {
     "horsies": "./dist/tools/bin.js"
   },

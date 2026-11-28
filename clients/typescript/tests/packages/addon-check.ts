@@ -8,7 +8,7 @@
 
 import { isAbsolute } from "node:path";
 
-import { openAddonFile } from "../../horsies/src/native/load.ts";
+import { openAddonFile } from "../../horsies/src/native/addon-file.ts";
 import { processCoreView } from "../../horsies/src/native/process-core/addon.ts";
 import { coreStateProblem, testOnlyExportsIn } from "./addon-exports.ts";
 

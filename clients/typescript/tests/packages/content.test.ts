@@ -71,7 +71,7 @@ describe("horsiesFileProblems", () => {
   test("a target of the exports map that is not packed", () => {
     const files = [...PACKED.filter((file) => file !== "dist/zod.d.ts"), ...PACKED_SKILLS];
 
-    assert.deepEqual(horsiesFileProblems(files, targets, FOUND), ["the exports map names dist/zod.d.ts, which is not packed"]);
+    assert.deepEqual(horsiesFileProblems(files, targets, FOUND), ["the manifest names dist/zod.d.ts, which is not packed"]);
   });
 
   test("an addon file, a source file, the dev-only entry and build info", () => {

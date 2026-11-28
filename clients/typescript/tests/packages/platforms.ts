@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { isArray, isPlainObject, isString } from "../../horsies/src/codec/values.ts";
-import { platformPackageName } from "../../horsies/src/native/load.ts";
-import type { NativePlatform } from "../../horsies/src/native/load.ts";
+import { platformPackageName } from "../../horsies/src/native/addon-file.ts";
+import type { NativePlatform } from "../../horsies/src/native/addon-file.ts";
 import type { Result } from "../../horsies/src/wire/result.ts";
 import type { ParsedJson } from "../public-api/package.ts";
 
