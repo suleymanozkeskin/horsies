@@ -454,16 +454,19 @@ fn config_report(refusal: HorsiesError) -> ValidationReport {
 /// The report of the phase `config` that holds every refusal of the broker
 /// settings, each with its catalog code. Pure.
 fn broker_refusals_report(refusals: &[BrokerSettingRefused]) -> ValidationReport {
-    ValidationReport::of(
-        CONFIG_PHASE,
-        refusals
-            .iter()
-            .map(|refused| {
-                HorsiesError::new(format!("invalid database config: {refused}"))
-                    .with_code(refused.code())
-            })
-            .collect(),
-    )
+    ValidationReport::of(CONFIG_PHASE, broker_refusal_errors(refusals))
+}
+
+/// One error per refusal of the broker settings, each with its catalog code,
+/// in the order the core gives them. Pure.
+pub(crate) fn broker_refusal_errors(refusals: &[BrokerSettingRefused]) -> Vec<HorsiesError> {
+    refusals
+        .iter()
+        .map(|refused| {
+            HorsiesError::new(format!("invalid database config: {refused}"))
+                .with_code(refused.code())
+        })
+        .collect()
 }
 
 /// Whether the sends of this process are suppressed. Clones share one flag.
