@@ -19,8 +19,9 @@ use horsies_core::{
 };
 
 pub use horsies_core::manifest::SchemaMode;
+use horsies_core::manifest::{producer_manifest, BrokerSettingRefused};
 
-use crate::config::{producer_manifest, rust_config_refusals};
+use crate::config::rust_config_refusals;
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
 use crate::send::TaskFunctions;
 use crate::workflow::WorkflowRegistry;
@@ -135,7 +136,7 @@ impl Horsies {
     pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, ValidationReport> {
         validate_config(&config)?;
         let manifest = producer_manifest(&config.database, mode)
-            .map_err(|refused| config_report(refused.to_horsies_error()))?;
+            .map_err(|refusals| broker_refusals_report(&refusals))?;
         let install_coverage =
             CoverageRequest::of_retention(&config.retention).map_err(|refused| {
                 config_report(HorsiesError::new(format!(
@@ -448,6 +449,24 @@ fn validate_config(config: &AppConfig) -> Result<(), ValidationReport> {
 /// The report of the phase `config` that holds `refusal` alone. Pure.
 fn config_report(refusal: HorsiesError) -> ValidationReport {
     ValidationReport::of(CONFIG_PHASE, vec![refusal])
+}
+
+/// The report of the phase `config` that holds every refusal of the broker
+/// settings, each with its catalog code. Pure.
+fn broker_refusals_report(refusals: &[BrokerSettingRefused]) -> ValidationReport {
+    ValidationReport::of(CONFIG_PHASE, broker_refusal_errors(refusals))
+}
+
+/// One error per refusal of the broker settings, each with its catalog code,
+/// in the order the core gives them. Pure.
+pub(crate) fn broker_refusal_errors(refusals: &[BrokerSettingRefused]) -> Vec<HorsiesError> {
+    refusals
+        .iter()
+        .map(|refused| {
+            HorsiesError::new(format!("invalid database config: {refused}"))
+                .with_code(refused.code())
+        })
+        .collect()
 }
 
 /// Whether the sends of this process are suppressed. Clones share one flag.
