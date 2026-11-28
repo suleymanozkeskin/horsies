@@ -17,12 +17,13 @@ import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { NativeSendRules } from "../../../horsies/src/native/sends/addon.ts";
 import { checkAppConfig } from "../../../horsies/src/native/sends/sends.ts";
-import { type ChildSpecSourceFunction, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
+import { type ChildSpecSourceFunction, type WorkflowStartOutcome, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
 import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/_catalog/send_bounds.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
+import { show } from "../../support/values.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
-import { subWorkflowRootText } from "./workflow-spec-texts.ts";
+import { type NodeTimeFacts, subWorkflowRootText, taskNodeTimeText } from "./workflow-spec-texts.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -312,5 +313,58 @@ describe("the child spec source and the core's strict check, with a database", (
 
     assert.match(text, /"error_code":\{"__builtin_task_code__":"SUBWORKFLOW_LOAD_FAILED"\}/u);
     assert.equal(calls, 0);
+  });
+});
+
+/** The outcome of the start of the one task node workflow with the time facts `facts`. */
+async function startOutcomeOf(facts: NodeTimeFacts): Promise<WorkflowStartOutcome> {
+  const handle = testHandle();
+
+  assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled, [])), "registered");
+
+  const prepared = envelopeValue(workflowsAddon().prepareClientSpec(taskNodeTimeText(facts)));
+
+  assert(prepared.kind === "prepared", "the spec data parse does not read the node options");
+
+  const started = envelopeValue(
+    await workflowsAddon().startWorkflow(
+      handle.native,
+      prepared.spec,
+      randomUUID(),
+      1_795_687_200_000_000n,
+      { kind: "noCarrier" },
+      false,
+    ),
+  );
+
+  await handle.close();
+
+  return started;
+}
+
+/** Check that the start refused the node as `WorkflowStartValidationFailed`, with the core's text. */
+function assertSharedNodeRefused(started: WorkflowStartOutcome, execution: string): void {
+  assert(started.kind === "failed", `the start was ${started.kind}`);
+  assert.equal(started.error.class, "WorkflowStartValidationFailed", show(started.error));
+  assert(
+    show(started.error).includes(
+      `workflow node 0 (node_time_task) refused: task_options refused: timeout_ms is absent for execution ${execution}; a shared class requires timeout_ms`,
+    ),
+    show(started.error),
+  );
+}
+
+describe("the workflow start of a shared class node with no timeout, with a database", () => {
+  test("SHARED_ASYNC with no timeout_ms is refused", async () => {
+    assertSharedNodeRefused(await startOutcomeOf({ execution: "SHARED_ASYNC", timeoutMs: "absent" }), "SHARED_ASYNC");
+  });
+
+  test("SHARED_THREAD with a null timeout_ms is refused", async () => {
+    assertSharedNodeRefused(await startOutcomeOf({ execution: "SHARED_THREAD", timeoutMs: null }), "SHARED_THREAD");
+  });
+
+  test("ISOLATED with no timeout_ms and SHARED_THREAD with a timeout_ms are started", async () => {
+    assert.deepEqual(await startOutcomeOf({ execution: "ISOLATED", timeoutMs: "absent" }), { kind: "started" });
+    assert.deepEqual(await startOutcomeOf({ execution: "SHARED_THREAD", timeoutMs: 5000 }), { kind: "started" });
   });
 });

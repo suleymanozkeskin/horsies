@@ -26,3 +26,44 @@ export function subWorkflowRootText(input: string): string {
     nodes: [node],
   });
 }
+
+/** The execution class and the stored `timeout_ms` of the one task node of `taskNodeTimeText`. */
+export interface NodeTimeFacts {
+  readonly execution: "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
+  readonly timeoutMs: number | null | "absent";
+}
+
+/** The spec data text of one task node whose stored options hold the class and the timeout of `facts`. */
+export function taskNodeTimeText(facts: NodeTimeFacts): string {
+  const options = {
+    retry_policy: null,
+    good_until: null,
+    ...(facts.timeoutMs === "absent" ? {} : { timeout_ms: facts.timeoutMs }),
+    execution: facts.execution,
+    cancel_grace_ms: null,
+  };
+
+  const node = {
+    index: 0,
+    node_id: "work",
+    task_name: "node_time_task",
+    input_json: "{}",
+    dependencies: [],
+    args_from: {},
+    workflow_context_from: [],
+    allow_failed_dependencies: false,
+    join: { kind: "ALL" },
+    body: { kind: "TASK", queue: "default", priority: 100, task_options: { kind: "ENCODED", json: JSON.stringify(options) } },
+  };
+
+  return JSON.stringify({
+    data_version: 1,
+    name: "node_time",
+    definition_key: { kind: "KEYED", key: "tests.node_time.v1" },
+    on_error: "FAIL",
+    output: { kind: "NODE", index: 0 },
+    success_policy: { kind: "NO_POLICY" },
+    queue_classes: { default: "standard_30d" },
+    nodes: [node],
+  });
+}
