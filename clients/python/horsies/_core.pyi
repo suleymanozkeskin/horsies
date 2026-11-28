@@ -725,8 +725,9 @@ class TaskAttemptRecord:
 
 @final
 class TaskInfoRecord:
-    """The metadata of one task, with the fields of TaskInfo. result_json is the
-    stored result envelope as JSON text; execution is None for a task read from history.
+    """The metadata of one task, with the fields of TaskInfo. result is the stored result:
+    TaskInfoResultNotRequested, TaskInfoResultNotStored, or TaskInfoResultStored with the envelope as
+    JSON text; execution is None for a task read from history.
     """
     @property
     def task_id(self) -> uuid.UUID: ...
@@ -767,11 +768,28 @@ class TaskInfoRecord:
     @property
     def failed_reason(self) -> str | None: ...
     @property
-    def result_json(self) -> str | None: ...
+    def result(self) -> TaskInfoResultNotRequested | TaskInfoResultNotStored | TaskInfoResultStored: ...
     @property
     def attempts(self) -> list[TaskAttemptRecord] | None: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None: ...
+
+
+@final
+class TaskInfoResultNotRequested:
+    """The read did not ask for the result of the task."""
+
+
+@final
+class TaskInfoResultNotStored:
+    """The read asked for the result, and the task stored none."""
+
+
+@final
+class TaskInfoResultStored:
+    """The read asked for the result, and the task stored one: the envelope as JSON text, as stored."""
+    @property
+    def envelope_json(self) -> str: ...
 
 
 @final

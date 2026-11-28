@@ -151,7 +151,7 @@ class StoredResult:
     user-task imports. Callers (typed user APIs at the handle/app layer)
     compose typed decode on top by deriving ``ok_type`` from
     ``record.task_name`` and calling
-    ``decode_task_result(record.raw_result, ok_type)``.
+    ``decode_task_result(record.envelope, ok_type)``.
 
     Fields:
         task_id: Task identifier.
@@ -160,7 +160,7 @@ class StoredResult:
         status: Current row status. Lets callers map non-terminal
             outcomes (``CANCELLED``, ``WAIT_TIMEOUT``) into the
             ``ReadResult`` shape they expose.
-        raw_result: The decoded JSON envelope from the result column,
+        envelope: The decoded JSON envelope from the result column,
             or ``None`` for rows that haven't reached a terminal state
             yet, were cancelled before completion, or were terminal but
             stored no payload.
@@ -169,4 +169,4 @@ class StoredResult:
     task_id: UUID
     task_name: str
     status: 'TaskStatus'
-    raw_result: 'dict[str, Json] | None'
+    envelope: 'dict[str, Json] | None'

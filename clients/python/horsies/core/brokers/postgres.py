@@ -44,6 +44,9 @@ from horsies._core import (
     TaskAttemptRecord,
     TaskInfoNotFound,
     TaskInfoRecord,
+    TaskInfoResultNotRequested,
+    TaskInfoResultNotStored,
+    TaskInfoResultStored,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -106,7 +109,15 @@ from horsies.core.types.status import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json
-from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
+from horsies.core.models.tasks import (
+    Execution,
+    ResultSlot,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
+    TaskInfo,
+    TaskAttemptInfo,
+)
 from horsies.core.models.class_coverage import ExecutionClassCoverage, ExecutionClassReport
 from horsies.core.models.health import (
     DatabasePing,
@@ -693,23 +704,29 @@ def _task_attempt_info(record: TaskAttemptRecord) -> TaskAttemptInfo:
     )
 
 
-def _task_info_of_record(record: TaskInfoRecord) -> DatabaseResult[TaskInfo]:
+def _task_info_of_record(
+    record: TaskInfoRecord,
+) -> DatabaseResult[TaskInfo[dict[str, Json]]]:
     """The ``TaskInfo`` of one core task info record. Pure.
 
-    ``decoded_result`` stays ``None``: the typed decode needs the task's
-    type, which the caller knows. A stored result that does not read is
-    ``INVALID_JSON_PAYLOAD``.
+    The result slot carries the stored envelope: the typed decode needs the
+    task's type, which the caller knows. A stored result that does not read
+    is ``INVALID_JSON_PAYLOAD``.
     """
-    raw_result: dict[str, Json] | None
-    match record.result_json:
-        case None:
-            raw_result = None
-        case str() as result_json:
-            match _strict_result_envelope(record.task_id, result_json):
+    result: ResultSlot[dict[str, Json]]
+    match record.result:
+        case TaskInfoResultNotRequested():
+            result = ResultSlotNotRequested()
+        case TaskInfoResultNotStored():
+            result = ResultSlotNotStored()
+        case TaskInfoResultStored(envelope_json=envelope_json):
+            match _strict_result_envelope(record.task_id, envelope_json):
                 case Ok(envelope):
-                    raw_result = envelope
+                    result = ResultSlotStored(envelope)
                 case Err() as refused:
                     return refused
+        case _ as unreachable:
+            assert_never(unreachable)
     return Ok(TaskInfo(
         task_id=record.task_id,
         task_name=record.task_name,
@@ -729,9 +746,7 @@ def _task_info_of_record(record: TaskInfoRecord) -> DatabaseResult[TaskInfo]:
         worker_pid=record.worker_pid,
         worker_process_name=record.worker_process_name,
         error_code=record.error_code,
-        raw_result=raw_result,
-        decoded_result=None,
-        result_decoded=False,
+        result=result,
         failed_reason=record.failed_reason,
         attempts=(
             None
@@ -746,7 +761,7 @@ def _task_info_result(
     outcome: (
         TaskInfoRecord | TaskInfoNotFound | DatabaseOperationFailed | DatabaseInvalidJsonPayload
     ),
-) -> DatabaseResult[TaskInfo | None]:
+) -> DatabaseResult[TaskInfo[dict[str, Json]] | None]:
     """The result of one core task info read. Pure.
 
     - ``TaskInfoRecord``: ``Ok(TaskInfo)``, or ``INVALID_JSON_PAYLOAD`` for a
@@ -1336,7 +1351,7 @@ class PostgresBroker:
 
         The broker performs no typed decoding; callers at the handle/app
         layer derive ``ok_type`` from ``record.task_name`` and call
-        ``decode_task_result(record.raw_result, ok_type)``.
+        ``decode_task_result(record.envelope, ok_type)``.
 
         The core installs the schema once per handle first, then reads the
         live row or the history record. While the task has not finished it
@@ -1350,11 +1365,11 @@ class PostgresBroker:
         Semantics:
 
         - ``Ok(None)``: neither the live table nor the history holds the task.
-        - ``Ok(StoredResult(status=COMPLETED|FAILED|EXPIRED, raw_result=<dict>))``:
+        - ``Ok(StoredResult(status=COMPLETED|FAILED|EXPIRED, envelope=<dict>))``:
           terminal task with a stored payload.
-        - ``Ok(StoredResult(status=CANCELLED, raw_result=None))``:
+        - ``Ok(StoredResult(status=CANCELLED, envelope=None))``:
           task was cancelled before completion.
-        - ``Ok(StoredResult(status=<non-terminal>, raw_result=None))``:
+        - ``Ok(StoredResult(status=<non-terminal>, envelope=None))``:
           the limit passed before the task reached a terminal state.
         - ``Err(DatabaseInvalidJsonPayload)``: the stored result does not read
           (malformed, non-finite number, not an object, a history digest
@@ -1483,18 +1498,18 @@ class PostgresBroker:
             ):
                 match result_json:
                     case None:
-                        raw_result = None
+                        envelope_value = None
                     case str():
                         match _strict_result_envelope(task_id, result_json):
                             case Ok(envelope):
-                                raw_result = envelope
+                                envelope_value = envelope
                             case Err() as refused:
                                 return refused
                 return Ok(StoredResult(
                     task_id=task_id,
                     task_name=task_name,
                     status=TaskStatus(status),
-                    raw_result=raw_result,
+                    envelope=envelope_value,
                 ))
             case RawResultAbsent():
                 return Ok(None)
@@ -2355,7 +2370,7 @@ class PostgresBroker:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> DatabaseResult[TaskInfo | None]:
+    ) -> DatabaseResult[TaskInfo[dict[str, Json]] | None]:
         """Fetch metadata for a task by ID, through ``CoreHandle.task_info_async``.
 
         The core installs the schema once per handle first (nothing with
@@ -2366,9 +2381,9 @@ class PostgresBroker:
         drops the read.
 
         Returns ``Ok(TaskInfo)``, or ``Ok(None)`` when neither the live
-        table nor the history holds the task. ``raw_result`` is the stored
-        envelope, read with the strict JSON reader; ``decoded_result`` is
-        left to the caller (``Horsies.get_task_info_async``). Failures, see
+        table nor the history holds the task. ``result`` is a ``ResultSlot``
+        of the stored envelope, read with the strict JSON reader; the typed
+        decode is left to the caller (``Horsies.get_task_info_async``). Failures, see
         ``_task_info_result``.
         """
         try:
@@ -2389,7 +2404,7 @@ class PostgresBroker:
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> DatabaseResult[TaskInfo | None]:
+    ) -> DatabaseResult[TaskInfo[dict[str, Json]] | None]:
         """The blocking form of ``get_task_info_async``: ``CoreHandle.task_info``
         on the calling thread, with the GIL released.
 

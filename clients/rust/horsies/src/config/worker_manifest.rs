@@ -20,11 +20,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use horsies_core::core::config::worker_profile::ProfileRequest;
-use horsies_core::manifest::WholeSeconds;
+use horsies_core::manifest::{
+    core_database_url, send_manifest, session_database_manifest, WholeSeconds,
+};
 use horsies_core::worker_manifest as wire;
 use horsies_core::{DeclaredErrorCodes, Execution, RegisteredTask, TaskRegistry};
 
-use super::{core_database_url, send_manifest, session_database};
 use crate::{AppConfig, PostgresConfig};
 
 /// A config value that the config validation accepted and that is outside
@@ -212,7 +213,7 @@ pub(crate) fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredError
 fn database_manifest(config: &PostgresConfig) -> wire::WorkerDatabaseManifest {
     wire::WorkerDatabaseManifest {
         database_url: core_database_url(&config.database_url),
-        session_database: session_database(config),
+        session_database: session_database_manifest(config),
         pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
         pool_pre_ping: config.pool_pre_ping,
         worker_pool_pre_ping: config.worker_pool_pre_ping,

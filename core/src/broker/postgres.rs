@@ -20,7 +20,7 @@ use crate::core::history::rerun::operations::{
     rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunCommand,
     RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
-use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
+use crate::core::{EnqueueRetention, PostgresConfig, ResultSlot, TaskInfo};
 
 use crate::broker::core_rows::{
     column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
@@ -1961,12 +1961,14 @@ impl PostgresBroker {
 
     /// Fetch task metadata.
     ///
-    /// By default, the `result` and `failed_reason` fields are excluded
-    /// (returned as `None`), matching Python's
-    /// `info(include_result=False, include_failed_reason=False)` default.
-    /// Pass `true` for either flag to include the field of a terminal task's
-    /// history row. A live task has no result, failed reason, error code or
-    /// terminal time: those fields are `None` whatever the flags say.
+    /// By default, the `result` and `failed_reason` fields are excluded:
+    /// `result` is `ResultSlot::NotRequested` and `failed_reason` is `None`,
+    /// matching Python's `info(include_result=False,
+    /// include_failed_reason=False)` default. Pass `true` for either flag to
+    /// include the field of a terminal task's history row. A live task has no
+    /// result, failed reason, error code or terminal time: with the result
+    /// flag `result` is `ResultSlot::NotStored`, and the other fields are
+    /// `None`, whatever the flags say.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,
@@ -2042,7 +2044,7 @@ impl PostgresBroker {
         match row {
             Some(r) => {
                 let mut info = r
-                    .into_task_info()
+                    .into_task_info(include_result)
                     .map_err(|error| task_info_history_error(task_id, error))?;
                 if include_attempts {
                     info.attempts = Some(
@@ -2922,8 +2924,11 @@ fn history_task_info(
     let task_id = detail.task_id;
     let status = detail.status;
     let result = match include_result {
-        false => None,
-        true => history_result_envelope(&detail)?,
+        false => ResultSlot::NotRequested,
+        true => match history_result_envelope(&detail)? {
+            None => ResultSlot::NotStored,
+            Some(envelope) => ResultSlot::Stored(envelope),
+        },
     };
     let terminal_at = detail.terminal_at;
     // The snapshot holds the attempts oldest first; a task info lists them
@@ -5831,19 +5836,29 @@ mod task_info_code_tests {
                 false,
             )
             .unwrap_or_else(|refused| panic!("{payload}: {refused}"));
-            assert_eq!(
-                info.result.as_ref().map(StoredEnvelopeText::as_str),
-                Some(payload),
-            );
+            match &info.result {
+                ResultSlot::Stored(envelope) => assert_eq!(envelope.as_str(), payload),
+                other => panic!("{payload}: expected a stored result, got {other:?}"),
+            }
         }
     }
 
     /// Python: a stored JSON `null` is no result.
     #[test]
-    fn a_history_result_of_null_is_no_result() {
+    fn a_history_result_of_null_is_not_stored() {
         let info = history_task_info(history_detail_with_result(b"null"), true, false, false)
             .expect("a stored null reads");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotStored);
+    }
+
+    /// A history row with no result payload stores no result.
+    #[test]
+    fn a_history_row_without_a_payload_is_not_stored() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.result_payload = None;
+        let info =
+            history_task_info(detail, true, false, false).expect("a row without a payload reads");
+        assert_eq!(info.result, ResultSlot::NotStored);
     }
 
     /// Python: a stored result that is neither an object nor `null` is
@@ -5860,7 +5875,7 @@ mod task_info_code_tests {
     fn a_history_result_is_not_read_unless_asked() {
         let info = history_task_info(history_detail_with_result(b"[]"), false, false, false)
             .expect("a result that is not read is not checked");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotRequested);
     }
 }
 

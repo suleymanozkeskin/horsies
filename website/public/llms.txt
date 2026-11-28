@@ -178,7 +178,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - ASYNC_CONTEXT (DatabaseErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, WorkflowHandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; a read returns Err(ReadAsyncContext(...)), which a TaskHandle does not keep)
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
-- Broker methods: enqueue_async -> Result[str, DatabaseEnqueueError], enqueue (sync) -> Result[str, DatabaseEnqueueError | DatabaseSyncCallError], get_task_info_async -> DatabaseResult[TaskInfo | None],
+- Broker methods: enqueue_async -> Result[str, DatabaseEnqueueError], enqueue (sync) -> Result[str, DatabaseEnqueueError | DatabaseSyncCallError], get_task_info_async -> DatabaseResult[TaskInfo[dict[str, Json]] | None],
   ensure_schema_initialized -> Result[None, DatabaseOperationFailed], get_stale_tasks(threshold_minutes=2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]],
   get_expired_tasks -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]],
   mark_stale_tasks_as_failed -> DatabaseResult[int], requeue_stale_claimed -> DatabaseResult[int],
@@ -247,8 +247,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_id -> str
 - .get(wait_ms=None) -> ReadResult[T, TaskError] (blocking)
 - .get_async(wait_ms=None) -> ReadResult[T, TaskError] (async blocking)
-- .info(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo | None]
-- .info_async(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo | None]
+- .info(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
+- .info_async(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
 
 ### TaskSendResult[T] (send Result type)
 - type TaskSendResult[T] = Result[T, TaskSendError]
@@ -299,8 +299,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .due_at -> datetime (a worker may claim the task from this time)
 - .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
 - .worker_hostname/worker_pid/worker_process_name -> str | int | None
-- .raw_result -> dict[str, Any] | None (the stored envelope; opt-in via include_result)
-- .decoded_result -> TaskOutcome[Any, TaskError] | None, .result_decoded -> bool (set by the app-level reads when the task is registered in this process and the decode works; the broker-level reads leave it None)
+- .result -> ResultSlot: ResultSlotNotRequested() (the read did not pass include_result), ResultSlotNotStored() (include_result, and the task stored no result), ResultSlotStored(value) (include_result, and the task stored one)
+- ResultSlotStored.value -> dict[str, Json] (the stored envelope) for a broker-level read, TaskOutcome[Any, TaskError] for an app-level read (an ok value of a task that is not registered in this process stays plain JSON)
 - .failed_reason -> str | None (opt-in via include_failed_reason)
 
 ### TaskStatus (enum)
