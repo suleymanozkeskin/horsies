@@ -255,7 +255,13 @@ def shared_async_kind(seats: int = 2, executor_threads: int = 2) -> dict[str, ob
 
 
 def shared_thread_kind(seats: int = 2) -> dict[str, object]:
-    return {'kind': 'shared_thread', 'seats': seats, 'pool': pool(), 'task_send_pool': 1}
+    return {
+        'kind': 'shared_thread',
+        'seats': seats,
+        'pool': pool(),
+        'task_send_pool': 1,
+        'recycle_above': {'kind': 'off'},
+    }
 
 
 def handler_kind(task_send_pool: int = 1) -> dict[str, object]:

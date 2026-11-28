@@ -15,6 +15,17 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Core child host: more start facts of a shared thread child, and the run
+  in `BodySpans::close` (Rust core types).**
+  `ChildStartFacts::SharedThread` holds `task_send_pool` (the connections that
+  the task sends of the child share) and `recycle_above` (`MemoryLimit`:
+  `AtMb(limit)` or `Off` for no limit) beside `seats`. The init frame of a
+  shared thread child carries the limit in the new field `recycle_above`
+  (`{"kind":"off"}` or `{"kind":"at_mb","mb":N}`, `N` from 1); the decoder
+  refuses a shared thread init frame without it (`MissingField`).
+  `BodySpans::close` takes the run that it closes as its first argument
+  (`BodyRunKey { task_id, attempt }`, new). A client whose `open` returns
+  `tracing::Span::none()` can name the run that ended.
 - **`StoredTime` stores a time of day in Python's text (Rust).**
   `horsies::StoredTime` wraps a chrono `NaiveTime`. It writes `09:10:12` for a
   whole second, `09:10:12.500000` for a fraction (6 digits) and 9 digits for a

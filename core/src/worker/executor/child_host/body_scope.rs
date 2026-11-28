@@ -11,8 +11,9 @@
 //!    blocking body runs inside it on its own thread, so a `tracing` span
 //!    that the body opens, and an `#[instrument]` function that it calls,
 //!    is a child of the span;
-//! 3. gives the span back to [`BodySpans::close`] with how the body ended
-//!    ([`BodyOutcome`]), then drops its own handle on the span.
+//! 3. gives the span back to [`BodySpans::close`] with the run that it
+//!    closes ([`BodyRunKey`]) and how the body ended ([`BodyOutcome`]), then
+//!    drops its own handle on the span.
 //!
 //! The span closes when the body's handle on it is dropped too: at the end
 //! of the body, or, for a body that runs past its deadline, when it returns
@@ -60,9 +61,31 @@ pub trait BodySpans: Send + Sync {
     /// (`tracing::Span::none()`) is valid: the body then runs with no span.
     fn open(&self, run: &BodyRun<'_>) -> tracing::Span;
 
-    /// Record how the body of `span`'s run ended. The host drops its handle
-    /// on the span after this call.
-    fn close(&self, span: &tracing::Span, end: &BodyOutcome<'_>);
+    /// Record how the body of the run `run` ended. `span` is the span that
+    /// [`BodySpans::open`] gave for that run. `run` names the run when the
+    /// span cannot: `Span::none()` has no id. The host drops its handle on
+    /// the span after this call.
+    fn close(&self, run: BodyRunKey, span: &tracing::Span, end: &BodyOutcome<'_>);
+}
+
+/// The run that a body belongs to: the task and its attempt. It is the key
+/// of [`BodyRun`], so the run that [`BodySpans::open`] saw is the run that
+/// [`BodySpans::close`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BodyRunKey {
+    pub task_id: Uuid,
+    /// The attempt that the claim runs, from 1.
+    pub attempt: AttemptNumber,
+}
+
+impl BodyRun<'_> {
+    /// The key of this run.
+    pub fn key(&self) -> BodyRunKey {
+        BodyRunKey {
+            task_id: self.task_id,
+            attempt: self.attempt,
+        }
+    }
 }
 
 /// The facts of one run that the host knows when its body starts.
@@ -168,6 +191,7 @@ pub(super) enum OpenBody {
     /// The span that the client opened for the run.
     Scoped {
         spans: Arc<dyn BodySpans>,
+        run: BodyRunKey,
         span: tracing::Span,
     },
 }
@@ -200,6 +224,7 @@ impl BodyScope {
                 let span = spans.open(&run);
                 OpenBody::Scoped {
                     spans: Arc::clone(spans),
+                    run: run.key(),
                     span,
                 }
             }
@@ -222,7 +247,7 @@ impl OpenBody {
     pub(super) fn close(self, end: &BodyOutcome<'_>) {
         match self {
             OpenBody::Unscoped => {}
-            OpenBody::Scoped { spans, span } => spans.close(&span, end),
+            OpenBody::Scoped { spans, run, span } => spans.close(run, &span, end),
         }
     }
 }

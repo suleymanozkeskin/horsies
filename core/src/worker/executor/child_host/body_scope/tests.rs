@@ -120,6 +120,8 @@ enum ScopeCall {
 struct RecordingSpans {
     probe: tracing::Dispatch,
     calls: Mutex<Vec<ScopeCall>>,
+    /// The run that each close named, in order.
+    closed_runs: Mutex<Vec<BodyRunKey>>,
 }
 
 impl RecordingSpans {
@@ -127,7 +129,15 @@ impl RecordingSpans {
         Self {
             probe: tracing::Dispatch::new(EnterProbe::default()),
             calls: Mutex::new(Vec::new()),
+            closed_runs: Mutex::new(Vec::new()),
         }
+    }
+
+    fn closed_runs(&self) -> Vec<BodyRunKey> {
+        self.closed_runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn calls(&self) -> Vec<ScopeCall> {
@@ -169,7 +179,11 @@ impl BodySpans for RecordingSpans {
         span
     }
 
-    fn close(&self, span: &tracing::Span, end: &BodyOutcome<'_>) {
+    fn close(&self, run: BodyRunKey, span: &tracing::Span, end: &BodyOutcome<'_>) {
+        self.closed_runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(run);
         let end = match end {
             BodyOutcome::Returned => ClosedEnd::Returned,
             BodyOutcome::Failed { error_code } => ClosedEnd::Failed((*error_code).clone()),
@@ -400,6 +414,67 @@ fn a_client_scope_opens_with_the_run_facts_and_closes_with_the_end() {
                 end: ClosedEnd::TimedOut,
             },
         ]
+    );
+}
+
+/// A client whose spans are `Span::none()`, as a client that traces outside
+/// `tracing` has. It keeps the run of each close.
+struct NoSpanClient {
+    closed: Mutex<Vec<(BodyRunKey, bool)>>,
+}
+
+impl BodySpans for NoSpanClient {
+    fn open(&self, _run: &BodyRun<'_>) -> tracing::Span {
+        tracing::Span::none()
+    }
+
+    fn close(&self, run: BodyRunKey, span: &tracing::Span, _end: &BodyOutcome<'_>) {
+        self.closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((run, span.id().is_some()));
+    }
+}
+
+/// A close names the run that its open saw: the task and the attempt, also
+/// for a client whose spans have no id.
+#[test]
+fn a_close_names_the_run_that_its_open_saw() {
+    let task_id = Uuid::new_v4();
+    let trace = carrier_trace();
+
+    let recording = Arc::new(RecordingSpans::new());
+    let scope = BodyScope::Spans(Arc::clone(&recording) as Arc<dyn BodySpans>);
+    scope
+        .open(&facts(task_id), Execution::SharedThread, source(&trace))
+        .close(&BodyOutcome::Returned);
+    assert_eq!(
+        recording.closed_runs(),
+        vec![BodyRunKey {
+            task_id,
+            attempt: third_attempt(),
+        }]
+    );
+
+    let no_span = Arc::new(NoSpanClient {
+        closed: Mutex::new(Vec::new()),
+    });
+    let scope = BodyScope::Spans(Arc::clone(&no_span) as Arc<dyn BodySpans>);
+    scope
+        .open(&facts(task_id), Execution::Isolated, source(&trace))
+        .close(&BodyOutcome::Cancelled);
+    assert_eq!(
+        *no_span
+            .closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+        vec![(
+            BodyRunKey {
+                task_id,
+                attempt: third_attempt(),
+            },
+            false,
+        )]
     );
 }
 

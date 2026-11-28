@@ -11,6 +11,14 @@ use super::bounds::{
     MAX_LEFTOVER_TASK_NAMES, MAX_PRELOAD_REASON_CHARS, MAX_REFUSAL_REASON_CHARS,
 };
 
+/// Recycle a child when its reported RSS reaches this many MiB. An
+/// unreadable RSS never recycles. `Off` is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLimit {
+    Off,
+    AtMb(NonZeroU64),
+}
+
 /// Text of at most `MAX_CHARS` characters (Unicode scalar values, as
 /// Python's `len`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

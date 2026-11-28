@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -19,7 +20,7 @@ use super::metadata::{
     check_protocol, no_body, parse_metadata, text_body, time_text, Fields, MalformedFrame,
     ProtocolCheck, ProtocolMismatch,
 };
-use super::values::{DispatchNumber, RefusalReason, TaskInputText};
+use super::values::{DispatchNumber, MemoryLimit, RefusalReason, TaskInputText};
 use super::PROTOCOL_VERSION;
 use crate::broker::OrphanSelfHeal;
 use crate::core::codec::check_json_text;
@@ -151,11 +152,16 @@ pub struct SharedAsyncChild {
 }
 
 /// A child that runs up to `seats` blocking tasks at once, each on a thread.
+///
+/// `recycle_above` is the resident-memory limit of the child (the
+/// `recycle.above` of the profile). The parent recycles the child at it. A
+/// host that runs its own seats reads it from the start facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedThreadChild {
     pub seats: ThreadSeats,
     pub pool: ChildPool,
     pub task_send_pool: TaskSendPool,
+    pub recycle_above: MemoryLimit,
 }
 
 /// A child that runs the event handlers of the app. It runs no task: it
@@ -523,6 +529,13 @@ struct PoolWire {
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+enum MemoryLimitWire {
+    Off,
+    AtMb { mb: u64 },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 enum ChildKindWire {
     Isolated {
         pool: PoolWire,
@@ -538,6 +551,7 @@ enum ChildKindWire {
         seats: u64,
         pool: PoolWire,
         task_send_pool: u64,
+        recycle_above: MemoryLimitWire,
     },
     Handler {
         task_send_pool: u64,
@@ -641,6 +655,13 @@ fn pool_wire(pool: ChildPool) -> PoolWire {
     }
 }
 
+fn memory_limit_wire(limit: MemoryLimit) -> MemoryLimitWire {
+    match limit {
+        MemoryLimit::Off => MemoryLimitWire::Off,
+        MemoryLimit::AtMb(mb) => MemoryLimitWire::AtMb { mb: mb.get() },
+    }
+}
+
 fn child_kind_wire(kind: ChildKind) -> ChildKindWire {
     match kind {
         ChildKind::Isolated(child) => ChildKindWire::Isolated {
@@ -657,6 +678,7 @@ fn child_kind_wire(kind: ChildKind) -> ChildKindWire {
             seats: child.seats.get(),
             pool: pool_wire(child.pool),
             task_send_pool: child.task_send_pool.get(),
+            recycle_above: memory_limit_wire(child.recycle_above),
         },
         ChildKind::Handler(child) => ChildKindWire::Handler {
             task_send_pool: child.task_send_pool.get(),
@@ -983,6 +1005,21 @@ fn decode_pool(pool: &Fields<'_>) -> Result<ChildPool, MalformedFrame> {
     })
 }
 
+fn decode_memory_limit(limit: &Fields<'_>) -> Result<MemoryLimit, MalformedFrame> {
+    match limit.kind()? {
+        "off" => {
+            limit.only(&["kind"])?;
+            Ok(MemoryLimit::Off)
+        }
+        "at_mb" => {
+            limit.only(&["kind", "mb"])?;
+            let mb: NonZeroU32 = config_count(limit, "mb")?;
+            Ok(MemoryLimit::AtMb(NonZeroU64::from(mb)))
+        }
+        other => Err(limit.unknown_kind(other)),
+    }
+}
+
 fn decode_child_kind(kind: &Fields<'_>) -> Result<ChildKind, MalformedFrame> {
     match kind.kind()? {
         "isolated" => {
@@ -1008,11 +1045,12 @@ fn decode_child_kind(kind: &Fields<'_>) -> Result<ChildKind, MalformedFrame> {
             }))
         }
         "shared_thread" => {
-            kind.only(&["kind", "seats", "pool", "task_send_pool"])?;
+            kind.only(&["kind", "seats", "pool", "task_send_pool", "recycle_above"])?;
             Ok(ChildKind::SharedThread(SharedThreadChild {
                 seats: kind.bounded_count("seats")?,
                 pool: decode_pool(&kind.object("pool")?)?,
                 task_send_pool: kind.bounded_count("task_send_pool")?,
+                recycle_above: decode_memory_limit(&kind.object("recycle_above")?)?,
             }))
         }
         "handler" => {
