@@ -2,7 +2,7 @@
 
 import type { JsonValue } from "../codec/json-value.ts";
 import type { AnyTaskContract } from "../contract/define-task.ts";
-import { upstreamCodesOf, upstreamOutputOf } from "../contract/upstream-output.ts";
+import { upstreamOutputOf } from "../contract/upstream-output.ts";
 import type { AnyWorkflowContract } from "../workflow/define.ts";
 import type { Decimal } from "./decimal.ts";
 import type {
@@ -114,8 +114,8 @@ export interface WireBuilders {
   /**
    * A task input parameter that a workflow node fills with the outcome of an upstream node: `{ kind: "succeeded",
    * value }` or `{ kind: "failed", error }`, typed by `contract`. For a task contract the value has its output type and
-   * the error its codes (the input decode refuses a stored custom code that `errorCodes` does not declare; a task with no
-   * `errorCodes` allows any); for a workflow contract (a sub-workflow node) the value has its output type and the code
+   * the error its codes (the core refuses a stored custom code that `errorCodes` does not declare before the body runs; a
+   * task with no `errorCodes` allows any); for a workflow contract (a sub-workflow node) the value has its output type and the code
    * is any code. Valid only as a whole parameter (optional or nullable too); a sender never gives it.
    */
   taskOutcome<C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C>;
@@ -282,7 +282,7 @@ export const h: WireBuilders = Object.freeze({
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
   union,
   taskOutcome: <C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C> =>
-    wireOf(taskOutcomeKind(upstreamOutputOf(contract), upstreamCodesOf(contract))),
+    wireOf(taskOutcomeKind(upstreamOutputOf(contract))),
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
     wireOf(objectKind(membersOf(members, (wire) => valueKindOf(wire, "object")))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>
