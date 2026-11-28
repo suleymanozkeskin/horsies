@@ -130,7 +130,39 @@ fn typescript_path(field: &ConfigField) -> String {
         ConfigField::Retention(field) => format!("retention.{}", retention_member(field)),
         ConfigField::Resilience(field) => format!("resilience.{}", resilience_member(*field)),
         ConfigField::Payload(field) => format!("payload.{}", payload_member(*field)),
+        ConfigField::WorkerProfile { name, field } => format!(
+            "workerProfiles[{}].{}",
+            serde_json::Value::String(name.clone()),
+            profile_field_path(field)
+        ),
     }
+}
+
+/// The TypeScript members of a worker profile field path of the core: each
+/// `.` segment in camelCase, and the drain timeout as `drainTimeoutMs`, the
+/// name of its member in the TypeScript profile. Pure.
+fn profile_field_path(field: &str) -> String {
+    field
+        .split('.')
+        .map(|segment| match segment {
+            "drain_timeout" => "drainTimeoutMs".to_owned(),
+            other => snake_to_camel(other),
+        })
+        .collect::<Vec<String>>()
+        .join(".")
+}
+
+fn snake_to_camel(segment: &str) -> String {
+    let mut words = segment.split('_');
+    let mut camel = words.next().unwrap_or_default().to_owned();
+    for word in words {
+        let mut letters = word.chars();
+        if let Some(first) = letters.next() {
+            camel.extend(first.to_uppercase());
+            camel.push_str(letters.as_str());
+        }
+    }
+    camel
 }
 
 fn recovery_member(field: RecoveryField) -> &'static str {
@@ -656,6 +688,27 @@ mod tests {
             (
                 ConfigField::Payload(PayloadField::RejectBytes),
                 "payload.rejectBytes.bytes",
+            ),
+            (
+                ConfigField::WorkerProfile {
+                    name: "web \"a\"".to_owned(),
+                    field: "isolated.count".to_owned(),
+                },
+                r#"workerProfiles["web \"a\""].isolated.count"#,
+            ),
+            (
+                ConfigField::WorkerProfile {
+                    name: "web".to_owned(),
+                    field: "claim.per_queue_per_pass.tasks".to_owned(),
+                },
+                r#"workerProfiles["web"].claim.perQueuePerPass.tasks"#,
+            ),
+            (
+                ConfigField::WorkerProfile {
+                    name: "web".to_owned(),
+                    field: "drain_timeout".to_owned(),
+                },
+                r#"workerProfiles["web"].drainTimeoutMs"#,
             ),
         ];
         for (field, path) in cases {
