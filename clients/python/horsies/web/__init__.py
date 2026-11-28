@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from horsies.web import AllowAll, create_monitoring_app
 
 host_app = FastAPI()  # your application, which authenticates its callers
-host_app.mount('/monitoring', create_monitoring_app(app, auth_policy=AllowAll()))
+host_app.mount('/monitoring', create_monitoring_app(app, authorization_policy=AllowAll()))
 ```
 
 Or serve it standalone with ``horsies web``.
@@ -36,8 +36,9 @@ del _fastapi
 from horsies.web.app import (  # noqa: E402 - must follow the extra guard
     MetaResponse,
     MonitoringUIConfig,
-    NoTraceLink,
+    TraceLink,
     TraceLinkTemplate,
+    TraceLinkText,
     create_monitoring_app,
 )
 from horsies.web.schema import (  # noqa: E402 - must follow the extra guard
@@ -48,11 +49,12 @@ from horsies.web.schema import (  # noqa: E402 - must follow the extra guard
     SchemaState,
     SchemaStatus,
 )
-from horsies.web.auth import (  # noqa: E402 - must follow the extra guard
+from horsies.web.authorization import (  # noqa: E402 - must follow the extra guard
     INTENT_HEADER,
     INTENT_VALUE,
+    Actions,
     AllowAll,
-    MonitoringAuthPolicy,
+    MonitoringAuthorizationPolicy,
     TrustedHeader,
     ViewOnly,
 )
@@ -66,12 +68,14 @@ __all__ = [
     'SchemaProbe',
     'SchemaState',
     'SchemaStatus',
+    'Actions',
     'AllowAll',
     'MetaResponse',
-    'MonitoringAuthPolicy',
+    'MonitoringAuthorizationPolicy',
     'MonitoringUIConfig',
-    'NoTraceLink',
+    'TraceLink',
     'TraceLinkTemplate',
+    'TraceLinkText',
     'TrustedHeader',
     'ViewOnly',
     'create_monitoring_app',

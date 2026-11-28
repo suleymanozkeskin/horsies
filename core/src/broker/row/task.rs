@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
+use crate::core::{Execution, ExecutionClass, ResultSlot, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 use crate::broker::result_types::StoredEnvelopeText;
@@ -41,8 +41,13 @@ impl TaskInfoRow {
     /// `BrokerError::InvalidExecutionClass`; the column's CHECK holds the
     /// domain, so that refusal means the row was written past it. The live
     /// table stores no result (`0001_tables.sql`): the result of a terminal
-    /// task is in its history row, so the info has none.
-    pub fn into_task_info(self) -> Result<TaskInfo<StoredEnvelopeText>, BrokerError> {
+    /// task is in its history row, so a read that asked for the result gets
+    /// `ResultSlot::NotStored`, and a read that did not gets
+    /// `ResultSlot::NotRequested`.
+    pub fn into_task_info(
+        self,
+        include_result: bool,
+    ) -> Result<TaskInfo<StoredEnvelopeText>, BrokerError> {
         let status = parse_task_status(&self.status)?;
         let execution = Execution::from_stored(&self.execution)
             .ok_or_else(|| BrokerError::InvalidExecutionClass(self.execution.clone()))?;
@@ -50,13 +55,15 @@ impl TaskInfoRow {
             task_id: self.id,
             task_name: self.task_name,
             status,
-            queue_name: self.queue_name,
+            // Column horsies_tasks.queue_name.
+            queue: self.queue_name,
             priority: self.priority,
             retry_count: self.retry_count as u32,
             max_retries: self.max_retries as u32,
             next_retry_at: self.next_retry_at,
             sent_at: self.sent_at,
-            enqueued_at: self.enqueued_at,
+            // Column horsies_tasks.enqueued_at: the time the row became due.
+            due_at: self.enqueued_at,
             claimed_at: self.claimed_at,
             started_at: self.started_at,
             completed_at: self.completed_at,
@@ -66,7 +73,10 @@ impl TaskInfoRow {
             worker_process_name: self.worker_process_name,
             error_code: self.error_code,
             failed_reason: self.failed_reason,
-            result: None,
+            result: match include_result {
+                true => ResultSlot::NotStored,
+                false => ResultSlot::NotRequested,
+            },
             attempts: None,
             execution: ExecutionClass::Live(execution),
         })
@@ -118,18 +128,18 @@ pub struct TaskAttemptRow {
 /// Represents a RUNNING task whose worker has not sent a heartbeat within
 /// the configured threshold, indicating the worker may have crashed.
 /// `started_at` is set: the query selects only rows that started before the
-/// threshold. `last_heartbeat` is the latest runner beat sent at or after
+/// threshold. `last_heartbeat_at` is the latest runner beat sent at or after
 /// `started_at`, and `None` for a task with no such beat: the start writes
 /// no beat, and a beat of an earlier attempt does not count.
 #[derive(Debug, Clone, Serialize)]
 pub struct StaleTaskRow {
-    pub id: Uuid,
+    pub task_id: Uuid,
     pub task_name: String,
     pub worker_hostname: Option<String>,
     pub worker_pid: Option<i32>,
     pub worker_process_name: Option<String>,
     pub started_at: DateTime<Utc>,
-    pub last_heartbeat: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 /// Row returned by the expired-tasks monitoring query.
@@ -138,16 +148,16 @@ pub struct StaleTaskRow {
 /// meaning it will never be claimed by a worker.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpiredTaskRow {
-    pub id: Uuid,
+    pub task_id: Uuid,
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
     pub sent_at: DateTime<Utc>,
     pub enqueued_at: DateTime<Utc>,
     pub good_until: DateTime<Utc>,
-    /// How long ago `good_until` passed, in microseconds, on the database
-    /// clock: the exact length of Python's `expired_for` interval.
-    pub expired_for_us: i64,
+    /// How long ago `good_until` passed, on the database clock, exact to the
+    /// microsecond.
+    pub expired_for: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -210,14 +220,26 @@ mod tests {
             ("SHARED_ASYNC", Execution::SharedAsync),
             ("SHARED_THREAD", Execution::SharedThread),
         ] {
-            let info = task_info_row(stored).into_task_info().unwrap();
+            let info = task_info_row(stored).into_task_info(false).unwrap();
             assert_eq!(info.execution, ExecutionClass::Live(execution));
         }
     }
 
     #[test]
+    fn live_task_info_without_the_result_flag_is_not_requested() {
+        let info = task_info_row("ISOLATED").into_task_info(false).unwrap();
+        assert_eq!(info.result, ResultSlot::NotRequested);
+    }
+
+    #[test]
+    fn live_task_info_with_the_result_flag_is_not_stored() {
+        let info = task_info_row("ISOLATED").into_task_info(true).unwrap();
+        assert_eq!(info.result, ResultSlot::NotStored);
+    }
+
+    #[test]
     fn live_task_info_refuses_an_unknown_execution_class() {
-        let refused = task_info_row("PARALLEL").into_task_info().unwrap_err();
+        let refused = task_info_row("PARALLEL").into_task_info(false).unwrap_err();
         assert!(
             matches!(&refused, BrokerError::InvalidExecutionClass(value) if value == "PARALLEL"),
             "{refused:?}"

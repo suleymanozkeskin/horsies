@@ -19,6 +19,9 @@
 //! - On Linux it can serve spawns by fork from a preload process
 //!   ([`preload`]); the waits of that path are states of this loop, so a
 //!   reap or a kill is never held up by them.
+//! - A child gets on its fds 1 and 2 only the standard output and the
+//!   standard error that the worker had when the process loaded the core,
+//!   or `/dev/null` ([`standard_outputs`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -38,8 +41,10 @@ use super::exit::{ExitState, ReapedExit};
 use super::exit_watch::{ChildWatch, ExitWatch, POLLED_EXIT_INTERVAL};
 use super::socket::child_socket_pair;
 use crate::worker::executor::protocol::{ProcessId, ShortageErrno};
+use standard_outputs::ChildOutputs;
 
 mod preload;
+mod standard_outputs;
 
 pub use preload::{PreloadMode, PreloadPlan, PreloadStart, PreloadUnsupported};
 
@@ -163,6 +168,10 @@ pub enum SpawnerStartError {
     ExitWatch(io::Error),
     #[error("the spawner thread could not start: {0}")]
     Thread(io::Error),
+    /// The standard outputs of the children could not be held
+    /// (`standard_outputs`).
+    #[error("the standard outputs of the children could not be held: {0}")]
+    StandardOutputs(io::Error),
 }
 
 /// What remained when the spawner stopped.
@@ -447,8 +456,15 @@ pub struct Spawner {
 
 impl Spawner {
     /// Start the spawner thread. Call once per worker process, from a thread
-    /// that is not a task of the core runtime.
+    /// that is not a task of the core runtime. The spawner keeps, for its
+    /// life, a duplicate of each standard output that its children get
+    /// ([`standard_outputs`]).
+    ///
+    /// Panics: when the load-time constructor of the core did not run, a
+    /// defect of the build.
     pub fn start() -> Result<Self, SpawnerStartError> {
+        let outputs = ChildOutputs::hold().map_err(SpawnerStartError::StandardOutputs)?;
+        outputs.log_lost_streams();
         let waker = Waker::new().map_err(SpawnerStartError::Waker)?;
         let watch = ExitWatch::new(waker.read.as_raw_fd()).map_err(SpawnerStartError::ExitWatch)?;
         let shared = Arc::new(Shared {
@@ -465,7 +481,7 @@ impl Spawner {
             .name(SPAWNER_THREAD_NAME.to_owned())
             .spawn(crate::worker::thread_dispatch::with_starter_dispatch(
                 move || {
-                    SpawnerLoop::new(thread_shared, watch).run();
+                    SpawnerLoop::new(thread_shared, watch, outputs).run();
                     // The receiver is gone only when `stop` is not waiting.
                     let _ = stopped_tx.send(());
                 },
@@ -546,10 +562,12 @@ struct SpawnerLoop {
     worker_pid: u32,
     shutting_down: bool,
     preload: preload::Preload,
+    /// What each child gets on its fd 1 and fd 2.
+    outputs: ChildOutputs,
 }
 
 impl SpawnerLoop {
-    fn new(shared: Arc<Shared>, watch: ExitWatch) -> Self {
+    fn new(shared: Arc<Shared>, watch: ExitWatch, outputs: ChildOutputs) -> Self {
         Self {
             shared,
             watch,
@@ -559,6 +577,7 @@ impl SpawnerLoop {
             worker_pid: std::process::id(),
             shutting_down: false,
             preload: preload::Preload::default(),
+            outputs,
         }
     }
 
@@ -672,7 +691,7 @@ impl SpawnerLoop {
             (false, true) => return Err(SpawnError::TooManyChildren),
             (false, false) => {}
         }
-        let (pid, socket) = exec_child(command, self.worker_pid, &[])?;
+        let (pid, socket) = exec_child(command, self.worker_pid, &[], &self.outputs)?;
         let (id, exit, watch_error) = self.register(pid);
         if let Some(error) = &watch_error {
             tracing::warn!(
@@ -859,27 +878,51 @@ fn spawn_error(error: &io::Error) -> SpawnError {
     }
 }
 
-/// Start the child: socket pair, then `exec` with the child end as the only
-/// passed descriptor. The arguments are the command's, the descriptor
-/// number of the child end, the worker pid, then `trailing`. Our copy of the
-/// child end closes when this returns.
+/// The child end of a socket, numbered above the standard streams. A worker
+/// that closed fd 0, 1 or 2 can get an end on that number, and the spawn
+/// sets fds 0 to 2 of the child before `exec`. A duplicate above them takes
+/// the place of such an end, which closes.
+fn above_standard_streams(end: UnixStream) -> io::Result<UnixStream> {
+    match end.as_raw_fd() {
+        libc::STDIN_FILENO..=libc::STDERR_FILENO => end.try_clone(),
+        _ => Ok(end),
+    }
+}
+
+/// Start the child: socket pair, then `exec`. The child gets the child end
+/// of the socket, `/dev/null` as its standard input, and `outputs` as its
+/// standard output and standard error. The arguments are the command's, the
+/// descriptor number of the child end, the worker pid, then `trailing`. Our
+/// copy of the child end closes when this returns.
 fn exec_child(
     command: &ChildCommand,
     worker_pid: u32,
     trailing: &[&str],
+    outputs: &ChildOutputs,
 ) -> Result<(ProcessId, UnixStream), SpawnError> {
     let pair = child_socket_pair().map_err(|error| spawn_error(&error))?;
-    let child_fd = pair.child.as_raw_fd();
+    let child_end = above_standard_streams(pair.child).map_err(|error| spawn_error(&error))?;
+    let child_fd = child_end.as_raw_fd();
     let parent_pid = libc::pid_t::try_from(worker_pid).map_err(|_| SpawnError::SpawnFailed {
         detail: format!("the worker pid {worker_pid} is not a pid_t"),
     })?;
+    let stdout = outputs
+        .stdout
+        .stdio()
+        .map_err(|error| spawn_error(&error))?;
+    let stderr = outputs
+        .stderr
+        .stdio()
+        .map_err(|error| spawn_error(&error))?;
     let mut process = Command::new(&command.program);
     process
         .args(&command.args)
         .arg(child_fd.to_string())
         .arg(worker_pid.to_string())
         .args(trailing)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
     // SAFETY: the hook runs in the forked child before `exec` and calls only
     // async-signal-safe functions (setsid, fcntl, prctl, getppid, _exit).
     unsafe {
@@ -891,7 +934,7 @@ fn exec_child(
     })?;
     // Dropping the std handle neither waits nor signals; the spawner reaps.
     drop(started);
-    drop(pair.child);
+    drop(child_end);
     Ok((pid, pair.parent))
 }
 

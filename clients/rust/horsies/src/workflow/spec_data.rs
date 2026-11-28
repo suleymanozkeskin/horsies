@@ -21,7 +21,7 @@ use super::node::{JoinType, NodeDeadline, NodePriority};
 use super::spec::{SpecBody, SpecNode, SpecOutput, WorkflowSpec};
 use super::sub_workflow::NodeParams;
 use crate::registry::{check_queue, queue_priority};
-use crate::{AppConfig, ErrorCode, HorsiesError};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode};
 
 /// The member of a task node's options that holds its deadline.
 const GOOD_UNTIL_MEMBER: &str = "good_until";
@@ -160,8 +160,8 @@ fn node_document(
         "input_json": input_json,
         "dependencies": node.dependencies,
         "args_from": node.args_from,
-        "workflow_ctx_from": node.workflow_ctx_from,
-        "allow_failed_deps": node.allow_failed_deps,
+        "workflow_context_from": node.workflow_context_from,
+        "allow_failed_dependencies": node.allow_failed_dependencies,
         "join": match node.join {
             JoinType::All => json!({"kind": "ALL"}),
             JoinType::Any => json!({"kind": "ANY"}),
@@ -207,7 +207,7 @@ fn unresolved_queue(spec: &WorkflowSpec, node: &SpecNode, refused: &HorsiesError
         "workflow '{}' node '{}' (task '{}') has a queue that the app does not admit",
         spec.name, node.node_id, node.name
     ))
-    .with_code(ErrorCode::WorkflowUnresolvedQueue)
+    .with_code(HorsiesErrorCode::WorkflowUnresolvedQueue)
     .with_note(refused.message.clone())
     .with_help("name a queue of the app, or leave the node on the task's queue")
 }
@@ -224,12 +224,12 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::workflow::node::tests::{task_node, ChargeInput};
-    use crate::workflow::{SuccessCase, SuccessPolicy, WorkflowSpecBuilder};
+    use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
+    use crate::workflow::{SuccessCase, SuccessPolicy};
     use crate::{CustomQueueConfig, QueueMode};
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     fn charge() -> crate::TaskNode<f64, ChargeInput> {
@@ -243,11 +243,14 @@ mod tests {
 
     #[test]
     fn a_spec_reads_back_as_core_spec_data() {
-        let mut builder = WorkflowSpecBuilder::new("checkout");
+        let mut builder = test_builder("checkout");
         builder.definition_key("tests.checkout.v1");
         builder.on_error(OnError::Pause);
-        let first = builder.task(charge().node_id("first"));
-        let second = builder.task(charge().waits_for(first).join_quorum(1).priority(3));
+        let first = add(&mut builder, charge().node_id("first"));
+        let second = add(
+            &mut builder,
+            charge().waits_for(first).join_quorum(1).priority(3),
+        );
         builder.output(second);
         builder
             .success_policy(SuccessPolicy::new(vec![SuccessCase::new([second])]).optional([first]));
@@ -298,11 +301,14 @@ mod tests {
 
     #[test]
     fn a_queue_that_the_app_does_not_admit_is_refused() {
-        let mut builder = WorkflowSpecBuilder::new("queues");
-        builder.task(charge().queue("bulk"));
+        let mut builder = test_builder("queues");
+        add(&mut builder, charge().queue("bulk"));
         let spec = builder.build().unwrap();
         let refused = client_spec(&spec, &config()).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnresolvedQueue));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnresolvedQueue)
+        );
     }
 
     #[test]
@@ -323,9 +329,9 @@ mod tests {
             ]),
             ..config()
         };
-        let mut builder = WorkflowSpecBuilder::new("queues");
-        builder.task(charge().queue("bulk"));
-        builder.task(charge().queue("bulk").priority(1));
+        let mut builder = test_builder("queues");
+        add(&mut builder, charge().queue("bulk"));
+        add(&mut builder, charge().queue("bulk").priority(1));
         let spec = builder.build().unwrap();
         let client = client_spec(&spec, &custom).unwrap();
         assert_eq!(client.spec().tasks[0].queue.as_deref(), Some("bulk"));

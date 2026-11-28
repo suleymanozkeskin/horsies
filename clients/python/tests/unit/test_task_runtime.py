@@ -16,7 +16,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +30,12 @@ from horsies import (
     CancelCause,
     CancelNotRequested,
     CancelRequested,
+    Failed,
     FencingToken,
+    MaxRetries,
+    MaxRetriesRefused,
+    RetriesLeft,
+    Succeeded,
     TaskRuntime,
 )
 from horsies.core.app import Horsies
@@ -44,25 +49,26 @@ from horsies.core.codec.kwargs import (
 )
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     TaskDefinitionError,
     WorkflowValidationError,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.scheduler.validation import _signature_error
 from horsies.core.task_runtime import (
     FIRST_ATTEMPT,
     MAX_ATTEMPT,
+    MAX_TASK_RETRIES,
     CancelAlreadySet,
     CancelSet,
     RunCancelCell,
     run_task_runtime,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner, shared_runner, thread_runner
 from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
@@ -90,7 +96,7 @@ STARTED = StartedRunning(
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:password@localhost/unused'),
             ),
         ),
@@ -101,35 +107,47 @@ APP = _app()
 
 
 @APP.task('runtime.token')
-def token_task(runtime: TaskRuntime, *, order_id: str) -> TaskResult[FencingToken, TaskError]:
+def token_task(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, TaskError]:
     _ = order_id
-    return TaskResult(ok=runtime.fencing_token)
+    return Ok(runtime.fencing_token)
 
 
 @APP.task('runtime.token_async')
-async def token_async_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
+async def token_async_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     await asyncio.sleep(0)
-    return TaskResult(ok=runtime.fencing_token)
+    return Ok(runtime.fencing_token)
+
+
+@APP.task('runtime.facts')
+def facts_task(runtime: TaskRuntime) -> Result[list[str], TaskError]:
+    return Ok(
+        [
+            str(runtime.task_id),
+            str(runtime.attempt.value),
+            str(runtime.max_retries.value),
+            str(runtime.retries_left.value),
+        ],
+    )
 
 
 @APP.task('runtime.reads_twice')
-def reads_twice_task(runtime: TaskRuntime) -> TaskResult[list[FencingToken], TaskError]:
-    return TaskResult(ok=[runtime.fencing_token, runtime.fencing_token])
+def reads_twice_task(runtime: TaskRuntime) -> Result[list[FencingToken], TaskError]:
+    return Ok([runtime.fencing_token, runtime.fencing_token])
 
 
 @APP.task('runtime.plain')
-def plain_task(*, order_id: str) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=order_id)
+def plain_task(*, order_id: str) -> Result[str, TaskError]:
+    return Ok(order_id)
 
 
 @APP.task('runtime.shared_async', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
-async def shared_async_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+async def shared_async_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 
 
 @APP.task('runtime.shared_thread', execution=Execution.SHARED_THREAD, timeout_ms=5_000)
-def shared_thread_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+def shared_thread_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 
 
 @pytest.fixture
@@ -144,6 +162,15 @@ def task_loop() -> Iterator[TaskLoop]:
 # =============================================================================
 # AttemptNumber and TaskRuntime.for_test
 # =============================================================================
+
+
+def _budget(number: int) -> MaxRetries:
+    """The retry budget `number`, which the test states is in bounds."""
+    match MaxRetries.parse(number):
+        case Ok(ok_value=budget):
+            return budget
+        case Err(err_value=refused):
+            raise AssertionError(f'the test passes a budget in bounds: {refused.reason}')
 
 
 def _attempt(number: int) -> AttemptNumber:
@@ -179,6 +206,80 @@ class TestAttemptNumber:
         assert FIRST_ATTEMPT == AttemptNumber(value=1)
 
 
+class TestMaxRetries:
+    @pytest.mark.parametrize('number', [0, 3, MAX_TASK_RETRIES])
+    def test_a_budget_in_bounds_parses(self, number: int) -> None:
+        assert MaxRetries.parse(number) == Ok(MaxRetries(value=number))
+
+    @pytest.mark.parametrize('number', [-1, MAX_TASK_RETRIES + 1])
+    def test_a_budget_outside_the_bounds_is_refused(self, number: int) -> None:
+        refused = MaxRetries.parse(number)
+
+        assert refused == Err(MaxRetriesRefused(number=number))
+        assert isinstance(refused, Err)
+        assert str(number) in refused.err_value.reason
+
+    @pytest.mark.parametrize('number', [-1, MAX_TASK_RETRIES + 1])
+    def test_a_direct_construction_outside_the_bound_is_a_defect(self, number: int) -> None:
+        with pytest.raises(AssertionError, match=f'illegal retry budget {number}'):
+            MaxRetries(value=number)
+
+
+class TestAttemptFacts:
+    """`task_id`, `attempt`, `max_retries` and `retries_left` of a runtime
+    that `for_test` builds."""
+
+    def test_the_runtime_gives_the_facts_it_was_built_with(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(2),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.task_id == TASK_ID
+        assert runtime.attempt == _attempt(2)
+        assert runtime.max_retries == _budget(3)
+
+    def test_a_first_attempt_has_all_its_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(task_id=TASK_ID, max_retries=_budget(3))
+
+        assert runtime.attempt == FIRST_ATTEMPT
+        assert runtime.retries_left == RetriesLeft(value=3)
+
+    def test_a_retry_is_the_next_attempt_with_one_retry_less(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(2),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=2)
+
+    def test_the_last_attempt_has_no_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(4),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=0)
+
+    def test_an_attempt_past_the_budget_has_no_retries_left(self) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            attempt=_attempt(9),
+            max_retries=_budget(3),
+        )
+
+        assert runtime.retries_left == RetriesLeft(value=0)
+
+    def test_the_default_task_is_not_retried(self) -> None:
+        runtime = TaskRuntime.for_test(task_id=TASK_ID)
+
+        assert runtime.max_retries == _budget(0)
+        assert runtime.retries_left == RetriesLeft(value=0)
+
+
 class TestForTest:
     def test_the_runtime_holds_the_token_of_the_attempt(self) -> None:
         runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=_attempt(3))
@@ -200,7 +301,7 @@ class TestForTest:
 
         result = token_task(runtime, order_id='o-1')
 
-        assert result.unwrap() == FencingToken(task_id=TASK_ID, value=2)
+        assert result == Ok(FencingToken(task_id=TASK_ID, value=2))
 
     def test_the_default_cancel_state_is_not_requested(self) -> None:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
@@ -234,7 +335,7 @@ class TestForTest:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
 
         with pytest.raises(AttributeError):
-            setattr(runtime, 'fencing_token', FencingToken(task_id=TASK_ID, value=2))
+            setattr(runtime, 'task_id', uuid.uuid4())
         with pytest.raises(AttributeError):
             setattr(runtime.fencing_token, 'value', 2)
         with pytest.raises(AttributeError):
@@ -264,7 +365,7 @@ class TestRunCancelCell:
 
     def test_the_runtime_of_a_run_reads_its_cell_as_it_changes(self) -> None:
         cell = RunCancelCell()
-        runtime = run_task_runtime(FencingToken(task_id=TASK_ID, value=1), cell)
+        runtime = run_task_runtime(TASK_ID, FIRST_ATTEMPT, _budget(0), cell)
 
         assert runtime.cancel_state() == CancelNotRequested()
         _ = cell.request(CancelCause.OPERATOR)
@@ -282,43 +383,43 @@ class _HoldsRuntime(BaseModel):
     runtime: TaskRuntime
 
 
-def _keyword_only(*, runtime: TaskRuntime) -> TaskResult[int, TaskError]:
+def _keyword_only(*, runtime: TaskRuntime) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _optional_first(runtime: TaskRuntime | None, *, x: int) -> TaskResult[int, TaskError]:
+def _optional_first(runtime: TaskRuntime | None, *, x: int) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=x)
+    return Ok(x)
 
 
 def _with_default(
     runtime: TaskRuntime = TaskRuntime.for_test(task_id=TASK_ID),
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 def _second_positional(
     runtime: TaskRuntime,
     other: TaskRuntime,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     _ = (runtime, other)
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _in_a_container(*, runtimes: list[TaskRuntime]) -> TaskResult[int, TaskError]:
+def _in_a_container(*, runtimes: list[TaskRuntime]) -> Result[int, TaskError]:
     _ = runtimes
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _in_a_model(*, holder: _HoldsRuntime) -> TaskResult[int, TaskError]:
+def _in_a_model(*, holder: _HoldsRuntime) -> Result[int, TaskError]:
     _ = holder
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _as_the_ok_type(runtime: TaskRuntime) -> TaskResult[TaskRuntime, TaskError]:
-    return TaskResult(ok=runtime)
+def _as_the_ok_type(runtime: TaskRuntime) -> Result[TaskRuntime, TaskError]:
+    return Ok(runtime)
 
 
 class TestRegistration:
@@ -331,9 +432,9 @@ class TestRegistration:
     def test_a_positional_only_runtime_parameter_registers(self) -> None:
         app = _app()
 
-        def positional_only(runtime: TaskRuntime, /, *, x: int) -> TaskResult[int, TaskError]:
+        def positional_only(runtime: TaskRuntime, /, *, x: int) -> Result[int, TaskError]:
             _ = runtime
-            return TaskResult(ok=x)
+            return Ok(x)
 
         registered = app.task('runtime.positional_only')(positional_only)
 
@@ -348,7 +449,7 @@ class TestRegistration:
             (_second_positional, "parameter 'other'"),
             (_in_a_container, "parameter 'runtimes'"),
             (_in_a_model, "parameter 'holder'"),
-            (_as_the_ok_type, 'return TaskResult ok slot'),
+            (_as_the_ok_type, 'return Result ok slot'),
         ],
         ids=[
             'keyword-only',
@@ -366,7 +467,7 @@ class TestRegistration:
         with pytest.raises(TaskDefinitionError) as refused:
             app.task('runtime.refused')(fn)
 
-        assert refused.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert refused.value.code == HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert subject in str(refused.value)
         assert 'TaskRuntime' in str(refused.value)
         assert 'runtime.refused' not in app.tasks
@@ -398,27 +499,27 @@ class TestProducerPaths:
     def test_a_workflow_node_does_not_miss_the_runtime(self) -> None:
         spec: WorkflowSpec[Any] = WorkflowSpec(
             name='runtime_node',
-            tasks=[TaskNode(fn=token_task, kwargs={'order_id': 'o-1'})],
+            nodes=[TaskNode(function=token_task, kwargs={'order_id': 'o-1'})],
         )
 
-        assert len(spec.tasks) == 1
+        assert len(spec.nodes) == 1
 
     def test_a_workflow_node_kwarg_that_names_the_runtime_is_refused(self) -> None:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='runtime_node_kwarg',
-                tasks=[
-                    TaskNode(fn=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
+                nodes=[
+                    TaskNode(function=token_task, kwargs={'order_id': 'o-1', 'runtime': 1}),
                 ],
             )
 
-        assert refused.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_schedule_binds_without_the_runtime(self) -> None:
         schedule = TaskSchedule(
             name='runtime_schedule',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1'},
         )
 
@@ -428,14 +529,14 @@ class TestProducerPaths:
         schedule = TaskSchedule(
             name='runtime_schedule_kwarg',
             task_name='runtime.token',
-            pattern=IntervalSchedule(seconds=60),
+            pattern=IntervalSchedule(every=timedelta(seconds=60)),
             kwargs={'order_id': 'o-1', 'runtime': 1},
         )
 
         error = _signature_error(APP, schedule)
 
         assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert error.code == HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
 
 # =============================================================================
@@ -444,7 +545,11 @@ class TestProducerPaths:
 
 
 def _ok_of(envelope: str, ok_type: Any) -> Any:
-    return decode_task_result(loads_json(envelope).unwrap(), ok_type).unwrap()
+    match decode_task_result(loads_json(envelope).unwrap(), ok_type):
+        case Succeeded(value=value):
+            return value
+        case Failed(error=error):
+            raise AssertionError(f'the stored result is an error: {error!r}')
 
 
 def _run_isolated(
@@ -452,6 +557,7 @@ def _run_isolated(
     task_loop: TaskLoop,
     *,
     attempt: int,
+    max_retries: int = 0,
     input_json: str = '{}',
 ) -> str:
     with (
@@ -474,6 +580,7 @@ def _run_isolated(
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=attempt,
+                max_retries=max_retries,
                 trace=NoTraceCarrier(),
             ),
         )
@@ -505,6 +612,19 @@ class TestInjection:
         envelope = _run_isolated('runtime.token_async', task_loop, attempt=1)
 
         assert _ok_of(envelope, FencingToken) == FencingToken(task_id=TASK_ID, value=1)
+
+    def test_a_first_isolated_run_reads_attempt_1_and_all_its_retries(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        envelope = _run_isolated('runtime.facts', task_loop, attempt=1, max_retries=3)
+
+        assert _ok_of(envelope, list[str]) == [str(TASK_ID), '1', '3', '3']
+
+    def test_an_isolated_retry_reads_attempt_2(self, task_loop: TaskLoop) -> None:
+        envelope = _run_isolated('runtime.facts', task_loop, attempt=2, max_retries=3)
+
+        assert _ok_of(envelope, list[str]) == [str(TASK_ID), '2', '3', '2']
 
     def test_a_later_attempt_gets_a_greater_value(self, task_loop: TaskLoop) -> None:
         first = _ok_of(

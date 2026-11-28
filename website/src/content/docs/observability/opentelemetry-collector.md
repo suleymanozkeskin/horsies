@@ -6,7 +6,7 @@ related: [metrics, fleet-collector, tracing, deployment]
 tags: [observability, opentelemetry, collector, otlp, metrics]
 ---
 
-The core serves its metrics as Prometheus endpoints and pushes nothing. For an OpenTelemetry pipeline, an OpenTelemetry Collector scrapes the endpoints with its `prometheus` receiver and exports the series through OTLP. The core needs no OpenTelemetry dependency for its metrics, and the Python client and the Rust client use one path.
+The core serves its metrics as Prometheus endpoints and pushes nothing. For an OpenTelemetry pipeline, an OpenTelemetry Collector scrapes the endpoints with its `prometheus` receiver and exports the series through OTLP. The core needs no OpenTelemetry dependency for its metrics, and the Python, Rust and TypeScript clients use one path.
 
 The spans and the producer metrics do not take this path: the client records them with the OpenTelemetry SDK of your process. See [Tracing](/horsies/observability/tracing/).
 
@@ -17,7 +17,7 @@ The spans and the producer metrics do not take this path: the client records the
 | Job | Process | Address in the file |
 |-----|---------|---------------------|
 | `horsies-worker` | Each worker: `horsies worker <app> --profile <name> --metrics-listen HOST:PORT` | `127.0.0.1:9464` |
-| `horsies-fleet` | The fleet collector: `horsies metrics <app> --listen HOST:PORT` | `127.0.0.1:9465` |
+| `horsies-fleet` | The fleet collector: `horsies metrics <app> --metrics-listen HOST:PORT` | `127.0.0.1:9465` |
 
 1. Replace the addresses with the addresses of your processes:
    - Static targets: the receiver `prometheus`. Edit its `targets` lists.

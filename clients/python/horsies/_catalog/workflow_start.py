@@ -3,17 +3,13 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['WorkflowStartErrorCode']
 
 
-class WorkflowStartErrorCode(str, Enum):
-    """Categorized workflow start failure codes.
-
-    The members are Python's, in Python's order
-    (`clients/python/horsies/core/workflows/start_types.py`).
-    """
+class WorkflowStartErrorCode(StrEnum):
+    """Categorized workflow start failure codes."""
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
     """Config error: no broker attached."""
@@ -34,5 +30,5 @@ class WorkflowStartErrorCode(str, Enum):
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync or blocking start was called on a thread that runs an event loop or a tokio
-    runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
+    runtime; its wait would stall that loop, so nothing was written. `resend_start` accepts it.
     """

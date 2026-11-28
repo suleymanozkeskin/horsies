@@ -207,12 +207,49 @@ async fn seed_workflow_task_link(pool: &TestPool, workflow_id: Uuid, task_id: Uu
     .expect("seed W3 workflow task link");
 }
 
+/// `CancelTaskBody` refuses a key that it does not declare, for any serde
+/// reader: serde's text names the key and the known key. The old key
+/// `include_running` is an unknown key. The known key and the empty object
+/// read.
+#[test]
+fn the_cancel_body_type_refuses_an_unknown_key() {
+    let refused = serde_json::from_str::<CancelTaskBody>(r#"{"include_running": true}"#)
+        .expect_err("a key that the type does not declare");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("unknown field `include_running`, expected `policy`"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>(r#"{"policy": "INCLUDE_RUNNING"}"#).ok(),
+        Some(CancelTaskBody {
+            policy: CancelPolicy::IncludeRunning,
+        })
+    );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>("{}").ok(),
+        Some(CancelTaskBody::default())
+    );
+}
+
 #[test]
 fn action_models_and_task_mapping_serialize_exactly() {
     assert_eq!(
         serde_json::to_string(&CancelTaskBody::default()).unwrap(),
-        r#"{"include_running":false}"#
+        r#"{"policy":"PENDING_OR_CLAIMED_ONLY"}"#
     );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>(r#"{"policy":"INCLUDE_RUNNING"}"#).unwrap(),
+        CancelTaskBody {
+            policy: CancelPolicy::IncludeRunning,
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>("{}").unwrap(),
+        CancelTaskBody::default()
+    );
+    assert!(serde_json::from_str::<CancelTaskBody>(r#"{"policy":"include_running"}"#).is_err());
     let task_id = Uuid::nil();
     let success = task_action_outcome(Ok(TaskCancelled {
         task_id,
@@ -234,7 +271,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"Task missing"}"#,
         ),
         (
-            TaskActionError::WorkflowTask {
+            TaskActionError::IsWorkflowTask {
                 message: "workflow".to_owned(),
                 task_id,
                 current_status: TaskStatus::Running,
@@ -252,7 +289,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"code":"TASK_NOT_CANCELLABLE","current_status":"COMPLETED"}"#,
         ),
         (
-            TaskActionError::DbOperationFailed {
+            TaskActionError::DatabaseOperationFailed {
                 message: "database".to_owned(),
                 retryable: true,
                 task_id,
@@ -264,7 +301,7 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"database"}"#,
         ),
         (
-            TaskActionError::DbOperationFailed {
+            TaskActionError::DatabaseOperationFailed {
                 message: "refused".to_owned(),
                 retryable: false,
                 task_id,
@@ -272,6 +309,18 @@ fn action_models_and_task_mapping_serialize_exactly() {
             },
             500,
             r#"{"detail":"refused"}"#,
+        ),
+        (
+            TaskActionError::OutcomeUnknown {
+                message: "unknown".to_owned(),
+                retryable: true,
+                task_id,
+                cause: Box::new(crate::broker::BrokerError::ConnectionFailed(
+                    "reply lost".to_owned(),
+                )),
+            },
+            503,
+            r#"{"detail":"unknown"}"#,
         ),
         (
             TaskActionError::StoredDataInvalid {
@@ -296,13 +345,13 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
     clean_w3(&pool).await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
-    for (seed, include_running) in [
-        (TaskSeed::pending(), false),
-        (TaskSeed::claimed(), false),
-        (TaskSeed::running(), true),
+    for (seed, policy) in [
+        (TaskSeed::pending(), CancelPolicy::PendingOrClaimedOnly),
+        (TaskSeed::claimed(), CancelPolicy::PendingOrClaimedOnly),
+        (TaskSeed::running(), CancelPolicy::IncludeRunning),
     ] {
         seed_task(&pool, &seed).await;
-        let outcome = cancel_task_action(&broker, seed.id, include_running).await;
+        let outcome = cancel_task_action(&broker, seed.id, policy).await;
         assert_eq!(outcome.status_code(), 200);
         assert!(body_json(&outcome).contains(&format!(r#""was_status":"{}""#, seed.status)));
         let history = sql::query(
@@ -348,7 +397,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
 
     let running = TaskSeed::running();
     seed_task(&pool, &running).await;
-    let refused = cancel_task_action(&broker, running.id, false).await;
+    let refused = cancel_task_action(&broker, running.id, CancelPolicy::PendingOrClaimedOnly).await;
     assert_eq!(refused.status_code(), 409);
     assert_eq!(
         body_json(&refused),
@@ -363,7 +412,7 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
         "RUNNING"
     );
     assert_eq!(
-        cancel_task_action(&broker, running.id, true)
+        cancel_task_action(&broker, running.id, CancelPolicy::IncludeRunning)
             .await
             .status_code(),
         200
@@ -379,7 +428,7 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let missing = Uuid::new_v4();
-    let absent = cancel_task_action(&broker, missing, false).await;
+    let absent = cancel_task_action(&broker, missing, CancelPolicy::PendingOrClaimedOnly).await;
     assert_eq!(absent.status_code(), 404);
     assert_eq!(
         body_json(&absent),
@@ -399,7 +448,11 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
 
     let cancelled = TaskSeed::pending();
     seed_task(&pool, &cancelled).await;
-    assert!(cancel_task(&broker, cancelled.id, false).await.is_ok());
+    assert!(
+        cancel_task(&broker, cancelled.id, CancelPolicy::PendingOrClaimedOnly)
+            .await
+            .is_ok()
+    );
     terminal.push((cancelled.id, TaskStatus::Cancelled));
 
     let expired = TaskSeed::claimed();
@@ -408,7 +461,7 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     terminal.push((expired.id, TaskStatus::Expired));
 
     for (task_id, status) in terminal {
-        let outcome = cancel_task_action(&broker, task_id, true).await;
+        let outcome = cancel_task_action(&broker, task_id, CancelPolicy::IncludeRunning).await;
         assert_eq!(outcome.status_code(), 409);
         assert_eq!(
             body_json(&outcome),
@@ -421,7 +474,12 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     seed_task(&pool, &workflow_live).await;
     let live_workflow = seed_workflow(&pool, WorkflowStatus::Running).await;
     seed_workflow_task_link(&pool, live_workflow, workflow_live.id, "ENQUEUED").await;
-    let live_refusal = cancel_task_action(&broker, workflow_live.id, false).await;
+    let live_refusal = cancel_task_action(
+        &broker,
+        workflow_live.id,
+        CancelPolicy::PendingOrClaimedOnly,
+    )
+    .await;
     assert_eq!(live_refusal.status_code(), 400);
     assert_eq!(
         body_json(&live_refusal),
@@ -442,7 +500,8 @@ async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     let history_workflow = seed_workflow(&pool, WorkflowStatus::Running).await;
     seed_workflow_task_link(&pool, history_workflow, workflow_history.id, "RUNNING").await;
     fail_task(&pool, workflow_history.id).await;
-    let history_refusal = cancel_task_action(&broker, workflow_history.id, true).await;
+    let history_refusal =
+        cancel_task_action(&broker, workflow_history.id, CancelPolicy::IncludeRunning).await;
     assert_eq!(history_refusal.status_code(), 400);
     assert_eq!(
         body_json(&history_refusal),
@@ -458,10 +517,10 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
         .acquire_timeout(std::time::Duration::from_millis(250))
         .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none");
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
-    let task = cancel_task(&broker, Uuid::new_v4(), false)
+    let task = cancel_task(&broker, Uuid::new_v4(), CancelPolicy::PendingOrClaimedOnly)
         .await
         .expect_err("task database failure");
-    assert_eq!(task.code(), TaskActionErrorCode::DbOperationFailed);
+    assert_eq!(task.code(), TaskActionErrorCode::DatabaseOperationFailed);
     assert!(task.retryable());
     let workflow = pause_workflow_action(&broker, Uuid::new_v4()).await;
     assert_eq!(workflow.status_code(), 503);
@@ -588,7 +647,7 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
 
     let cancel = tokio::spawn({
         let broker = std::sync::Arc::clone(&broker);
-        async move { cancel_task(&broker, task_id, false).await }
+        async move { cancel_task(&broker, task_id, CancelPolicy::PendingOrClaimedOnly).await }
     });
 
     let mut cancel_waits = false;

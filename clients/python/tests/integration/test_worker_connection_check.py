@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import (
@@ -91,12 +91,13 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
     small = WorkerProfile(isolated=IsolatedChildren(count=1))
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(db_url)),
+            database=PostgresConfig(database_url=SecretStr(db_url)),
             worker_profiles={'big': big, 'small': small},
         ),
     )
 
-    errors = await asyncio.to_thread(app.check, live=True)
+    report = await asyncio.to_thread(app.check, live=True)
+    errors = report.refusals
 
     parent_pool = big.resolved_parent_pool()
     isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
@@ -110,7 +111,7 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
         + thread_pool
     )
     assert total > usable
-    assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+    assert [error.code for error in errors] == [HorsiesErrorCode.CHECK_WORKER_CONNECTIONS]
     assert errors[0].message.startswith(
         f"worker_profiles['big']: one worker opens up to {total} Postgres "
         'connections itself',
@@ -150,7 +151,7 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
     )
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(db_url),
                 pool_size=1,
                 max_overflow=0,
@@ -159,12 +160,13 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
         ),
     )
 
-    errors = await asyncio.to_thread(app.check, live=True)
+    report = await asyncio.to_thread(app.check, live=True)
+    errors = report.refusals
 
     isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
     total = parent_pool + 1 + 1 + 1 + 1 * isolated_pool
     assert total > usable
-    assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+    assert [error.code for error in errors] == [HorsiesErrorCode.CHECK_WORKER_CONNECTIONS]
     assert errors[0].notes[0] == (
         f'parent pool max_size {parent_pool} + listener 1 + runner heartbeat 1 '
         f'+ liveness lock 1 + 1 isolated children x isolated.pool max_size {isolated_pool} '

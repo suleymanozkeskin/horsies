@@ -1,9 +1,9 @@
 //! The workflow context: the results of chosen dependencies, given to a
 //! task that takes it (Python `WorkflowContext`).
 //!
-//! A node names the dependencies with `workflow_ctx_from`, and its task
-//! takes the context as the input field `workflow_ctx` (the task attribute's
-//! `workflow_ctx`). The child of the worker writes the context into that
+//! A node names the dependencies with `workflow_context_from`, and its task
+//! takes the context as the input field `workflow_context` (the task attribute's
+//! `workflow_context`). The child of the worker writes the context into that
 //! field; its form is the core's `WorkflowContext`.
 
 use std::collections::BTreeMap;
@@ -17,15 +17,18 @@ use uuid::Uuid;
 use super::node::NodeKey;
 use crate::handle::read_stored_result;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
+use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownCustomCode};
 
 /// The context of one workflow task: its place in the workflow, and the
 /// results and sub-workflow summaries of the dependencies that its node
-/// names in `workflow_ctx_from`, by node id.
+/// names in `workflow_context_from`, by node id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowContext {
     workflow_id: Uuid,
-    task_index: i32,
+    /// The index of the node. The stored key keeps the schema name
+    /// `task_index`: the SQL function that writes the context writes it.
+    #[serde(rename = "task_index")]
+    node_index: i32,
     task_name: String,
     /// The stored result envelope of each context node, by node id.
     #[serde(default)]
@@ -54,20 +57,22 @@ impl PartialEq for StoredResultText {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkflowContextError {
     /// The context holds no entry for the node: the node is not in the
-    /// task node's `workflow_ctx_from`, or the dependency did not end
-    /// (Python `KeyError`; the core's `WORKFLOW_CTX_MISSING_ID`).
-    #[error("node '{node_id}' is not in the workflow context; name it in workflow_ctx_from")]
+    /// task node's `workflow_context_from`, or the dependency did not end
+    /// (Python `NodeNotInContext`; the core's `NODE_NOT_IN_CONTEXT`). A
+    /// `NodeKey` always has a node id, so this client has no read of a node
+    /// without an id (`WORKFLOW_CONTEXT_MISSING_ID`).
+    #[error("node '{node_id}' is not in the workflow context; name it in workflow_context_from")]
     NotInContext { node_id: String },
     /// The stored value does not read as the asked type
     /// (`RESULT_DESERIALIZATION_ERROR`). `cause` names no value.
     #[error("the stored value of node '{node_id}' does not read: {cause}")]
-    Unreadable { node_id: String, cause: String },
-    /// The stored error has a user code that the asked code type does not
-    /// name.
+    ResultDeserializationError { node_id: String, cause: String },
+    /// The stored error has a custom code that the asked code type does not
+    /// name (`UNKNOWN_CUSTOM_CODE`).
     #[error("the stored error of node '{node_id}': {cause}")]
-    UnknownUserCode {
+    UnknownCustomCode {
         node_id: String,
-        cause: UnknownUserCode,
+        cause: UnknownCustomCode,
     },
 }
 
@@ -78,8 +83,8 @@ impl WorkflowContext {
     }
 
     /// The index of the task's node in its workflow.
-    pub fn task_index(&self) -> i32 {
-        self.task_index
+    pub fn node_index(&self) -> i32 {
+        self.node_index
     }
 
     /// The task name of the node.
@@ -97,7 +102,7 @@ impl WorkflowContext {
     ) -> Result<TaskOutcome<T, E>, WorkflowContextError>
     where
         T: DeserializeOwned,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         let node_id = key.node_id();
         let stored =
@@ -107,7 +112,7 @@ impl WorkflowContext {
                     node_id: node_id.to_owned(),
                 })?;
         let read = read_stored_result::<T>(stored.0.get()).map_err(|refused| {
-            WorkflowContextError::Unreadable {
+            WorkflowContextError::ResultDeserializationError {
                 node_id: node_id.to_owned(),
                 cause: refused.cause,
             }
@@ -116,7 +121,7 @@ impl WorkflowContext {
             TaskResult::Ok(value) => Ok(TaskOutcome::Succeeded(value)),
             TaskResult::Err(stored) => TaskError::<E>::from_stored(stored)
                 .map(TaskOutcome::Failed)
-                .map_err(|cause| WorkflowContextError::UnknownUserCode {
+                .map_err(|cause| WorkflowContextError::UnknownCustomCode {
                     node_id: node_id.to_owned(),
                     cause,
                 }),
@@ -149,7 +154,7 @@ impl WorkflowContext {
     /// and `u64` range reads as `u128` or `i128`, as Python reads any integer.
     ///
     /// Errors: [`WorkflowContextError::NotInContext`];
-    /// [`WorkflowContextError::Unreadable`] for an output that does not read
+    /// [`WorkflowContextError::ResultDeserializationError`] for an output that does not read
     /// as `T`.
     pub fn output_for<T: DeserializeOwned>(
         &self,
@@ -158,15 +163,12 @@ impl WorkflowContext {
         let summary = self.summary_for(key)?;
         match &summary.output {
             None => Ok(None),
-            Some(output) => {
-                output
-                    .decode::<T>()
-                    .map(Some)
-                    .map_err(|error| WorkflowContextError::Unreadable {
-                        node_id: key.node_id().to_owned(),
-                        cause: value_free_decode_text(&error),
-                    })
-            }
+            Some(output) => output.decode::<T>().map(Some).map_err(|error| {
+                WorkflowContextError::ResultDeserializationError {
+                    node_id: key.node_id().to_owned(),
+                    cause: value_free_decode_text(&error),
+                }
+            }),
         }
     }
 
@@ -203,13 +205,13 @@ mod tests {
     #[test]
     fn a_result_reads_with_its_types() {
         let context = context();
-        assert_eq!(context.task_index(), 2);
+        assert_eq!(context.node_index(), 2);
         let fetched = context
             .result_for::<Vec<u32>, Infallible>(&NodeKey::new("fetch"))
             .unwrap();
         assert_eq!(fetched, TaskOutcome::Succeeded(vec![1, 2]));
         let checked = context
-            .result_for::<u32, horsies_core::UserCode>(&NodeKey::new("check"))
+            .result_for::<u32, horsies_core::CustomCode>(&NodeKey::new("check"))
             .unwrap();
         assert!(matches!(checked, TaskOutcome::Failed(_)));
     }
@@ -223,16 +225,18 @@ mod tests {
     fn a_stored_integer_outside_i64_and_u64_reads_as_its_type() {
         #[derive(Deserialize)]
         struct Input {
-            workflow_ctx: WorkflowContext,
+            workflow_context: WorkflowContext,
         }
         let text = concat!(
-            r#"{"workflow_ctx":{"workflow_id":"00000000-0000-0000-0000-000000000007","#,
+            r#"{"workflow_context":{"workflow_id":"00000000-0000-0000-0000-000000000007","#,
             r#""task_index":2,"task_name":"report","results_by_id":{"#,
             r#""max":{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null},"#,
             r#""below":{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}},"#,
             r#""summaries_by_id":{}}}"#,
         );
-        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        let context = decode_input::<Input>(text.as_bytes())
+            .unwrap()
+            .workflow_context;
         assert_eq!(
             context.result_for::<u128, Infallible>(&NodeKey::new("max")),
             Ok(TaskOutcome::Succeeded(u128::MAX))
@@ -250,19 +254,21 @@ mod tests {
     fn a_summary_output_outside_i64_and_u64_reads_as_its_type() {
         #[derive(Deserialize)]
         struct Input {
-            workflow_ctx: WorkflowContext,
+            workflow_context: WorkflowContext,
         }
         let summary = |output: &str| {
             format!(
-                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+                r#"{{"status":"COMPLETED","output":{output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}}"#
             )
         };
         let text = format!(
-            r#"{{"workflow_ctx":{{"workflow_id":"00000000-0000-0000-0000-000000000007","task_index":2,"task_name":"report","results_by_id":{{}},"summaries_by_id":{{"max":{},"below":{}}}}}}}"#,
+            r#"{{"workflow_context":{{"workflow_id":"00000000-0000-0000-0000-000000000007","task_index":2,"task_name":"report","results_by_id":{{}},"summaries_by_id":{{"max":{},"below":{}}}}}}}"#,
             summary("340282366920938463463374607431768211455"),
             summary("-9223372036854775809"),
         );
-        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        let context = decode_input::<Input>(text.as_bytes())
+            .unwrap()
+            .workflow_context;
         assert_eq!(
             context.output_for(&NodeKey::<u128>::new("max")),
             Ok(Some(u128::MAX))
@@ -282,7 +288,7 @@ mod tests {
         );
         assert!(matches!(
             context.output_for(&NodeKey::<u64>::new("max")),
-            Err(WorkflowContextError::Unreadable { .. })
+            Err(WorkflowContextError::ResultDeserializationError { .. })
         ));
     }
 
@@ -297,11 +303,11 @@ mod tests {
         );
         assert!(matches!(
             context.result_for::<String, Infallible>(&NodeKey::new("fetch")),
-            Err(WorkflowContextError::Unreadable { .. })
+            Err(WorkflowContextError::ResultDeserializationError { .. })
         ));
         assert!(matches!(
             context.result_for::<u32, Infallible>(&NodeKey::new("check")),
-            Err(WorkflowContextError::UnknownUserCode { .. })
+            Err(WorkflowContextError::UnknownCustomCode { .. })
         ));
         assert!(matches!(
             context.summary_for(&NodeKey::<u32>::new("fetch")),

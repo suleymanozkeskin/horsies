@@ -18,7 +18,7 @@ use super::supervise::Supervision;
 use super::{
     HandlerChildMetrics, StopSignal, EVENT_BATCH_MAX, HANDLER_MAILBOX_FRAMES, STOP_FLUSH_PASSES,
 };
-use crate::events::Event;
+use crate::events::AnyEvent;
 use crate::telemetry::labels::{EventDropCause, LabelValue, SpanReadFailure};
 use crate::telemetry::worker::{EventBatch, EventQueue};
 use crate::worker::executor::protocol::{
@@ -189,10 +189,10 @@ async fn dispose_lost(channel: ChildChannel, lost: ChildLost) -> Served {
 /// wait: the stop writes the batch.
 async fn gather(
     queue: &mut EventQueue,
-    mut events: Vec<Event>,
+    mut events: Vec<AnyEvent>,
     flush: Duration,
     stop: &StopSignal,
-) -> Vec<Event> {
+) -> Vec<AnyEvent> {
     let until = Instant::now() + flush;
     loop {
         let room = EVENT_BATCH_MAX.get().saturating_sub(events.len());
@@ -224,7 +224,7 @@ enum FrameOfEvents {
 /// The frame of `events`. An event with no wire form, or one over the
 /// bound of its wire form, is a defect of the core: it is logged and left
 /// out. Pure but for the log.
-fn frame_of(events: &[Event]) -> FrameOfEvents {
+fn frame_of(events: &[AnyEvent]) -> FrameOfEvents {
     let wire: Vec<WireEvent> = events
         .iter()
         .filter_map(|event| match WireEvent::of(event) {
@@ -270,7 +270,7 @@ enum Written {
 async fn write_events(
     supervision: &Supervision,
     channel: &mut ChildChannel,
-    events: &[Event],
+    events: &[AnyEvent],
 ) -> Written {
     let (frame, count) = match frame_of(events) {
         FrameOfEvents::Frame { frame, events } => (frame, events),

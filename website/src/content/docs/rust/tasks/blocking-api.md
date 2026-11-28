@@ -22,7 +22,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -45,7 +45,7 @@ With `DailyReport` and `register_daily_report` of [Workflow API](/horsies/rust/c
 use horsies::{AppConfig, Horsies, TaskOutcome, WaitLimit};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let daily_report = register_daily_report(&mut app)?;
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = daily_report.blocking().start()?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
-        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().as_str()),
     }
     let status = handle.blocking().status()?;
     println!("status: {status:?}");
@@ -65,15 +65,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | View | From | Methods |
 |------|------|---------|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `schedule`, `schedule_with_options`, `with_options`, `retry_send`, `retry_schedule` |
-| `TaskFunctionSendOptionsView` | `task_function.blocking().with_options(options)` | `send`, `schedule` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options`, `resend` |
+| `TaskFunctionWithOptionsView` | `task_function.blocking().with_options(options)` | `send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id` |
-| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
+| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `resend_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
-| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
+| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `nodes`, `cancel`, `pause`, `resume` |
 
-The process-wide starts have blocking functions in the same module: `horsies::blocking::start_workflow::<D>()` and `horsies::blocking::start_workflow_with::<D>(params)`.
+The starts of a definition by its type are methods of the app view: `app.blocking().start_workflow::<D>()` and `app.blocking().start_workflow_with::<D>(params)`.
 
 The sends, their options and `TaskSendError` are on [Sending Tasks](/horsies/rust/tasks/sending-tasks/); the reads and `ReadError` on [Retrieving Results](/horsies/rust/tasks/retrieving-results/); the workflow starts, `WorkflowStartError`, the handle and its errors on [Workflow API](/horsies/rust/concepts/workflows/workflow-api/); the health reads on [Health Reads](/horsies/rust/monitoring/health-reads/).
 
@@ -85,25 +85,26 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 
 | Call | Error |
 |------|-------|
-| A send or a retry | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
+| A send or a resend | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
-| A health read | `BrokerOperationError::AsyncContext`, not retryable |
-| `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
-| A workflow start or `retry_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::AsyncContext`, not retryable |
+| A health read | `DatabaseOperationError::AsyncContext`, not retryable |
+| `check_live` | `ValidationReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
+| A workflow start or `resend_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
+| `status`, `results`, `nodes`, `cancel`, `pause`, `resume` | `WorkflowHandleError::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
 
-`retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
+`resend(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Resend a Failed Send](/horsies/rust/tasks/sending-tasks/#resend-a-failed-send).
 
-`retry_start(&error).await` with a `WorkflowStartError::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
+`resend_start(&error).await` with a `WorkflowStartError::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
 
 ## Order of the Checks
 
-- A refused input is refused before the thread check: a suppressed send is `SendSuppressed`, and an input that does not read back is `ValidationFailed`, on any thread.
-- `TaskHandleView::get` refuses a wait in a worker child with `WaitInsideTask` first, then returns a kept read with no I/O, then checks the thread. An `AsyncContext` answer is not kept.
-- A workflow start checks the thread first, as Python's `WorkflowSpec.start`: on a runtime thread the build of a template does not run, and a process-wide start of a definition that this process did not register is `AsyncContext` too.
-- `WorkflowFunctionView::retry_start` checks its error first: an error of another workflow name, or with a code that `retry_start` does not take, is `ValidationFailed` on any thread.
-- `WorkflowHandleView::get` refuses a wait in a worker child with `WaitInsideTask` first. `result_for` is not a wait.
+- A refused input is refused before the thread check: a suppressed send is `Suppressed`, and an input that does not read back is `ValidationFailed`, on any thread.
+- A read that takes a `WaitLimit` checks the limit first, on any thread: a `Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput` (`get`, `get_result`, `get_raw_result`) or `WorkflowReadError::InvalidInput` (`WorkflowHandleView::get`). Nothing runs.
+- `TaskHandleView::get` then refuses a wait in a worker child with `WaitInsideTask`, then returns a kept read with no I/O, then checks the thread. An `InvalidInput` or `AsyncContext` answer is not kept.
+- A workflow start checks the thread first, as Python's `WorkflowSpec.start`: on a runtime thread the build of a template does not run, and a start by type of a definition that the app does not register is `AsyncContext` too.
+- `WorkflowFunctionView::resend_start` checks its error first: an error of another workflow name, or with a code that `resend_start` does not take, is `ValidationFailed` on any thread.
+- `WorkflowHandleView::get` refuses a wait in a worker child with `WaitInsideTask` after the limit check. `result_for` is not a wait.
 - The thread of a `#[horsies::blocking_task]` body in a worker child drives no async task, so a blocking send or a blocking workflow start works there. A result wait in a worker child is `WaitInsideTask`.
 
 ## When the Process Runtime Did Not Start
@@ -112,13 +113,13 @@ When the operating system refused the threads of the core's process runtime, the
 
 | Call | Error |
 |------|-------|
-| A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload |
-| A read | `ReadError::Database` |
-| A health read | `BrokerOperationError::OperationFailed` with the code of the read |
-| `check_live` | `CheckReport` with the connectivity refusal |
+| A send or a resend | `TaskSendError::EnqueueFailed` with the task id and payload |
+| A read | `ReadError::DatabaseError` |
+| A health read | `DatabaseOperationError::OperationFailed` with the code of the read |
+| `check_live` | `ValidationReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::DbOperationFailed` |
-| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
+| `status`, `results`, `nodes`, `cancel`, `pause`, `resume` | `WorkflowHandleError::DatabaseOperationFailed` |
+| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::DatabaseError` with `DatabaseOperationFailed` |
 
 In a process that was forked without `exec` after the process runtime started, every call panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 

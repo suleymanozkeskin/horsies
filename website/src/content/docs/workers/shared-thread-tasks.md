@@ -46,7 +46,9 @@ Enqueue stores a `timeout_ms` on every `SHARED_THREAD` row. A row without a usab
 
 Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be stopped from outside, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
 
-The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust), and [Thread Seats](/horsies/typescript/workers/thread-seats/) (TypeScript).
+
+In the TypeScript client, a thread seat is a `worker_threads` isolate of its own, on Node only. The isolate runs the app's entry file and does not load the addon: its sends, reads and workflow calls go to the main thread of the child. A body reads the cancel state with `runtime.cancelState()`, and an async body also gets `runtime.signal`.
 
 ## The Timeout
 
@@ -59,16 +61,16 @@ The shared thread child holds the deadline of each of its tasks. It starts the d
 
 The outcome of a task is fixed when it returns: what it returned before its deadline, or `TASK_TIMEOUT` after it. A task that returned has no deadline left, so the finalizing marker that follows cannot turn its value into a timeout. That marker is written only for a task that returned before its deadline, and the seat waits for a pooled connection for it at most until that deadline. A task that timed out gets no marker: the child reports its end at once, and the runner heartbeats of the worker cover the row until the worker reads that end.
 
-The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
+The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `OutcomeCode.TASK_TIMEOUT` to `retry_for` for a retry.
 
 The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no new culprit. A task whose deadline already closed the child keeps its retry in an isolated child at this kill, and at the drain deadline of a stop.
 
 ## An Operator Cancel
 
-An operator can cancel a running task (`cancel_task` with `include_running`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
+An operator can cancel a running task (`cancel_task` with the policy `INCLUDE_RUNNING`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
 
 1. The child sets the cancel state of the `TaskRuntime` of the task to the cause `OPERATOR`. A task whose code has not started yet does not start.
-2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`) can stop at its next read.
+2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`, TypeScript `runtime.cancelState()`) can stop at its next read.
 3. What the task returns after the cancel is dropped: the task stays `CANCELLED`. The seat stays in use until the thread returns.
 4. The deadline rules above still apply to the child: a task past its deadline closes the child, and the worker kills the child when no task in it has time left.
 
@@ -113,7 +115,7 @@ A seat thread waits up to 30 seconds for a free connection. A thread that gets n
 
 The pool size that the seats give is a default. The connections that a child uses come from its writes. To size the pool from the writes, set `pool=SharedPool(max_size=PoolSize(connections=N))`:
 
-- Each write holds one connection for one statement in autocommit: one database round trip, and one more when the `check` of the pool is on. The RUNNING update of a workflow task holds it for a transaction of four round trips.
+- Each write holds one connection for one statement in autocommit: one database round trip, and one more when the `pre_ping` of the pool is on. The RUNNING update of a workflow task holds it for a transaction of four round trips.
 - Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
 - Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. A pool of 2 is enough.
 - Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. A pool of 2 is then full, and seat threads wait for each other. Set `max_size=PoolSize(connections=4)` or more.

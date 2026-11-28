@@ -14,7 +14,7 @@ import type { MonitoringMeta } from '@/types/meta';
 const meta = (overrides: Partial<MonitoringMeta> = {}): MonitoringMeta => ({
   horsies_version: '0.3.1',
   base_path: '/',
-  actions_enabled: true,
+  actions: 'ENABLED',
   can_act: true,
   schema_version: 14,
   expected_schema_version: 14,
@@ -116,7 +116,7 @@ describe('action capability', () => {
   });
 
   it('denies actions when the server disabled them', () => {
-    expect(deriveCanAct(meta({ actions_enabled: false }), false)).toBe(false);
+    expect(deriveCanAct(meta({ actions: 'DISABLED' }), false)).toBe(false);
   });
 
   it('denies actions when the policy says view-only', () => {

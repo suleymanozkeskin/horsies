@@ -17,7 +17,7 @@ interface Row {
 const META: MonitoringMeta = {
   horsies_version: '0.3.1',
   base_path: '/',
-  actions_enabled: true,
+  actions: 'ENABLED',
   can_act: true,
   schema_version: 14,
   expected_schema_version: 14,

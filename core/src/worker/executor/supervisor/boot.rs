@@ -237,7 +237,8 @@ fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
                 | ChildExitCode::BadArguments
                 | ChildExitCode::StoppedWithExecutorThreads
                 | ChildExitCode::BootFailed
-                | ChildExitCode::CoreStopped,
+                | ChildExitCode::CoreStopped
+                | ChildExitCode::MemoryLimit,
             )
             | None,
         ) => BootFailure::new(

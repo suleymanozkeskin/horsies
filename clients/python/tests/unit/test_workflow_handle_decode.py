@@ -2,36 +2,52 @@
 
 Strict-serde phase 5/6 regression coverage. The decode routine must:
 
-1. Reject envelopes whose ``__h_outputless_terminals__`` flag disagrees
-   with the handle's ``out_type`` (silent coercion was the bug).
-2. Apply the disagreement check BEFORE the err-fast-path so a smuggled
-   outputless flag on a typed payload can't slip through the err route.
+1. Read the plain envelope of a workflow with no output node
+   (``ok`` null) as ``NoWorkflowOutput``, and refuse a typed payload for
+   that type.
+2. Refuse the old outputless envelope (migrations before 1009 stored the
+   key ``__h_outputless_terminals__`` and a map of the terminal nodes in
+   ``ok``) for every ``output_type``: it is not an envelope of the strict
+   form.
 3. Use `decode_task_error` for polymorphic err decoding so a
-   SubWorkflowError emitted by a child workflow round-trips with its
+   SubWorkflowFailure emitted by a child workflow round-trips with its
    subclass fields intact.
 """
 
 from __future__ import annotations
 
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.codec.typed import Json
+from horsies.core.codec.typed import Json, encode_task_error
+from horsies.core.models.outcome import (
+    Failed,
+    ReadResult,
+    ReadResultDeserializationError,
+    Succeeded,
+)
 from horsies.core.models.tasks import (
-    ContractCode,
-    OperationalErrorCode,
-    SubWorkflowError,
+    OperationalCode,
+    SubWorkflowFailure,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.handle import (
-    _OUTPUTLESS_TERMINALS,  # pyright: ignore[reportPrivateUsage]
     _decode_workflow_envelope,  # pyright: ignore[reportPrivateUsage]
 )
+from horsies.core.types.result import Err, Ok
+
+
+def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
+    """The message of a read that is ``Err(ReadResultDeserializationError)``."""
+    match result:
+        case Err(ReadResultDeserializationError(message=message)):
+            return message
+        case _:
+            pytest.fail(f'expected Err(ReadResultDeserializationError), got {result!r}')
 
 
 def _typed_envelope(ok: Any) -> dict[str, Any]:
@@ -43,11 +59,12 @@ def _typed_envelope(ok: Any) -> dict[str, Any]:
     }
 
 
-def _outputless_envelope(
+def _old_outputless_envelope(
     results_by_id: dict[str, Any],
     task_name_by_id: dict[str, str],
 ) -> dict[str, Any]:
-    """Wire-outputless envelope with embedded per-node results."""
+    """The envelope that migrations before 1009 stored for a workflow with
+    no output node: the marker and the embedded per-node results."""
     return {
         '__h_task_result__': True,
         '__h_outputless_terminals__': True,
@@ -70,87 +87,27 @@ def _err_envelope(err_payload: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessMismatch:
-    """Mismatch between wire flag and handle ``out_type`` is a contract
-    violation — silent coercion to the wrong shape is the bug."""
+    """The stored form and the handle's ``output_type`` must agree."""
 
-    def test_typed_handle_on_outputless_wire_rejected(self) -> None:
-        """Handle has a typed ``out_type`` but the envelope is outputless."""
-        wire = _outputless_envelope(
-            results_by_id={},
-            task_name_by_id={},
-        )
+    def test_typed_handle_on_the_old_outputless_wire_rejected(self) -> None:
+        wire = _old_outputless_envelope(results_by_id={}, task_name_by_id={})
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-1',
         )
-        assert result.is_err()
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
-        assert result.err.data is not None
-        assert result.err.data.get('wire_outputless') is True
-        assert result.err.data.get('handle_outputless') is False
+        assert '__h_outputless_terminals__' in _unreadable_message(result)
 
-    def test_outputless_handle_on_typed_wire_rejected(self) -> None:
-        """Handle is outputless but the envelope carries a typed payload."""
+    def test_no_workflow_output_handle_on_a_typed_wire_rejected(self) -> None:
         wire = _typed_envelope(ok=42)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
+            output_type=NoWorkflowOutput,
             app=None,
             workflow_id='wf-2',
         )
-        assert result.is_err()
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
-        assert result.err.data is not None
-        assert result.err.data.get('wire_outputless') is False
-        assert result.err.data.get('handle_outputless') is True
-
-    def test_smuggled_outputless_flag_on_typed_err_envelope_rejected(
-        self,
-    ) -> None:
-        """Outputless flag MUST be checked before err-fast-path.
-
-        Regression: an attacker / cross-version producer could write
-        ``__h_outputless_terminals__: True`` next to an err slot and
-        slip past the outputless check if the err-fast-path ran first.
-        """
-        wire = {
-            '__h_task_result__': True,
-            '__h_outputless_terminals__': True,
-            'ok': None,
-            'err': {
-                'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
-                'message': 'sneak',
-                'data': None,
-                'exception': None,
-            },
-        }
-        # Handle is typed; smuggled outputless flag must trip mismatch
-        # BEFORE the err-fast-path returns a (spurious) decode.
-        result = _decode_workflow_envelope(
-            cast(Json, wire),
-            out_type=int,
-            app=None,
-            workflow_id='wf-3',
-        )
-        assert result.is_err()
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
-        assert result.err.data is not None
-        assert result.err.data.get('wire_outputless') is True
-        assert result.err.data.get('handle_outputless') is False
+        _unreadable_message(result)
 
 
 @pytest.mark.unit
@@ -160,40 +117,32 @@ class TestWorkflowEnvelopeMarkerGuards:
     def test_non_dict_envelope_rejected(self) -> None:
         result = _decode_workflow_envelope(
             cast(Json, 42),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
-        assert result.is_err()
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
+        assert isinstance(result, Err)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_missing_marker_rejected(self) -> None:
         result = _decode_workflow_envelope(
             cast(Json, {'ok': 1, 'err': None}),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
-        assert result.is_err()
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
+        assert isinstance(result, Err)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeErrSlot:
-    """Err slot routes through `decode_task_error` so SubWorkflowError
+    """Err slot routes through `decode_task_error` so SubWorkflowFailure
     survives the round-trip."""
 
     def test_plain_task_error_decoded(self) -> None:
         err_payload = {
-            'error_code': {'__builtin_task_code__': 'BROKER_ERROR'},
+            'error_code': {'__builtin_task_code__': 'DATABASE_ERROR'},
             'message': 'plain failure',
             'data': None,
             'exception': None,
@@ -201,93 +150,83 @@ class TestWorkflowEnvelopeErrSlot:
         wire = _err_envelope(err_payload)
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-x',
         )
-        assert result.is_err()
-        assert result.err is not None
-        assert isinstance(result.err, TaskError)
-        assert not isinstance(result.err, SubWorkflowError)
-        assert result.err.message == 'plain failure'
+        match result:
+            case Ok(Failed(task_error)):
+                assert isinstance(task_error, TaskError)
+                assert not isinstance(task_error, SubWorkflowFailure)
+                assert task_error.message == 'plain failure'
+            case _:
+                pytest.fail(f'expected a failed outcome, got {result!r}')
 
     def test_sub_workflow_error_preserved(self) -> None:
-        """SubWorkflowError dumped by the engine round-trips with the
+        """SubWorkflowFailure in its stored form round-trips with the
         ``sub_workflow_id`` / ``sub_workflow_summary`` fields intact."""
-        original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+        original = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
             message='nested failure',
             sub_workflow_id='wf-child',
             sub_workflow_summary=SubWorkflowSummary(
                 status=WorkflowStatus.FAILED,
                 output=None,
-                total_tasks=3,
-                completed_tasks=1,
-                failed_tasks=2,
-                skipped_tasks=0,
+                total_nodes=3,
+                completed_nodes=1,
+                failed_nodes=2,
+                skipped_nodes=0,
                 error_summary='downstream',
             ),
         )
-        wire = _err_envelope(original.model_dump(mode='json'))
+        wire = _err_envelope(encode_task_error(original))
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=int,
+            output_type=int,
             app=None,
             workflow_id='wf-parent',
         )
-        assert result.is_err()
-        assert isinstance(result.err, SubWorkflowError)
-        assert result.err is not None
-        decoded = result.err
-        assert isinstance(decoded, SubWorkflowError)
-        assert decoded.sub_workflow_id == 'wf-child'
-        assert decoded.sub_workflow_summary.failed_tasks == 2
+        match result:
+            case Ok(Failed(SubWorkflowFailure() as decoded)):
+                assert decoded.sub_workflow_id == 'wf-child'
+                assert decoded.sub_workflow_summary.failed_nodes == 2
+            case _:
+                pytest.fail(f'expected Ok(Failed(SubWorkflowFailure)), got {result!r}')
 
 
 @pytest.mark.unit
 class TestWorkflowEnvelopeOutputlessPath:
-    """Outputless path decodes per-node envelopes using the app
-    registry. Tests cover the embedded ``task_name_by_id`` mapping."""
+    """A handle of ``NoWorkflowOutput`` reads the plain envelope of a
+    workflow with no output node."""
 
-    @staticmethod
-    def _make_app_with_task(task_name: str, ok_type: Any) -> Any:
-        """Build a mock app whose task registry knows one task."""
-        app = MagicMock()
-        task = MagicMock()
-        task.task_ok_type = ok_type
-        app.tasks = {task_name: task}
-        return app
+    def test_plain_envelope_reads_as_no_workflow_output(self) -> None:
+        result = _decode_workflow_envelope(
+            cast(Json, _typed_envelope(ok=None)),
+            output_type=NoWorkflowOutput,
+            app=None,
+            workflow_id='wf-out',
+        )
+        assert result == Ok(Succeeded(NoWorkflowOutput()))
 
-    def test_per_node_decode_uses_embedded_task_names(self) -> None:
-        app = self._make_app_with_task('task_a', int)
-        wire = _outputless_envelope(
-            results_by_id={
-                'node-0': {
-                    '__h_task_result__': True,
-                    'ok': 7,
-                    'err': None,
-                },
-            },
-            task_name_by_id={'node-0': 'task_a'},
+    def test_plain_envelope_with_an_err_slot_reads_as_failed(self) -> None:
+        wire = _typed_envelope(ok=None)
+        wire['err'] = encode_task_error(
+            TaskError(code=OperationalCode.UNHANDLED_EXCEPTION, message='boom'),
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
-            app=app,
+            output_type=NoWorkflowOutput,
+            app=None,
             workflow_id='wf-out',
         )
-        assert result.is_ok()
-        results: dict[str, TaskResult[Any, TaskError]] = result.unwrap()
-        assert 'node-0' in results
-        node_result = results['node-0']
-        assert node_result.is_ok()
-        assert node_result.ok == 7
+        match result:
+            case Ok(Failed(task_error)):
+                assert task_error.message == 'boom'
+            case _:
+                pytest.fail(f'expected Ok(Failed(...)), got {result!r}')
 
-    def test_unknown_task_name_records_no_type_available(self) -> None:
-        """Source task missing from the registry → ``NO_TYPE_AVAILABLE``
-        sentinel on that node, not a fatal workflow error."""
-        app = self._make_app_with_task('task_a', int)
-        wire = _outputless_envelope(
+    def test_a_row_of_the_old_outputless_form_is_unreadable(self) -> None:
+        wire = _old_outputless_envelope(
             results_by_id={
                 'node-0': {
                     '__h_task_result__': True,
@@ -299,13 +238,8 @@ class TestWorkflowEnvelopeOutputlessPath:
         )
         result = _decode_workflow_envelope(
             cast(Json, wire),
-            out_type=_OUTPUTLESS_TERMINALS,
-            app=app,
-            workflow_id='wf-out',
+            output_type=NoWorkflowOutput,
+            app=None,
+            workflow_id='wf-old',
         )
-        assert result.is_ok()
-        results = result.unwrap()
-        node = results['node-0']
-        assert node.is_err()
-        assert node.err is not None
-        assert node.err.error_code == ContractCode.NO_TYPE_AVAILABLE
+        assert '__h_outputless_terminals__' in _unreadable_message(result)

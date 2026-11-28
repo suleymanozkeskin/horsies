@@ -3,7 +3,7 @@ title: Testing
 section: python
 summary: How to test tasks and workflow tasks without a database, and how HORSIES_SUPPRESS_SENDS stops sends in code that calls .send().
 related: [../tasks/defining-tasks, ../tasks/sending-tasks, ../tasks/retrieving-results, ../concepts/workflows/workflow-semantics, ../configuration/broker-config]
-tags: [testing, pytest, HORSIES_SUPPRESS_SENDS, WorkflowContext, from_serialized, TaskRuntime, for_test, AttemptNumber, TaskSendSuppressed, direct call]
+tags: [testing, pytest, HORSIES_SUPPRESS_SENDS, WorkflowContext, from_serialized, TaskRuntime, for_test, AttemptNumber, TaskSendSuppressed, TaskOutcome, direct call]
 ---
 
 # Testing
@@ -27,7 +27,17 @@ A direct call does not test these:
 The examples use these tasks:
 
 ```python
-from horsies import NodeKey, TaskError, TaskResult, WorkflowContext
+from horsies import (
+    Err,
+    Failed,
+    NodeKey,
+    Ok,
+    Result,
+    Succeeded,
+    TaskError,
+    TaskOutcome,
+    WorkflowContext,
+)
 
 from myapp.instance import app
 
@@ -35,67 +45,69 @@ FIRST_KEY: NodeKey[int] = NodeKey('first')
 
 
 @app.task('double')
-def double(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value * 2)
+def double(*, value: int) -> Result[int, TaskError]:
+    return Ok(value * 2)
 
 
 @app.task('describe')
-def describe(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
-    if data.is_err():
-        return TaskResult(err=data.unwrap_err())
-    return TaskResult(ok=f'value={data.unwrap()}')
+def describe(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
+    match data:
+        case Succeeded(value):
+            return Ok(f'value={value}')
+        case Failed(error):
+            return Err(error)
 
 
 @app.task('summarize')
 def summarize(
     *,
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
-    if workflow_ctx is None:
-        return TaskResult(err=TaskError(error_code='NO_CTX', message='Missing context'))
-    first = workflow_ctx.result_for(FIRST_KEY)
-    return TaskResult(ok=first.unwrap())
+    workflow_context: WorkflowContext | None = None,
+) -> Result[int, TaskError]:
+    if workflow_context is None:
+        return Err(TaskError(code='NO_CTX', message='Missing context'))
+    match workflow_context.result_for(FIRST_KEY):
+        case Succeeded(first):
+            return Ok(first)
+        case Failed(error):
+            return Err(error)
 ```
 
 ### Call a Task Directly
 
-Pass keyword arguments. The call returns the `TaskResult` of the task.
+Pass keyword arguments. The call returns the `Result` of the task: `Ok(value)` or `Err(task_error)`.
 
 ```python
 from myapp.tasks import double
 
 
 def test_direct_call() -> None:
-    result = double(value=21)
-    assert result.is_ok()
-    assert result.unwrap() == 42
+    assert double(value=21) == Ok(42)
 ```
 
-Task parameters are keyword-only. A call with a positional argument, or without a required kwarg, does not raise. It returns a `TaskResult` with the error code `UNHANDLED_EXCEPTION`, and the message names the `TypeError`.
+Task parameters are keyword-only. A call with a positional argument, or without a required kwarg, does not raise. It returns `Err(TaskError(...))` with the error code `UNHANDLED_EXCEPTION`, and the message names the `TypeError`.
 
 ### Pass an Upstream Result
 
-A parameter that a workflow fills through `args_from` has the type `TaskResult[T, TaskError]`. In a test, pass the value yourself.
+A parameter that a workflow fills through `args_from` has the type `TaskOutcome[T, TaskError]`. In a test, pass the outcome yourself.
 
 ```python
-from horsies import TaskResult
+from horsies import Succeeded
 
 from myapp.tasks import describe
 
 
 def test_injected_result() -> None:
-    result = describe(data=TaskResult(ok=4))
-    assert result.unwrap() == 'value=4'
+    assert describe(data=Succeeded(4)) == Ok('value=4')
 ```
 
-To test the failure path, pass `TaskResult(err=TaskError(...))`.
+To test the failure path, pass `Failed(TaskError(...))`.
 
 ### Build a Workflow Context
 
-`WorkflowContext.from_serialized(...)` builds the context that a worker gives to a task with a `workflow_ctx` parameter.
+`WorkflowContext.from_serialized(...)` builds the context that a worker gives to a task with a `workflow_context` parameter.
 
 ```python
-from horsies import TaskResult, WorkflowContext
+from horsies import Succeeded, WorkflowContext
 
 from myapp.tasks import FIRST_KEY, summarize
 
@@ -103,22 +115,22 @@ from myapp.tasks import FIRST_KEY, summarize
 def test_workflow_context() -> None:
     ctx = WorkflowContext.from_serialized(
         workflow_id='wf-1',
-        task_index=1,
+        node_index=1,
         task_name='summarize',
-        results_by_id={FIRST_KEY.node_id: TaskResult(ok=7)},
+        results_by_node_id={FIRST_KEY.node_id: Succeeded(7)},
     )
-    assert summarize(workflow_ctx=ctx).unwrap() == 7
+    assert summarize(workflow_context=ctx) == Ok(7)
 ```
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `workflow_id` | `str` | Id of the workflow |
-| `task_index` | `int` | Index of the node |
+| `node_index` | `int` | Index of the node |
 | `task_name` | `str` | Name of the task |
-| `results_by_id` | `dict[str, TaskResult[Any, TaskError]]` | Upstream results, keyed by `node_id` |
-| `summaries_by_id` | `dict[str, SubWorkflowSummary[Any]] \| None` | Subworkflow summaries, keyed by `node_id`. Default `None` |
+| `results_by_node_id` | `dict[str, TaskOutcome[Any, TaskError]]` | Upstream outcomes (`Succeeded(value)` or `Failed(task_error)`), keyed by `node_id` |
+| `summaries_by_node_id` | `dict[str, SubWorkflowSummary[Any]] \| None` | Subworkflow summaries, keyed by `node_id`. Default `None` |
 
-`result_for(node)` raises `KeyError` for a node whose id is not in `results_by_id`.
+`result_for(node)` raises `NodeNotInContext` (code `ContractCode.NODE_NOT_IN_CONTEXT`) for a node whose id is not in `results_by_node_id`, and `WorkflowContextMissingId` (code `ContractCode.WORKFLOW_CONTEXT_MISSING_ID`) for a node with no `node_id`.
 
 ### Pass a Task Runtime
 
@@ -127,13 +139,13 @@ A task whose first parameter is `runtime: TaskRuntime` takes the runtime first i
 ```python
 import uuid
 
-from horsies import AttemptNumber, Err, FencingToken, Ok, TaskError, TaskResult, TaskRuntime
+from horsies import AttemptNumber, Err, FencingToken, MaxRetries, Ok, Result, TaskError, TaskRuntime
 
 
 @app.task('stamp')
-def stamp(runtime: TaskRuntime, *, label: str) -> TaskResult[str, TaskError]:
+def stamp(runtime: TaskRuntime, *, label: str) -> Result[str, TaskError]:
     token = runtime.fencing_token
-    return TaskResult(ok=f'{label}:{token.value}')
+    return Ok(f'{label}:{token.value}')
 
 
 def test_task_runtime() -> None:
@@ -142,37 +154,44 @@ def test_task_runtime() -> None:
             pass
         case Err(err_value=refused):
             raise AssertionError(refused.reason)
+    match MaxRetries.parse(3):
+        case Ok(ok_value=budget):
+            pass
+        case Err(err_value=refused):
+            raise AssertionError(refused.reason)
     task_id = uuid.uuid4()
-    runtime = TaskRuntime.for_test(task_id=task_id, attempt=second_attempt)
+    runtime = TaskRuntime.for_test(task_id=task_id, attempt=second_attempt, max_retries=budget)
     assert runtime.fencing_token == FencingToken(task_id=task_id, value=2)
-    assert stamp(runtime, label='order').unwrap() == 'order:2'
+    assert runtime.retries_left.value == 2
+    assert stamp(runtime, label='order') == Ok('order:2')
 ```
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `task_id` | `uuid.UUID` | The task id of the token |
 | `attempt` | `AttemptNumber` | The attempt number. Default: the first attempt (1). A test of a retry passes 2 |
+| `max_retries` | `MaxRetries` | The retry budget of the task. Default: `MaxRetries(value=0)`. `retries_left` follows from `attempt` and `max_retries` |
 | `cancel_state` | `RunCancelState` | The cancel state of the run for the whole call. Default: `CancelNotRequested()`. A test of the stop path passes `CancelRequested(cause=CancelCause.OPERATOR)`. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) |
 
-`AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
+`AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `MaxRetries.parse(number)` returns `Ok(MaxRetries)` for a number from 0 to 20, and `Err(MaxRetriesRefused)` for another number. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
 
-### Refuse a TaskResult Kwarg on `.send()`
+### Refuse a TaskOutcome Kwarg on `.send()`
 
-The workflow engine fills `TaskResult` parameters. A producer must not send them. `.send()` returns `Err(TaskSendValidationFailed)` and writes nothing.
+The workflow engine fills `TaskOutcome` parameters. A producer must not send them. `.send()` returns `Err(TaskSendValidationFailed)` and writes nothing.
 
 ```python
-from horsies import Err, TaskResult, TaskSendValidationFailed
+from horsies import Err, Succeeded, TaskSendValidationFailed
 
 from myapp.tasks import describe
 
 
-def test_send_refuses_task_result() -> None:
-    sent = describe.send(data=TaskResult(ok=4))
+def test_send_refuses_task_outcome() -> None:
+    sent = describe.send(data=Succeeded(4))
     assert isinstance(sent, Err)
     assert isinstance(sent.err_value, TaskSendValidationFailed)
 ```
 
-The same check applies to `workflow_ctx` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_ctx` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
+The same check applies to `workflow_context` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_context` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
 
 ## Suppress Sends
 
@@ -197,8 +216,8 @@ Rules:
 
 - The variable is read on each send. The value must be exactly `1` after trimming spaces. Any other value does not suppress.
 - The effect is local to the process. It does not affect other producers or workers.
-- It applies to `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`.
-- The retry methods refuse a `TaskSendSuppressed` error.
+- It applies to `.send()` and `.send_async()`, with or without `with_options(...)`.
+- The resend methods refuse a `TaskSendSuppressed` error.
 - Horsies turns on the same suppression by itself when it imports modules in a worker or scheduler, and during `app.check()`. A `.send()` at module level is a no-op in those phases.
 
 Code under test must treat `Err(TaskSendSuppressed)` as a normal return. A test that needs `Ok(handle)` needs a database.

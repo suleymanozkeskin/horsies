@@ -182,7 +182,7 @@ def _workflow_event() -> events.AnyEvent:
             reason=TIMEOUT_KILL.reason,
             code=TIMEOUT_KILL.code,
             execution=TIMEOUT_KILL.execution,
-            child_kind=TIMEOUT_KILL.child_kind,
+            child_execution=TIMEOUT_KILL.child_execution,
             trace_wire=['NoCarrier'],
             workflow='WORKFLOW_NOT_KNOWN',
         ),
@@ -246,7 +246,7 @@ def _ended_text(
     reason: str,
     code: str,
     execution: str,
-    child_kind: str,
+    child_execution: str,
     trace_wire: list[object],
     workflow: str = 'NOT_IN_WORKFLOW',
 ) -> str:
@@ -266,7 +266,7 @@ def _ended_text(
             code,
             trace_wire,
             PLACED_NANOS,
-            child_kind,
+            child_execution,
             WORKER_ID,
             workflow,
         ],
@@ -304,12 +304,12 @@ def _event(text: str) -> events.AnyEvent:
 @dataclass(frozen=True, slots=True)
 class _WorkerEnd:
     """One way the worker ends an attempt: the reason and its code, the
-    class of the task and the kind of its child."""
+    class of the task and the execution class of its child."""
 
     reason: str
     code: str
     execution: str
-    child_kind: str
+    child_execution: str
 
 
 TIMEOUT_KILL: Final = _WorkerEnd('TIMED_OUT', 'TASK_TIMEOUT', 'ISOLATED', 'ISOLATED')
@@ -334,7 +334,7 @@ def _expected_attributes(end: _WorkerEnd) -> dict[str, object]:
         'horsies.task.id': str(TASK_ID),
         'horsies.task.name': TASK_NAME,
         'horsies.task.attempt': ATTEMPT,
-        'horsies.task.execution': end.child_kind,
+        'horsies.task.execution': end.child_execution,
         'horsies.queue': QUEUE_NAME,
         'horsies.worker.id': WORKER_ID,
         'horsies.span.source': 'worker',
@@ -358,7 +358,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
             reason=end.reason,
             code=end.code,
             execution=end.execution,
-            child_kind=end.child_kind,
+            child_execution=end.child_execution,
             trace_wire=['Carrier', carrier],
         )
 
@@ -401,7 +401,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                     reason=TIMEOUT_KILL.reason,
                     code=TIMEOUT_KILL.code,
                     execution=TIMEOUT_KILL.execution,
-                    child_kind=TIMEOUT_KILL.child_kind,
+                    child_execution=TIMEOUT_KILL.child_execution,
                     trace_wire=['Carrier', carrier],
                 ),
             ],
@@ -431,7 +431,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                     reason=CRASH.reason,
                     code=CRASH.code,
                     execution=CRASH.execution,
-                    child_kind=CRASH.child_kind,
+                    child_execution=CRASH.child_execution,
                     trace_wire=['NoCarrier'],
                 ),
             ],
@@ -452,7 +452,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                     reason=TIMEOUT_KILL.reason,
                     code=TIMEOUT_KILL.code,
                     execution=TIMEOUT_KILL.execution,
-                    child_kind=TIMEOUT_KILL.child_kind,
+                    child_execution=TIMEOUT_KILL.child_execution,
                     trace_wire=['Carrier', carrier],
                 ),
             ],
@@ -479,7 +479,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                     reason=TIMEOUT_KILL.reason,
                     code=TIMEOUT_KILL.code,
                     execution=TIMEOUT_KILL.execution,
-                    child_kind=TIMEOUT_KILL.child_kind,
+                    child_execution=TIMEOUT_KILL.child_execution,
                     trace_wire=['Carrier', carrier],
                     workflow='WORKFLOW_NOT_KNOWN',
                 ),
@@ -524,7 +524,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                 reason=TIMEOUT_KILL.reason,
                 code=TIMEOUT_KILL.code,
                 execution=TIMEOUT_KILL.execution,
-                child_kind=TIMEOUT_KILL.child_kind,
+                child_execution=TIMEOUT_KILL.child_execution,
                 trace_wire=['Carrier', carrier],
                 workflow='WORKFLOW_NOT_KNOWN',
             ),
@@ -551,7 +551,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                 reason=CRASH.reason,
                 code=CRASH.code,
                 execution=CRASH.execution,
-                child_kind=CRASH.child_kind,
+                child_execution=CRASH.child_execution,
                 trace_wire=['NoCarrier'],
             ),
         )
@@ -728,7 +728,7 @@ class TestNoSpans:
                 reason=TIMEOUT_KILL.reason,
                 code=TIMEOUT_KILL.code,
                 execution=TIMEOUT_KILL.execution,
-                child_kind=TIMEOUT_KILL.child_kind,
+                child_execution=TIMEOUT_KILL.child_execution,
                 trace_wire=['Carrier', carrier],
             ),
         )
@@ -764,7 +764,7 @@ class TestNoSpans:
     ) -> None:
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://user:pass@localhost/db'),
                 ),
                 tracing=tracing,
@@ -775,7 +775,7 @@ class TestNoSpans:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
@@ -793,7 +793,7 @@ class TestNoSpans:
             reason=TIMEOUT_KILL.reason,
             code=TIMEOUT_KILL.code,
             execution=TIMEOUT_KILL.execution,
-            child_kind=TIMEOUT_KILL.child_kind,
+            child_execution=TIMEOUT_KILL.child_execution,
             trace_wire=['NoCarrier'],
         )
         code = textwrap.dedent(
@@ -878,7 +878,7 @@ class TestARecorderThatRaises:
                 reason=CRASH.reason,
                 code=CRASH.code,
                 execution=CRASH.execution,
-                child_kind=CRASH.child_kind,
+                child_execution=CRASH.child_execution,
                 trace_wire=['NoCarrier'],
             ),
         )
@@ -942,7 +942,7 @@ class TestTheFactsOfTheSpan:
                 reason=TIMEOUT_KILL.reason,
                 code=TIMEOUT_KILL.code,
                 execution=TIMEOUT_KILL.execution,
-                child_kind=TIMEOUT_KILL.child_kind,
+                child_execution=TIMEOUT_KILL.child_execution,
                 trace_wire=['NoCarrier'],
             ),
         )

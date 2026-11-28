@@ -10,9 +10,8 @@ node is. An err output makes a FAILED node that holds the child's text. A stored
 child result that does not parse, or no result, makes a FAILED node that holds an
 envelope with ``RESULT_DESERIALIZATION_ERROR``, so each reader names the cause.
 
-An outputless workflow has no output node, so its terminal nodes are its output.
-A SKIPPED terminal gets the same code in its entry. The shape of that envelope
-and the ``None`` entry of a row that does not parse stay as they are.
+An outputless workflow has no output node. It stores the plain envelope with
+``ok`` null, and a SKIPPED terminal node gives no ``WORKFLOW_OUTPUT_SKIPPED``.
 """
 
 from __future__ import annotations

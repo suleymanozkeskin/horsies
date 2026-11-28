@@ -432,7 +432,7 @@ PARENT_B: Final = '0191aaaa-bbbb-7ccc-8ddd-eeeeffff0002'
 def _parent_and_child(parent: str, child: str, named: str) -> list[RawRow]:
     error = json.dumps(
         {
-            'error_code': 'SUBWORKFLOW_FAILED',
+            'error_code': 'SUB_WORKFLOW_FAILED',
             'message': f'Subworkflow {named} failed',
             'sub_workflow_id': child,
         }
@@ -442,7 +442,7 @@ def _parent_and_child(parent: str, child: str, named: str) -> list[RawRow]:
             '__h_task_result__': True,
             'ok': None,
             'err': {
-                'error_code': 'SUBWORKFLOW_FAILED',
+                'error_code': 'SUB_WORKFLOW_FAILED',
                 'message': f'Subworkflow {named} failed with status FAILED',
                 'sub_workflow_id': child,
             },
@@ -589,7 +589,7 @@ def _skipped_error(named: str) -> dict[str, object]:
 
 def _child_failed_error(named: str) -> dict[str, object]:
     return {
-        'error_code': 'SUBWORKFLOW_FAILED',
+        'error_code': 'SUB_WORKFLOW_FAILED',
         'message': f'Subworkflow {named} failed with status FAILED',
         'sub_workflow_id': named,
         'sub_workflow_summary': {
@@ -643,15 +643,6 @@ def _task_input(run: Run, named: str) -> dict[str, object]:
     }
 
 
-def _outputless_result(named: str) -> dict[str, object]:
-    return {
-        '__h_task_result__': True,
-        '__h_outputless_terminals__': True,
-        'ok': {'results_by_id': {'source:0': _envelope(_skipped_error(named))}},
-        'err': None,
-    }
-
-
 def _documents(run: Run, named: str) -> dict[str, object]:
     """One stored document of each column rule, naming the workflow ``named``."""
     return {
@@ -660,7 +651,6 @@ def _documents(run: Run, named: str) -> dict[str, object]:
         'node_result': _envelope(_crash_error(run)),
         'child_node_result': _envelope(_child_failed_error(named)),
         'workflow_result': _envelope(_skipped_error(named)),
-        'outputless_result': _outputless_result(named),
         'summary': {'status': 'COMPLETED', 'error_summary': f'Workflow {named} ended'},
     }
 
@@ -678,7 +668,6 @@ DOCUMENTS: Final = SnapshotCatalog(
                 ColumnSpec(name='node_result', rule=NODE_RESULT),
                 ColumnSpec(name='child_node_result', rule=NODE_RESULT),
                 ColumnSpec(name='workflow_result', rule=WORKFLOW_RESULT),
-                ColumnSpec(name='outputless_result', rule=WORKFLOW_RESULT),
                 ColumnSpec(name='summary', rule=SUB_WORKFLOW_SUMMARY),
             ),
             order_by=('workflow',),
@@ -738,7 +727,6 @@ def test_a_document_that_names_another_workflow_is_a_difference() -> None:
         'input',
         'child_node_result',
         'workflow_result',
-        'outputless_result',
         'summary',
     ]
 

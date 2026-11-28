@@ -50,7 +50,7 @@ use crate::broker::BrokerError;
 use crate::core::codec::task_result_to_json_string;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::python_text::python_isoformat_utc;
-use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
+use crate::core::{OperationalCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
 use crate::log_targets::STALE_RUNNING_PASS;
 use crate::telemetry::labels::RecoveryAction;
@@ -210,8 +210,8 @@ pub(crate) struct OwnerGoneStep {
 /// One owner-gone step on `pool`: the liveness read, the judgement of
 /// `memory` with `span`, the read of the generations of the judged owners
 /// (only when the read judged one), then for each gone owner the recovery
-/// of its RUNNING rows (with `auto_fail_stale_running`) and of its CLAIMED
-/// rows (with `auto_requeue_stale_claimed`). Each statement runs alone on
+/// of its RUNNING rows (with `fail_stale_running`) and of its CLAIMED
+/// rows (with `requeue_stale_claimed`). Each statement runs alone on
 /// `pool` as reserved work and commits alone. A recovery statement that
 /// fails is logged, and the step goes on with the next one. Each row whose
 /// recovery committed is told to `telemetry` (`RunningRetried`,
@@ -257,10 +257,10 @@ pub(crate) async fn owner_gone_step(
             owner.unheld_since,
             owner.generation,
         );
-        if config.auto_fail_stale_running {
+        if config.fail_stale_running {
             step.running_recovered += recover_gone_owner_running(pool, log, owner, telemetry).await;
         }
-        if config.auto_requeue_stale_claimed {
+        if config.requeue_stale_claimed {
             step.claims_requeued += requeue_gone_owner_claims(pool, log, owner, telemetry).await;
         }
     }
@@ -404,13 +404,13 @@ pub(crate) fn gone_owner_attempt_command(
     owner: &GoneOwner,
 ) -> Result<FinishStaleAttempt, serde_json::Error> {
     let facts = &candidate.facts;
-    let error_code = OperationalErrorCode::WorkerCrashed.to_string();
+    let error_code = OperationalCode::WorkerCrashed.to_string();
     let unheld_since = python_isoformat_utc(owner.unheld_since);
     let failed_reason =
         format!("Worker process crashed (its liveness lock is free since {unheld_since})");
     let task_error = TaskError {
         exception: None,
-        error_code: OperationalErrorCode::WorkerCrashed.into(),
+        error_code: OperationalCode::WorkerCrashed.into(),
         message: Some(failed_reason.clone()),
         kind: TaskErrorKind::Plain,
         data: Some(crate::core::codec::JsonText::of_engine_value(

@@ -11,16 +11,16 @@ use super::support::{
     shared_pool, spec, start, task_node, unreachable_handle, IsolatedDatabase, NodeSeed,
     ParentLink, WorkflowSeed,
 };
-use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::core::workflow::handle_types::WorkflowHandleErrorCode;
 use crate::core::PausedWorkflowAge;
 use crate::core::{
-    OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
+    OnError, SubWorkflowSummary, TaskResult, WorkflowNodeStatus, WorkflowSpec, WorkflowStatus,
 };
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::expire_paused_workflows;
-use crate::workflow_engine::query::NodesRead;
+use crate::workflow_engine::query::{NodeResultRead, NodesRead};
 
 /// How long `get()` waits for a workflow that is terminal before the call.
 const GET_WAIT: Duration = Duration::from_secs(1);
@@ -134,7 +134,7 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id has no status");
 
-    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), WorkflowHandleErrorCode::WorkflowNotFound);
     assert!(!error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
 }
@@ -364,7 +364,7 @@ async fn result_for_gives_the_typed_result_of_one_node() {
 /// the node of an unfinished workflow stores no result, which a client reads
 /// as `RESULT_NOT_READY`.
 #[tokio::test]
-async fn an_unfinished_node_stores_no_result() {
+async fn an_unfinished_node_is_not_stored() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
@@ -378,7 +378,41 @@ async fn an_unfinished_node_stores_no_result() {
         .await
         .expect("the node result read");
 
-    assert_eq!(stored, None);
+    assert_eq!(stored, NodeResultRead::NotStored);
+}
+
+/// A node id that the workflow does not have is `NodeAbsent`, not
+/// `NotStored`: a caller that polls tells a wrong id from a node that has not
+/// ended.
+#[tokio::test]
+async fn a_node_id_the_workflow_does_not_have_is_node_absent() {
+    let pool = shared_pool().await;
+    let workflow_id = start(
+        &pool,
+        &single("result_for_no_node", OnError::Fail),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+
+    let read = handle(&pool, workflow_id)
+        .node_result("no_such_node")
+        .await
+        .expect("the node result read");
+
+    assert_eq!(read, NodeResultRead::NodeAbsent);
+}
+
+/// An id that no workflow has is `WorkflowAbsent`.
+#[tokio::test]
+async fn a_workflow_id_that_no_workflow_has_is_workflow_absent() {
+    let pool = shared_pool().await;
+
+    let read = handle(&pool, Uuid::new_v4())
+        .node_result("node_0")
+        .await
+        .expect("the node result read");
+
+    assert_eq!(read, NodeResultRead::WorkflowAbsent);
 }
 
 /// `TestWorkflowHandleResults.test_results_empty_when_no_tasks_completed`
@@ -441,8 +475,8 @@ async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
 
     let tasks = handle(&pool, workflow_id).tasks().await.expect("tasks()");
 
-    assert_eq!(tasks[0].status, WorkflowTaskStatus::Enqueued);
-    assert_eq!(tasks[1].status, WorkflowTaskStatus::Pending);
+    assert_eq!(tasks[0].status, WorkflowNodeStatus::Enqueued);
+    assert_eq!(tasks[1].status, WorkflowNodeStatus::Pending);
     assert!(tasks[0].result.is_none());
     assert!(tasks[1].result.is_none());
 }
@@ -466,7 +500,7 @@ async fn tasks_gives_the_result_and_times_of_a_finished_node() {
 
     assert_eq!(tasks.len(), 1);
     let info = &tasks[0];
-    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(info.status, WorkflowNodeStatus::Completed);
     let result = info.result.as_ref().expect("a finished node has a result");
     assert_eq!(ok_value(result), &serde_json::json!(42));
     assert!(info.started_at.is_some(), "the node started at its enqueue");
@@ -528,7 +562,7 @@ async fn a_started_sub_workflow_node_gives_its_child_id() {
 #[tokio::test]
 async fn a_finished_sub_workflow_node_gives_its_summary() {
     let pool = shared_pool().await;
-    let summary = r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#;
+    let summary = r#"{"status": "COMPLETED", "output": null, "total_nodes": 3, "completed_nodes": 3, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}"#;
     let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(summary)).await;
 
     let tasks = handle(&pool, parent).tasks().await.expect("tasks()");
@@ -541,10 +575,10 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
     assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (3, 3, 0, 0)
     );
@@ -582,7 +616,7 @@ async fn a_corrupt_summary_is_read_as_stored() {
 #[tokio::test]
 async fn a_summary_with_an_unknown_status_is_read_as_stored() {
     let pool = shared_pool().await;
-    let stored = r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#;
+    let stored = r#"{"status": "NOT_A_STATUS", "total_nodes": 1}"#;
     let (parent, child) = seed_linked_child(&pool, "COMPLETED", "COMPLETED", Some(stored)).await;
 
     let summary = stored_summary_of(&pool, parent).await;
@@ -702,14 +736,17 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("status() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`:
 /// the result read on a lost database fails with a retryable database
-/// error, which a client's handle names `BROKER_ERROR`.
+/// error, which a client's handle names `DATABASE_ERROR`.
 #[tokio::test]
 async fn a_lost_database_makes_the_result_read_fail_retryably() {
     let error = unreachable_handle(Uuid::new_v4())
@@ -729,7 +766,10 @@ async fn a_lost_database_makes_cancel_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("cancel() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
 }
 
@@ -743,7 +783,10 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
         .await
         .expect_err("results() with no database");
 
-    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert_eq!(error.workflow_id(), workflow_id);
 }
 

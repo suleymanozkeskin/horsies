@@ -129,14 +129,14 @@ validate_order
          |- generate_invoice         (timeout_ms = 8 s)
          \-> SubWorkflow: shipping(courier, express)
                 \-> capture_payment  (args_from = authorize_payment)
-                      \-> send_order_email  (allow_failed_deps=True)
+                      \-> send_order_email  (allow_failed_dependencies=True)
 ```
 
 `shipping` is a child workflow in its own right — its own run, its own graph,
 its own node results — parameterized per order through `build_with`.
 
 `send_order_email` is the recovery handler. It runs whether the capture
-completed, failed, or was skipped, reads the upstream `TaskResult`, and picks
+completed, failed, or was skipped, reads the upstream `TaskOutcome`, and picks
 between the confirmation and the apology. It completes; the workflow still
 fails, because `OnError.FAIL` accounts for the failure regardless of the
 handler. A COMPLETED node underneath a FAILED one is the point.
@@ -170,7 +170,7 @@ things follow, and they are not optional in a real deployment:
   in this showcase does, and the `replayed` field on its result says whether
   this run did the work or found it already done.
 - **Retry the crash, not the cause.** `WORKER_CRASHED` belongs in
-  `auto_retry_for`; the error that caused the kill does not. `generate_invoice`
+  `retry_for`; the error that caused the kill does not. `generate_invoice`
   omits `TASK_TIMEOUT` on purpose — its stall is a stable property of the order,
   so a retry would stall again and cost another child.
 
@@ -188,7 +188,7 @@ state. The same run on the shared process pool lost 37 tasks to 7 pool restarts.
 
 `store.py` contains every psycopg exception at the one call that performs I/O
 and converts it into a `StoreError` carrying the operation name. Tasks turn that
-into `TaskError(error_code='STORE_UNAVAILABLE')` with the failing operation in
+into `TaskError(code='STORE_UNAVAILABLE')` with the failing operation in
 `data`.
 
 This was demonstrated by accident. During development the host volume filled
@@ -233,7 +233,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 
 | Capability | Where it lives | What you see |
 |---|---|---|
-| `@app.task` + `TaskResult` both branches | all 36 tasks | tasks across all 7 statuses |
+| `@app.task` + `Result` both branches (`Ok`, `Err`) | all 36 tasks | tasks across all 7 statuses |
 | Custom queues, priority, `max_concurrency` | 4 queues; `marketing_blast` floods `notifications` (cap 3) | a deep backlog on one queue while `payments` stays clear |
 | `RetryPolicy.exponential` + attempt history | `authorize_payment` | attempt cards, per-try errors, `?retried=true` |
 | `RetryPolicy.fixed` | `sync_supplier_feed` on `SUPPLIER_TIMEOUT` | a scheduled task that sometimes retries |
@@ -248,7 +248,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `SubWorkflowNode` | `shipping`, parameterized per order | a child run with its own graph |
 | `args_from` | `capture_payment` takes the authorization | node detail shows what was injected |
 | `from_node` | `daily_report`, functional style | the same wiring, one call shorter |
-| `allow_failed_deps` | `send_order_email`, `restock_or_writeoff` | a COMPLETED node under a FAILED one |
+| `allow_failed_dependencies` | `send_order_email`, `restock_or_writeoff` | a COMPLETED node under a FAILED one |
 | `join='quorum'` + `WorkflowContext` | `restock`: three feeds, two are enough | a run that survives a failed branch |
 | `join='any'` | `flash_sale`: `warm_cache_edge` | fires on the first publish to land |
 | `SuccessPolicy` / `SuccessCase` | `flash_sale` (either target) and `restock` (the aggregate) | COMPLETED despite a failed node |
@@ -262,10 +262,10 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `MonthlySchedule` | month-end close, catalog audit | — |
 | `CronSchedule`, typed | every 4 h at :15; Friday the 13th via `BothDays` | the case a cron string cannot express |
 | Disabled schedules | 3 of the 31 | what a disabled schedule looks like |
-| `WorkflowMeta` | `pick_pack` | workflow id and node index in the result |
+| `WorkflowMetadata` | `pick_pack` | workflow id and node index in the result |
 | Crash recovery | `chaos`: `flaky_export` calls `os._exit(1)` | `WORKER_CRASHED` attempts, then recovery |
 | Worker health | 12 worker children, 10 s snapshots | CPU and memory history |
-| `resend_on_transient_err` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
+| `resend_on_transient_error` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
 
 ## Layout
 
@@ -304,7 +304,7 @@ A damaged return is a judgement call: the item is in someone's hands, and
 whether it goes back on the shelf or is written off is not a decision code
 should make. `inspect_item` reports `DAMAGED_ITEM`, the run goes PAUSED, and
 nothing downstream starts. Resume and `restock_or_writeoff` executes on the
-failed branch — it sets `allow_failed_deps=True`, so it receives the inspection
+failed branch — it sets `allow_failed_dependencies=True`, so it receives the inspection
 error and writes the item off. Cancel instead and the return simply stays open,
 which is also a legitimate answer.
 
@@ -321,7 +321,7 @@ will pause, because the draw is a hash of the return id.
 
 - `cluster_wide_cap` — mutually exclusive with a non-zero `prefetch_buffer`,
   and the showcase demonstrates exact per-queue caps instead.
-- `on_child_process_start` — there is no per-child engine to rebind here.
+- `on_child_start` — there is no per-child engine to rebind here.
 - `catch_up_missed=True` — restarting a demo would replay a backlog of noise.
 
 ## Configuration on show
@@ -345,6 +345,6 @@ Recovery is demo-tuned: worker snapshots every 10 s (so the CPU and memory
 charts move), the reaper polling at the same cadence, and terminal rows kept for
 24 hours.
 
-`resend_on_transient_err=True` retries transient enqueue failures on the send
+`resend_on_transient_error=True` retries transient enqueue failures on the send
 and start path. That is infrastructure retry, and it is a different thing from
 `RetryPolicy`, which retries task *execution*.

@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
@@ -21,6 +22,7 @@ from horsies.core.worker.current import set_current_app
 from horsies.core.worker.child_runner import _run_task_entry
 from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.types.result import Err, Ok, Result
 
 from .conftest import (
     finish_task,
@@ -122,9 +124,9 @@ class TestArgsFromInjection:
         task_a = make_simple_task(app, 'single_args_a')
         task_b = make_args_receiver_task(app, 'single_args_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
         )
@@ -136,14 +138,14 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A with result
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(42))
 
-        # Check wrapper: key present with TaskResult marker
+        # Check wrapper: key present with the result envelope marker
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
-        # Check inner data: full TaskResult with ok value
+        # Check inner data: full result envelope with ok value
         injected = kwargs['input_result']['inner']
         assert isinstance(injected, dict)
         assert injected['__h_task_result__'] is True
@@ -160,10 +162,10 @@ class TestArgsFromInjection:
         task_b = make_simple_task(app, 'multi_args_b')
         task_c = make_multi_args_receiver_task(app, 'multi_args_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 10})
         node_c = TaskNode(
-            fn=task_c,
+            function=task_c,
             waits_for=[node_a, node_b],
             args_from={'first': node_a, 'second': node_b},
         )
@@ -175,8 +177,8 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=200))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(200))
 
         # Check C's kwargs
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
@@ -189,17 +191,17 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Failed TaskResult injected (with allow_failed_deps=True)."""
+        """Failed outcome injected (with allow_failed_dependencies=True)."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'err_result_a')
         task_b = make_recovery_task(app, 'err_result_b')
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,  # Required to receive failed result
+            allow_failed_dependencies=True,  # Required to receive failed result
         )
 
         spec = make_workflow_spec(
@@ -214,10 +216,10 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='TEST_FAIL', message='Test failure')),
+            Err(TaskError(code='TEST_FAIL', message='Test failure')),
         )
 
-        # B should be enqueued (allow_failed_deps=True)
+        # B should be enqueued (allow_failed_dependencies=True)
         status_result = await session.execute(
             text("""
                 SELECT status FROM horsies_workflow_tasks
@@ -227,7 +229,7 @@ class TestArgsFromInjection:
         )
         assert status_result.fetchone()[0] == 'ENQUEUED'
 
-        # Get B's kwargs - should contain failed TaskResult
+        # Get B's kwargs - should contain the failed result envelope
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         injected = kwargs['input_result']['inner']
         assert injected['__h_task_result__'] is True
@@ -241,19 +243,23 @@ class TestArgsFromInjection:
         session, broker, app = setup
 
         # Create a task that accepts both static and injected args
-        @app.task(task_name='static_and_injected')
+        @app.task(name='static_and_injected')
         def static_and_injected(
             *, static_value: int,
-            input_result: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            base = input_result.unwrap() if input_result and input_result.is_ok() else 0
-            return TaskResult(ok=static_value + base)
+            input_result: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            match input_result:
+                case Succeeded(value=value):
+                    base = value
+                case Failed() | None:
+                    base = 0
+            return Ok(static_value + base)
 
         task_a = make_simple_task(app, 'static_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=static_and_injected,
+            function=static_and_injected,
             kwargs={'static_value': 100},  # Static kwarg
             waits_for=[node_a],
             args_from={'input_result': node_a},  # Injected kwarg
@@ -266,7 +272,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(50))
 
         # Get B's kwargs - should have both static and injected
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
@@ -280,20 +286,22 @@ class TestArgsFromInjection:
         """Same dep mapped to multiple kwargs (unusual but valid)."""
         session, broker, app = setup
 
-        @app.task(task_name='dual_receiver')
+        @app.task(name='dual_receiver')
         def dual_receiver(
-            *, first_copy: TaskResult[int, TaskError],
-            second_copy: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            if first_copy.is_ok() and second_copy.is_ok():
-                return TaskResult(ok=first_copy.unwrap() + second_copy.unwrap())
-            return TaskResult(err=TaskError(error_code='FAIL', message='Failed'))
+            *, first_copy: TaskOutcome[int, TaskError],
+            second_copy: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match (first_copy, second_copy):
+                case (Succeeded(value=first_value), Succeeded(value=second_value)):
+                    return Ok(first_value + second_value)
+                case _:
+                    return Err(TaskError(code='FAIL', message='Failed'))
 
         task_a = make_simple_task(app, 'same_dep_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 25})
+        node_a = TaskNode(function=task_a, kwargs={'value': 25})
         node_b = TaskNode(
-            fn=dual_receiver,
+            function=dual_receiver,
             waits_for=[node_a],
             # Same node mapped to two different kwargs
             args_from={'first_copy': node_a, 'second_copy': node_a},
@@ -306,7 +314,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(50))
 
         # Get B's kwargs - should have both pointing to same result
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
@@ -323,22 +331,22 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """SKIPPED dep injects sentinel TaskResult with UPSTREAM_SKIPPED error."""
+        """SKIPPED dep injects a sentinel failed outcome with UPSTREAM_SKIPPED error."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'skipped_sentinel_a')
         task_b = make_simple_task(app, 'skipped_sentinel_b')
         task_c = make_recovery_task(app, 'skipped_sentinel_c')
 
-        # A -> B -> C (with allow_failed_deps=True and args_from)
+        # A -> B -> C (with allow_failed_dependencies=True and args_from)
         # When A fails, B is SKIPPED
         # C should receive UPSTREAM_SKIPPED for B (which is SKIPPED)
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
-            fn=task_c,
+            function=task_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -353,18 +361,18 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(code='A_FAILED', message='A failed')),
         )
 
-        # B should be SKIPPED now (not allow_failed_deps)
-        # This triggers C to become READY (allow_failed_deps=True)
+        # B should be SKIPPED now (not allow_failed_dependencies)
+        # This triggers C to become READY (allow_failed_dependencies=True)
 
         # Check C's kwargs contain UPSTREAM_SKIPPED sentinel for B
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
-        # Parse the injected TaskResult
+        # Parse the injected result envelope
         injected_data = kwargs['input_result']['inner']
         assert injected_data['__h_task_result__'] is True
         assert injected_data['err'] is not None
@@ -380,14 +388,14 @@ class TestArgsFromInjection:
         task_a = make_failing_task(app, 'failed_error_a')
         task_b = make_recovery_task(app, 'failed_error_b')
 
-        # A -> B (with allow_failed_deps=True and args_from)
+        # A -> B (with allow_failed_dependencies=True and args_from)
         # A fails, B should receive A's actual error
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -402,9 +410,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(
-                err=TaskError(error_code='ORIGINAL_ERROR', message='Original failure')
-            ),
+            Err(TaskError(code='ORIGINAL_ERROR', message='Original failure')),
         )
 
         # Check B's kwargs contain A's original error (not UPSTREAM_SKIPPED)
@@ -412,7 +418,7 @@ class TestArgsFromInjection:
         assert 'input_result' in kwargs
         assert kwargs['input_result']['__h_taskresult_envelope__'] is True
 
-        # Parse the injected TaskResult
+        # Parse the injected result envelope
         injected_data = kwargs['input_result']['inner']
         assert injected_data['__h_task_result__'] is True
         assert injected_data['err'] is not None
@@ -425,19 +431,23 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Worker reconstructs TaskResult objects from args_from injection."""
+        """Worker reconstructs TaskOutcome values from args_from injection."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_args_from_b')
+        @app.task(name='worker_args_from_b')
         def worker_args_from_b(
-            *, input_result: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=input_result.unwrap() + 5)
+            *, input_result: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match input_result:
+                case Succeeded(value=value):
+                    return Ok(value + 5)
+                case Failed(error=error):
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
         task_a = make_simple_task(app, 'worker_args_from_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=worker_args_from_b,
+            function=worker_args_from_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
         )
@@ -448,7 +458,7 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         # Fetch task row for B
         task_row_result = await session.execute(
@@ -491,8 +501,7 @@ class TestArgsFromInjection:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
-        assert task_result.unwrap() == 15
+        assert task_result == Succeeded(15)
 
     async def test_worker_deserializes_args_from_into_optional_parameter(
         self,
@@ -501,28 +510,32 @@ class TestArgsFromInjection:
         """A quorum node's args_from target is Optional, and still receives it.
 
         `join='quorum'` requires every args_from target to declare a default,
-        and the documented default is `TaskResult[..., TaskError] | None = None`
+        and the documented default is `TaskOutcome[..., TaskError] | None = None`
         — a source that never becomes terminal is simply not injected. When the
         source DOES complete, the envelope has to decode against that Optional
         annotation, which is the whole point of the pattern.
         """
         session, broker, app = setup
 
-        @app.task(task_name='quorum_optional_target')
+        @app.task(name='quorum_optional_target')
         def quorum_optional_target(
             *,
-            input_result: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            if input_result is None:
-                return TaskResult(ok=-1)
-            return TaskResult(ok=input_result.unwrap() + 5)
+            input_result: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            match input_result:
+                case None:
+                    return Ok(-1)
+                case Succeeded(value=value):
+                    return Ok(value + 5)
+                case Failed(error=error):
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
         task_a = make_simple_task(app, 'quorum_optional_a')
         task_b = make_simple_task(app, 'quorum_optional_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 7})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 7})
         node_c = TaskNode(
-            fn=quorum_optional_target,
+            function=quorum_optional_target,
             waits_for=[node_a, node_b],
             args_from={'input_result': node_a},
             join='quorum',
@@ -539,7 +552,7 @@ class TestArgsFromInjection:
         # A completing satisfies the quorum on its own, so C is enqueued with
         # A's result injected.
         await finish_task(
-            session, broker, str(handle.workflow_id), 0, TaskResult(ok=10)
+            session, broker, str(handle.workflow_id), 0, Ok(10)
         )
 
         task_row_result = await session.execute(
@@ -581,26 +594,25 @@ class TestArgsFromInjection:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
         # 15, not the -1 sentinel: the envelope decoded rather than being
         # rejected as user data carrying a reserved key.
-        assert task_result.unwrap() == 15
+        assert task_result == Succeeded(15)
 
     async def test_failed_dep_skips_downstream_no_injection(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Default allow_failed_deps=False: failed dep skips downstream, no injection."""
+        """Default allow_failed_dependencies=False: failed dep skips downstream, no injection."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'skip_no_inject_a')
         task_b = make_args_receiver_task(app, 'skip_no_inject_b')
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            # allow_failed_deps defaults to False
+            # allow_failed_dependencies defaults to False
         )
 
         spec = make_workflow_spec(
@@ -615,7 +627,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='DEP_FAIL', message='Dep failed')),
+            Err(TaskError(code='DEP_FAIL', message='Dep failed')),
         )
 
         # B should be SKIPPED (not ENQUEUED)
@@ -639,17 +651,17 @@ class TestArgsFromInjection:
         """Empty args_from={} does not interfere with static kwargs."""
         session, broker, app = setup
 
-        @app.task(task_name='empty_args_from_b')
+        @app.task(name='empty_args_from_b')
         def static_only(
             *, static_value: int,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=static_value + 1)
+        ) -> Result[int, TaskError]:
+            return Ok(static_value + 1)
 
         task_a = make_simple_task(app, 'empty_args_from_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=static_only,
+            function=static_only,
             kwargs={'static_value': 100},
             waits_for=[node_a],
             args_from={},  # Explicitly empty
@@ -662,12 +674,12 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         # B should be enqueued with only static kwargs
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert kwargs.get('static_value') == 100
-        # No TaskResult markers injected
+        # No result envelope markers injected
         for value in kwargs.values():
             if isinstance(value, dict):
                 assert '__h_taskresult_envelope__' not in value
@@ -676,24 +688,26 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Worker deserializes err TaskResult from args_from injection."""
+        """Worker deserializes a failed outcome from args_from injection."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_err_args_b')
+        @app.task(name='worker_err_args_b')
         def worker_err_args_b(
-            *, input_result: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            if input_result.is_err():
-                return TaskResult(ok=999)  # Recover with default
-            return TaskResult(ok=input_result.unwrap())
+            *, input_result: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match input_result:
+                case Failed():
+                    return Ok(999)  # Recover with default
+                case Succeeded(value=value):
+                    return Ok(value)
 
         task_a = make_failing_task(app, 'worker_err_args_a')
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=worker_err_args_b,
+            function=worker_err_args_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -707,7 +721,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='WORKER_ERR', message='Worker err test')),
+            Err(TaskError(code='WORKER_ERR', message='Worker err test')),
         )
 
         # Fetch task row for B
@@ -750,8 +764,7 @@ class TestArgsFromInjection:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
-        assert task_result.unwrap() == 999  # Recovery value
+        assert task_result == Succeeded(999)  # Recovery value
 
     async def test_worker_deserializes_upstream_skipped_sentinel(
         self,
@@ -760,25 +773,27 @@ class TestArgsFromInjection:
         """Worker deserializes UPSTREAM_SKIPPED sentinel from skipped dep."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_skipped_c')
+        @app.task(name='worker_skipped_c')
         def worker_skipped_c(
-            *, input_result: TaskResult[int, TaskError],
-        ) -> TaskResult[str, TaskError]:
-            if input_result.is_err():
-                return TaskResult(ok=input_result.unwrap_err().error_code)
-            return TaskResult(ok='not_skipped')
+            *, input_result: TaskOutcome[int, TaskError],
+        ) -> Result[str, TaskError]:
+            match input_result:
+                case Failed(error=error):
+                    return Ok(error.code)
+                case Succeeded():
+                    return Ok('not_skipped')
 
         task_a = make_failing_task(app, 'worker_skipped_a')
         task_b = make_simple_task(app, 'worker_skipped_b')
 
         # A -> B -> C: A fails, B skipped, C receives UPSTREAM_SKIPPED for B
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
-            fn=worker_skipped_c,
+            function=worker_skipped_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -794,7 +809,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
 
         # Fetch task row for C (index 2)
@@ -837,8 +852,7 @@ class TestArgsFromInjection:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
-        assert task_result.unwrap() == 'UPSTREAM_SKIPPED'
+        assert task_result == Succeeded('UPSTREAM_SKIPPED')
 
     async def test_partial_args_from_only_mapped_deps_injected(
         self,
@@ -849,16 +863,20 @@ class TestArgsFromInjection:
         task_a = make_simple_task(app, 'partial_map_a')
         task_b = make_simple_task(app, 'partial_map_b')
 
-        @app.task(task_name='partial_map_c')
+        @app.task(name='partial_map_c')
         def partial_receiver(
-            *, from_a: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=from_a.unwrap() + 1)
+            *, from_a: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match from_a:
+                case Succeeded(value=value):
+                    return Ok(value + 1)
+                case Failed(error=error):
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 10})
         node_c = TaskNode(
-            fn=partial_receiver,
+            function=partial_receiver,
             waits_for=[node_a, node_b],
             args_from={'from_a': node_a},  # Only A mapped, not B
         )
@@ -870,15 +888,15 @@ class TestArgsFromInjection:
         handle = await start_ok(spec, broker)
 
         # Complete both roots
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=100))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=200))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(100))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(200))
 
         # Check C's kwargs: only 'from_a' injected, nothing from B
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         assert 'from_a' in kwargs
         assert kwargs['from_a']['__h_taskresult_envelope__'] is True
 
-        # Exactly one TaskResult marker in kwargs — B's result not leaked
+        # Exactly one result envelope marker in kwargs — B's result not leaked
         taskresult_keys = [
             k for k, v in kwargs.items()
             if isinstance(v, dict) and v.get('__h_taskresult_envelope__')

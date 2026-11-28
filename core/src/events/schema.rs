@@ -1,5 +1,4 @@
-//! The forms of the event contract: what each value is on the wire and in
-//! Python, the traits that `#[derive(horsies_core_derive::EventSchema)]`
+//! The forms of the event contract: what each value is on the wire, the traits that `#[derive(horsies_core_derive::EventSchema)]`
 //! implements, the value types that implement them by hand, and the
 //! refusals of the codec.
 //!
@@ -27,27 +26,26 @@ pub const MAX_REFUSED_NAME_CHARS: usize = 64;
 /// [`MAX_REFUSED_NAME_CHARS`].
 pub type RefusedName = BoundedText<MAX_REFUSED_NAME_CHARS>;
 
-/// What one value is on the wire and in Python.
+/// What one value is on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueForm {
-    /// A UUID. Wire: its hyphenated lower-case text. Python: `uuid.UUID`.
+    /// A UUID. Wire: its hyphenated lower-case text.
     Uuid,
-    /// Text of at most `max_chars` characters (Unicode scalar values, as
-    /// Python's `len`). Wire: a JSON string. Python: `str`.
+    /// Text of at most `max_chars` characters (Unicode scalar values).
+    /// Wire: a JSON string.
     Text { max_chars: usize },
-    /// A whole number from `min` to `max`. Wire: a JSON number. Python:
-    /// `int`.
+    /// A whole number from `min` to `max`. Wire: a JSON number.
     WholeNumber { min: i64, max: i64 },
-    /// A duration. Wire: whole nanoseconds, from 0 to `u64::MAX`. Python:
-    /// `datetime.timedelta`, to the microsecond (the nanoseconds below a
-    /// microsecond are dropped).
+    /// A duration. Wire: whole nanoseconds, from 0 to `u64::MAX`. A client
+    /// whose duration type has microsecond resolution drops the
+    /// nanoseconds below a microsecond.
     Duration,
     /// A point in time. Wire: whole nanoseconds since the Unix epoch, as an
-    /// `i64`. Python: a `datetime.datetime` in UTC, to the microsecond (the
-    /// nanoseconds below a microsecond are dropped).
+    /// `i64`. A client whose time type has microsecond resolution drops the
+    /// nanoseconds below a microsecond.
     Time,
     /// A member of one of the code catalogs of a [`CodeUnion`]. Wire: the
-    /// member's value. Python: the member of its generated enum class.
+    /// member's value.
     Codes(&'static CodeUnion),
     /// A closed type of the contract ([`NamedType`]), by its name.
     Named(&'static str),
@@ -57,8 +55,8 @@ pub enum ValueForm {
 /// are unique across the catalogs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeUnion {
-    /// The Python name of the union alias of the catalog classes.
-    pub python_name: &'static str,
+    /// The name of the union of the catalog types.
+    pub alias_name: &'static str,
     pub doc: &'static str,
     pub catalogs: &'static [CodeCatalog],
 }
@@ -69,15 +67,15 @@ pub enum FieldAccess {
     /// A field of the public contract.
     Public,
     /// A field that only the handler child reads. It is on the wire and on
-    /// the Python class (left out of `repr`), and it is not a field of the
-    /// stable contract.
+    /// the class of the type, and it is not a field of the stable
+    /// contract. A client keeps it out of the text form of the class.
     Internal,
 }
 
 /// One field of an event type or of a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventField {
-    /// The field name; the Python attribute has the same name.
+    /// The field name; the attribute of a client has the same name.
     pub name: &'static str,
     /// The field doc, from the field's `///` lines.
     pub doc: &'static str,
@@ -88,7 +86,7 @@ pub struct EventField {
 /// One event type. Wire form: `[name, field, ...]`, the fields in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventType {
-    /// The wire tag and the Python class: the Rust type name.
+    /// The wire tag and the type name: the Rust type name.
     pub name: &'static str,
     /// The type doc, from the type's `///` lines.
     pub doc: &'static str,
@@ -99,7 +97,7 @@ pub struct EventType {
 /// A closed type that event fields hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamedType {
-    /// The Rust type name; the Python alias has the same name.
+    /// The Rust type name; the type of a client has the same name.
     pub name: &'static str,
     pub doc: &'static str,
     pub shape: NamedShape,
@@ -108,12 +106,11 @@ pub struct NamedType {
 /// How a closed type is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamedShape {
-    /// An enum of unit variants. Wire: the value's text. Python: a
-    /// `Literal` alias.
+    /// An enum of unit variants. Wire: the value's text.
     Choice { values: &'static [ChoiceValue] },
     /// An enum whose variants are unit variants or have named fields. Wire:
-    /// `[tag, field, ...]`. Python: one frozen dataclass per variant and a
-    /// union alias.
+    /// `[tag, field, ...]`. A client has one type per variant and a union
+    /// of them.
     Variants { variants: &'static [VariantType] },
 }
 
@@ -130,8 +127,8 @@ pub struct ChoiceValue {
 pub struct VariantType {
     /// The wire tag: the Rust variant name.
     pub tag: &'static str,
-    /// The Python class: the type name, then the variant name.
-    pub python_class: &'static str,
+    /// The type name of the variant: the type name, then the variant name.
+    pub type_name: &'static str,
     pub doc: &'static str,
     /// The fields in wire order; none for a unit variant.
     pub fields: &'static [EventField],
@@ -139,7 +136,7 @@ pub struct VariantType {
 
 /// A Rust type that an event field can have.
 pub trait EventValue: Sized {
-    /// The form of the value on the wire and in Python.
+    /// The form of the value on the wire.
     const FORM: ValueForm;
 
     /// The wire form of the value.

@@ -15,7 +15,9 @@ use super::identity::fingerprint::{
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::{end_of_number, end_of_string};
 use crate::core::codec::{check_json_text, JsonReadError, StrictJsonError};
-use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
+use crate::core::task::execution::{
+    check_shared_timeout, stored_execution, Execution, InvalidExecution,
+};
 
 /// The smallest integer that task options may hold (`i64::MIN`).
 pub const MIN_OPTIONS_INTEGER: i64 = i64::MIN;
@@ -106,7 +108,11 @@ pub enum EnqueuePreparationError {
 ///
 /// `input_json` is the encoded input as one JSON value. Any JSON value that
 /// passes the strict read rule is accepted; the text is stored and
-/// fingerprinted byte for byte.
+/// fingerprinted byte for byte. The task options must fit the class rules
+/// (`stored_execution`); a refusal is
+/// [`EnqueuePreparationError::InvalidExecution`]. The `timeout_ms` of a
+/// shared class is not checked here: a schedule and a rerun take options
+/// without one, and only a new send refuses them (`CheckedSend::check`).
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_enqueue_facts(
     task_name: &str,
@@ -188,6 +194,11 @@ pub(crate) fn prepare_enqueue_facts_with_lineage(
 }
 
 /// Facts of a task node and of the task row that the engine mints from it.
+///
+/// A workflow start is a new send of its task nodes: the options must fit
+/// the class rules (`stored_execution`), and a shared class needs a
+/// `timeout_ms` (`check_shared_timeout`), absent and `null` refused. A
+/// refusal is [`EnqueuePreparationError::InvalidExecution`]. Does no I/O.
 pub fn prepare_workflow_task_facts(
     input_json: &str,
     task_options_json: Option<&str>,
@@ -196,6 +207,10 @@ pub fn prepare_workflow_task_facts(
     check_input(input_json)?;
     let options = parse_optional_object(task_options_json)?;
     let execution = stored_execution(options.as_ref())?;
+    check_shared_timeout(
+        execution,
+        options.as_ref().and_then(|object| object.get("timeout_ms")),
+    )?;
     Ok(WorkflowTaskFacts {
         retention_class_key: resolve_retention_class_key(retention_class_key).to_owned(),
         execution,
@@ -336,7 +351,7 @@ mod tests {
     #[test]
     fn the_options_integer_range_is_i64_min_to_u64_max() {
         let accepted = [
-            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551615,"auto_retry_for":["X"]}}"#,
+            r#"{"retry_policy":{"max_retries":1,"intervals_seconds":[1],"max_delay_seconds":18446744073709551615,"retry_for":["X"]}}"#,
             r#"{"a":[-9223372036854775808,18446744073709551615,-0]}"#,
             r#"{"a":1.8446744073709551616e19,"b":-1e300,"c":0.5}"#,
             r#"{"123456789012345678901234567890":"123456789012345678901234567890"}"#,
@@ -347,7 +362,7 @@ mod tests {
         }
         let long = "9".repeat(400);
         let refused = [
-            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551616,"auto_retry_for":["X"]}}"#.to_owned(),
+            r#"{"retry_policy":{"max_retries":1,"intervals_seconds":[1],"max_delay_seconds":18446744073709551616,"retry_for":["X"]}}"#.to_owned(),
             r#"{"a":[1,{"b":-9223372036854775809}]}"#.to_owned(),
             format!(r#"{{"k":{long}}}"#),
             "18446744073709551616".to_owned(),
@@ -501,12 +516,43 @@ mod tests {
     fn workflow_facts_carry_class_and_execution() {
         let facts = prepare_workflow_task_facts(
             "[1]",
-            Some("{\"execution\":\"SHARED_THREAD\"}"),
+            Some("{\"execution\":\"SHARED_THREAD\",\"timeout_ms\":5000}"),
             Some("standard_7d"),
         )
         .unwrap();
         assert_eq!(facts.retention_class_key, "standard_7d");
         assert_eq!(facts.execution, Execution::SharedThread);
+    }
+
+    #[test]
+    fn a_workflow_node_of_a_shared_class_without_a_timeout_is_refused() {
+        for options in [
+            "{\"execution\":\"SHARED_ASYNC\",\"cancel_grace_ms\":1000}",
+            "{\"execution\":\"SHARED_ASYNC\",\"cancel_grace_ms\":1000,\"timeout_ms\":null}",
+            "{\"execution\":\"SHARED_THREAD\"}",
+            "{\"execution\":\"SHARED_THREAD\",\"timeout_ms\":null}",
+        ] {
+            let error = prepare_workflow_task_facts("[1]", Some(options), None)
+                .expect_err("a shared class without a timeout must be refused");
+            assert!(
+                matches!(error, EnqueuePreparationError::InvalidExecution(_)),
+                "{options}: {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("timeout_ms is absent for execution"),
+                "{options}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_workflow_node_of_the_isolated_class_without_a_timeout_is_accepted() {
+        for options in [None, Some("{}"), Some("{\"execution\":\"ISOLATED\"}")] {
+            let facts = prepare_workflow_task_facts("[1]", options, None).unwrap();
+            assert_eq!(facts.execution, Execution::Isolated);
+        }
     }
 
     #[test]

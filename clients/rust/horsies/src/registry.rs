@@ -3,32 +3,29 @@
 //! A task name is unique. The queue of a task follows the queue mode: in
 //! `Default` mode a task names no queue and runs on `default`; in `Custom`
 //! mode it names one of the configured queues (Python
-//! `Horsies.validate_queue_name`). Each registered task carries its resolved
+//! `Horsies.validate_queue`). Each registered task carries its resolved
 //! queue and priority, which sends and workflow nodes inherit.
 //!
-//! The user error codes that a task declares (`UserErrorCode::CODES` of its
+//! The custom error codes that a task declares (`CustomErrorCode::CODES` of its
 //! code type, which the task macros fill) follow the rules of a declared
-//! set (`DeclaredErrorCodes::parse`).
+//! set (`DeclaredErrorCodes::parse`). The cancel grace of a task's options is
+//! checked here, once, against its bounds (`check_cancel_grace_ms`).
 //!
 //! Every function is pure: it reads the config and changes only the registry
 //! it is given.
 
 use horsies_core::core::task::error::CodeTextRefusal;
-use horsies_core::{DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry};
+use horsies_core::{
+    check_cancel_grace_ms, DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry,
+    DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
+};
 
-use crate::{AppConfig, ErrorCode, HorsiesError, QueueMode, ValidationReport};
-
-/// The one queue of `Default` mode.
-pub(crate) const DEFAULT_QUEUE: &str = "default";
-
-/// The priority of the default queue, and of a task that resolves no queue
-/// priority (Python's `100`).
-pub(crate) const DEFAULT_PRIORITY: u32 = 100;
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode, QueueMode, ValidationReport};
 
 /// Where a registration takes the queue of its task from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueueSource<'a> {
-    /// The `queue_name` of the task's options; no options name no queue.
+    /// The `queue` of the task's options; no options name no queue.
     TaskOptions,
     /// The queue that the registration call names.
     Named(&'a str),
@@ -37,7 +34,8 @@ pub(crate) enum QueueSource<'a> {
 /// Register `task` as `name` in `tasks`, with the queue that `source` gives
 /// and its priority.
 ///
-/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a set
+/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a
+/// `cancel_grace_ms` outside its bounds (`TaskCancelGraceOutOfRange`); a set
 /// of declared error codes that breaks a rule of a declared set
 /// (`CheckReservedCodeCollision`, `TaskInvalidErrorCode`,
 /// `TaskDuplicateErrorCode`; [`refuse_bad_error_codes`]); a queue that the
@@ -52,22 +50,23 @@ pub(crate) fn register_task(
     source: QueueSource<'_>,
 ) -> Result<(), HorsiesError> {
     refuse_definition_deadline(&name, &task)?;
+    refuse_cancel_grace_out_of_range(&name, &task)?;
     refuse_bad_error_codes(&name, &task)?;
     let requested = match source {
         QueueSource::TaskOptions => task
             .task_options()
-            .and_then(|options| options.queue_name.clone()),
+            .and_then(|options| options.queue.clone()),
         QueueSource::Named(queue) => Some(queue.to_owned()),
     };
     let queue = resolve_task_queue(config, requested.as_deref())?;
     let priority = queue_priority(config, &queue);
-    task.set_queue_name(queue);
+    task.set_queue(queue);
     task.set_priority(priority);
     tasks.register(name, task)
 }
 
 /// The queue of a task that asks for `requested` (Python
-/// `Horsies.validate_queue_name`).
+/// `Horsies.validate_queue`).
 ///
 /// - `Default` mode: no queue is `default`; any named queue is refused with
 ///   `ConfigInvalidQueueMode`, `default` too, as in Python.
@@ -78,18 +77,18 @@ pub(crate) fn resolve_task_queue(
     requested: Option<&str>,
 ) -> Result<String, HorsiesError> {
     match (config.queue_mode, requested) {
-        (QueueMode::Default, None) => Ok(DEFAULT_QUEUE.to_owned()),
+        (QueueMode::Default, None) => Ok(DEFAULT_QUEUE_NAME.to_owned()),
         (QueueMode::Default, Some(queue)) => Err(HorsiesError::new(
             "cannot specify a queue in Default queue mode",
         )
-        .with_code(ErrorCode::ConfigInvalidQueueMode)
+        .with_code(HorsiesErrorCode::ConfigInvalidQueueMode)
         .with_note(format!("queue '{queue}' was specified"))
         .with_note("the app is configured with QueueMode::Default")
         .with_help("either remove the queue or switch to QueueMode::Custom")),
         (QueueMode::Custom, None) => Err(HorsiesError::new(
             "a queue is required in Custom queue mode",
         )
-        .with_code(ErrorCode::ConfigInvalidQueueMode)
+        .with_code(HorsiesErrorCode::ConfigInvalidQueueMode)
         .with_note("the app is configured with QueueMode::Custom")
         .with_help("name one of the configured queues")),
         (QueueMode::Custom, Some(queue)) => match is_configured_queue(config, queue) {
@@ -103,7 +102,7 @@ pub(crate) fn resolve_task_queue(
 /// configured queues in `Custom` mode.
 pub(crate) fn valid_queue_names(config: &AppConfig) -> Vec<String> {
     match config.queue_mode {
-        QueueMode::Default => vec![DEFAULT_QUEUE.to_owned()],
+        QueueMode::Default => vec![DEFAULT_QUEUE_NAME.to_owned()],
         QueueMode::Custom => configured_queues(config)
             .map(|queue| queue.name.clone())
             .collect(),
@@ -114,7 +113,7 @@ pub(crate) fn valid_queue_names(config: &AppConfig) -> Vec<String> {
 /// `TaskInvalidQueue` and the valid names.
 pub(crate) fn check_queue(config: &AppConfig, queue: &str) -> Result<(), HorsiesError> {
     let admitted = match config.queue_mode {
-        QueueMode::Default => queue == DEFAULT_QUEUE,
+        QueueMode::Default => queue == DEFAULT_QUEUE_NAME,
         QueueMode::Custom => is_configured_queue(config, queue),
     };
     match admitted {
@@ -124,11 +123,11 @@ pub(crate) fn check_queue(config: &AppConfig, queue: &str) -> Result<(), Horsies
 }
 
 /// The priority of `queue`: its configured priority in `Custom` mode, else
-/// [`DEFAULT_PRIORITY`].
+/// [`DEFAULT_QUEUE_PRIORITY`].
 pub(crate) fn queue_priority(config: &AppConfig, queue: &str) -> u32 {
     configured_queues(config)
         .find(|configured| configured.name == queue)
-        .map_or(DEFAULT_PRIORITY, |configured| configured.priority)
+        .map_or(DEFAULT_QUEUE_PRIORITY, |configured| configured.priority)
 }
 
 fn configured_queues(config: &AppConfig) -> impl Iterator<Item = &crate::CustomQueueConfig> {
@@ -141,7 +140,7 @@ fn is_configured_queue(config: &AppConfig, queue: &str) -> bool {
 
 fn unknown_queue(config: &AppConfig, queue: &str) -> HorsiesError {
     HorsiesError::new(format!("invalid queue '{queue}'"))
-        .with_code(ErrorCode::TaskInvalidQueue)
+        .with_code(HorsiesErrorCode::TaskInvalidQueue)
         .with_note(format!("valid queues: {:?}", valid_queue_names(config)))
         .with_help("use one of the configured queue names")
 }
@@ -155,11 +154,32 @@ fn refuse_definition_deadline(name: &str, task: &RegisteredTask) -> Result<(), H
         Some(_) => Err(HorsiesError::new(format!(
             "task '{name}' sets good_until in its definition"
         ))
-        .with_code(ErrorCode::TaskInvalidOptions)
+        .with_code(HorsiesErrorCode::TaskInvalidOptions)
         .with_help(
             "set good_until per send with TaskSendOptions, or per workflow node with \
              good_until on the node",
         )),
+    }
+}
+
+/// The cancel grace of `task`'s options is from `MIN_CANCEL_GRACE_MS` to
+/// `MAX_CANCEL_GRACE_MS` (Python `_check_cancel_grace`). A task with no
+/// options or no grace passes. The task attribute checks the bounds at
+/// compile time; a hand-built `TaskOptions` is checked here.
+///
+/// Errors: `TaskCancelGraceOutOfRange` (`HRS-111`), with the bounds.
+fn refuse_cancel_grace_out_of_range(name: &str, task: &RegisteredTask) -> Result<(), HorsiesError> {
+    let Some(options) = task.task_options() else {
+        return Ok(());
+    };
+    match options.cancel_grace_ms.map(check_cancel_grace_ms) {
+        None | Some(Ok(_)) => Ok(()),
+        Some(Err(refused)) => Err(HorsiesError::new("cancel_grace_ms is out of range")
+            .with_code(HorsiesErrorCode::TaskCancelGraceOutOfRange)
+            .with_note(format!("task '{name}'"))
+            .with_note(refused.to_string())
+            .with_note(format!("execution is {}", options.execution))
+            .with_help("set a value in the range, or remove cancel_grace_ms")),
     }
 }
 
@@ -193,8 +213,8 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
             ..
         }
         | DeclaredCodeRefusal::BuiltInName { .. } => {
-            "rename the code: a built-in or reserved name is not a user code; derive the code \
-             type with #[derive(horsies::UserErrorCode)]"
+            "rename the code: a built-in or reserved name is not a custom code; derive the code \
+             type with #[derive(horsies::CustomErrorCode)]"
         }
         DeclaredCodeRefusal::Text {
             refusal:
@@ -203,11 +223,11 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
                 | CodeTextRefusal::NotUpperSnakeCase,
             ..
         } => "give the code an UPPER_SNAKE_CASE name, for example RATE_LIMITED",
-        DeclaredCodeRefusal::Repeated { .. } => "list each code once in UserErrorCode::CODES",
+        DeclaredCodeRefusal::Repeated { .. } => "list each code once in CustomErrorCode::CODES",
     };
     HorsiesError::new(format!("task '{name}': {refusal}"))
         .with_code(refusal.error_code())
-        .with_note("the error codes of a task are UserErrorCode::CODES of its code type")
+        .with_note("the error codes of a task are CustomErrorCode::CODES of its code type")
         .with_help(help)
 }
 
@@ -215,7 +235,7 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
 mod tests {
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::core::task::result::TaskResult;
     use horsies_core::TaskOptions;
 
@@ -233,16 +253,16 @@ mod tests {
     fn plain_task() -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
     }
 
     fn task_with_options(queue: Option<&str>, good_until: bool) -> RegisteredTask {
         plain_task().with_task_options(TaskOptions {
             task_name: "echo".to_owned(),
-            queue_name: queue.map(str::to_owned),
+            queue: queue.map(str::to_owned),
             good_until: good_until.then(chrono::Utc::now),
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: horsies_core::Execution::Isolated,
@@ -251,7 +271,7 @@ mod tests {
     }
 
     fn default_config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     fn custom_config() -> AppConfig {
@@ -285,8 +305,8 @@ mod tests {
         )
         .unwrap();
         let task = tasks.get("echo").unwrap();
-        assert_eq!(task.queue_name(), Some(DEFAULT_QUEUE));
-        assert_eq!(task.priority(), Some(DEFAULT_PRIORITY));
+        assert_eq!(task.queue(), Some(DEFAULT_QUEUE_NAME));
+        assert_eq!(task.priority(), Some(DEFAULT_QUEUE_PRIORITY));
     }
 
     #[test]
@@ -295,7 +315,7 @@ mod tests {
             let refused = resolve_task_queue(&default_config(), Some(queue)).unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::ConfigInvalidQueueMode),
+                Some(HorsiesErrorCode::ConfigInvalidQueueMode),
                 "{queue}"
             );
         }
@@ -304,13 +324,13 @@ mod tests {
     #[test]
     fn custom_mode_refuses_a_task_without_a_queue() {
         let refused = resolve_task_queue(&custom_config(), None).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidQueueMode));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
     }
 
     #[test]
     fn custom_mode_refuses_an_unknown_queue_and_names_the_valid_ones() {
         let refused = resolve_task_queue(&custom_config(), Some("other")).unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidQueue));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidQueue));
         assert!(refused.notes.iter().any(|note| note.contains("critical")));
     }
 
@@ -326,7 +346,7 @@ mod tests {
         )
         .unwrap();
         let task = tasks.get("echo").unwrap();
-        assert_eq!(task.queue_name(), Some("bulk"));
+        assert_eq!(task.queue(), Some("bulk"));
         assert_eq!(task.priority(), Some(90));
     }
 
@@ -341,7 +361,7 @@ mod tests {
             QueueSource::Named("critical"),
         )
         .unwrap();
-        assert_eq!(tasks.get("echo").unwrap().queue_name(), Some("critical"));
+        assert_eq!(tasks.get("echo").unwrap().queue(), Some("critical"));
     }
 
     #[test]
@@ -355,8 +375,70 @@ mod tests {
             QueueSource::TaskOptions,
         )
         .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert!(tasks.is_empty());
+    }
+
+    fn task_with_grace(execution: horsies_core::Execution, grace: u32) -> RegisteredTask {
+        plain_task().with_task_options(TaskOptions {
+            task_name: "echo".to_owned(),
+            queue: None,
+            good_until: None,
+            retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+            execution,
+            cancel_grace_ms: Some(grace),
+        })
+    }
+
+    /// The registration checks the cancel grace once: a grace outside 100 to
+    /// 10,000 ms is `HRS-111`, and nothing is registered.
+    #[test]
+    fn a_cancel_grace_outside_its_bounds_is_refused_and_nothing_is_registered() {
+        for (execution, grace) in [
+            (horsies_core::Execution::SharedAsync, 99),
+            (horsies_core::Execution::Isolated, 10_001),
+        ] {
+            let mut tasks = TaskRegistry::new();
+            let refused = register_task(
+                &mut tasks,
+                &default_config(),
+                "echo".to_owned(),
+                task_with_grace(execution, grace),
+                QueueSource::TaskOptions,
+            )
+            .unwrap_err();
+            assert_eq!(
+                refused.code,
+                Some(HorsiesErrorCode::TaskCancelGraceOutOfRange),
+                "{execution} {grace}"
+            );
+            assert!(tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_cancel_grace_at_its_bounds_registers() {
+        for grace in [100, 10_000] {
+            let mut tasks = TaskRegistry::new();
+            register_task(
+                &mut tasks,
+                &default_config(),
+                "echo".to_owned(),
+                task_with_grace(horsies_core::Execution::SharedAsync, grace),
+                QueueSource::TaskOptions,
+            )
+            .unwrap();
+            assert_eq!(
+                tasks
+                    .get("echo")
+                    .unwrap()
+                    .task_options()
+                    .and_then(|options| options.cancel_grace_ms),
+                Some(grace)
+            );
+        }
     }
 
     #[test]
@@ -379,13 +461,13 @@ mod tests {
             QueueSource::TaskOptions,
         )
         .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateName));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskDuplicateName));
     }
 
     fn task_declaring(codes: &'static [&'static str]) -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default().with_error_codes(codes),
+            metadata: TaskMetadata::default().with_error_codes(codes),
         }
     }
 
@@ -416,13 +498,13 @@ mod tests {
     #[test]
     fn a_built_in_or_reserved_name_is_refused_with_hrs_212_and_nothing_is_registered() {
         let cases: [&'static [&'static str]; 2] =
-            [&["FINE", "BROKER_ERROR"], &["WORKFLOW_STOPPED"]];
+            [&["FINE", "DATABASE_ERROR"], &["WORKFLOW_STOPPED"]];
         for codes in cases {
             let (tasks, registered) = register_declaring(codes);
             let refused = registered.unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::CheckReservedCodeCollision),
+                Some(HorsiesErrorCode::CheckReservedCodeCollision),
                 "{codes:?}"
             );
             assert!(
@@ -443,7 +525,7 @@ mod tests {
             let refused = registered.unwrap_err();
             assert_eq!(
                 refused.code,
-                Some(ErrorCode::TaskInvalidErrorCode),
+                Some(HorsiesErrorCode::TaskInvalidErrorCode),
                 "{codes:?}"
             );
             assert!(tasks.is_empty());
@@ -454,7 +536,7 @@ mod tests {
     fn a_repeated_code_is_refused_with_hrs_113() {
         let (tasks, registered) = register_declaring(&["RATE_LIMITED", "RATE_LIMITED"]);
         let refused = registered.unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateErrorCode));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskDuplicateErrorCode));
         assert!(
             refused.message.contains("RATE_LIMITED"),
             "{}",
@@ -465,7 +547,7 @@ mod tests {
 
     #[test]
     fn every_refused_code_is_named_in_one_error() {
-        let (_tasks, registered) = register_declaring(&["bad", "BROKER_ERROR", "OK", "OK"]);
+        let (_tasks, registered) = register_declaring(&["bad", "DATABASE_ERROR", "OK", "OK"]);
         let refused = registered.unwrap_err();
         assert_eq!(refused.notes.len(), 3, "{refused}");
         assert_eq!(refused.code, None);
@@ -498,7 +580,7 @@ mod tests {
         assert!(check_queue(&default_config(), "default").is_ok());
         assert_eq!(
             check_queue(&default_config(), "bulk").unwrap_err().code,
-            Some(ErrorCode::TaskInvalidQueue)
+            Some(HorsiesErrorCode::TaskInvalidQueue)
         );
         assert!(check_queue(&custom_config(), "bulk").is_ok());
         assert!(check_queue(&custom_config(), "default").is_err());
@@ -510,11 +592,11 @@ mod tests {
         assert_eq!(queue_priority(&custom_config(), "bulk"), 90);
         assert_eq!(
             queue_priority(&custom_config(), "unknown"),
-            DEFAULT_PRIORITY
+            DEFAULT_QUEUE_PRIORITY
         );
         assert_eq!(
             queue_priority(&default_config(), "default"),
-            DEFAULT_PRIORITY
+            DEFAULT_QUEUE_PRIORITY
         );
     }
 }

@@ -1,0 +1,7 @@
+{
+  "name": "horsies-ci-typescript-floor",
+  "private": true,
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

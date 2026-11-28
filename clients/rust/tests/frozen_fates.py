@@ -79,8 +79,9 @@ _RAW_STRING_OPEN: Final = re.compile(r'b?r(#*)"')
 _IDENTIFIER_CHAR: Final = re.compile(r'\w')
 
 # Tests that the tip holds under another name, for the 0.8.0 rule (one input
-# value, the core's catalogs, the clean-slate history): frozen name -> tip
-# test as `module::name` in horsies-core.
+# value, the core's catalogs, the clean-slate history) or for a later rename
+# of the item that the test names: frozen name -> tip test as `module::name`
+# in horsies-core.
 RENAMED: Final[dict[str, str]] = {
     'terminal_move_emits_task_done_without_a_monitoring_status_event': 'broker::monitoring_schema_tests::a_terminal_move_sends_task_done_and_the_status_event',
     'cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal': 'broker::terminalization_matrix::cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal',
@@ -88,12 +89,15 @@ RENAMED: Final[dict[str, str]] = {
     'precedence_and_registrable_classes_are_exact': 'core::config::retention::tests::precedence_sendable_and_registrable_periods_are_exact',
     'command_union_carries_exactly_the_seven_variants': 'core::history::commands::tests::command_union_carries_exactly_the_six_variants',
     'partition_commands_reject_empty_health_class_and_invalid_timeouts': 'core::history::tests::partition_commands_reject_invalid_timeouts',
-    'open_ended_start_and_predicate_render_one_pinned_text': 'core::history::partitions::catalog::open_ended_leaf_sql_tests::open_ended_predicate_renders_one_pinned_text',
     'manifest_excludes_absent_probes_but_birth_floor_keeps_the_complete_attached_set': 'core::history::partitions::tests::manifest_excludes_absent_probes_and_keeps_the_complete_attached_set',
     'guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf': 'core::history::partitions::tests::guard_probe_set_is_standard_horizon_plus_the_static_forever_leaf',
     'busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent': 'core::history::partitions::tests::busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent',
     'fifteen_commands_fifteen_kinds': 'core::lifecycle::tests::eleven_commands_eleven_kinds',
     'display_codes': 'core::task::error::tests::display_codes_and_errors',
+    'task_error_code_user_serde': 'core::task::error::tests::task_error_code_custom_serde',
+    'task_error_builtin_constructor': 'core::task::error::tests::task_error_built_in_constructor',
+    'task_error_new_constructor': 'core::task::error::tests::task_error_custom_constructor',
+    'user_code_is_terminal': 'core::task::result::tests::custom_code_is_terminal',
     'serialize_retry_options_emits_timeout_ms_alone': 'core::task::options::tests::stored_options_text_emits_timeout_ms_alone',
     'case_name_first_satisfied': 'core::workflow::policy::tests::evaluate_first_case_satisfied',
     'case_name_second_satisfied': 'core::workflow::policy::tests::evaluate_second_case_satisfied',

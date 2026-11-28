@@ -178,20 +178,20 @@ async fn a_thousand_node_run_with_one_retry_each_is_composed_from_one_read() {
     for node in &detail.nodes {
         let segments = match &node.timing {
             NodeTimingInfo::Exact { segments, .. } => segments,
-            other => panic!("node {}: {other:?}", node.task_index),
+            other => panic!("node {}: {other:?}", node.node_index),
         };
         let names: Vec<&str> = segments
             .iter()
             .map(|segment| phase_name(&segment.phase))
             .collect();
-        assert_eq!(names, BULK_NODE_PHASES, "node {}", node.task_index);
+        assert_eq!(names, BULK_NODE_PHASES, "node {}", node.node_index);
         assert!(
             matches!(
                 segments.last().map(|segment| segment.end),
                 Some(SegmentEndInfo::Open)
             ),
             "node {}",
-            node.task_index
+            node.node_index
         );
     }
     assert!(

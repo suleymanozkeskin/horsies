@@ -25,7 +25,7 @@ import {
   workflowRun,
 } from '@/test/workflow-fixtures';
 import type { RunTiming } from '@/types/timing';
-import type { WorkflowNode, WorkflowRunDetail, WorkflowTaskDetail } from '@/types/workflows';
+import type { WorkflowNode, WorkflowRunDetail, WorkflowNodeDetail } from '@/types/workflows';
 
 /** The browser receives the read at the database time of the read. */
 const RECEIVED_AT_MS = instantMs('2026-11-22T12:01:40Z');
@@ -465,14 +465,14 @@ describe('TimelineView tooltips', () => {
 
   it('adds the error code of the task to the end of a failed node', async () => {
     vi.useRealTimers();
-    const failed: WorkflowTaskDetail = {
-      task_index: 1,
+    const failed: WorkflowNodeDetail = {
+      node_index: 1,
       node_id: 'b',
       task_name: 'tasks.b',
       node_status: 'FAILED',
-      is_subworkflow: false,
+      is_sub_workflow: false,
       node_error: null,
-      leaf: {
+      task_row: {
         task_id: 't',
         status: 'FAILED',
         error_code: 'PSP_UNAVAILABLE',
@@ -483,8 +483,8 @@ describe('TimelineView tooltips', () => {
         started_at: null,
         completed_at: null,
         failed_at: null,
-        queue_s: null,
-        exec_s: null,
+        queue_seconds: null,
+        execution_seconds: null,
         worker_hostname: null,
         good_until: null,
         trace_id: null,

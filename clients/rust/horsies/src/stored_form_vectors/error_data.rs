@@ -5,7 +5,7 @@
 //! form is the vector's error. An error object (the workflow error column)
 //! reads through the core's `TaskError` read.
 
-use horsies_core::{TaskStatus, UserCode};
+use horsies_core::{CustomCode, TaskStatus};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -36,7 +36,7 @@ fn each_stored_library_error_reads_back() {
         let name = vector.name.as_str();
         let expected = stored_error(name, &vector.error, None);
         let read = match vector.stored_as.as_str() {
-            "envelope" => match outcome_of_record::<(), UserCode>(record(
+            "envelope" => match outcome_of_record::<(), CustomCode>(record(
                 name,
                 TaskStatus::Failed,
                 &vector.text,

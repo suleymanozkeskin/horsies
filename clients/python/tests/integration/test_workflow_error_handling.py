@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
@@ -101,8 +102,8 @@ class TestEnqueuedFailureConversion:
         task_a = make_simple_task(app, 'resume_ready_a')
         task_b = make_simple_task(app, 'resume_ready_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
 
         spec = make_workflow_spec(
             broker=broker,
@@ -161,7 +162,7 @@ class TestEnqueuedFailureConversion:
         session, broker, app = setup
         task_a = make_simple_task(app, 'resume_noop_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
 
         spec = make_workflow_spec(
             broker=broker,
@@ -211,13 +212,13 @@ class TestValidationGuards:
         task_a = make_simple_task(app, 'unresolved_queue')
 
         # Create TaskNode without resolving queue (bypasses app.workflow())
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         # Direct construction - queue is None
         from horsies.core.models.workflow import WorkflowSpec
 
         spec = WorkflowSpec(
             name='unresolved',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.unresolved.v1',
             broker=broker,
         )
@@ -237,7 +238,7 @@ class TestValidationGuards:
         task_a = make_simple_task(app, 'unresolved_priority')
 
         # Create TaskNode with queue but no priority
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'default'  # Set queue manually
         # priority is still None
 
@@ -245,7 +246,7 @@ class TestValidationGuards:
 
         spec = WorkflowSpec(
             name='unresolved_prio',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.unresolved_prio.v1',
             broker=broker,
         )
@@ -287,13 +288,13 @@ class TestWorkflowStartErrors:
             _ = value
 
         task_fn.task_name = 'no_broker_task'  # type: ignore[attr-defined]
-        task_fn.task_queue_name = 'default'  # type: ignore[attr-defined]
-        node = TaskNode(fn=task_fn, kwargs={'value': 1})
+        task_fn.queue = 'default'  # type: ignore[attr-defined]
+        node = TaskNode(function=task_fn, kwargs={'value': 1})
         node.queue = 'default'
         node.priority = 100
         spec = WorkflowSpec(
             name='no_broker',
-            tasks=[node],
+            nodes=[node],
             definition_key='tests.integration.no_broker.v1',
         )
 
@@ -311,10 +312,10 @@ class TestWorkflowStartErrors:
         """Unresolved queue returns Err(VALIDATION_FAILED)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'val_q')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         spec = WorkflowSpec(
             name='val_q_wf',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.val_q_wf.v1',
             broker=broker,
         )
@@ -334,10 +335,10 @@ class TestWorkflowStartErrors:
         """Missing definition_key returns Err(VALIDATION_FAILED)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'missing_def_key')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'default'
         node_a.priority = 100
-        spec = WorkflowSpec(name='missing_def_key_wf', tasks=[node_a], broker=broker)
+        spec = WorkflowSpec(name='missing_def_key_wf', nodes=[node_a], broker=broker)
 
         r = await start_workflow_async(spec, broker)
         assert is_err(r)
@@ -352,11 +353,11 @@ class TestWorkflowStartErrors:
         """Unresolved priority returns Err(VALIDATION_FAILED)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'val_p')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
         node_a.queue = 'default'
         spec = WorkflowSpec(
             name='val_p_wf',
-            tasks=[node_a],
+            nodes=[node_a],
             definition_key='tests.integration.val_p_wf.v1',
             broker=broker,
         )
@@ -378,7 +379,7 @@ class TestWorkflowStartErrors:
         refuses the connection."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'schema_fail')
-        spec = make_workflow_spec('schema_fail_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+        spec = make_workflow_spec('schema_fail_wf', [TaskNode(function=task_a, kwargs={'value': 1})], broker)
         unreachable = PostgresBroker(
             PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
         )
@@ -404,10 +405,10 @@ class TestWorkflowStartErrors:
         The start runs in the core; its database refuses the connection."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'db_err')
-        spec = make_workflow_spec('db_err_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
+        spec = make_workflow_spec('db_err_wf', [TaskNode(function=task_a, kwargs={'value': 1})], broker)
         unreachable = PostgresBroker(
             PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
-            assume_initialized=True,
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
 
         try:
@@ -429,7 +430,7 @@ class TestWorkflowStartErrors:
 
         The start runs in the core. The child of the broken root cannot be
         built, so its node fails, and the start owes the start of the child
-        that waits for it (allow_failed_deps): the start statement and that
+        that waits for it (allow_failed_dependencies): the start statement and that
         child start run in one transaction. A trigger refuses the insert of
         the second child's workflow row."""
         session, broker, app = setup
@@ -452,12 +453,12 @@ class TestWorkflowStartErrors:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = TaskNode(fn=task_a, kwargs={'value': 1})
+                node = TaskNode(function=task_a, kwargs={'value': 1})
                 return app.workflow(cls.name, [node], output=node)
 
-        broken = SubWorkflowNode(workflow_def=RollbackBroken)
+        broken = SubWorkflowNode(workflow_definition=RollbackBroken)
         started_after = SubWorkflowNode(
-            workflow_def=RollbackChild, waits_for=[broken], allow_failed_deps=True,
+            workflow_definition=RollbackChild, waits_for=[broken], allow_failed_dependencies=True,
         )
         spec = app.workflow(
             'rollback_wf', [broken, started_after], definition_key=f'rollback-wf-{suffix}',
@@ -522,7 +523,7 @@ class TestWorkflowStartErrors:
 
         spec = make_workflow_spec(
             'sync_fail_wf',
-            [TaskNode(fn=task_a, kwargs={'value': 1})],
+            [TaskNode(function=task_a, kwargs={'value': 1})],
             broker,
         )
 

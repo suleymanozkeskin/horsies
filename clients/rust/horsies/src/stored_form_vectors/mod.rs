@@ -7,7 +7,8 @@
 //! text back to the value. A vector names what the client cannot express
 //! (`rust_cannot_express`) or writes differently today (`rust_drift`, a
 //! finding of the README); the tests check both, so a change in either client
-//! fails a test.
+//! fails a test. The marks of the TypeScript client (`typescript_cannot_express`,
+//! `typescript_drift`) are not read here: the row structs skip unknown keys.
 
 mod error_data;
 mod result_envelope;
@@ -17,17 +18,17 @@ mod task_options;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use horsies_core::{
-    BuiltInTaskCode, RawResultRecord, StoredEnvelopeText, SubWorkflowFailure, SubWorkflowSummary,
-    TaskErrorCode, TaskErrorKind, TaskStatus, UserCode,
+    BuiltInTaskCode, CustomCode, RawResultRecord, StoredEnvelopeText, SubWorkflowFailure,
+    SubWorkflowSummary, TaskErrorCode, TaskErrorKind, TaskStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::StoredDateTime;
+use crate::{StoredDateTime, StoredTime};
 
 /// The text of the vector file `name` of the core's vector folder.
 pub(crate) fn vector_file(name: &str) -> String {
@@ -206,6 +207,8 @@ fn check_typed(name: &str, type_name: &str, notation: &Value, check: &mut impl T
         "datetime_offset" => check.check(StoredDateTime(offset_datetime(name, notation))),
         "datetime_naive" => check.check(StoredDateTime(naive_datetime(name, notation))),
         "date" => check.check(parsed::<NaiveDate>(name, notation)),
+        // `StoredTime` writes Python's text for a time of day.
+        "time" => check.check(StoredTime(parsed::<NaiveTime>(name, notation))),
         "uuid" => check.check(parsed::<Uuid>(name, notation)),
         "str_enum" => check.check(color(name, notation)),
         "optional_i64" => check.check(match notation {
@@ -238,8 +241,8 @@ fn error_code(name: &str, notation: &Value) -> TaskErrorCode {
             BuiltInTaskCode::parse(code)
                 .unwrap_or_else(|| panic!("{name}: {code} is not a built-in code")),
         ),
-        (None, Some(code)) => TaskErrorCode::User(
-            UserCode::parse(code).unwrap_or_else(|refused| panic!("{name}: {refused}")),
+        (None, Some(code)) => TaskErrorCode::Custom(
+            CustomCode::parse(code).unwrap_or_else(|refused| panic!("{name}: {refused}")),
         ),
         _ => panic!("{name}: an error code is built_in or user"),
     }

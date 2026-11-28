@@ -1,0 +1,15 @@
+{
+  "extends": "../horsies/tsconfig.json",
+  "compilerOptions": {
+    // Tests run on `bun test` and `node --test`: Bun types include the Node types.
+    "types": ["bun"],
+    // Test files publish no declarations.
+    "isolatedDeclarations": false,
+    "declaration": false
+  },
+  "include": ["**/*.ts"],
+  // These files import the addon declarations that a native build writes. The compile-fail cases
+  // (`types/fail/`) must not compile, and the consumer project (`types/consumer/`) imports the built package: the
+  // type-test runner (`types/run.ts`) compiles both.
+  "exclude": ["e2e/entry/package.ts", "native-declarations", "node_modules", "types/fail", "types/consumer"]
+}

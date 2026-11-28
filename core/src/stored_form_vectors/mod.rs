@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::core::codec::StrictJsonError;
 use crate::core::task::error::ExceptionRecord;
 use crate::core::{
-    BuiltInTaskCode, SubWorkflowFailure, SubWorkflowSummary, TaskError, TaskErrorCode,
-    TaskErrorKind, UserCode,
+    BuiltInTaskCode, CustomCode, SubWorkflowFailure, SubWorkflowSummary, TaskError, TaskErrorCode,
+    TaskErrorKind,
 };
 
 /// The text of the vector file `name` of the vector folder.
@@ -56,8 +56,8 @@ fn error_code(name: &str, notation: &Value) -> TaskErrorCode {
             BuiltInTaskCode::parse(code)
                 .unwrap_or_else(|| panic!("{name}: {code} is not a built-in code")),
         ),
-        (None, Some(code)) => TaskErrorCode::User(
-            UserCode::parse(code).unwrap_or_else(|refused| panic!("{name}: {refused}")),
+        (None, Some(code)) => TaskErrorCode::Custom(
+            CustomCode::parse(code).unwrap_or_else(|refused| panic!("{name}: {refused}")),
         ),
         _ => panic!("{name}: an error code is built_in or user"),
     }

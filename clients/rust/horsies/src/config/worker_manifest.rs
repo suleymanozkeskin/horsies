@@ -3,8 +3,11 @@
 //!
 //! The app's validated config, its task registrations, the profile that
 //! the start asks for and the child launch become the one manifest that the
-//! core's worker reads. Every profile of the app goes in: the core checks
-//! the profile set and picks the requested profile, as for Python.
+//! core's worker reads. The core builds the sections that the config gives
+//! (`horsies_core::worker_manifest::config_sections`): every profile of the
+//! app, the queue and claim settings, and the recovery, retention,
+//! resilience and payload sections. The core checks the profile set and
+//! picks the requested profile, as for Python.
 //!
 //! The config validation bounds each value as Python's Pydantic models do.
 //! A few values have a tighter bound in the manifest (a count that the claim
@@ -16,26 +19,17 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use horsies_core::core::config::bounded::BoundedU32;
-use horsies_core::core::config::worker_profile::{
-    ExecutorThreadsSetting, IsolatedSetting, MemoryLimitSetting, PoolSizeSetting, ProfileRequest,
-    SharedAsyncSetting, SharedPool, SharedRecycle, SharedThreadSetting, TaskLimitSetting,
+use horsies_core::core::config::worker_profile::ProfileRequest;
+use horsies_core::manifest::{
+    core_database_url, send_manifest, session_database_manifest, WholeSeconds,
 };
-use horsies_core::manifest::WholeSeconds;
 use horsies_core::worker_manifest as wire;
-use horsies_core::{DeclaredErrorCodes, Execution, RegisteredTask, RetentionDays, TaskRegistry};
+use horsies_core::{DeclaredErrorCodes, Execution, RegisteredTask, TaskRegistry};
 
-use super::{core_database_url, send_manifest, session_database};
-use crate::{
-    AppConfig, ChildPreload, DrainTimeout, PayloadPolicy, PostgresConfig, QueueMode,
-    RecoveryConfig, RetentionConfig, WorkerProfile, WorkerResilienceConfig,
-};
-
-/// Nanoseconds in a millisecond.
-const NANOS_PER_MILLI: u128 = 1_000_000;
+use crate::{AppConfig, PostgresConfig};
 
 /// A config value that the config validation accepted and that is outside
-/// the bound of its manifest field.
+/// the bound of its worker manifest field.
 ///
 /// Python has no such error: its `AppConfig` validation refuses a claim
 /// value above its manifest bound (`CONFIG_INVALID_PREFETCH`,
@@ -44,7 +38,8 @@ const NANOS_PER_MILLI: u128 = 1_000_000;
 /// bound.
 ///
 /// `path` names the field as `AppConfig` writes it, for example
-/// `custom_queues[0].max_concurrency`. The value itself is not kept.
+/// `custom_queues[0].max_concurrency` (`config_path`). The value itself is
+/// not kept.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{path}: outside {min} to {max}, the bound of its worker manifest field")]
 pub(crate) struct ManifestBoundRefused {
@@ -64,6 +59,9 @@ pub(crate) enum ChildLaunchRefused {
 
 /// The worker manifest of `config`. Pure: no I/O.
 ///
+/// - The profiles, the claim settings and the recovery, retention,
+///   resilience and payload sections: from the core's builder
+///   (`wire::config_sections`).
 /// - `tasks`: the app's registrations; each task's class is the
 ///   `execution` of its options, `ISOLATED` for a task without options, and
 ///   its declared error codes are the codes of its code type
@@ -93,20 +91,23 @@ pub(crate) fn worker_manifest(
     metrics_endpoint: wire::MetricsEndpoint,
     child_launch: wire::ChildLaunchManifest,
 ) -> Result<wire::WorkerManifest, ManifestBoundRefused> {
-    let claim = claim_manifest(config)?;
-    let recovery = recovery_manifest(&config.recovery)?;
-    let retention = retention_manifest(&config.retention)?;
-    let resilience = resilience_manifest(&config.resilience)?;
-    let payload = payload_manifest(&config.payload)?;
+    let wire::ConfigSections {
+        profiles,
+        claim,
+        recovery,
+        retention,
+        resilience,
+        payload,
+    } = wire::config_sections(config).map_err(|refused| ManifestBoundRefused {
+        path: config_path(&refused.field),
+        min: refused.min,
+        max: refused.max,
+    })?;
     Ok(wire::WorkerManifest {
         manifest_version: wire::WorkerManifestVersion::CURRENT,
-        database: database_manifest(&config.broker),
-        send: send_manifest(&config.broker),
-        profiles: config
-            .worker_profiles
-            .iter()
-            .map(|(name, worker_profile)| (name.clone(), profile_manifest(worker_profile)))
-            .collect(),
+        database: database_manifest(&config.database),
+        send: send_manifest(&config.database),
+        profiles,
         profile,
         metrics_endpoint,
         claim,
@@ -121,9 +122,32 @@ pub(crate) fn worker_manifest(
     })
 }
 
+/// The path of `field` as `AppConfig` writes it: the members joined with
+/// `.`, a list position as `[n]` and a map key as a member
+/// (`custom_queues[0].priority`, `retention.queue_retention.bulk`). Pure.
+fn config_path(field: &wire::ConfigField) -> String {
+    let mut path = String::new();
+    for segment in field.segments() {
+        match segment {
+            wire::FieldSegment::Member(name) => push_member(&mut path, name),
+            wire::FieldSegment::Key(key) => push_member(&mut path, key),
+            wire::FieldSegment::Position(position) => path.push_str(&format!("[{position}]")),
+        }
+    }
+    path
+}
+
+/// `name` after `path`, with a `.` between them when `path` has a member.
+fn push_member(path: &mut String, name: &str) {
+    if !path.is_empty() {
+        path.push('.');
+    }
+    path.push_str(name);
+}
+
 /// How each child of a Rust worker starts: `program` with `args` (from the
 /// core's `child_command()`: this executable and the child mode argument),
-/// no preload process, the Rust child program, and the log level of the
+/// no preload process, the host child program, and the log level of the
 /// start. Pure.
 ///
 /// Errors: [`ChildLaunchRefused`] for a part of the command that is not
@@ -150,7 +174,7 @@ pub(crate) fn rust_child_launch(
     Ok(wire::ChildLaunchManifest {
         command: wire::ChildCommandManifest { program, args },
         preload: wire::PreloadLaunch::NoPreloadProgram,
-        program: wire::ChildProgram::Rust,
+        program: wire::ChildProgram::Host,
         log_level,
     })
 }
@@ -177,7 +201,7 @@ pub(crate) fn task_records(tasks: &TaskRegistry) -> BTreeMap<String, wire::TaskM
 /// The declared error codes of the registered task `name`. The
 /// registration refused a set that breaks a rule (`register_task`), so a
 /// refusal here is a defect: it panics with the task and the cause.
-fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
+pub(crate) fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
     DeclaredErrorCodes::parse(task.error_codes()).unwrap_or_else(|refused| {
         panic!("task '{name}' was registered with error codes that the registration refuses: {refused}")
     })
@@ -189,465 +213,21 @@ fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
 fn database_manifest(config: &PostgresConfig) -> wire::WorkerDatabaseManifest {
     wire::WorkerDatabaseManifest {
         database_url: core_database_url(&config.database_url),
-        session_database: session_database(config),
+        session_database: session_database_manifest(config),
         pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
         pool_pre_ping: config.pool_pre_ping,
         worker_pool_pre_ping: config.worker_pool_pre_ping,
-        pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
+        pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
         pool_recycle: config.pool_recycle,
         echo: config.echo,
-        tcp_keepalives: config.tcp_keepalives,
-        tcp_user_timeout: config.tcp_user_timeout,
-    }
-}
-
-/// `profile` with every value given. Total: each config value already has
-/// the bound of its manifest field. Pure.
-fn profile_manifest(profile: &WorkerProfile) -> wire::WorkerProfileManifest {
-    wire::WorkerProfileManifest {
-        isolated: isolated_manifest(&profile.isolated),
-        shared_async: shared_async_manifest(&profile.shared_async),
-        shared_thread: shared_thread_manifest(&profile.shared_thread),
-        pool: wire::ParentPoolManifest {
-            max_size: pool_max_size(profile.pool.max_size),
-        },
-        claim: wire::ClaimLimitsManifest {
-            per_queue_per_pass: task_limit(profile.claim.per_queue_per_pass),
-            claimed_per_worker: task_limit(profile.claim.claimed_per_worker),
-        },
-        drain_timeout_ms: drain_timeout_ms(profile.drain_timeout),
-        preload: preload(profile.preload),
-        parent_cpu: profile.parent_cpu,
-    }
-}
-
-fn isolated_manifest(setting: &IsolatedSetting) -> wire::Isolated {
-    match setting {
-        IsolatedSetting::IsolatedChildren(children) => wire::Isolated::Children {
-            count: wire::IsolatedCount(children.count),
-            recycle: wire::IsolatedRecycleManifest {
-                after: task_limit(children.recycle.after),
-                above: memory_limit(children.recycle.above),
-            },
-            pool: wire::IsolatedPoolManifest {
-                min_size: wire::ChildPoolMinSize(children.pool.min_size),
-                max_size: wire::ChildPoolConnections(children.pool.max_size.connections),
-                check: children.pool.check,
-            },
-            task_send_pool: wire::ChildPoolConnections(children.task_send_pool.connections),
-        },
-        IsolatedSetting::NoIsolatedChildren {} => wire::Isolated::NoChildren,
-    }
-}
-
-fn shared_async_manifest(setting: &SharedAsyncSetting) -> wire::SharedAsync {
-    match setting {
-        SharedAsyncSetting::SharedAsyncChildren(children) => wire::SharedAsync::Children {
-            count: wire::SharedAsyncCount(children.count),
-            seats: wire::SharedAsyncSeatCount(children.seats),
-            recycle: shared_recycle(&children.recycle),
-            pool: shared_pool(&children.pool),
-            executor: match children.executor {
-                ExecutorThreadsSetting::ExecutorThreads { threads } => {
-                    wire::DefaultExecutor::Threads {
-                        threads: wire::DefaultExecutorThreadCount(threads),
-                    }
-                }
-                ExecutorThreadsSetting::ExecutorThreadsFromSeats {} => {
-                    wire::DefaultExecutor::FromSeats
-                }
-            },
-            task_send_pool: wire::ChildPoolConnections(children.task_send_pool.connections),
-        },
-        SharedAsyncSetting::NoSharedAsyncChildren {} => wire::SharedAsync::NoChildren,
-    }
-}
-
-fn shared_thread_manifest(setting: &SharedThreadSetting) -> wire::SharedThread {
-    match setting {
-        SharedThreadSetting::SharedThreadChildren(children) => wire::SharedThread::Children {
-            count: wire::SharedThreadCount(children.count),
-            seats: wire::SharedThreadSeatCount(children.seats),
-            recycle: shared_recycle(&children.recycle),
-            pool: shared_pool(&children.pool),
-            task_send_pool: wire::ChildPoolConnections(children.task_send_pool.connections),
-        },
-        SharedThreadSetting::NoSharedThreadChildren {} => wire::SharedThread::NoChildren,
-    }
-}
-
-fn shared_recycle(recycle: &SharedRecycle) -> wire::SharedRecycleManifest {
-    wire::SharedRecycleManifest {
-        after_per_seat: task_limit(recycle.after_per_seat),
-        above: memory_limit(recycle.above),
-    }
-}
-
-fn shared_pool(pool: &SharedPool) -> wire::SharedPoolManifest {
-    wire::SharedPoolManifest {
-        min_size: wire::ChildPoolMinSize(pool.min_size),
-        max_size: pool_max_size(pool.max_size),
-        check: pool.check,
-    }
-}
-
-fn pool_max_size(setting: PoolSizeSetting) -> wire::PoolMaxSize {
-    match setting {
-        PoolSizeSetting::PoolSize { connections } => wire::PoolMaxSize::Connections {
-            connections: wire::ChildPoolConnections(connections),
-        },
-        PoolSizeSetting::PoolSizeFromSeats {} => wire::PoolMaxSize::FromSeats,
-    }
-}
-
-fn task_limit(setting: TaskLimitSetting) -> wire::TaskLimit {
-    match setting {
-        TaskLimitSetting::TaskLimit { tasks } => wire::TaskLimit::Tasks {
-            tasks: wire::LimitTasks(tasks),
-        },
-        TaskLimitSetting::NoTaskLimit {} => wire::TaskLimit::NoLimit,
-    }
-}
-
-fn memory_limit(setting: MemoryLimitSetting) -> wire::MemoryLimit {
-    match setting {
-        MemoryLimitSetting::MemoryLimit { mb } => wire::MemoryLimit::Megabytes {
-            mb: wire::LimitMb(mb),
-        },
-        MemoryLimitSetting::NoMemoryLimit {} => wire::MemoryLimit::NoLimit,
-    }
-}
-
-fn preload(preload: ChildPreload) -> wire::Preload {
-    match preload {
-        ChildPreload::Library => wire::Preload::Library,
-        ChildPreload::App => wire::Preload::App,
-        ChildPreload::NoPreload => wire::Preload::NoPreload,
-    }
-}
-
-/// `drain_timeout` in whole milliseconds, rounded up, so the worker never
-/// waits less than the profile asks (Python `drain_timeout_ms`). A
-/// `DrainTimeout` is above 0 and at most 24 hours, so the count is inside
-/// the manifest bound; another count is a defect.
-fn drain_timeout_ms(drain_timeout: DrainTimeout) -> wire::DrainTimeoutMs {
-    let milliseconds = drain_timeout.get().as_nanos().div_ceil(NANOS_PER_MILLI);
-    u64::try_from(milliseconds)
-        .map_err(|_| "more milliseconds than a u64 holds".to_owned())
-        .and_then(wire::DrainTimeoutMs::try_from)
-        .unwrap_or_else(|refused| {
-            unreachable!(
-                "a drain timeout above 0 and at most 24 hours fits the manifest: {refused}"
-            )
-        })
-}
-
-/// The queue and claim settings (Python `worker_claim_manifest`).
-fn claim_manifest(config: &AppConfig) -> Result<wire::WorkerClaimManifest, ManifestBoundRefused> {
-    let prefetch_buffer = wire::ClaimCount(bounded(config.prefetch_buffer, "prefetch_buffer")?);
-    let claim_lease = match config.claim_lease_ms {
-        None => wire::ClaimLease::WorkerDefault,
-        Some(milliseconds) => wire::ClaimLease::Milliseconds {
-            ms: wire::Milliseconds(bounded(milliseconds, "claim_lease_ms")?),
-        },
-    };
-    let max_claim_renew_age_ms = wire::Milliseconds(bounded(
-        config.max_claim_renew_age_ms,
-        "max_claim_renew_age_ms",
-    )?);
-    let cluster_wide_cap = match config.cluster_wide_cap {
-        None => wire::ClusterWideCap::NoLimit,
-        Some(tasks) => wire::ClusterWideCap::Tasks {
-            tasks: wire::LimitTasks(bounded(tasks, "cluster_wide_cap")?),
-        },
-    };
-    let queues = queues_manifest(config)?;
-    Ok(wire::WorkerClaimManifest {
-        queues,
-        prefetch_buffer,
-        claim_lease,
-        max_claim_renew_age_ms,
-        cluster_wide_cap,
-    })
-}
-
-/// The queues of the app; in `Custom` mode each configured queue, in the
-/// order of the config.
-fn queues_manifest(config: &AppConfig) -> Result<wire::Queues, ManifestBoundRefused> {
-    match config.queue_mode {
-        QueueMode::Default => Ok(wire::Queues::Default),
-        QueueMode::Custom => {
-            let queues = config
-                .custom_queues
-                .iter()
-                .flatten()
-                .enumerate()
-                .map(|(position, queue)| -> Result<_, ManifestBoundRefused> {
-                    let path = format!("custom_queues[{position}]");
-                    Ok(wire::CustomQueueManifest {
-                        name: queue.name.clone(),
-                        priority: wire::QueuePriority(bounded(
-                            queue.priority,
-                            &format!("{path}.priority"),
-                        )?),
-                        max_concurrency: match queue.max_concurrency {
-                            None => wire::QueueConcurrency::NoLimit,
-                            Some(tasks) => wire::QueueConcurrency::Tasks {
-                                tasks: wire::QueueConcurrencyLimit(bounded(
-                                    tasks,
-                                    &format!("{path}.max_concurrency"),
-                                )?),
-                            },
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>, ManifestBoundRefused>>()?;
-            Ok(wire::Queues::Custom { queues })
-        }
-    }
-}
-
-/// The recovery section (Python `recovery_manifest`).
-fn recovery_manifest(
-    config: &RecoveryConfig,
-) -> Result<wire::RecoveryManifest, ManifestBoundRefused> {
-    Ok(wire::RecoveryManifest {
-        auto_requeue_stale_claimed: config.auto_requeue_stale_claimed,
-        claimed_stale_threshold_ms: wire::ClaimedStaleThresholdMs(bounded_wide(
-            config.claimed_stale_threshold_ms,
-            "recovery.claimed_stale_threshold_ms",
-        )?),
-        auto_terminate_orphaned_workflow_tasks: config.auto_terminate_orphaned_workflow_tasks,
-        auto_fail_stale_running: config.auto_fail_stale_running,
-        running_stale_threshold_ms: wire::StaleThresholdMs(bounded_wide(
-            config.running_stale_threshold_ms,
-            "recovery.running_stale_threshold_ms",
-        )?),
-        finalizing_stale_threshold_ms: wire::StaleThresholdMs(bounded_wide(
-            config.finalizing_stale_threshold_ms,
-            "recovery.finalizing_stale_threshold_ms",
-        )?),
-        crashed_worker_recovery_grace_ms: wire::RecoveryGraceMs(bounded_wide(
-            config.crashed_worker_recovery_grace_ms,
-            "recovery.crashed_worker_recovery_grace_ms",
-        )?),
-        phase2_quarantine_after_attempts: wire::RecoveryPassLimit(bounded(
-            config.phase2_quarantine_after_attempts,
-            "recovery.phase2_quarantine_after_attempts",
-        )?),
-        workflow_recovery_failure_limit: wire::RecoveryPassLimit(bounded(
-            config.workflow_recovery_failure_limit,
-            "recovery.workflow_recovery_failure_limit",
-        )?),
-        check_interval_ms: wire::CheckIntervalMs(bounded_wide(
-            config.check_interval_ms,
-            "recovery.check_interval_ms",
-        )?),
-        orphan_task_audit_interval_ms: wire::AuditIntervalMs(bounded_wide(
-            config.orphan_task_audit_interval_ms,
-            "recovery.orphan_task_audit_interval_ms",
-        )?),
-        runner_heartbeat_interval_ms: wire::HeartbeatIntervalMs(bounded_wide(
-            config.runner_heartbeat_interval_ms,
-            "recovery.runner_heartbeat_interval_ms",
-        )?),
-        claimer_heartbeat_interval_ms: wire::HeartbeatIntervalMs(bounded_wide(
-            config.claimer_heartbeat_interval_ms,
-            "recovery.claimer_heartbeat_interval_ms",
-        )?),
-        worker_state_snapshot_interval_ms: wire::SnapshotIntervalMs(bounded_wide(
-            config.worker_state_snapshot_interval_ms,
-            "recovery.worker_state_snapshot_interval_ms",
-        )?),
-    })
-}
-
-/// The retention section (Python `retention_manifest`): a `None` that turns
-/// pruning or the paused expiry off is its own variant; a period is whole
-/// days.
-fn retention_manifest(
-    config: &RetentionConfig,
-) -> Result<wire::RetentionManifest, ManifestBoundRefused> {
-    let worker_state_retention = match config.worker_state_retention_hours {
-        None => wire::WorkerStateRetention::NoPruning,
-        Some(hours) => wire::WorkerStateRetention::Hours {
-            hours: wire::WorkerStateRetentionHours(bounded(
-                hours,
-                "retention.worker_state_retention_hours",
-            )?),
-        },
-    };
-    let terminal_record_retention = match config.terminal_record_retention_hours {
-        None => wire::TerminalRecordRetention::NoPruning,
-        Some(hours) => wire::TerminalRecordRetention::Hours {
-            hours: wire::TerminalRecordRetentionHours(bounded(
-                hours,
-                "retention.terminal_record_retention_hours",
-            )?),
-        },
-    };
-    let paused_workflow_auto_cancel_after = match config.paused_workflow_auto_cancel_after {
-        None => wire::PausedWorkflowExpiry::NoExpiry,
-        Some(age) => wire::PausedWorkflowExpiry::After {
-            micros: u64::try_from(age.micros())
-                .ok()
-                .and_then(|micros| wire::PausedAgeMicros::try_from(micros).ok())
-                .ok_or_else(|| ManifestBoundRefused {
-                    path: "retention.paused_workflow_auto_cancel_after".to_owned(),
-                    min: 1,
-                    max: wire::MAX_PAUSED_AGE_MICROS,
-                })?,
-        },
-    };
-    let retention_periods = config
-        .retention_periods
-        .iter()
-        .enumerate()
-        .map(|(position, period)| {
-            period_days(*period, &format!("retention.retention_periods[{position}]"))
-        })
-        .collect::<Result<Vec<_>, ManifestBoundRefused>>()?;
-    // In name order, so the first refusal does not depend on the map's
-    // order.
-    let queue_retention = config
-        .queue_retention
-        .iter()
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .map(|(queue, period)| -> Result<_, ManifestBoundRefused> {
-            let retention = match period {
-                None => wire::QueueRetention::Forever,
-                Some(period) => wire::QueueRetention::Days {
-                    days: period_days(*period, &format!("retention.queue_retention.{queue}"))?,
-                },
-            };
-            Ok((queue.clone(), retention))
-        })
-        .collect::<Result<BTreeMap<_, _>, ManifestBoundRefused>>()?;
-    Ok(wire::RetentionManifest {
-        worker_state_retention,
-        terminal_record_retention,
-        paused_workflow_auto_cancel_after,
-        history_leaf_horizon_days: wire::HistoryLeafHorizonDays(bounded(
-            config.history_leaf_horizon_days,
-            "retention.history_leaf_horizon_days",
-        )?),
-        heartbeat_leaf_horizon_hours: wire::HeartbeatLeafHorizonHours(bounded(
-            config.heartbeat_leaf_horizon_hours,
-            "retention.heartbeat_leaf_horizon_hours",
-        )?),
-        retention_periods,
-        queue_retention,
-        partition_maintenance_interval_s: wire::MaintenanceIntervalSeconds(bounded_wide(
-            config.partition_maintenance_interval_s,
-            "retention.partition_maintenance_interval_s",
-        )?),
-        retention_sweep_interval_s: wire::SweepIntervalSeconds(bounded_wide(
-            config.retention_sweep_interval_s,
-            "retention.retention_sweep_interval_s",
-        )?),
-        retention_delete_batch_size: wire::DeleteBatchSize(bounded(
-            config.retention_delete_batch_size,
-            "retention.retention_delete_batch_size",
-        )?),
-    })
-}
-
-/// A retention period in whole days (Python `_period_days`): a period of
-/// whole days inside the period bounds, else refused with those bounds.
-fn period_days(
-    period: chrono::Duration,
-    path: &str,
-) -> Result<wire::RetentionPeriodDays, ManifestBoundRefused> {
-    let days = RetentionDays::parse_period(period)
-        .ok()
-        .map(|days| u32::from(days.get()));
-    Ok(wire::RetentionPeriodDays(within(days, path)?))
-}
-
-/// The resilience section (Python `resilience_manifest`): 0 attempts is no
-/// limit.
-fn resilience_manifest(
-    config: &WorkerResilienceConfig,
-) -> Result<wire::ResilienceManifest, ManifestBoundRefused> {
-    Ok(wire::ResilienceManifest {
-        db_retry_initial_ms: wire::RetryInitialMs(bounded_wide(
-            config.db_retry_initial_ms,
-            "resilience.db_retry_initial_ms",
-        )?),
-        db_retry_max_ms: wire::RetryMaxMs(bounded_wide(
-            config.db_retry_max_ms,
-            "resilience.db_retry_max_ms",
-        )?),
-        db_retry_max_attempts: match config.db_retry_max_attempts {
-            0 => wire::RetryAttemptLimit::NoLimit,
-            attempts => wire::RetryAttemptLimit::Attempts {
-                attempts: wire::RetryAttemptCount(bounded_wide(
-                    attempts,
-                    "resilience.db_retry_max_attempts",
-                )?),
-            },
-        },
-        notify_poll_interval_ms: wire::PollIntervalMs(bounded_wide(
-            config.notify_poll_interval_ms,
-            "resilience.notify_poll_interval_ms",
-        )?),
-    })
-}
-
-/// The payload section (Python `payload_manifest`): no threshold is no
-/// limit.
-fn payload_manifest(config: &PayloadPolicy) -> Result<wire::PayloadManifest, ManifestBoundRefused> {
-    Ok(wire::PayloadManifest {
-        warn_bytes: payload_limit(config.warn_bytes, "payload.warn_bytes")?,
-        reject_bytes: payload_limit(config.reject_bytes, "payload.reject_bytes")?,
-    })
-}
-
-fn payload_limit(
-    threshold: Option<u64>,
-    path: &str,
-) -> Result<wire::PayloadLimit, ManifestBoundRefused> {
-    match threshold {
-        None => Ok(wire::PayloadLimit::NoLimit),
-        Some(bytes) => wire::PayloadBytes::try_from(bytes)
-            .map(|bytes| wire::PayloadLimit::Bytes { bytes })
-            .map_err(|_| refused(path, 1, wire::MAX_PAYLOAD_BYTES)),
-    }
-}
-
-/// `value` as a bounded count of its manifest field.
-fn bounded<const MIN: u32, const MAX: u32>(
-    value: u32,
-    path: &str,
-) -> Result<BoundedU32<MIN, MAX>, ManifestBoundRefused> {
-    within(Some(value), path)
-}
-
-/// `value`, a `u64` of the config, as a bounded count of its manifest field.
-fn bounded_wide<const MIN: u32, const MAX: u32>(
-    value: u64,
-    path: &str,
-) -> Result<BoundedU32<MIN, MAX>, ManifestBoundRefused> {
-    within(u32::try_from(value).ok(), path)
-}
-
-/// `value` inside `MIN` to `MAX`; no value (one that has no `u32` form) or
-/// a value outside is refused with the bounds of the field.
-fn within<const MIN: u32, const MAX: u32>(
-    value: Option<u32>,
-    path: &str,
-) -> Result<BoundedU32<MIN, MAX>, ManifestBoundRefused> {
-    value
-        .and_then(|value| BoundedU32::try_from(value).ok())
-        .ok_or_else(|| refused(path, u64::from(MIN), u64::from(MAX)))
-}
-
-fn refused(path: &str, min: u64, max: u64) -> ManifestBoundRefused {
-    ManifestBoundRefused {
-        path: path.to_owned(),
-        min,
-        max,
+        tcp_keepalives: config
+            .tcp_keepalives
+            .checked()
+            .expect("Horsies::new validated the keepalive values"),
+        tcp_user_timeout: config
+            .tcp_user_timeout
+            .checked()
+            .expect("Horsies::new validated the TCP user timeout"),
     }
 }
 
@@ -656,12 +236,15 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::worker_manifest::parse_worker_manifest;
-    use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
+    use horsies_core::{RegisteredTask, TaskOptions, TaskResult, DEFAULT_CANCEL_GRACE_MS};
 
     use super::*;
-    use crate::{CustomQueueConfig, IsolatedChildCount, IsolatedChildren};
+    use crate::{
+        ChildPreload, ClusterCapSetting, CustomQueueConfig, IsolatedChildren, QueueMode,
+        WorkerProfile,
+    };
 
     struct EchoTask;
 
@@ -674,20 +257,20 @@ mod tests {
     fn task(execution: Option<Execution>) -> RegisteredTask {
         let plain = RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         match execution {
             None => plain,
             Some(execution) => plain.with_task_options(TaskOptions {
                 task_name: "task".to_owned(),
-                queue_name: None,
+                queue: None,
                 good_until: None,
-                auto_retry_for: None,
+                retry_for: None,
                 retry_policy: None,
                 timeout_ms: Some(5_000),
                 execution,
                 cancel_grace_ms: match execution {
-                    Execution::SharedAsync => Some(CancelGraceMs::DEFAULT),
+                    Execution::SharedAsync => Some(DEFAULT_CANCEL_GRACE_MS),
                     Execution::Isolated | Execution::SharedThread => None,
                 },
             }),
@@ -708,16 +291,14 @@ mod tests {
 
     fn profile() -> WorkerProfile {
         WorkerProfile {
-            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                IsolatedChildCount::try_from(4).unwrap(),
-            )),
+            isolated: IsolatedChildren::new(4).into(),
             preload: ChildPreload::NoPreload,
             ..WorkerProfile::default()
         }
     }
 
     fn config() -> AppConfig {
-        let mut config = AppConfig::for_database_url("postgresql://app@db.example/horsies");
+        let mut config = AppConfig::from_database_url("postgresql://app@db.example/horsies");
         config.worker_profiles.insert("web".to_owned(), profile());
         config
     }
@@ -787,7 +368,7 @@ mod tests {
         assert_eq!(read, manifest);
         let selected = read.selected_profile().unwrap();
         assert_eq!(selected.name, "web");
-        assert_eq!(selected.profile, profile());
+        assert_eq!(WorkerProfile::from(selected.profile), profile());
     }
 
     #[test]
@@ -806,7 +387,7 @@ mod tests {
                 max_concurrency: None,
             },
         ]);
-        config.cluster_wide_cap = Some(20);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 20 };
         config.claim_lease_ms = Some(30_000);
         let manifest = build(&config).unwrap();
         let text = serde_json::to_string(&manifest).unwrap();
@@ -835,7 +416,8 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
+                    metadata: TaskMetadata::default()
+                        .with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
                 },
             )
             .unwrap();
@@ -858,7 +440,7 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["DUP", "DUP"]),
+                    metadata: TaskMetadata::default().with_error_codes(&["DUP", "DUP"]),
                 },
             )
             .unwrap();
@@ -871,7 +453,7 @@ mod tests {
         assert_eq!(launch.command.program, "/srv/app/bin/worker");
         assert_eq!(launch.command.args, vec![horsies_core::CHILD_MODE_ARGUMENT]);
         assert_eq!(launch.preload, wire::PreloadLaunch::NoPreloadProgram);
-        assert_eq!(launch.program, wire::ChildProgram::Rust);
+        assert_eq!(launch.program, wire::ChildProgram::Host);
     }
 
     #[test]
@@ -911,7 +493,9 @@ mod tests {
                 None,
             ),
             (
-                Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+                Box::new(|config: &mut AppConfig| {
+                    config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+                }),
                 "cluster_wide_cap",
                 Some("4294967295"),
             ),
@@ -950,6 +534,16 @@ mod tests {
             ),
             (
                 Box::new(|config: &mut AppConfig| {
+                    config.retention.queue_retention = std::collections::HashMap::from([(
+                        "bulk".to_owned(),
+                        Some(chrono::Duration::hours(36)),
+                    )]);
+                }),
+                "retention.queue_retention.bulk",
+                None,
+            ),
+            (
+                Box::new(|config: &mut AppConfig| {
                     config.resilience.notify_poll_interval_ms = 4_000_000_000_000;
                 }),
                 "resilience.notify_poll_interval_ms",
@@ -983,17 +577,23 @@ mod tests {
     #[test]
     fn no_retry_attempt_limit_is_its_own_variant() {
         let mut config = config();
-        config.resilience.db_retry_max_attempts = 0;
+        config.resilience.database_retry_max_attempts = 0;
         let manifest = build(&config).unwrap();
         assert_eq!(
-            manifest.resilience.db_retry_max_attempts,
+            manifest.resilience.database_retry_max_attempts,
             wire::RetryAttemptLimit::NoLimit
         );
     }
 
     #[test]
     fn a_drain_timeout_is_rounded_up_to_whole_milliseconds() {
-        let timeout = DrainTimeout::try_from(std::time::Duration::from_micros(1_500)).unwrap();
-        assert_eq!(drain_timeout_ms(timeout).get(), 2);
+        let mut config = config();
+        let profile = WorkerProfile {
+            drain_timeout: std::time::Duration::from_micros(1_500),
+            ..profile()
+        };
+        config.worker_profiles.insert("web".to_owned(), profile);
+        let manifest = build(&config).unwrap();
+        assert_eq!(manifest.profiles["web"].drain_timeout_ms.get(), 2);
     }
 }

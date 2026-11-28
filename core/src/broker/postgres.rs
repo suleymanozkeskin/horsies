@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope_text;
 use crate::core::history::enqueue::{
-    parse_optional_object, prepare_enqueue_facts, PreparedEnqueueFacts, SendPart,
+    parse_optional_object, prepare_enqueue_facts, EnqueuePreparationError, PreparedEnqueueFacts,
+    SendPart,
 };
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -16,10 +17,10 @@ use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
-    RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunCommand,
+    RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
-use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
+use crate::core::{EnqueueRetention, PostgresConfig, ResultSlot, TaskInfo};
 
 use crate::broker::core_rows::{
     column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
@@ -31,14 +32,14 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, ping_min_responses_refused, ping_timeout_refused,
-    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
-    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_min_responses_refused, read_listed_worker_states, read_worker_snapshot,
+    read_worker_snapshots, DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerCheckCause, BrokerOperationError, BrokerOperationSource, BrokerResult, RawResultRead,
+    BrokerCheckCause, BrokerOperationSource, DatabaseOperationError, DatabaseResult, RawResultRead,
     RawResultRecord, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow};
@@ -266,7 +267,7 @@ mod checked_send_tests {
 mod raw_result_probe_tests {
     //! The probe records of the staged result reader's rows. Pure.
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
     use crate::core::history::archive::versions::{
         archive_digest, JSON_CONTENT_TYPE, JSON_UTF8_CODEC,
     };
@@ -326,7 +327,7 @@ mod raw_result_probe_tests {
         else {
             panic!("a digest mismatch is refused");
         };
-        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidJsonPayload);
         assert!(!refused.retryable());
     }
 
@@ -338,7 +339,7 @@ mod raw_result_probe_tests {
         ) else {
             panic!("a live status in history is refused");
         };
-        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidJsonPayload);
     }
 
     /// Python `test_broker_postgres.py::TestPythonRawResultRead::test_live_row_with_a_terminal_status_returns_record_with_none_payload`:
@@ -373,7 +374,7 @@ mod raw_result_probe_tests {
         else {
             panic!("an empty stored result is refused");
         };
-        assert_eq!(refused.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidJsonPayload);
         assert!(!refused.retryable());
     }
 
@@ -392,7 +393,7 @@ mod raw_result_probe_tests {
         ));
         assert!(matches!(
             raw_result_from_live(TASK_ID, "result.task".to_owned(), "NOT_A_STATUS"),
-            Err(BrokerOperationError::InvalidJsonPayload { .. })
+            Err(DatabaseOperationError::InvalidJsonPayload { .. })
         ));
     }
 }
@@ -639,7 +640,7 @@ static GET_WORKER_STATE_HISTORY: TypedStatement = TypedStatement::new(
 
 /// The expired list: `horsies_list_expired_tasks` (baseline `0007`), task
 /// rows in list order, then its `LIST_END` row. `expired_for` is read as
-/// whole milliseconds, as the list row carries it.
+/// whole microseconds, in the column `expired_for_us`.
 static LIST_EXPIRED_TASKS: TypedStatement = TypedStatement::new(
     "list_expired_tasks",
     "SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until,
@@ -691,7 +692,7 @@ pub enum SchemaInitializationMode {
     MigrateAndValidate,
     /// Connect for monitoring reads without executing schema DDL or fleet
     /// gates. The broker keeps its listener, as Python's web tool, which runs
-    /// with `run_schema_migrations=False`.
+    /// with `SchemaMode.OBSERVE_ONLY`.
     ObserveOnly,
 }
 
@@ -727,6 +728,9 @@ impl SendCommand {
     /// Errors: `EnqueueContract`, the refusals of `enqueue` before its
     /// write: an input that the rules refuse, options that do not parse or
     /// whose retry policy does not fit, a value the fingerprint refuses.
+    /// It takes a shared class with no `timeout_ms`, which only a new send
+    /// refuses (`check_new_send_timeout`): a schedule keeps such options,
+    /// and the worker refuses the run.
     pub fn prepare(
         task_name: &str,
         queue_name: &str,
@@ -802,10 +806,11 @@ impl<'a> CheckedSend<'a> {
     /// future of a send that starts now; an input that the rules of a user
     /// value refuse (`check_sent_input`); options that do not read by the
     /// strict rule, that hold an integer outside `i64::MIN` to `u64::MAX`,
-    /// or whose retry limit does not fit; a `sent_at` with no
+    /// or whose retry limit or `timeout_ms` does not fit (`enqueue_timeout`); a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
-    /// class, the command fingerprint and the scope of the idempotency key.
+    /// class, the command fingerprint and the scope of the idempotency key;
+    /// then a shared class with no `timeout_ms` (`check_new_send_timeout`).
     /// A send with no id mints it here. `retain_rerun_input` is resolved:
     /// the send's choice, or the default of the handle. Touches no
     /// database; reads the clock.
@@ -834,7 +839,7 @@ impl<'a> CheckedSend<'a> {
         {
             return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
                 SendPart::Input,
-                "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
+                "sent_at is in the future without enqueued_at or delay_seconds; sent_at is a call-site timestamp".to_owned(),
             )));
         }
         check_sent_input(input)?;
@@ -851,9 +856,10 @@ impl<'a> CheckedSend<'a> {
         };
         // The options are read with the strict rule before the retry limit,
         // so a text that does not read names its reader's error.
-        let _options = parse_optional_object(task_options)
+        let options = parse_optional_object(task_options)
             .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
+        enqueue_timeout(task_name, task_options)?;
         let sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
@@ -869,6 +875,7 @@ impl<'a> CheckedSend<'a> {
             idempotency_key,
         )
         .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
+        check_new_send_timeout(facts.execution, options.as_ref())?;
         Ok(Self {
             task_id,
             task_name,
@@ -1045,7 +1052,7 @@ impl PostgresBroker {
     /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
     /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str, family: ClientFamily) -> Result<Self, BrokerError> {
-        Self::connect_with(&PostgresConfig::from_url(database_url), family).await
+        Self::connect_with(&PostgresConfig::from_database_url(database_url), family).await
     }
 
     /// Connect using a `PostgresConfig` from horsies-core, for a client of
@@ -1238,8 +1245,8 @@ impl PostgresBroker {
         self
     }
 
-    /// The same handle with no listener (Python's
-    /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
+    /// The same handle with no listener (the schema mode
+    /// `ASSUME_INITIALIZED`): a result wait reads again
     /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
     /// needs a listener answers `LISTENER_DISABLED`. Opens and closes
     /// nothing: the listener of a connected broker opens its connection at
@@ -1467,7 +1474,9 @@ impl PostgresBroker {
     /// `RerunError::ClientFamilyMismatch`; a family row whose value is not a
     /// client family is `RerunError::UnknownStoredFamily`; a family row that
     /// could not be read is `RerunError::FamilyCheckFailed`. In each case
-    /// nothing is written.
+    /// nothing is written. `codes` are the declared custom codes of the
+    /// calling app's tasks: the stored retry list of the source is checked
+    /// against them before the write.
     ///
     /// Errors: as the rerun in its transaction, and
     /// [`RerunError::PoolSettings`] when a closed handle cannot open its
@@ -1475,8 +1484,9 @@ impl PostgresBroker {
     /// `OutcomeUnknown` at `COMMIT`.
     pub async fn rerun_task(
         &self,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
+        codes: &RegisteredTaskCodes,
     ) -> Result<RerunOutcome, RerunError> {
         self.check_client_family_for_write()
             .await
@@ -1496,6 +1506,7 @@ impl PostgresBroker {
             self.statement_log,
             &command,
             &policy,
+            codes,
             self.client_family,
         )
         .await?;
@@ -1876,7 +1887,7 @@ impl PostgresBroker {
         &self,
         task_id: Uuid,
         timeout: Option<Duration>,
-    ) -> BrokerResult<RawResultRead> {
+    ) -> DatabaseResult<RawResultRead> {
         let start = Instant::now();
         let limit =
             WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
@@ -1951,18 +1962,20 @@ impl PostgresBroker {
 
     /// Fetch task metadata.
     ///
-    /// By default, the `result` and `failed_reason` fields are excluded
-    /// (returned as `None`), matching Python's
-    /// `info(include_result=False, include_failed_reason=False)` default.
-    /// Pass `true` for either flag to include the field of a terminal task's
-    /// history row. A live task has no result, failed reason, error code or
-    /// terminal time: those fields are `None` whatever the flags say.
+    /// By default, the `result` and `failed_reason` fields are excluded:
+    /// `result` is `ResultSlot::NotRequested` and `failed_reason` is `None`,
+    /// matching Python's `info(include_result=False,
+    /// include_failed_reason=False)` default. Pass `true` for either flag to
+    /// include the field of a terminal task's history row. A live task has no
+    /// result, failed reason, error code or terminal time: with the result
+    /// flag `result` is `ResultSlot::NotStored`, and the other fields are
+    /// `None`, whatever the flags say.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
-    ) -> BrokerResult<TaskInfoRead> {
+    ) -> DatabaseResult<TaskInfoRead> {
         self.get_task_info_with_attempts(task_id, include_result, include_failed_reason, false)
             .await
     }
@@ -1982,7 +1995,7 @@ impl PostgresBroker {
         include_result: bool,
         include_failed_reason: bool,
         include_attempts: bool,
-    ) -> BrokerResult<TaskInfoRead> {
+    ) -> DatabaseResult<TaskInfoRead> {
         for _pass in 0..TASK_INFO_READ_PASSES {
             match Box::pin(self.task_info_pass(
                 task_id,
@@ -1996,7 +2009,7 @@ impl PostgresBroker {
                 TaskInfoPass::BecameLive => {}
             }
         }
-        Err(BrokerOperationError::task_info_query_failed(
+        Err(DatabaseOperationError::task_info_query_failed(
             task_id,
             BrokerOperationSource::TaskInfoMoved {
                 task_id,
@@ -2013,7 +2026,7 @@ impl PostgresBroker {
         include_result: bool,
         include_failed_reason: bool,
         include_attempts: bool,
-    ) -> BrokerResult<TaskInfoPass> {
+    ) -> DatabaseResult<TaskInfoPass> {
         let row = self
             .read_main(
                 &GET_TASK_INFO.bind().value(&task_id).finish(),
@@ -2021,7 +2034,7 @@ impl PostgresBroker {
             )
             .await
             .map_err(|error| {
-                BrokerOperationError::task_info_query_failed(
+                DatabaseOperationError::task_info_query_failed(
                     task_id,
                     BrokerOperationSource::Broker(error),
                 )
@@ -2032,7 +2045,7 @@ impl PostgresBroker {
         match row {
             Some(r) => {
                 let mut info = r
-                    .into_task_info()
+                    .into_task_info(include_result)
                     .map_err(|error| task_info_history_error(task_id, error))?;
                 if include_attempts {
                     info.attempts = Some(
@@ -2160,10 +2173,10 @@ impl PostgresBroker {
     /// Active database liveness probe: a timed `SELECT 1` round-trip.
     ///
     /// Returns a [`DatabasePing`] carrying the measured latency, or a
-    /// `DB_PING_FAILED` broker error. Unlike [`health_check`](Self::health_check)
+    /// `DATABASE_PING_FAILED` broker error. Unlike [`health_check`](Self::health_check)
     /// (which callers use as a plain reachability gate), this surfaces latency
     /// for monitoring. Mirrors Python's `ping_database_async`.
-    pub async fn ping_database(&self) -> BrokerResult<DatabasePing> {
+    pub async fn ping_database(&self) -> DatabaseResult<DatabasePing> {
         let start = std::time::Instant::now();
         let probe = self
             .query_main(&HEALTH_CHECK.bind().finish())
@@ -2173,7 +2186,7 @@ impl PostgresBroker {
             Ok(_row) => Ok(DatabasePing {
                 latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             }),
-            Err(error) => Err(BrokerOperationError::db_ping_failed(error)),
+            Err(error) => Err(DatabaseOperationError::database_ping_failed(error)),
         }
     }
 
@@ -2187,7 +2200,7 @@ impl PostgresBroker {
     /// - `min_responses` set: returns as soon as that many distinct workers
     ///   reply (fast fail-open liveness, e.g. `Some(1)` for a `/health` gate — a
     ///   healthy fleet answers in milliseconds; only a degraded fleet pays the
-    ///   full `timeout`).
+    ///   full `wait`).
     /// - neither set: waits the full window and enumerates every responder.
     ///
     /// A pong proves the replying worker's event loop is responsive *and* that
@@ -2206,12 +2219,10 @@ impl PostgresBroker {
     pub async fn ping_workers(
         &self,
         target_worker_id: Option<&str>,
-        timeout: std::time::Duration,
+        wait: std::time::Duration,
         min_responses: Option<usize>,
-    ) -> BrokerResult<Vec<WorkerPong>> {
-        if timeout.is_zero() {
-            return Err(ping_timeout_refused(&0));
-        }
+    ) -> DatabaseResult<Vec<WorkerPong>> {
+        let wait = checked_ping_wait(wait)?;
         if min_responses == Some(0) {
             return Err(ping_min_responses_refused(&0));
         }
@@ -2231,7 +2242,7 @@ impl PostgresBroker {
             target_worker_id: target_worker_id.map(str::to_owned),
         };
         let payload = serde_json::to_string(&request).map_err(|error| {
-            BrokerOperationError::worker_ping_failed(
+            DatabaseOperationError::worker_ping_failed(
                 WorkerPingStep::PayloadEncode,
                 BrokerOperationSource::Broker(BrokerError::Serialization(error)),
             )
@@ -2254,10 +2265,7 @@ impl PostgresBroker {
 
         let mut pongs: Vec<WorkerPong> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        loop {
-            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
-                break;
-            };
+        while let Some(remaining) = wait.checked_sub(start.elapsed()) {
             if remaining.is_zero() {
                 break;
             }
@@ -2267,7 +2275,7 @@ impl PostgresBroker {
                 // a full reply queue, are lost; the window goes on.
                 Ok(PayloadEvent::Gap | PayloadEvent::Overflowed) => continue,
                 Ok(PayloadEvent::Stopped) => {
-                    return Err(BrokerOperationError::worker_ping_failed(
+                    return Err(DatabaseOperationError::worker_ping_failed(
                         WorkerPingStep::ReplyWait,
                         BrokerOperationSource::Broker(BrokerError::ListenerClosed),
                     ));
@@ -2355,8 +2363,8 @@ impl PostgresBroker {
     }
 
     /// RUNNING tasks whose latest runner beat, or their start when they have
-    /// no beat, is older than `stale_threshold_minutes`. Read-only: the
-    /// reaper recovers stale tasks.
+    /// no beat, is older than `threshold_minutes`. Read-only: the reaper
+    /// recovers stale tasks.
     ///
     /// A threshold outside 0 to one year is `INVALID_INPUT` with no database
     /// call. At most [`TASK_LIST_BOUND`](crate::broker::task_lists::TASK_LIST_BOUND)
@@ -2366,10 +2374,10 @@ impl PostgresBroker {
     /// Mirrors `PostgresBroker.get_stale_tasks()` in the Python library.
     pub async fn get_stale_tasks(
         &self,
-        stale_threshold_minutes: i32,
-    ) -> BrokerResult<BoundedTaskList<StaleTaskRow>> {
-        let threshold = StaleMinutes::parse(i64::from(stale_threshold_minutes))
-            .map_err(|refused| refused.error())?;
+        threshold_minutes: i32,
+    ) -> DatabaseResult<BoundedTaskList<StaleTaskRow>> {
+        let threshold =
+            StaleMinutes::parse(i64::from(threshold_minutes)).map_err(|refused| refused.error())?;
         let minutes = threshold.minutes();
         let rows = self
             .read_main(
@@ -2396,7 +2404,7 @@ impl PostgresBroker {
     /// A stored `slots_down`, `class_capacity` or map column of another shape
     /// fails the read: `MONITORING_QUERY_FAILED`, not retryable, naming the
     /// worker and the column (Python `postgres.py:2961-3034`).
-    pub async fn list_worker_states(&self) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+    pub async fn list_worker_states(&self) -> DatabaseResult<Vec<WorkerStateSnapshot>> {
         let listed = self.list_worker_states_with_read_time().await?;
         Ok(listed.into_iter().map(|state| state.snapshot).collect())
     }
@@ -2408,7 +2416,7 @@ impl PostgresBroker {
     /// errors; reads only.
     pub(crate) async fn list_worker_states_with_read_time(
         &self,
-    ) -> BrokerResult<Vec<ListedWorkerState>> {
+    ) -> DatabaseResult<Vec<ListedWorkerState>> {
         let rows = self
             .read_main(&LIST_WORKER_STATES.bind().finish(), listed_worker_state_row)
             .await
@@ -2424,7 +2432,7 @@ impl PostgresBroker {
     pub async fn get_worker_state(
         &self,
         worker_id: &str,
-    ) -> BrokerResult<Option<WorkerStateSnapshot>> {
+    ) -> DatabaseResult<Option<WorkerStateSnapshot>> {
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_LATEST.bind().value(&worker_id).finish(),
@@ -2440,28 +2448,33 @@ impl PostgresBroker {
 
     /// State-snapshot history for one worker, newest first.
     ///
-    /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
-    /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// An unreadable stored row fails the read as in
+    /// `limit` of `None` returns all retained rows, at most
+    /// [`WORKER_HISTORY_ROW_BOUND`](crate::broker::WORKER_HISTORY_ROW_BOUND);
+    /// pass `Some(n)` to bound the fetch. A limit of 0 or less, or above the
+    /// bound, is `INVALID_INPUT`, with no database call. A worker that holds
+    /// more retained rows than the bound refuses the read of `None` with
+    /// `INVALID_INPUT`: no rows are returned in part. An unreadable stored row fails the read as in
     /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
     /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
         limit: Option<i64>,
-    ) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+    ) -> DatabaseResult<Vec<WorkerStateSnapshot>> {
         let limit = checked_history_limit(limit)?;
+        let fetch_limit = history_fetch_limit(limit);
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_HISTORY
                     .bind()
                     .value(&worker_id)
-                    .value(&limit)
+                    .value(&fetch_limit)
                     .finish(),
                 stored_worker_state,
             )
             .await
             .map_err(|error| monitoring_query_error("get_worker_state_history", error))?;
+        let rows = checked_history_rows(limit, rows)?;
         read_worker_snapshots("get_worker_state_history", rows)
     }
 
@@ -2476,7 +2489,7 @@ impl PostgresBroker {
     /// more is [`BoundedTaskList::Truncated`]. A database failure is
     /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_expired_tasks()` in the Python library.
-    pub async fn get_expired_tasks(&self) -> BrokerResult<BoundedTaskList<ExpiredTaskRow>> {
+    pub async fn get_expired_tasks(&self) -> DatabaseResult<BoundedTaskList<ExpiredTaskRow>> {
         let rows = self
             .read_main(&LIST_EXPIRED_TASKS.bind().finish(), expired_list_row)
             .await
@@ -2502,7 +2515,7 @@ impl PostgresBroker {
     /// dropped out of band after this broker saw it fails one probe with the
     /// `42883` refusal that names it (`TASK_INFO_QUERY_FAILED`); the next
     /// probe checks the publication again and falls back.
-    async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+    async fn raw_result_probe(&self, task_id: Uuid) -> DatabaseResult<RawResultProbe> {
         let open = self
             .core
             .pools()
@@ -2529,7 +2542,7 @@ impl PostgresBroker {
     /// A live row holds no result, so the live read takes the id, name and
     /// status only, as Python's `_probe_live_result_row`; a row that is not
     /// live is read from history.
-    async fn raw_result_probe_unstaged(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+    async fn raw_result_probe_unstaged(&self, task_id: Uuid) -> DatabaseResult<RawResultProbe> {
         let live = self
             .read_main(
                 &GET_RAW_RESULT_PROBE.bind().value(&task_id).finish(),
@@ -2543,7 +2556,7 @@ impl PostgresBroker {
         raw_result_from_live(row.id, row.task_name, &row.status)
     }
 
-    async fn history_raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+    async fn history_raw_result_probe(&self, task_id: Uuid) -> DatabaseResult<RawResultProbe> {
         let detail = self
             .fetch_history_detail(task_id)
             .await
@@ -2650,17 +2663,17 @@ mod rerun_family_error_tests {
 /// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
 /// history result is checked in [`history_task_info`]; the live row holds no
 /// result.
-fn task_info_history_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
+fn task_info_history_error(task_id: Uuid, error: BrokerError) -> DatabaseOperationError {
     match error {
         unreadable @ BrokerError::Serialization(_) => {
             let detail = unreadable.to_string();
-            BrokerOperationError::task_info_invalid_json(
+            DatabaseOperationError::task_info_invalid_json(
                 task_id,
                 &detail,
                 BrokerCheckCause::Error(unreadable),
             )
         }
-        other => BrokerOperationError::task_info_query_failed(
+        other => DatabaseOperationError::task_info_query_failed(
             task_id,
             BrokerOperationSource::Broker(other),
         ),
@@ -2711,7 +2724,7 @@ fn raw_result_from_live(
     task_id: Uuid,
     task_name: String,
     status: &str,
-) -> BrokerResult<RawResultProbe> {
+) -> DatabaseResult<RawResultProbe> {
     let status: crate::core::TaskStatus = status
         .parse()
         .map_err(|error| raw_result_operation_error(task_id, BrokerError::InvalidStatus(error)))?;
@@ -2740,7 +2753,7 @@ fn raw_result_from_live(
 fn raw_result_from_history_result(
     task_id: Uuid,
     history: HistoryTaskResult,
-) -> BrokerResult<RawResultProbe> {
+) -> DatabaseResult<RawResultProbe> {
     let status: crate::core::TaskStatus = history
         .status
         .parse()
@@ -2783,7 +2796,7 @@ fn raw_result_from_history_result(
 fn raw_result_from_history_detail(
     task_id: Uuid,
     detail: TaskDetailResult,
-) -> BrokerResult<RawResultProbe> {
+) -> DatabaseResult<RawResultProbe> {
     match detail {
         TaskDetailResult::Absent { reason, .. } => Ok(RawResultProbe::Absent(reason)),
         TaskDetailResult::Live { .. } => Ok(RawResultProbe::Retry),
@@ -2815,14 +2828,14 @@ fn raw_result_from_history_detail(
 
 /// The envelope text of a stored result: `None` for the JSON `null`; any
 /// other value than an object is `INVALID_JSON_PAYLOAD`.
-fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>> {
+fn stored_envelope_text(text: String) -> DatabaseResult<Option<StoredEnvelopeText>> {
     StoredEnvelopeText::parse(text).map_err(|refused| invalid_raw_result(refused.to_string()))
 }
 
 /// `INVALID_JSON_PAYLOAD` of a raw result read: a check of the core refused
 /// the stored result; `message` names the refusal.
-fn invalid_raw_result(message: String) -> BrokerOperationError {
-    BrokerOperationError::InvalidJsonPayload {
+fn invalid_raw_result(message: String) -> DatabaseOperationError {
+    DatabaseOperationError::InvalidJsonPayload {
         message,
         cause: Box::new(BrokerCheckCause::Check),
     }
@@ -2833,15 +2846,15 @@ fn invalid_raw_result(message: String) -> BrokerOperationError {
 /// every other failure is `TASK_INFO_QUERY_FAILED` with Python's message
 /// (`Broker error while retrieving task {task_id}: {error}`), retryable by
 /// the error's rule.
-fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> BrokerOperationError {
+fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> DatabaseOperationError {
     match error {
         unreadable @ (BrokerError::Serialization(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidStatus(_)) => BrokerOperationError::InvalidJsonPayload {
+        | BrokerError::InvalidStatus(_)) => DatabaseOperationError::InvalidJsonPayload {
             message: unreadable.to_string(),
             cause: Box::new(BrokerCheckCause::Error(unreadable)),
         },
-        other => BrokerOperationError::raw_result_query_failed(task_id, other),
+        other => DatabaseOperationError::raw_result_query_failed(task_id, other),
     }
 }
 
@@ -2852,7 +2865,9 @@ fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> BrokerOperat
 /// Errors: `INVALID_JSON_PAYLOAD`, not retryable, for an absent digest, an
 /// envelope that fails its version, digest or strict JSON check, and a value
 /// other than an object or `null`.
-fn history_result_envelope(detail: &HistoryTaskDetail) -> BrokerResult<Option<StoredEnvelopeText>> {
+fn history_result_envelope(
+    detail: &HistoryTaskDetail,
+) -> DatabaseResult<Option<StoredEnvelopeText>> {
     let checked = match history_result_text(detail) {
         Ok(None) => Ok(None),
         Ok(Some(text)) => StoredEnvelopeText::parse(text).map_err(|refused| refused.to_string()),
@@ -2863,7 +2878,7 @@ fn history_result_envelope(detail: &HistoryTaskDetail) -> BrokerResult<Option<St
             "History result envelope failed validation for task {}: {cause}",
             detail.task_id
         );
-        BrokerOperationError::task_info_invalid_json(
+        DatabaseOperationError::task_info_invalid_json(
             detail.task_id,
             &detail_text,
             BrokerCheckCause::Check,
@@ -2906,12 +2921,15 @@ fn history_task_info(
     include_result: bool,
     include_failed_reason: bool,
     include_attempts: bool,
-) -> BrokerResult<TaskInfo<StoredEnvelopeText>> {
+) -> DatabaseResult<TaskInfo<StoredEnvelopeText>> {
     let task_id = detail.task_id;
     let status = detail.status;
     let result = match include_result {
-        false => None,
-        true => history_result_envelope(&detail)?,
+        false => ResultSlot::NotRequested,
+        true => match history_result_envelope(&detail)? {
+            None => ResultSlot::NotStored,
+            Some(envelope) => ResultSlot::Stored(envelope),
+        },
     };
     let terminal_at = detail.terminal_at;
     // The snapshot holds the attempts oldest first; a task info lists them
@@ -2932,13 +2950,15 @@ fn history_task_info(
         task_id: detail.task_id,
         task_name: detail.task_name,
         status,
-        queue_name: detail.queue_name,
+        // History column queue_name.
+        queue: detail.queue_name,
         priority: detail.priority,
         retry_count: detail.retry_count as u32,
         max_retries: detail.max_retries as u32,
         next_retry_at: None,
         sent_at: detail.sent_at,
-        enqueued_at: detail.enqueued_at,
+        // History column enqueued_at: the time the row became due.
+        due_at: detail.enqueued_at,
         claimed_at: detail.claimed_at,
         started_at: detail.started_at,
         completed_at: (status == crate::core::TaskStatus::Completed).then_some(terminal_at),
@@ -3027,21 +3047,21 @@ fn list_shape_error(statement: &TypedStatement, shape: ListShapeError) -> Broker
 /// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
 /// `retryable` is the classification of the cause, as Python's
 /// `_operation_failed`.
-fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
+fn monitoring_query_error(operation: &str, error: BrokerError) -> DatabaseOperationError {
+    DatabaseOperationError::monitoring_query_failed(operation, BrokerOperationSource::Broker(error))
 }
 
 /// The error of a refused reply subscription of `ping_workers`, as Python
 /// (`clients/python/horsies/core/brokers/postgres.py:2821-2865`): a broker with no listener
 /// is `LISTENER_DISABLED`, not retryable; any other refusal is
 /// `WORKER_PING_FAILED` with the listener's retryable flag.
-fn worker_ping_subscribe_error(error: ListenError) -> BrokerOperationError {
+fn worker_ping_subscribe_error(error: ListenError) -> DatabaseOperationError {
     match error {
-        ListenError::NoSessionUrl => BrokerOperationError::ListenerDisabled {
+        ListenError::NoSessionUrl => DatabaseOperationError::ListenerDisabled {
             message: format!("ping_workers needs a listener: {error}"),
         },
         ListenError::PlanRefused(_) | ListenError::Subscribe(_) => {
-            BrokerOperationError::worker_ping_failed(
+            DatabaseOperationError::worker_ping_failed(
                 WorkerPingStep::ReplySubscribe,
                 BrokerOperationSource::Listen(error),
             )
@@ -3052,8 +3072,8 @@ fn worker_ping_subscribe_error(error: ListenError) -> BrokerOperationError {
 /// Build a `WORKER_PING_FAILED` broker error for the failed NOTIFY of a
 /// ping, with Python's message (`ping_workers failed: {error}`). `retryable`
 /// is the classification of the cause.
-fn worker_ping_statement_error(error: BrokerError) -> BrokerOperationError {
-    BrokerOperationError::worker_ping_failed(
+fn worker_ping_statement_error(error: BrokerError) -> DatabaseOperationError {
+    DatabaseOperationError::worker_ping_failed(
         WorkerPingStep::Notify,
         BrokerOperationSource::Broker(error),
     )
@@ -3061,8 +3081,8 @@ fn worker_ping_statement_error(error: BrokerError) -> BrokerOperationError {
 
 /// Build an `INVALID_INPUT` broker error: an argument was refused before
 /// anything ran, and the same argument is refused again.
-fn invalid_input(message: String) -> BrokerOperationError {
-    BrokerOperationError::invalid_input(message)
+fn invalid_input(message: String) -> DatabaseOperationError {
+    DatabaseOperationError::invalid_input(message)
 }
 
 /// Decode a pong notification, discarding malformed or mismatched replies.
@@ -3105,7 +3125,7 @@ fn decode_pong(
     })
 }
 
-use crate::worker::retry::stored_max_retries;
+use crate::worker::retry::{check_stored_timeout, stored_max_retries, timeout_refusal_message};
 
 /// The `max_retries` that enqueue stores, by Python's rule
 /// (`clients/python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
@@ -3122,6 +3142,45 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
             SendPart::TaskOptions,
             format!("task_options refused for {task_name}: {refusal}"),
+        ))
+    })
+}
+
+/// The `timeout_ms` of the options of a new send, judged with the rule of
+/// the dispatch ([`check_stored_timeout`]): a value that is not an int or
+/// not from `MIN_TASK_TIMEOUT_MS` to `MAX_TASK_TIMEOUT_MS` is
+/// `EnqueueContract` (`VALIDATION_FAILED`) with the dispatch's text, so no
+/// worker fails the run with `WORKER_SERIALIZATION_ERROR`. Absent and `null`
+/// pass (`check_new_send_timeout` judges a shared class). A schedule
+/// (`SendCommand::prepare`) does not apply it. Pure.
+fn enqueue_timeout(task_name: &str, task_options: Option<&str>) -> Result<(), BrokerError> {
+    check_stored_timeout(task_options).map_err(|refusal| {
+        BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+            SendPart::TaskOptions,
+            format!(
+                "task_options refused for {task_name}: {}",
+                timeout_refusal_message(refusal)
+            ),
+        ))
+    })
+}
+
+/// The `timeout_ms` rule of a shared class (`check_shared_timeout`) for the
+/// decoded options `options` of a new send of the class `execution`, as the
+/// task options refusal (`InvalidExecution`). Only a new send applies it: a
+/// schedule (`SendCommand::prepare`) and a rerun write such options, and
+/// the worker refuses the run, as before this rule. Pure.
+fn check_new_send_timeout(
+    execution: crate::core::task::execution::Execution,
+    options: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<(), BrokerError> {
+    crate::core::task::execution::check_shared_timeout(
+        execution,
+        options.and_then(|object| object.get("timeout_ms")),
+    )
+    .map_err(|invalid| {
+        BrokerError::EnqueueContract(EnqueueRefusal::from(
+            EnqueuePreparationError::InvalidExecution(invalid),
         ))
     })
 }
@@ -3252,27 +3311,27 @@ mod tests {
             .contains("FROM horsies_list_stale_tasks($1)"));
     }
 
-    /// Verify that get_task_info returns BrokerResult<TaskInfoRead>
+    /// Verify that get_task_info returns DatabaseResult<TaskInfoRead>
     /// and accepts include_result / include_failed_reason filter params.
     #[test]
     fn get_task_info_return_type_contract() {
         #[allow(unused, unreachable_code)]
         async fn _check(broker: &PostgresBroker) {
-            let _result: BrokerResult<TaskInfoRead> =
+            let _result: DatabaseResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), false, false).await;
-            let _result: BrokerResult<TaskInfoRead> =
+            let _result: DatabaseResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, false).await;
-            let _result: BrokerResult<TaskInfoRead> =
+            let _result: DatabaseResult<TaskInfoRead> =
                 broker.get_task_info(Uuid::nil(), true, true).await;
         }
     }
 
-    /// Verify that ping_database returns BrokerResult<DatabasePing>.
+    /// Verify that ping_database returns DatabaseResult<DatabasePing>.
     #[test]
     fn ping_database_return_type_contract() {
         #[allow(unused, unreachable_code)]
         async fn _check(broker: &PostgresBroker) {
-            let _result: BrokerResult<DatabasePing> = broker.ping_database().await;
+            let _result: DatabaseResult<DatabasePing> = broker.ping_database().await;
         }
     }
 
@@ -4167,10 +4226,13 @@ mod terminal_at_stamp_tests {
         seed(&pool, &id, "PENDING", None, None).await;
         let before = database_now(&pool).await;
 
-        let cancelled =
-            crate::monitoring::cancel_task(&broker, Uuid::parse_str(&id).unwrap(), false)
-                .await
-                .expect("cancel");
+        let cancelled = crate::monitoring::cancel_task(
+            &broker,
+            Uuid::parse_str(&id).unwrap(),
+            crate::monitoring::CancelPolicy::PendingOrClaimedOnly,
+        )
+        .await
+        .expect("cancel");
         assert_eq!(
             cancelled.was_status,
             crate::core::types::status::TaskStatus::Pending
@@ -4330,7 +4392,7 @@ mod broker_operation_error_tests {
     //! classification of its cause (`core/brokers/postgres.py`,
     //! `_operation_failed`).
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
     use crate::db::StatementFailure;
 
     /// No server listens on port 1, so a call that reached a pool would fail
@@ -4362,7 +4424,7 @@ mod broker_operation_error_tests {
 
     #[tokio::test]
     async fn connect_with_refuses_a_config_rule_as_not_retryable() {
-        let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
+        let config = PostgresConfig::from_database_url("mysql://horsies@127.0.0.1:1/horsies");
 
         let refused = PostgresBroker::connect_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4404,14 +4466,27 @@ mod broker_operation_error_tests {
     }
 
     #[tokio::test]
-    async fn ping_workers_refuses_a_zero_timeout_as_invalid_input() {
+    async fn ping_workers_refuses_a_zero_wait_as_invalid_input() {
         let broker = unreachable_broker();
 
         let Err(refused) = broker.ping_workers(None, Duration::ZERO, None).await else {
-            panic!("a zero timeout must be refused");
+            panic!("a zero wait must be refused");
         };
 
-        assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
+    }
+
+    #[tokio::test]
+    async fn ping_workers_refuses_a_wait_above_the_bound_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_PING_WAIT_BOUND + Duration::from_millis(1);
+        let Err(refused) = broker.ping_workers(None, over, None).await else {
+            panic!("a wait above the bound must be refused");
+        };
+
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
         assert!(!refused.retryable());
     }
 
@@ -4426,7 +4501,7 @@ mod broker_operation_error_tests {
             panic!("min_responses of 0 must be refused");
         };
 
-        assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
         assert!(!refused.retryable());
     }
 
@@ -4445,7 +4520,7 @@ mod broker_operation_error_tests {
                 panic!("a broker without a listener cannot ping");
             };
 
-            assert_eq!(refused.code(), BrokerErrorCode::ListenerDisabled);
+            assert_eq!(refused.code(), DatabaseErrorCode::ListenerDisabled);
             assert!(!refused.retryable());
         }
     }
@@ -4459,9 +4534,21 @@ mod broker_operation_error_tests {
             let Err(refused) = broker.get_worker_state_history("w1", Some(limit)).await else {
                 panic!("limit {limit} must be refused");
             };
-            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{limit}");
+            assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput, "{limit}");
             assert!(!refused.retryable(), "{limit}");
         }
+    }
+
+    #[tokio::test]
+    async fn worker_state_history_refuses_a_limit_above_the_bound() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_HISTORY_ROW_BOUND + 1;
+        let Err(refused) = broker.get_worker_state_history("w1", Some(over)).await else {
+            panic!("limit {over} must be refused");
+        };
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
     }
 
     /// `close` returns the core pools to `Idle`, and the next operation opens
@@ -4480,7 +4567,7 @@ mod broker_operation_error_tests {
             panic!("no server listens on the unreachable URL");
         };
 
-        assert_eq!(failed.code(), BrokerErrorCode::DbPingFailed);
+        assert_eq!(failed.code(), DatabaseErrorCode::DatabasePingFailed);
         assert!(
             !failed.message().contains("pool is closed"),
             "the ping must run on new pools: {}",
@@ -4546,8 +4633,10 @@ mod connect_tests {
 
     #[tokio::test]
     async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
-        let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
-        config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
+        let mut config = PostgresConfig::from_database_url(UNREACHABLE_URL);
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies@127.0.0.1:2/horsies".to_owned(),
+        };
 
         let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4568,7 +4657,7 @@ mod result_wait_tests {
     //! listener gap, and polling with no listener or when the listener stops
     //! (`clients/python/horsies/core/brokers/postgres.py:3265-3285`).
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
     use crate::broker::wait_limit::MAX_WAIT_LIMIT_MS;
     use crate::test_support::sql::{self, TestPoolOptions};
     use serial_test::serial;
@@ -4598,7 +4687,7 @@ mod result_wait_tests {
             else {
                 panic!("limit {limit:?} must be refused");
             };
-            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{limit:?}");
+            assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput, "{limit:?}");
             assert!(!refused.retryable());
         }
     }
@@ -4711,19 +4800,19 @@ mod result_wait_tests {
     }
 
     /// An observe-only broker keeps its listener, as Python's web tool
-    /// (`run_schema_migrations=False`): its waits subscribe and it can ping.
+    /// (`SchemaMode.OBSERVE_ONLY`): its waits subscribe and it can ping.
     #[tokio::test]
     async fn an_observe_only_broker_keeps_its_listener() {
         let config = PostgresConfig {
             database_url: crate::test_support::migrated_database_url().await,
-            session_database_url: None,
+            session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -4784,7 +4873,7 @@ mod stale_and_expired_list_tests {
     //! to one year, a bound of `TASK_LIST_BOUND` rows, Python's verdict and
     //! order, and the expired record's `enqueued_at` and `expired_for`.
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
     use crate::test_support::history::{covered_beat_instant, SeedInstant};
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 
@@ -4803,7 +4892,7 @@ mod stale_and_expired_list_tests {
             let Err(refused) = broker.get_stale_tasks(minutes).await else {
                 panic!("threshold {minutes} must be refused");
             };
-            assert_eq!(refused.code(), BrokerErrorCode::InvalidInput, "{minutes}");
+            assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput, "{minutes}");
         }
     }
 
@@ -4899,11 +4988,11 @@ mod stale_and_expired_list_tests {
             .filter(|row| row.task_name == task_name)
             .collect();
         assert_eq!(
-            ours.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ours.iter().map(|row| row.task_id).collect::<Vec<_>>(),
             vec![beatless, old_beat]
         );
-        assert_eq!(ours[0].last_heartbeat, None);
-        assert!(ours[1].last_heartbeat.is_some());
+        assert_eq!(ours[0].last_heartbeat_at, None);
+        assert!(ours[1].last_heartbeat_at.is_some());
         clean(&pool, &task_name).await;
     }
 
@@ -4925,11 +5014,11 @@ mod stale_and_expired_list_tests {
             .filter(|row| row.task_name == task_name)
             .collect();
         assert_eq!(ours.len(), 1);
-        assert_eq!(ours[0].id, expired);
+        assert_eq!(ours[0].task_id, expired);
         assert!(
-            ours[0].expired_for_us >= 120_000_000,
-            "{}",
-            ours[0].expired_for_us
+            ours[0].expired_for >= std::time::Duration::from_secs(120),
+            "{:?}",
+            ours[0].expired_for
         );
         assert!(ours[0].enqueued_at < ours[0].good_until);
         clean(&pool, &task_name).await;
@@ -4948,9 +5037,9 @@ mod enqueue_task_options_tests {
     fn policy(max_retries: u32, extra: &str) -> String {
         let intervals = vec!["60"; max_retries as usize].join(", ");
         format!(
-            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [{intervals}],
+            r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals_seconds": [{intervals}],
                 "backoff_strategy": "fixed", "jitter": false,
-                "auto_retry_for": ["STORAGE_ERROR"]{extra}}},
+                "retry_for": ["STORAGE_ERROR"]{extra}}},
               "good_until": null, "timeout_ms": null, "execution": "ISOLATED",
               "cancel_grace_ms": null}}"#
         )
@@ -5001,8 +5090,10 @@ mod enqueue_task_options_tests {
     fn a_send_command_holds_the_values_that_a_send_of_its_texts_binds() {
         let options = policy(4, "")
             .replace("\"ISOLATED\"", "\"SHARED_ASYNC\"")
-            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000");
+            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000")
+            .replace("\"timeout_ms\": null", "\"timeout_ms\": 30000");
         assert!(options.contains("\"cancel_grace_ms\": 5000"), "{options}");
+        assert!(options.contains("\"timeout_ms\": 30000"), "{options}");
         for (retention, retain_rerun_input) in [
             (EnqueueRetention::Default, false),
             (EnqueueRetention::Forever, true),
@@ -5110,6 +5201,57 @@ mod enqueue_task_options_tests {
         }
     }
 
+    /// Only a new send refuses a shared class with no `timeout_ms`. A send
+    /// command (the command of a schedule) keeps such options, and the
+    /// worker refuses the run.
+    #[test]
+    fn only_a_new_send_refuses_a_shared_class_with_no_timeout() {
+        let options = r#"{"execution": "SHARED_THREAD", "timeout_ms": null}"#;
+        let command = SendCommand::prepare(
+            "tasks.report",
+            "default",
+            100,
+            "{}",
+            Some(options),
+            EnqueueRetention::Forever,
+            false,
+        )
+        .expect("a send command takes a shared class with no timeout");
+        assert_eq!(
+            command.execution,
+            crate::core::task::execution::Execution::SharedThread
+        );
+        assert_eq!(command.task_options.as_deref(), Some(options));
+
+        let send = CheckedSend::check(
+            "tasks.report",
+            "{}",
+            "default",
+            100,
+            None,
+            None,
+            None,
+            Some(options),
+            Some(Uuid::from_u128(7)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_send| ());
+        let expected = EnqueueRefusal {
+            part: SendPart::TaskOptions,
+            message: "task_options refused: timeout_ms is absent for execution SHARED_THREAD; \
+                      a shared class requires timeout_ms"
+                .to_owned(),
+            cause: crate::broker::error::EnqueueRefusalCause::RuleRefused,
+        };
+        match send {
+            Err(BrokerError::EnqueueContract(refusal)) => assert_eq!(refusal, expected),
+            other => panic!("a new send of a shared class with no timeout gave {other:?}"),
+        }
+    }
+
     #[test]
     fn a_valid_policy_stores_its_limit() {
         for limit in [1, 3, 20] {
@@ -5142,15 +5284,111 @@ mod enqueue_task_options_tests {
         }
     }
 
+    use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+
+    fn check_with_options(options: &str) -> Result<(), BrokerError> {
+        CheckedSend::check(
+            "t",
+            "{}",
+            "default",
+            50,
+            None,
+            None,
+            None,
+            Some(options),
+            Some(Uuid::from_u128(1)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_| ())
+    }
+
+    fn refusal_text(result: Result<(), BrokerError>) -> String {
+        match result {
+            Err(BrokerError::EnqueueContract(refusal)) => refusal.message,
+            other => panic!("expected the task options refusal, got {other:?}"),
+        }
+    }
+
+    /// A `timeout_ms` that is not an int is refused with the dispatch's text.
+    #[test]
+    fn a_send_refuses_a_timeout_that_is_not_an_int() {
+        for (options, found) in [
+            (r#"{"timeout_ms": "30s"}"#, "str"),
+            (r#"{"timeout_ms": 1500.5}"#, "float"),
+            (r#"{"timeout_ms": true}"#, "bool"),
+            (r#"{"timeout_ms": [1000]}"#, "list"),
+            (r#"{"timeout_ms": {"a": 1}}"#, "dict"),
+        ] {
+            let text = refusal_text(check_with_options(options));
+            assert!(
+                text.contains(&format!("stored timeout_ms is a {found}, not an int")),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// An int below the minimum is refused, whatever the class.
+    #[test]
+    fn a_send_refuses_a_timeout_below_the_minimum() {
+        for options in [
+            r#"{"timeout_ms": 999}"#,
+            r#"{"timeout_ms": -1}"#,
+            r#"{"execution": "ISOLATED", "timeout_ms": 5}"#,
+        ] {
+            let text = refusal_text(check_with_options(options));
+            assert!(
+                text.contains(&format!(
+                    "stored timeout_ms is below {MIN_TASK_TIMEOUT_MS} ms"
+                )),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// An int above the maximum is refused, a value above `u64::MAX`
+    /// included.
+    #[test]
+    fn a_send_refuses_a_timeout_above_the_maximum() {
+        let above = MAX_TASK_TIMEOUT_MS + 1;
+        for options in [
+            format!(r#"{{"timeout_ms": {above}}}"#),
+            r#"{"timeout_ms": 18446744073709551615}"#.to_owned(),
+        ] {
+            let text = refusal_text(check_with_options(&options));
+            assert!(
+                text.contains(&format!(
+                    "stored timeout_ms is above the limit of {MAX_TASK_TIMEOUT_MS} ms"
+                )),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// The minimum, the maximum, an absent value and `null` are accepted.
+    #[test]
+    fn a_send_accepts_the_bounds_and_no_timeout() {
+        for options in [
+            format!(r#"{{"timeout_ms": {MIN_TASK_TIMEOUT_MS}}}"#),
+            format!(r#"{{"timeout_ms": {MAX_TASK_TIMEOUT_MS}}}"#),
+            r#"{"timeout_ms": null}"#.to_owned(),
+            "{}".to_owned(),
+        ] {
+            check_with_options(&options).unwrap_or_else(|error| panic!("{options}: {error:?}"));
+        }
+    }
+
     /// What the core writes for a task is what its enqueue accepts.
     #[test]
     fn the_core_written_options_are_accepted() {
         let options = crate::core::TaskOptions {
             task_name: "t".to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User(
-                crate::core::UserCode::parse("X").expect("X is a user code"),
+            retry_for: Some(vec![crate::core::TaskErrorCode::Custom(
+                crate::core::CustomCode::parse("X").expect("X is a custom code"),
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
@@ -5476,7 +5714,7 @@ mod task_info_code_tests {
     //! `:4973-4977`): only a stored result that fails its check is
     //! `INVALID_JSON_PAYLOAD`.
     use super::*;
-    use crate::broker::result_types::BrokerErrorCode;
+    use crate::broker::result_types::DatabaseErrorCode;
     use crate::db::StatementFailure;
 
     /// The task of the reads in these tests.
@@ -5492,7 +5730,7 @@ mod task_info_code_tests {
         let error =
             task_info_history_error(TASK_INFO_TEST_ID, BrokerError::Serialization(parse_error));
 
-        assert_eq!(error.code(), BrokerErrorCode::InvalidJsonPayload);
+        assert_eq!(error.code(), DatabaseErrorCode::InvalidJsonPayload);
         assert!(!error.retryable());
         // Python's message of a task info read names the task.
         assert_eq!(
@@ -5505,7 +5743,7 @@ mod task_info_code_tests {
     /// `TASK_INFO_QUERY_FAILED`, retryable, with Python's message.
     #[test]
     fn a_task_that_moved_on_every_pass_is_retryable_with_python_s_message() {
-        let error = BrokerOperationError::task_info_query_failed(
+        let error = DatabaseOperationError::task_info_query_failed(
             TASK_INFO_TEST_ID,
             BrokerOperationSource::TaskInfoMoved {
                 task_id: TASK_INFO_TEST_ID,
@@ -5513,7 +5751,7 @@ mod task_info_code_tests {
             },
         );
 
-        assert_eq!(error.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert_eq!(error.code(), DatabaseErrorCode::TaskInfoQueryFailed);
         assert!(error.retryable());
         assert!(error.message().starts_with(&format!(
             "get_task_info failed for {TASK_INFO_TEST_ID}: task {TASK_INFO_TEST_ID} was absent"
@@ -5527,7 +5765,7 @@ mod task_info_code_tests {
             BrokerError::HistoryReadContract("unknown task-attempt outcome".to_owned()),
         ] {
             let mapped = task_info_history_error(TASK_INFO_TEST_ID, error);
-            assert_eq!(mapped.code(), BrokerErrorCode::TaskInfoQueryFailed);
+            assert_eq!(mapped.code(), DatabaseErrorCode::TaskInfoQueryFailed);
             assert!(!mapped.retryable());
         }
     }
@@ -5544,7 +5782,7 @@ mod task_info_code_tests {
                 }),
             }),
         );
-        assert_eq!(timed_out.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert_eq!(timed_out.code(), DatabaseErrorCode::TaskInfoQueryFailed);
         assert!(timed_out.retryable());
 
         let undecodable = task_info_history_error(
@@ -5553,7 +5791,7 @@ mod task_info_code_tests {
                 statement: "live_task_exists",
             }),
         );
-        assert_eq!(undecodable.code(), BrokerErrorCode::TaskInfoQueryFailed);
+        assert_eq!(undecodable.code(), DatabaseErrorCode::TaskInfoQueryFailed);
         assert!(!undecodable.retryable());
     }
 
@@ -5616,7 +5854,7 @@ mod task_info_code_tests {
         };
         assert_eq!(
             refused.code(),
-            BrokerErrorCode::InvalidJsonPayload,
+            DatabaseErrorCode::InvalidJsonPayload,
             "{shown:.40}"
         );
         assert!(!refused.retryable(), "{shown:.40}");
@@ -5714,19 +5952,29 @@ mod task_info_code_tests {
                 false,
             )
             .unwrap_or_else(|refused| panic!("{payload}: {refused}"));
-            assert_eq!(
-                info.result.as_ref().map(StoredEnvelopeText::as_str),
-                Some(payload),
-            );
+            match &info.result {
+                ResultSlot::Stored(envelope) => assert_eq!(envelope.as_str(), payload),
+                other => panic!("{payload}: expected a stored result, got {other:?}"),
+            }
         }
     }
 
     /// Python: a stored JSON `null` is no result.
     #[test]
-    fn a_history_result_of_null_is_no_result() {
+    fn a_history_result_of_null_is_not_stored() {
         let info = history_task_info(history_detail_with_result(b"null"), true, false, false)
             .expect("a stored null reads");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotStored);
+    }
+
+    /// A history row with no result payload stores no result.
+    #[test]
+    fn a_history_row_without_a_payload_is_not_stored() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.result_payload = None;
+        let info =
+            history_task_info(detail, true, false, false).expect("a row without a payload reads");
+        assert_eq!(info.result, ResultSlot::NotStored);
     }
 
     /// Python: a stored result that is neither an object nor `null` is
@@ -5743,7 +5991,7 @@ mod task_info_code_tests {
     fn a_history_result_is_not_read_unless_asked() {
         let info = history_task_info(history_detail_with_result(b"[]"), false, false, false)
             .expect("a result that is not read is not checked");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotRequested);
     }
 }
 

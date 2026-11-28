@@ -6,7 +6,7 @@ use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
+use crate::core::{OperationalCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -308,8 +308,8 @@ impl ArgsFromConflict {
                     "task_index": task_index,
                 }),
             )),
-            ..TaskError::builtin(
-                OperationalErrorCode::WorkflowEnqueueFailed,
+            ..TaskError::built_in(
+                OperationalCode::WorkflowEnqueueFailed,
                 format!(
                     "args_from key '{}' conflicts with static kwarg ({node})",
                     self.key
@@ -443,7 +443,7 @@ pub enum ArgsFromEntryRefused {
 /// The `inner` result envelope of the kwarg `name`, as its text, when `value` is an `args_from` entry;
 /// `None` when it is not one. An entry is an object with `ARGS_FROM_ENVELOPE_KEY: true`; it must have a
 /// text `source_task_name`, a text or null `source_definition_key`, an `inner` value and no other key.
-/// The receiving `TaskResult` field decodes the envelope with its own type (Python
+/// The receiving `TaskOutcome` parameter decodes the envelope with its own type (Python
 /// `core/worker/child_runner.py:1362-1436`).
 ///
 /// `value` is JSON, so its members read unless it is not an object.
@@ -497,6 +497,35 @@ pub(crate) fn args_from_inner_text<'a>(
         .ok_or_else(|| ArgsFromEntryRefused::MissingInner {
             kwarg: name.to_owned(),
         })
+}
+
+/// The node that an `args_from` entry takes its result from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArgsFromSource {
+    /// A task node: the entry has no definition key. The text is its task name.
+    Task(String),
+    /// A sub-workflow node: the entry has a definition key.
+    SubWorkflow,
+}
+
+/// The source of the `args_from` entry `value`, or `None` when `value` is not an
+/// entry that [`args_from_inner_text`] accepts. Pure.
+pub(crate) fn args_from_source(value: &RawValue) -> Option<ArgsFromSource> {
+    let entry = object_members(value.get()).ok()?;
+    let member = |key: &str| {
+        entry
+            .iter()
+            .find(|(member_name, _)| member_name == key)
+            .map(|(_, text)| *text)
+    };
+    match member("source_definition_key").map(RawValue::get) {
+        None | Some("null") => {}
+        Some(_) => return Some(ArgsFromSource::SubWorkflow),
+    }
+    let name = member("source_task_name")?;
+    serde_json::from_str::<String>(name.get())
+        .ok()
+        .map(ArgsFromSource::Task)
 }
 
 /// Whether `value` is a JSON string. A raw value starts at its first
@@ -586,7 +615,7 @@ pub(crate) fn missing_result_error(
     let node = node_id.unwrap_or("-");
     TaskError {
         exception: None,
-        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        error_code: OperationalCode::ResultDeserializationError.into(),
         data: Some(crate::core::codec::JsonText::of_engine_value(&serde_json::json!({ "dependency_index": dep_idx }))),
         message: Some(format!(
             "Dependency node {node} (index {dep_idx}, task {task_name}) is {status} with no stored result"
@@ -596,8 +625,8 @@ pub(crate) fn missing_result_error(
 }
 
 fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
-    TaskError::builtin(
-        OperationalErrorCode::ResultDeserializationError,
+    TaskError::built_in(
+        OperationalCode::ResultDeserializationError,
         format!(
             "failed to parse upstream task result at index {}: {}",
             dep_idx, error

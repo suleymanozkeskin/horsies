@@ -25,8 +25,8 @@ describe('task search validation', () => {
   });
 
   it('keeps an allowlisted sort column and direction', () => {
-    expect(validateTaskSearch({ sort: 'exec_s', dir: 'asc' })).toEqual({
-      sort: 'exec_s',
+    expect(validateTaskSearch({ sort: 'execution_seconds', dir: 'asc' })).toEqual({
+      sort: 'execution_seconds',
       dir: 'asc',
     });
   });
@@ -64,8 +64,8 @@ describe('task search validation', () => {
   });
 
   it('round-trips one or many error categories', () => {
-    expect(validateTaskSearch({ error_category: 'DOMAIN' })).toEqual({
-      error_category: ['DOMAIN'],
+    expect(validateTaskSearch({ error_category: 'CUSTOM' })).toEqual({
+      error_category: ['CUSTOM'],
     });
     expect(
       validateTaskSearch({ error_category: ['OPERATIONAL', 'OUTCOME'] })
@@ -86,7 +86,7 @@ describe('filters extracted from the URL', () => {
       status: ['FAILED'],
       worker: 'box-1',
       retried: 'true',
-      sort: 'exec_s',
+      sort: 'execution_seconds',
       page: '2',
     });
     expect(filtersFromSearch(search)).toEqual({
@@ -109,12 +109,12 @@ describe('filters extracted from the URL', () => {
 
   it('counts an error category as an active filter', () => {
     expect(
-      hasActiveFilters(validateTaskSearch({ error_category: 'DOMAIN' }))
+      hasActiveFilters(validateTaskSearch({ error_category: 'CUSTOM' }))
     ).toBe(true);
   });
 
   it('reports no active filters for a sort-only URL', () => {
-    expect(hasActiveFilters(validateTaskSearch({ sort: 'exec_s' }))).toBe(false);
+    expect(hasActiveFilters(validateTaskSearch({ sort: 'execution_seconds' }))).toBe(false);
   });
 
   it('reports active filters once any dimension is set', () => {
@@ -130,7 +130,7 @@ describe('workflow search validation', () => {
     });
   });
 
-  it('accepts node index zero — task_index is zero-based', () => {
+  it('accepts node index zero — node_index is zero-based', () => {
     expect(validateWorkflowSearch({ run: 'w1', node: 0 })).toEqual({
       run: 'w1',
       node: 0,

@@ -53,7 +53,7 @@ use crate::db::Transience;
 use crate::telemetry::labels::{
     FleetQuery, FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus, TelemetryPart,
 };
-use crate::{ClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
+use crate::{ExecutionClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
 
 #[cfg(feature = "web")]
 pub(crate) use collector::log_recorded;
@@ -134,8 +134,8 @@ pub struct FleetState {
     pub oldest_pending: FleetPart<OldestPending>,
     pub workers: FleetPart<FleetWorkers>,
     /// Whether a live worker serves each pending (queue, class): the fleet
-    /// check, the read of `crate::PostgresBroker::get_class_coverage`.
-    pub class_coverage: FleetPart<ClassCoverage>,
+    /// check, the read of `crate::PostgresBroker::get_execution_class_coverage`.
+    pub class_coverage: FleetPart<ExecutionClassCoverage>,
     pub workflows: FleetPart<WorkflowCounts>,
     pub schedules: FleetPart<ScheduleRuns>,
     pub schema_version: FleetPart<SchemaVersion>,
@@ -213,7 +213,7 @@ pub struct OldestPending {
 pub struct StreamOldest {
     pub queue_name: String,
     pub execution: Execution,
-    /// `OldestWaiting` with the wait of the oldest due row, or `NoneDue` when
+    /// `Due` with the wait of the oldest due row, or `NoneDue` when
     /// every row is due later.
     pub wait: StreamWait,
 }
@@ -221,7 +221,7 @@ pub struct StreamOldest {
 /// The live workers and their seats, read at `checked_at` (database time).
 ///
 /// A worker is live while its latest state snapshot is at most
-/// `WORKER_STATE_LIVE_WINDOW_S` old.
+/// `WORKER_STATE_LIVE_WINDOW_SECONDS` old.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetWorkers {
     pub checked_at: DateTime<Utc>,

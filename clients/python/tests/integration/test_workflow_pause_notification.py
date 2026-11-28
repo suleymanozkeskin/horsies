@@ -1,6 +1,6 @@
 """Workflow pause: the workflow_done notification comes from the status trigger.
 
-Both pause paths (the handle's pause_workflow and the engine's on_error=pause)
+Both pause paths (the handle's pause_workflow_async and the engine's on_error=pause)
 change each paused workflow from RUNNING to PAUSED in one transaction. The
 status trigger sends one workflow_done per paused workflow at commit; the
 pause paths send no NOTIFY of their own. The handle's pause runs on a broker
@@ -25,7 +25,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.workflows.lifecycle import pause_workflow
+from horsies.core.workflows.lifecycle import pause_workflow_async
 from tests.integration.autocommit_support import proxied_url, upstream_of
 from tests.integration.conftest import DB_URL
 from tests.integration.round_trip_proxy import RoundTripProxy
@@ -133,7 +133,7 @@ async def test_handle_pause_notifies_each_paused_workflow_through_the_trigger(
         PostgresConfig(database_url=SecretStr(proxied_url(db_url, proxy))),
     )
     try:
-        paused = await pause_workflow(proxied, uuid.UUID(parent_id))
+        paused = await pause_workflow_async(proxied, uuid.UUID(parent_id))
     finally:
         _ = await proxied.close_async()
 

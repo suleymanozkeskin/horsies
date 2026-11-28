@@ -72,10 +72,10 @@ use crate::broker::TaskWorkflowNode;
 use crate::core::task::Execution;
 use crate::core::BuiltInTaskCode;
 use crate::events::{
-    AttemptEnd, AttemptEnded, AttemptNumber, Event, RunTrace, WorkerDecision, WorkerIdText,
+    AnyEvent, AttemptEnd, AttemptEnded, AttemptNumber, RunTrace, WorkerDecision, WorkerIdText,
     WorkflowPlace,
 };
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::worker::executor::protocol::SpanReadCounts;
 
 /// What the handler child does for an attempt that the worker ended.
@@ -125,7 +125,7 @@ pub struct EndedAttempt<'a> {
     pub attempt: AttemptNumber,
     /// The worker that claimed the task and ended the attempt.
     pub worker_id: &'a str,
-    /// The kind of the child that ran the attempt.
+    /// The execution class of the child that ran the attempt.
     pub execution: Execution,
     /// The workflow node of the task.
     pub workflow: EndedWorkflow,
@@ -166,7 +166,7 @@ pub(super) trait NodeReads: Send + Sync {
 /// child, or none when this process has no producer handle.
 pub(super) enum ChildNodeReads {
     /// `PostgresBroker::read_task_workflow_node` on the producer handle.
-    Handle(Arc<CoreHandle>),
+    Handle(Arc<CoreConnection>),
     /// The child host published no producer handle in this process: every
     /// read fails.
     NoHandle,
@@ -431,13 +431,13 @@ impl StartedSpans {
     /// task goes to the node read queue; a full queue makes its span at
     /// once with [`EndedWorkflow::WorkflowNotKnown`], counted `not_read`.
     /// Never waits.
-    pub(super) fn step(&self, event: &Event) -> EndedSpanStep {
+    pub(super) fn step(&self, event: &AnyEvent) -> EndedSpanStep {
         let reader = match self {
             StartedSpans::Off => return EndedSpanStep::SpansOff,
             StartedSpans::On(reader) => reader,
         };
         // Every other event type of the union is not an end by the worker.
-        let Event::AttemptEnded(ended) = event else {
+        let AnyEvent::AttemptEnded(ended) = event else {
             return EndedSpanStep::NotEndedByWorker;
         };
         let Some(facts) = DecidedFacts::of(&ended.end) else {
@@ -601,7 +601,7 @@ struct DecidedFacts<'a> {
     error_code: &'a BuiltInTaskCode,
     trace: &'a RunTrace,
     placed_at: DateTime<Utc>,
-    child_kind: Execution,
+    child_execution: Execution,
     worker_id: &'a WorkerIdText,
     workflow: WorkflowPlace,
 }
@@ -617,7 +617,7 @@ impl<'a> DecidedFacts<'a> {
                 error_code,
                 trace,
                 placed_at,
-                child_kind,
+                child_execution,
                 worker_id,
                 workflow,
             } => Some(DecidedFacts {
@@ -625,7 +625,7 @@ impl<'a> DecidedFacts<'a> {
                 error_code,
                 trace,
                 placed_at: *placed_at,
-                child_kind: *child_kind,
+                child_execution: *child_execution,
                 worker_id,
                 workflow: *workflow,
             }),
@@ -651,7 +651,7 @@ fn attempt_of<'a>(
         queue_name: ended.queue.as_str(),
         attempt: ended.attempt,
         worker_id: facts.worker_id.as_str(),
-        execution: facts.child_kind,
+        execution: facts.child_execution,
         workflow,
         carrier,
         reason: facts.reason,

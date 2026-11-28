@@ -166,7 +166,7 @@ E2E_WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
             pool=IsolatedPool(
                 min_size=SET_POOLS_ISOLATED_BOUNDS[0],
                 max_size=PoolSize(connections=SET_POOLS_ISOLATED_BOUNDS[1]),
-                check=False,
+                pre_ping=False,
             ),
             task_send_pool=PoolSize(connections=SET_POOLS_ISOLATED_TASK_SEND_POOL),
         ),

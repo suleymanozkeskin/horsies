@@ -18,8 +18,8 @@
 //!   pool holds `pool_size + max_overflow`. The reserve of the reaper and the
 //!   per-task writes ([`crate::db::WORKER_RESERVED_CONNECTIONS`]) is kept
 //!   inside that size, so it adds no term;
-//! - session pool: a pool of its own on `session_database_url` only when that
-//!   URL differs from `database_url`, sized as the worker pool (the broker
+//! - session pool: a pool of its own on a separate session database only
+//!   when its URL differs from `database_url`, sized as the worker pool (the broker
 //!   builds both from one config; Python's session engine is sized the same
 //!   way and Python does not count it);
 //! - listener: one dedicated connection on the session URL carries every
@@ -44,14 +44,15 @@ use std::time::Duration;
 
 use crate::broker::core_rows::{column, one_row, StatementLog};
 use crate::broker::{BrokerError, PostgresBroker};
+use crate::core::config::worker_profile::input::ProfileValueRefused;
 use crate::core::config::worker_profile::{
-    profile_path, quoted_profile_name, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting,
-    WorkerProfile,
+    checked_worker_profiles, profile_path, quoted_profile_name, IsolatedSetting,
+    SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
-use crate::core::error::{ErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 
 /// Connections of the process listener of a worker: one connection carries
 /// every LISTEN of the process.
@@ -294,11 +295,12 @@ impl ModePools {
 /// The session pool of a worker process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPoolTerm {
-    /// `session_database_url` is absent or equal to `database_url`: session
-    /// work takes connections of the worker pool, so there is no term.
+    /// The session database is `database_url`, or a separate URL equal to
+    /// it: session work takes connections of the worker pool, so there is no
+    /// term.
     SharedWithWorkerPool,
-    /// A pool of its own on `session_database_url` of up to `max_size`
-    /// connections.
+    /// A pool of its own on the URL of a separate session database, of up
+    /// to `max_size` connections.
     Separate { max_size: u32 },
 }
 
@@ -536,7 +538,7 @@ fn exceeds_server_error(
         profile_path(name),
         exceeds_server_text(need, limit)
     ))
-    .with_code(ErrorCode::CheckWorkerConnections)
+    .with_code(HorsiesErrorCode::CheckWorkerConnections)
     .with_note(need.formula())
     .with_note(need.task_sends_note())
     .with_help(CONNECTIONS_HELP)
@@ -566,7 +568,7 @@ pub fn worker_connection_errors(
 /// The error of a limit that was not read. Pure.
 pub fn connection_limit_unreadable_error(cause: &ConnectionLimitUnreadable) -> HorsiesError {
     HorsiesError::new("the server connection limit could not be read")
-        .with_code(ErrorCode::CheckWorkerConnections)
+        .with_code(HorsiesErrorCode::CheckWorkerConnections)
         .with_note(cause.to_string())
         .with_help(LIMIT_UNREADABLE_HELP)
 }
@@ -607,6 +609,9 @@ async fn read_and_compare(
 /// broker (the Rust client's `check_live`; Python
 /// `Horsies._check_worker_connections`).
 ///
+/// - A profile value outside its bound: reads nothing and returns the
+///   refusal of each such value (`CONFIG_INVALID_WORKER_PROFILE`, with its
+///   path), the refusals of `AppConfig::validate`.
 /// - No worker profile, or PgBouncer transaction mode: reads nothing and
 ///   returns no error.
 /// - Otherwise reads the limit once through `broker` and returns one error
@@ -618,11 +623,18 @@ pub async fn check_worker_connections(
     config: &AppConfig,
     broker: &PostgresBroker,
 ) -> Vec<HorsiesError> {
-    match limit_read(&config.worker_profiles, &config.broker) {
-        LimitRead::NotNeeded => Vec::new(),
-        LimitRead::Needed => {
-            read_and_compare(&config.worker_profiles, &config.broker, broker).await
+    let profiles = match checked_worker_profiles(&config.worker_profiles) {
+        Ok(profiles) => profiles,
+        Err(refusals) => {
+            return refusals
+                .iter()
+                .map(ProfileValueRefused::to_horsies_error)
+                .collect()
         }
+    };
+    match limit_read(&profiles, &config.database) {
+        LimitRead::NotNeeded => Vec::new(),
+        LimitRead::Needed => read_and_compare(&profiles, &config.database, broker).await,
     }
 }
 
@@ -642,7 +654,7 @@ pub async fn check_worker_connections(
 /// read. Every error has the code `CHECK_WORKER_CONNECTIONS`.
 pub async fn check_handle_worker_connections(
     profiles: &BTreeMap<String, WorkerProfile>,
-    handle: &CoreHandle,
+    handle: &CoreConnection,
 ) -> Vec<HorsiesError> {
     let manifest = handle.manifest();
     let broker_config = manifest

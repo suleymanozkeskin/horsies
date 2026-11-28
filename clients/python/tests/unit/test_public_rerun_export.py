@@ -1,6 +1,6 @@
 """The rerun operation is part of the package's top-level surface.
 
-The pin is the export itself: `rerun_task` is unusable without its
+The pin is the export itself: `rerun_task_in_async` is unusable without its
 command, policy, and exhaustive outcome union, so the whole callable
 surface must resolve from `horsies` directly — a deep-module import
 path is not a public API.
@@ -16,8 +16,8 @@ from horsies.core.history.rerun import operations
 pytestmark = pytest.mark.unit
 
 RERUN_EXPORTS = (
-    'rerun_task',
-    'RerunTask',
+    'rerun_task_in_async',
+    'RerunCommand',
     'RerunEnqueuePolicy',
     'RerunOutcome',
     'RerunEnqueued',

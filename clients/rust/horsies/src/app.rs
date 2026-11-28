@@ -1,5 +1,5 @@
 //! The app: its configuration, its task registrations, its state, and the
-//! core handle that connects at the first operation.
+//! core connection that connects at the first operation.
 //!
 //! Every process of a horsies deployment builds the same app in `main`: a
 //! producer, the worker, each worker child and the scheduler. Building it does
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::manifest::ProducerManifest;
 use horsies_core::worker_manifest::WorkerEndedSpans;
 use horsies_core::{
@@ -19,8 +19,9 @@ use horsies_core::{
 };
 
 pub use horsies_core::manifest::SchemaMode;
+use horsies_core::manifest::{producer_manifest, BrokerSettingRefused};
 
-use crate::config::{producer_manifest, rust_config_refusals};
+use crate::config::rust_config_refusals;
 use crate::registry::{check_queue, queue_priority, register_task, valid_queue_names, QueueSource};
 use crate::send::TaskFunctions;
 use crate::workflow::WorkflowRegistry;
@@ -62,7 +63,11 @@ impl AppRole {
 /// let mut app = horsies::Horsies::new(config)?;
 /// send_email::register(&mut app)?;
 /// app.provide(Mailer::from_env())?;
+/// let handle = send_email::send(&app, address).await?;
 /// ```
+///
+/// Each send, workflow builder and workflow start names its app. Two apps
+/// in one process share no registration.
 ///
 /// # Panics
 ///
@@ -72,7 +77,7 @@ impl AppRole {
 /// value of a call. Nothing ran.
 pub struct Horsies {
     config: AppConfig,
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     tasks: TaskRegistry,
     state: Arc<AppState>,
     role: AppRole,
@@ -110,9 +115,11 @@ impl Horsies {
     /// ([`SchemaMode::MigrateAndValidate`], Python's default).
     ///
     /// Validates `config` and builds the producer manifest. No I/O: the
-    /// handle connects at the first operation. Refuses an invalid config
-    /// with every refusal of the validation in one error.
-    pub fn new(config: AppConfig) -> Result<Self, HorsiesError> {
+    /// handle connects at the first operation.
+    ///
+    /// Errors: a [`ValidationReport`] of the phase `config` with every
+    /// refusal of the validation. Nothing was built.
+    pub fn new(config: AppConfig) -> Result<Self, ValidationReport> {
         Self::with_schema_mode(config, SchemaMode::MigrateAndValidate)
     }
 
@@ -123,26 +130,39 @@ impl Horsies {
     /// config's retention ([`CoverageRequest::of_retention`]): the history
     /// leaves of every class that the app's sends can stamp exist for the
     /// current UTC day and the lookahead, with or without a worker.
-    pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, HorsiesError> {
+    ///
+    /// Errors: a [`ValidationReport`] of the phase `config`, as
+    /// [`Self::new`].
+    pub fn with_schema_mode(config: AppConfig, mode: SchemaMode) -> Result<Self, ValidationReport> {
         validate_config(&config)?;
-        let manifest = producer_manifest(&config.broker, mode)
-            .map_err(|refused| refused.to_horsies_error())?;
-        let install_coverage = CoverageRequest::of_retention(&config.retention)
-            .map_err(|refused| HorsiesError::new(format!("invalid retention config: {refused}")))?;
-        let handle = CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Rust)
+        let manifest = producer_manifest(&config.database, mode)
+            .map_err(|refusals| broker_refusals_report(&refusals))?;
+        let install_coverage =
+            CoverageRequest::of_retention(&config.retention).map_err(|refused| {
+                config_report(HorsiesError::new(format!(
+                    "invalid retention config: {refused}"
+                )))
+            })?;
+        let connection = CoreConnection::new(manifest, PoolProfile::Producer, ClientFamily::Rust)
             .with_install_coverage(install_coverage);
-        Ok(Self::from_parts(config, Arc::new(handle)))
+        Ok(Self::from_parts(config, Arc::new(connection)))
     }
 
-    /// An app that uses `handle`, which another app or the caller shares.
-    /// Validates `config`; the schema mode and the connection settings are
-    /// those that `handle` was built with.
-    pub fn with_handle(config: AppConfig, handle: Arc<CoreHandle>) -> Result<Self, HorsiesError> {
+    /// An app that uses `connection`, a core connection that another app or
+    /// the caller shares. Validates `config`; the schema mode and the
+    /// connection settings are those that `connection` was built with.
+    ///
+    /// Errors: a [`ValidationReport`] of the phase `config`, as
+    /// [`Self::new`].
+    pub fn with_core_connection(
+        config: AppConfig,
+        connection: Arc<CoreConnection>,
+    ) -> Result<Self, ValidationReport> {
         validate_config(&config)?;
-        Ok(Self::from_parts(config, handle))
+        Ok(Self::from_parts(config, connection))
     }
 
-    fn from_parts(config: AppConfig, handle: Arc<CoreHandle>) -> Self {
+    fn from_parts(config: AppConfig, handle: Arc<CoreConnection>) -> Self {
         Self {
             workflows: Arc::new(WorkflowRegistry::new(config.clone())),
             config,
@@ -197,10 +217,10 @@ impl Horsies {
         valid_queue_names(&self.config)
     }
 
-    /// Whether the app admits `queue_name` as the queue of a send. Refuses
-    /// with `TaskInvalidQueue` and the valid names.
-    pub fn validate_queue(&self, queue_name: &str) -> Result<(), HorsiesError> {
-        check_queue(&self.config, queue_name)
+    /// Whether the app admits `queue` as the queue of a send. Refuses with
+    /// `TaskInvalidQueue` and the valid names.
+    pub fn validate_queue(&self, queue: &str) -> Result<(), HorsiesError> {
+        check_queue(&self.config, queue)
     }
 
     /// The priority of a send to `queue_name`: `task_priority` when given,
@@ -214,7 +234,8 @@ impl Horsies {
     /// `#[horsies::task]` attribute generates a `register` function that
     /// calls this.
     ///
-    /// Refuses an empty or repeated name, a definition-time `good_until`, and
+    /// Refuses an empty or repeated name, a definition-time `good_until`, a
+    /// `cancel_grace_ms` outside its bounds (`TaskCancelGraceOutOfRange`), and
     /// a queue that the queue mode does not admit. After a refusal nothing is
     /// registered.
     pub fn register(
@@ -286,8 +307,8 @@ impl Horsies {
         )
     }
 
-    /// The core handle of the app.
-    pub(crate) fn handle(&self) -> &Arc<CoreHandle> {
+    /// The core connection of the app.
+    pub(crate) fn handle(&self) -> &Arc<CoreConnection> {
         &self.handle
     }
 
@@ -301,8 +322,10 @@ impl Horsies {
         &self.state
     }
 
-    /// The typed functions that the task attributes registered on this app.
-    pub(crate) fn functions(&self) -> &TaskFunctions {
+    /// The typed functions that the task attributes registered on this app:
+    /// the sends, the task runtime and the workflow builders of the app read
+    /// them.
+    pub(crate) fn functions(&self) -> &Arc<TaskFunctions> {
         &self.functions
     }
 
@@ -407,17 +430,43 @@ impl std::fmt::Debug for Horsies {
     }
 }
 
-/// Validate `config` with the core's rules and the Rust rules; every refusal
-/// in one error (`ValidationReport::into_result`).
-fn validate_config(config: &AppConfig) -> Result<(), HorsiesError> {
-    let mut report = ValidationReport::new("config");
+/// The phase name of the refusals of `Horsies::new`.
+const CONFIG_PHASE: &str = "config";
+
+/// Validate `config` with the core's rules and the Rust rules: every refusal
+/// in one report of the phase `config`. Pure.
+fn validate_config(config: &AppConfig) -> Result<(), ValidationReport> {
+    let mut report = ValidationReport::new(CONFIG_PHASE);
     for refusal in config.validate() {
         report.add(refusal.to_horsies_error());
     }
     for refusal in rust_config_refusals(config) {
         report.add(refusal);
     }
-    report.into_result()
+    report.into_checked()
+}
+
+/// The report of the phase `config` that holds `refusal` alone. Pure.
+fn config_report(refusal: HorsiesError) -> ValidationReport {
+    ValidationReport::of(CONFIG_PHASE, vec![refusal])
+}
+
+/// The report of the phase `config` that holds every refusal of the broker
+/// settings, each with its catalog code. Pure.
+fn broker_refusals_report(refusals: &[BrokerSettingRefused]) -> ValidationReport {
+    ValidationReport::of(CONFIG_PHASE, broker_refusal_errors(refusals))
+}
+
+/// One error per refusal of the broker settings, each with its catalog code,
+/// in the order the core gives them. Pure.
+pub(crate) fn broker_refusal_errors(refusals: &[BrokerSettingRefused]) -> Vec<HorsiesError> {
+    refusals
+        .iter()
+        .map(|refused| {
+            HorsiesError::new(format!("invalid database config: {refused}"))
+                .with_code(refused.code())
+        })
+        .collect()
 }
 
 /// Whether the sends of this process are suppressed. Clones share one flag.
@@ -558,10 +607,10 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChildPreload, ErrorCode, PostgresConfig, WorkerProfile};
+    use crate::{ChildPreload, HorsiesErrorCode, PostgresConfig, WorkerProfile};
 
     fn config() -> AppConfig {
-        AppConfig::for_database_url("postgresql://localhost/horsies")
+        AppConfig::from_database_url("postgresql://localhost/horsies")
     }
 
     #[derive(Debug, PartialEq)]
@@ -596,7 +645,7 @@ mod tests {
     #[test]
     fn an_invalid_config_is_refused_with_every_refusal() {
         let mut invalid = AppConfig {
-            broker: PostgresConfig::from_url("mysql://localhost/horsies"),
+            database: PostgresConfig::from_database_url("mysql://localhost/horsies"),
             ..config()
         };
         invalid.worker_profiles.insert(
@@ -607,28 +656,36 @@ mod tests {
             },
         );
         let refused = Horsies::new(invalid).unwrap_err();
-        // Two or more refusals are folded into one error with a note each.
-        assert!(refused.notes.len() >= 2, "{refused}");
-        assert!(refused.notes.iter().any(|note| note.contains("preload")));
+        // Every refusal stays one typed entry of the report.
+        assert_eq!(refused.phase_name(), "config");
+        assert!(refused.refusals().len() >= 2, "{refused}");
+        assert!(refused
+            .refusals()
+            .iter()
+            .any(|refusal| refusal.message.contains("preload")));
     }
 
     #[test]
     fn a_pool_size_outside_the_manifest_bounds_refuses_the_app() {
         let invalid = AppConfig {
-            broker: PostgresConfig {
+            database: PostgresConfig {
                 pool_size: 0,
-                ..PostgresConfig::from_url("postgresql://localhost/horsies")
+                ..PostgresConfig::from_database_url("postgresql://localhost/horsies")
             },
             ..config()
         };
         let refused = Horsies::new(invalid).unwrap_err();
-        assert!(refused.message.contains("broker.pool_size"), "{refused}");
+        assert_eq!(refused.refusals().len(), 1, "{refused}");
+        assert!(
+            refused.refusals()[0].message.contains("database.pool_size"),
+            "{refused}"
+        );
     }
 
     #[test]
-    fn with_handle_shares_one_handle() {
+    fn with_core_connection_shares_one_connection() {
         let first = Horsies::new(config()).unwrap();
-        let second = Horsies::with_handle(config(), Arc::clone(first.handle())).unwrap();
+        let second = Horsies::with_core_connection(config(), Arc::clone(first.handle())).unwrap();
         assert!(Arc::ptr_eq(first.handle(), second.handle()));
     }
 
@@ -703,17 +760,19 @@ mod tests {
     fn discover_stops_at_the_first_refusal() {
         let mut app = Horsies::new(config()).unwrap();
         let calls = std::cell::Cell::new(0);
-        let registrar = |app: &mut Horsies| {
-            calls.set(calls.get() + 1);
-            match calls.get() {
-                2 => Err(HorsiesError::new("refused").with_code(ErrorCode::TaskInvalidOptions)),
-                _ => app.provide(calls.get()),
-            }
-        };
+        let registrar =
+            |app: &mut Horsies| {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    2 => Err(HorsiesError::new("refused")
+                        .with_code(HorsiesErrorCode::TaskInvalidOptions)),
+                    _ => app.provide(calls.get()),
+                }
+            };
         let refused = app
             .discover([&registrar, &registrar, &registrar])
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::TaskInvalidOptions));
+        assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidOptions));
         assert_eq!(calls.get(), 2);
     }
 }

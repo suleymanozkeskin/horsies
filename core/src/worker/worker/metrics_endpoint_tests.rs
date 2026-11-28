@@ -45,7 +45,7 @@ const SNAPSHOT_INTERVAL_MS: u64 = 1_000;
 /// The app config of the test worker: the snapshot every second, a claim
 /// loop that polls every 100 ms.
 fn test_app_config(url: &str) -> AppConfig {
-    let mut config = AppConfig::for_database_url(url);
+    let mut config = AppConfig::from_database_url(url);
     config.recovery.worker_state_snapshot_interval_ms = SNAPSHOT_INTERVAL_MS;
     config.resilience.notify_poll_interval_ms = 100;
     config
@@ -54,7 +54,7 @@ fn test_app_config(url: &str) -> AppConfig {
 /// A worker of one isolated child that boots, then exits at the next frame
 /// it reads.
 fn worker_of_one_idle_child(broker: Arc<PostgresBroker>, app_config: AppConfig) -> Worker {
-    let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+    let database_url = DatabaseUrl::new(app_config.database.database_url.clone());
     Worker::of_child_specs(
         broker,
         crate::test_support::child_specs::no_child_specs(),
@@ -73,7 +73,7 @@ fn worker_of_one_idle_child(broker: Arc<PostgresBroker>, app_config: AppConfig) 
         ChildLaunch {
             command: idle_child_of_any_kind(),
             preload: PreloadProgram::NoPreloadProgram,
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url,
             connection: ChildConnection::default(),
@@ -209,9 +209,10 @@ async fn a_port_in_use_leaves_the_worker_claiming_and_the_endpoint_serves_once_f
     let address = ListenAddress::parse(&format!("127.0.0.1:{port}")).expect("a valid address");
 
     let app_config = test_app_config(database.url());
-    let broker = PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
-        .await
-        .expect("connect the broker of a worker");
+    let broker =
+        PostgresBroker::connect_worker_with(&app_config.database, crate::ClientFamily::Rust)
+            .await
+            .expect("connect the broker of a worker");
     let telemetry = TelemetryOn::metrics_only(worker_registry(), DeclaredCodesByTask::none())
         .expect("the telemetry of a worker registry");
     let worker = worker_of_one_idle_child(Arc::new(broker), app_config)

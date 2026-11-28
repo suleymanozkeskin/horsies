@@ -8,23 +8,23 @@
 //! }
 //! ```
 //!
-//! - `<binary> worker --profile <name> [--loglevel LEVEL]
+//! - `<binary> worker --profile <name> [--log-level LEVEL]
 //!   [--metrics-listen HOST:PORT]`: Python `horsies worker`. With
 //!   `--metrics-listen`, the worker serves its metrics at `GET /metrics` and
 //!   its health probes at `GET /livez` and `GET /readyz`; there is no default
 //!   address.
-//! - `<binary> scheduler [--loglevel LEVEL]`: Python `horsies scheduler`.
-//! - `<binary> check [--live] [--loglevel LEVEL]`: Python `horsies check`.
-//! - `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]`: Python
-//!   `horsies metrics`; the fleet metrics of the app's database at
-//!   `GET /metrics`. `--listen` has no default.
+//! - `<binary> scheduler [--log-level LEVEL]`: Python `horsies scheduler`.
+//! - `<binary> check [--live] [--log-level LEVEL]`: Python `horsies check`.
+//! - `<binary> metrics --metrics-listen HOST:PORT [--log-level LEVEL]`:
+//!   Python `horsies metrics`; the fleet metrics of the app's database at
+//!   `GET /metrics`. `--metrics-listen` has no default.
 //!
 //! The worker starts this binary again for each child; `run` sees the child
 //! mode argument first and serves the child. Every line of `main` before
 //! `run` runs in each child too.
 //!
 //! The logs go to stderr as text. [`run_with_log_format`] with
-//! [`LogFormat::Json`] writes one JSON object per record instead, in the
+//! [`LogFormat::JsonLogs`] writes one JSON object per record instead, in the
 //! runner and in each child.
 //!
 //! Exit codes: 0 on an operator stop (`SIGTERM`, `SIGINT`) and on a passing
@@ -46,34 +46,34 @@ use horsies_core::{ChildHostExit, ChildLogSetup, ChildMode};
 use crate::child::exit_byte;
 use crate::process_state::runtime_for;
 use crate::{
-    AppRole, CheckPassed, CheckReport, Horsies, SchedulerRunError, WorkerLogLevel, WorkerRunError,
-    WorkerStart,
+    AppRole, CheckPassed, Horsies, SchedulerRunError, ValidationReport, WorkerLogLevel,
+    WorkerRunError, WorkerRunOptions,
 };
 
 /// The exit status of an argument error, as argparse and clap give it.
 const USAGE_EXIT: u8 = 2;
 
 /// The format of the log records of the runner and of the worker's
-/// children.
+/// children (Python `TextLogs`, `JsonLogs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     /// One line of text per record, with ANSI color on a terminal. The
     /// format of [`run`].
-    Text,
+    TextLogs,
     /// One JSON object per line: `timestamp`, `level`, `target`, the fields
     /// of the event at the top level (`message` among them), `span` (the
     /// innermost span, with its name and fields) and `spans` (every span of
     /// the record, outermost first).
-    Json,
+    JsonLogs,
 }
 
 /// Run the command of this process's arguments for `app`, or serve as a
 /// worker child: see the module docs. Blocks the calling thread until the
 /// command ends, so call it from a plain `fn main`; inside a tokio runtime
 /// it prints why and returns exit status 1. The logs are text
-/// ([`LogFormat::Text`]).
+/// ([`LogFormat::TextLogs`]).
 pub fn run(app: Horsies) -> ExitCode {
-    run_with_log_format(app, LogFormat::Text)
+    run_with_log_format(app, LogFormat::TextLogs)
 }
 
 /// [`run`] with the logs in `format`. `main` runs in each worker child
@@ -90,7 +90,7 @@ pub fn run_with_log_format(app: Horsies, format: LogFormat) -> ExitCode {
         }
         ChildMode::BadArguments(error) => {
             eprintln!("horsies: child mode cannot start: {error}");
-            return ExitCode::from(exit_byte(ChildHostExit::BadArguments.code()));
+            return ExitCode::from(exit_byte(ChildHostExit::BadArguments.exit_code()));
         }
         ChildMode::Worker => {}
     }
@@ -136,17 +136,17 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
         #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
-        loglevel: LogLevel,
+        log_level: LogLevel,
         /// Serve the worker metrics (GET /metrics) and the health probes
         /// (GET /livez, GET /readyz) on HOST:PORT, or [IPV6]:PORT. No
         /// default: without it the worker serves no endpoint.
-        #[arg(long = "metrics-listen", value_name = "HOST:PORT", value_parser = ListenAddress::parse)]
+        #[arg(long, value_name = "HOST:PORT", value_parser = ListenAddress::parse)]
         metrics_listen: Option<ListenAddress>,
     },
     /// Start the scheduler of AppConfig.schedule.
     Scheduler {
         #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
-        loglevel: LogLevel,
+        log_level: LogLevel,
     },
     /// Check the app without starting a service.
     Check {
@@ -155,20 +155,20 @@ enum Command {
         #[arg(long)]
         live: bool,
         #[arg(long, value_enum, ignore_case = true, default_value = "WARNING")]
-        loglevel: LogLevel,
+        log_level: LogLevel,
     },
     /// Serve the fleet metrics of the app's database at GET /metrics.
     Metrics {
         /// The address to serve on: HOST:PORT, or [IPV6]:PORT. Required;
         /// there is no default.
         #[arg(long, value_name = "HOST:PORT", value_parser = ListenAddress::parse)]
-        listen: ListenAddress,
+        metrics_listen: ListenAddress,
         #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
-        loglevel: LogLevel,
+        log_level: LogLevel,
     },
 }
 
-/// The `--loglevel` values, Python's names. The shipped binary's `web`
+/// The `--log-level` values, Python's names. The shipped binary's `web`
 /// takes them too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "UPPER")]
@@ -199,27 +199,29 @@ fn run_command(mut app: Horsies, command: Command, format: LogFormat) -> ExitCod
     match command {
         Command::Worker {
             profile,
-            loglevel,
+            log_level,
             metrics_listen,
         } => {
-            logging::install_logs(loglevel.child_level(), format);
-            let start = match profile {
-                Some(name) => WorkerStart::profile(name).with_log_level(loglevel.child_level()),
-                None => WorkerStart::without_profile(loglevel.child_level()),
+            logging::install_logs(log_level.child_level(), format);
+            let options = match profile {
+                Some(name) => {
+                    WorkerRunOptions::profile(name).with_log_level(log_level.child_level())
+                }
+                None => WorkerRunOptions::without_profile(log_level.child_level()),
             };
-            let start = match metrics_listen {
-                Some(address) => start.with_metrics_endpoint(address),
-                None => start,
+            let options = match metrics_listen {
+                Some(address) => options.with_metrics_listen(address),
+                None => options,
             };
-            block_on_process_runtime(app.run_worker(start)).map_or(ExitCode::FAILURE, worker_exit)
+            block_on_process_runtime(app.run_worker(options)).map_or(ExitCode::FAILURE, worker_exit)
         }
-        Command::Scheduler { loglevel } => {
-            logging::install_logs(loglevel.child_level(), format);
+        Command::Scheduler { log_level } => {
+            logging::install_logs(log_level.child_level(), format);
             app.set_role(AppRole::Scheduler);
             block_on_process_runtime(app.run_scheduler()).map_or(ExitCode::FAILURE, scheduler_exit)
         }
-        Command::Check { live, loglevel } => {
-            logging::install_logs(loglevel.child_level(), format);
+        Command::Check { live, log_level } => {
+            logging::install_logs(log_level.child_level(), format);
             let checked = match live {
                 false => app.check(),
                 true => match block_on_process_runtime(app.check_live()) {
@@ -229,9 +231,12 @@ fn run_command(mut app: Horsies, command: Command, format: LogFormat) -> ExitCod
             };
             check_exit(checked)
         }
-        Command::Metrics { listen, loglevel } => {
-            logging::install_logs(loglevel.child_level(), format);
-            block_on_process_runtime(metrics::serve(&app, &listen))
+        Command::Metrics {
+            metrics_listen,
+            log_level,
+        } => {
+            logging::install_logs(log_level.child_level(), format);
+            block_on_process_runtime(metrics::serve(&app, &metrics_listen))
                 .map_or(ExitCode::FAILURE, metrics_exit)
         }
     }
@@ -271,7 +276,7 @@ fn worker_exit(end: Result<crate::WorkerStopped, WorkerRunError>) -> ExitCode {
             error @ (WorkerRunError::ManifestBound { .. }
             | WorkerRunError::ChildCommandRefused { .. }
             | WorkerRunError::ConnectionSettingsRefused { .. }
-            | WorkerRunError::RuntimeUnavailable(_)
+            | WorkerRunError::RuntimeStartFailed(_)
             | WorkerRunError::BootFailed { .. }
             | WorkerRunError::Failed { .. }),
         ) => {
@@ -295,7 +300,7 @@ fn scheduler_exit(end: Result<crate::SchedulerStopped, SchedulerRunError>) -> Ex
             | SchedulerRunError::ManifestRefused { .. }
             | SchedulerRunError::StartRefused { .. }
             | SchedulerRunError::StartFailed { .. }
-            | SchedulerRunError::RuntimeUnavailable(_)),
+            | SchedulerRunError::RuntimeStartFailed(_)),
         ) => {
             tracing::error!("{error}");
             ExitCode::FAILURE
@@ -319,7 +324,7 @@ fn metrics_exit(end: Result<(), metrics::MetricsFailed>) -> ExitCode {
 
 /// The exit status of a check: the success text on stdout, or the report on
 /// stderr (Python `check_command`).
-fn check_exit(checked: Result<CheckPassed, CheckReport>) -> ExitCode {
+fn check_exit(checked: Result<CheckPassed, ValidationReport>) -> ExitCode {
     match checked {
         Ok(passed) => {
             println!("{passed}");
@@ -329,7 +334,7 @@ fn check_exit(checked: Result<CheckPassed, CheckReport>) -> ExitCode {
     }
 }
 
-fn print_report(report: &CheckReport) -> ExitCode {
+fn print_report(report: &ValidationReport) -> ExitCode {
     eprintln!("{report}");
     ExitCode::FAILURE
 }
@@ -344,15 +349,15 @@ mod tests {
 
     #[test]
     fn worker_takes_a_profile_and_a_level_in_any_case() {
-        let cli = parse(&["app", "worker", "--profile", "web", "--loglevel", "debug"]).unwrap();
+        let cli = parse(&["app", "worker", "--profile", "web", "--log-level", "debug"]).unwrap();
         match cli.command {
             Command::Worker {
                 profile,
-                loglevel,
+                log_level,
                 metrics_listen,
             } => {
                 assert_eq!(profile.as_deref(), Some("web"));
-                assert_eq!(loglevel, LogLevel::Debug);
+                assert_eq!(log_level, LogLevel::Debug);
                 assert_eq!(metrics_listen, None);
             }
             other => panic!("expected worker, got {other:?}"),
@@ -418,22 +423,22 @@ mod tests {
     fn each_command_has_python_s_default_level() {
         let Command::Worker {
             profile,
-            loglevel,
+            log_level,
             metrics_listen,
         } = parse(&["app", "worker"]).unwrap().command
         else {
             panic!("expected worker");
         };
-        assert_eq!((profile, loglevel), (None, LogLevel::Info));
+        assert_eq!((profile, log_level), (None, LogLevel::Info));
         assert_eq!(metrics_listen, None);
-        let Command::Check { live, loglevel } = parse(&["app", "check"]).unwrap().command else {
+        let Command::Check { live, log_level } = parse(&["app", "check"]).unwrap().command else {
             panic!("expected check");
         };
-        assert_eq!((live, loglevel), (false, LogLevel::Warning));
+        assert_eq!((live, log_level), (false, LogLevel::Warning));
         assert!(matches!(
             parse(&["app", "scheduler"]).unwrap().command,
             Command::Scheduler {
-                loglevel: LogLevel::Info
+                log_level: LogLevel::Info
             }
         ));
     }
@@ -441,7 +446,8 @@ mod tests {
     #[test]
     fn an_unknown_level_and_an_unknown_command_are_usage_errors() {
         for arguments in [
-            &["app", "worker", "--loglevel", "TRACE"][..],
+            &["app", "worker", "--log-level", "TRACE"][..],
+            &["app", "worker", "--loglevel", "INFO"][..],
             &["app", "web"][..],
             &["app"][..],
         ] {
@@ -451,27 +457,32 @@ mod tests {
     }
 
     #[test]
-    fn metrics_takes_a_listen_address_and_python_s_default_level() {
-        let cli = parse(&["app", "metrics", "--listen", "127.0.0.1:9100"]).unwrap();
+    fn metrics_takes_a_metrics_listen_address_and_python_s_default_level() {
+        let cli = parse(&["app", "metrics", "--metrics-listen", "127.0.0.1:9100"]).unwrap();
         match cli.command {
-            Command::Metrics { listen, loglevel } => {
-                assert_eq!(listen.to_string(), "127.0.0.1:9100");
-                assert_eq!(loglevel, LogLevel::Info);
+            Command::Metrics {
+                metrics_listen,
+                log_level,
+            } => {
+                assert_eq!(metrics_listen.to_string(), "127.0.0.1:9100");
+                assert_eq!(log_level, LogLevel::Info);
             }
             other => panic!("expected metrics, got {other:?}"),
         }
-        let cli = parse(&["app", "metrics", "--listen", "[::1]:9100"]).unwrap();
+        let cli = parse(&["app", "metrics", "--metrics-listen", "[::1]:9100"]).unwrap();
         match cli.command {
-            Command::Metrics { listen, .. } => assert_eq!(listen.host(), "::1"),
+            Command::Metrics { metrics_listen, .. } => assert_eq!(metrics_listen.host(), "::1"),
             other => panic!("expected metrics, got {other:?}"),
         }
     }
 
     #[test]
-    fn metrics_without_listen_is_a_usage_error() {
+    fn metrics_without_metrics_listen_is_a_usage_error() {
         let error = parse(&["app", "metrics"]).unwrap_err();
         assert_eq!(error.exit_code(), 2);
-        assert!(error.to_string().contains("--listen"), "{error}");
+        assert!(error.to_string().contains("--metrics-listen"), "{error}");
+        let error = parse(&["app", "metrics", "--listen", "127.0.0.1:9100"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
     }
 
     #[test]
@@ -482,7 +493,7 @@ mod tests {
             ("localhost:0", "is not a number from 1 to 65535"),
             ("::1:9100", "write an IPv6 address in brackets"),
         ] {
-            let error = parse(&["app", "metrics", "--listen", address]).unwrap_err();
+            let error = parse(&["app", "metrics", "--metrics-listen", address]).unwrap_err();
             assert_eq!(error.exit_code(), 2, "{address}");
             assert!(error.to_string().contains(refusal), "{address}: {error}");
         }

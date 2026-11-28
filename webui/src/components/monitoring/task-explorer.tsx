@@ -240,11 +240,11 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
         minSize: 180,
       },
       {
-        accessorKey: 'queue_name',
+        accessorKey: 'queue',
         header: 'Queue',
         Cell: ({ row }) => (
           <span className="text-xs text-muted-foreground">
-            {row.original.queue_name}
+            {row.original.queue}
           </span>
         ),
         size: 120,
@@ -273,20 +273,20 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
         size: 90,
       },
       {
-        accessorKey: 'queue_s',
+        accessorKey: 'queue_seconds',
         header: 'Queued',
         Cell: ({ row }) => (
           <span className="tabular-nums text-muted-foreground">
-            {formatDuration(row.original.queue_s)}
+            {formatDuration(row.original.queue_seconds)}
           </span>
         ),
         size: 90,
       },
       {
-        accessorKey: 'exec_s',
+        accessorKey: 'execution_seconds',
         header: 'Exec',
         Cell: ({ row }) => (
-          <span className="tabular-nums">{formatDuration(row.original.exec_s)}</span>
+          <span className="tabular-nums">{formatDuration(row.original.execution_seconds)}</span>
         ),
         size: 90,
       },
@@ -382,10 +382,10 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
         className: 'border-hairline text-xs font-semibold text-muted-foreground',
       },
       tableBodyRow: ({ row }) => ({
-        onClick: () => onSearchChange({ task: row.original.id }),
+        onClick: () => onSearchChange({ task: row.original.task_id }),
         className: cn(
           'cursor-pointer border-hairline',
-          row.original.id === selectedId
+          row.original.task_id === selectedId
             ? 'bg-accent-surface!'
             : '[&:hover>td]:bg-surface-hover!'
         ),

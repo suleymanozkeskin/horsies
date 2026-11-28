@@ -1,11 +1,16 @@
 //! The workflow definition: a workflow's name, definition key, nodes,
 //! output and policies in one place (Python `WorkflowDefinition`).
 //!
-//! A definition without params implements `define`; the default `build`
-//! runs it. A definition with params implements `build_with`, which builds
-//! the spec from the params; the engine calls it for each sub-workflow node
-//! that gives params, and a start with params calls it. `build_with` may run
+//! A definition without parameters implements `define`; the default `build`
+//! runs it. A definition with parameters implements `build_with`, which builds
+//! the spec from the parameters; the engine calls it for each sub-workflow node
+//! that gives parameters, and a start with parameters calls it. `build_with` may run
 //! more than once for one node, so it must have no side effects.
+//!
+//! Each build gets a builder of the app that registered the definition,
+//! named after the definition: its task nodes resolve against that app. A
+//! definition without parameters builds when it registers, so the tasks of its
+//! nodes register first.
 
 use horsies_core::OnError;
 use serde::de::DeserializeOwned;
@@ -13,7 +18,7 @@ use serde::Serialize;
 
 use super::node::NodeRef;
 use super::spec::{SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
-use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
+use super::sub_workflow::{SubWorkflowNode, SubWorkflowParameters};
 use crate::HorsiesError;
 
 /// A workflow definition.
@@ -23,25 +28,29 @@ use crate::HorsiesError;
 ///
 /// impl WorkflowDefinition for Checkout {
 ///     type Output = Receipt;
-///     type Params = ();
+///     type Parameters = ();
 ///
 ///     fn name() -> &'static str { "checkout" }
 ///     fn definition_key() -> &'static str { "shop.checkout.v1" }
 ///
-///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-///         let charged = builder.task(charge::node()?.set(charge::params::order_id(), 7)?);
-///         let receipt = builder.task(receipt::node()?.arg_from(receipt::params::charge(), charged));
-///         Ok(WorkflowDefConfig::new().output(receipt))
+///     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+///         let charged = builder.task(charge::node().set(charge::fields::order_id(), 7)?)?;
+///         let receipt = builder.task(receipt::node().arg_from(receipt::fields::charge(), charged))?;
+///         Ok(WorkflowDefinitionConfig::new().output(receipt))
 ///     }
 /// }
+///
+/// let checkout = app.register_workflow_definition::<Checkout>()?;
 /// ```
 pub trait WorkflowDefinition: 'static {
     /// The type of the workflow's result: the output node's type, or
-    /// `OutputlessResults` for a workflow with no output node.
+    /// `NoWorkflowOutput` for a workflow with no output node. The node of a
+    /// sub-workflow and the handle of a start read the same type. The values
+    /// of the nodes come from `results()`, `nodes()` and `result_for()`.
     type Output: 'static;
 
-    /// The params of `build_with`; `()` for a definition without params.
-    type Params: Serialize + DeserializeOwned + 'static;
+    /// The parameters of `build_with`; `()` for a definition without parameters.
+    type Parameters: Serialize + DeserializeOwned + 'static;
 
     /// The workflow name, unique in the app.
     fn name() -> &'static str;
@@ -55,12 +64,13 @@ pub trait WorkflowDefinition: 'static {
         OnError::Fail
     }
 
-    /// Add the nodes to `builder`, which has the name, the definition key
-    /// and `on_error`, and return the output and the success policy.
+    /// Add the nodes to `builder`, a builder of the app with the name, the
+    /// definition key and `on_error` of the definition, and return the
+    /// output and the success policy.
     ///
     /// Errors: the default refuses: a definition implements `define` or
     /// `build_with`.
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let _unused = builder;
         Err(HorsiesError::new(format!(
             "WorkflowDefinition '{}' implements neither define() nor build_with()",
@@ -68,14 +78,15 @@ pub trait WorkflowDefinition: 'static {
         )))
     }
 
-    /// The spec of the definition without params: `define` on a new
-    /// builder, then `WorkflowSpecBuilder::build`.
+    /// The spec of the definition without parameters, from `builder`: a
+    /// builder of the app named after the definition
+    /// (`app.workflow_builder(Self::name())`). Sets the definition key and
+    /// `on_error`, runs `define`, then `WorkflowSpecBuilder::build`.
     ///
     /// Errors: the refusal of `define`, of the build, and
     /// `WORKFLOW_OUTPUT_TYPE_MISMATCH` (HRS-025) when the output node's type
     /// is not `Output`.
-    fn build() -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build(mut builder: WorkflowSpecBuilder) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         builder.on_error(Self::on_error());
         let config = Self::define(&mut builder)?;
@@ -90,39 +101,45 @@ pub trait WorkflowDefinition: 'static {
         Ok(spec)
     }
 
-    /// The spec of the definition with `params`. The default ignores the
-    /// params and returns [`Self::build`]: a definition with params
-    /// implements it.
+    /// The spec of the definition with `parameters`, from `builder`: a builder
+    /// of the app named after the definition. The app calls it with such a
+    /// builder for each sub-workflow node that gives parameters and for each
+    /// build of the template (`WorkflowTemplate::build`, `start`). The
+    /// default ignores the parameters and returns [`Self::build`]: a definition
+    /// with parameters implements it.
     ///
     /// Errors: the refusals of the build; the app also refuses a built spec
     /// whose output type is not `Output`.
-    fn build_with(params: Self::Params) -> Result<WorkflowSpec, HorsiesError> {
-        let _unused = params;
-        Self::build()
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        parameters: Self::Parameters,
+    ) -> Result<WorkflowSpec, HorsiesError> {
+        let _unused = parameters;
+        Self::build(builder)
     }
 
     /// A sub-workflow node of this definition.
     ///
-    /// Errors: for `Given(params)`, the refusals of
-    /// `SubWorkflowNode::set_params`.
+    /// Errors: for `Given(parameters)`, the refusals of
+    /// `SubWorkflowNode::set_parameters`.
     fn node(
-        params: SubWorkflowParams<Self::Params>,
-    ) -> Result<SubWorkflowNode<Self::Params, Self::Output>, HorsiesError>
+        parameters: SubWorkflowParameters<Self::Parameters>,
+    ) -> Result<SubWorkflowNode<Self::Parameters, Self::Output>, HorsiesError>
     where
         Self: Sized,
     {
-        SubWorkflowNode::of::<Self>(params)
+        SubWorkflowNode::of::<Self>(parameters)
     }
 }
 
 /// What `WorkflowDefinition::define` returns besides the nodes.
 #[derive(Debug, Clone, Default)]
-pub struct WorkflowDefConfig {
+pub struct WorkflowDefinitionConfig {
     output: Option<NodeRef>,
     success_policy: Option<SuccessPolicy>,
 }
 
-impl WorkflowDefConfig {
+impl WorkflowDefinitionConfig {
     /// No output node and no success policy.
     pub fn new() -> Self {
         Self::default()
@@ -144,10 +161,10 @@ impl WorkflowDefConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::node::tests::{task_node, ChargeInput};
+    use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
     use crate::workflow::spec::{SpecOutput, SpecSuccessPolicy, SuccessCase};
-    use crate::workflow::OutputlessResults;
-    use crate::ErrorCode;
+    use crate::workflow::NoWorkflowOutput;
+    use crate::HorsiesErrorCode;
 
     fn charge_node() -> crate::TaskNode<f64, ChargeInput> {
         task_node::<f64, ChargeInput>("charge")
@@ -162,7 +179,7 @@ mod tests {
 
     impl WorkflowDefinition for Charged {
         type Output = f64;
-        type Params = ();
+        type Parameters = ();
 
         fn name() -> &'static str {
             "charged"
@@ -176,9 +193,11 @@ mod tests {
             OnError::Pause
         }
 
-        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let charged = builder.task(charge_node());
-            Ok(WorkflowDefConfig::new().output(charged))
+        fn define(
+            builder: &mut WorkflowSpecBuilder,
+        ) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+            let charged = add(builder, charge_node());
+            Ok(WorkflowDefinitionConfig::new().output(charged))
         }
     }
 
@@ -187,7 +206,7 @@ mod tests {
 
     impl WorkflowDefinition for WrongOutput {
         type Output = String;
-        type Params = ();
+        type Parameters = ();
 
         fn name() -> &'static str {
             "wrong_output"
@@ -197,17 +216,19 @@ mod tests {
             "tests.wrong_output.v1"
         }
 
-        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let charged = builder.task(charge_node());
-            Ok(WorkflowDefConfig::new().output(charged))
+        fn define(
+            builder: &mut WorkflowSpecBuilder,
+        ) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+            let charged = add(builder, charge_node());
+            Ok(WorkflowDefinitionConfig::new().output(charged))
         }
     }
 
     struct NoDefine;
 
     impl WorkflowDefinition for NoDefine {
-        type Output = OutputlessResults;
-        type Params = ();
+        type Output = NoWorkflowOutput;
+        type Parameters = ();
 
         fn name() -> &'static str {
             "no_define"
@@ -220,7 +241,7 @@ mod tests {
 
     #[test]
     fn build_runs_define_with_the_definition_facts() {
-        let spec = Charged::build().unwrap();
+        let spec = Charged::build(test_builder(Charged::name())).unwrap();
         assert_eq!(spec.name(), "charged");
         assert_eq!(spec.definition_key(), Some("tests.charged.v1"));
         assert_eq!(spec.on_error(), OnError::Pause);
@@ -230,14 +251,19 @@ mod tests {
     #[test]
     fn a_declared_output_type_that_the_output_node_does_not_have_is_refused() {
         assert_eq!(
-            WrongOutput::build().unwrap_err().code,
-            Some(ErrorCode::WorkflowOutputTypeMismatch)
+            WrongOutput::build(test_builder(WrongOutput::name()))
+                .unwrap_err()
+                .code,
+            Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
         );
     }
 
     #[test]
     fn a_definition_without_define_is_refused() {
-        assert!(NoDefine::build().unwrap_err().message.contains("no_define"));
+        assert!(NoDefine::build(test_builder(NoDefine::name()))
+            .unwrap_err()
+            .message
+            .contains("no_define"));
     }
 
     /// Two nodes of one task, the second the output, with a success policy
@@ -246,7 +272,7 @@ mod tests {
 
     impl WorkflowDefinition for WithPolicy {
         type Output = f64;
-        type Params = ();
+        type Parameters = ();
 
         fn name() -> &'static str {
             "with_policy"
@@ -256,11 +282,13 @@ mod tests {
             "tests.with_policy.v1"
         }
 
-        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let first = builder.task(charge_node().node_id("first"));
-            let second = builder.task(charge_node().waits_for(first).node_id("second"));
+        fn define(
+            builder: &mut WorkflowSpecBuilder,
+        ) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+            let first = add(builder, charge_node().node_id("first"));
+            let second = add(builder, charge_node().waits_for(first).node_id("second"));
             let policy = SuccessPolicy::new(vec![SuccessCase::new([second])]).optional([first]);
-            Ok(WorkflowDefConfig::new()
+            Ok(WorkflowDefinitionConfig::new()
                 .output(second)
                 .success_policy(policy))
         }
@@ -268,7 +296,7 @@ mod tests {
 
     #[test]
     fn the_config_of_define_sets_the_output_and_the_success_policy() {
-        let spec = WithPolicy::build().unwrap();
+        let spec = WithPolicy::build(test_builder(WithPolicy::name())).unwrap();
         assert_eq!(spec.node_ids().collect::<Vec<_>>(), vec!["first", "second"]);
         assert_eq!(spec.nodes[1].dependencies, vec![0]);
         assert!(matches!(spec.output, SpecOutput::Node { index: 1, .. }));
@@ -283,7 +311,7 @@ mod tests {
 
     #[test]
     fn node_names_the_definition() {
-        let node = Charged::node(SubWorkflowParams::NotGiven).unwrap();
+        let node = Charged::node(SubWorkflowParameters::NotGiven).unwrap();
         assert_eq!(node.workflow_name(), "charged");
         assert_eq!(node.definition_key(), "tests.charged.v1");
     }

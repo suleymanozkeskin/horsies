@@ -31,14 +31,17 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies import (
+    MinResponsesAtLeast,
+    PingTargetWorker,
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
-    RerunTask,
     TaskSendAsyncContext,
     WorkerPong,
-    rerun_task,
+    rerun_task_in_async,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
 from crossclient.parity import app as parity
@@ -64,8 +67,8 @@ RERUN_POLICY: Final = RerunEnqueuePolicy(
 """The default retention class (`standard_30d`), the input retained, a
 24 h key reservation: Rust `RerunEnqueuePolicy::standard(true)`."""
 
-PING_WINDOW_S: Final = 2.0
-"""The window of one worker ping."""
+PING_WAIT_MS: Final = 2_000
+"""The window of one worker ping, in milliseconds."""
 
 PING_ATTEMPTS: Final = 10
 """The pings of every worker before the send process gives up: a worker
@@ -91,7 +94,7 @@ async def _send_retry(send: Send) -> str:
         case 'parity.add':
             pass
         case other:
-            raise SendRefused(f'the retry form has no task {other!r}')
+            raise SendRefused(f'the resend form has no task {other!r}')
     match parity.add.send(a=_int(kwargs, 'a'), b=_int(kwargs, 'b')):
         case Err(TaskSendAsyncContext() as refused):
             pass
@@ -99,13 +102,13 @@ async def _send_retry(send: Send) -> str:
             raise SendRefused(f'the blocking send of {send.task_name} answered {other}')
     ids: list[str] = []
     for _attempt in range(2):
-        match await parity.add.retry_send_async(refused):
+        match await parity.add.resend_async(refused):
             case Ok(handle):
                 ids.append(str(handle.task_id))
             case Err(error):
-                raise SendRefused(f'the retry of {send.task_name} was refused: {error}')
+                raise SendRefused(f'the resend of {send.task_name} was refused: {error}')
     if ids[0] != ids[1]:
-        raise SendRefused(f'the two retries of {send.task_name} wrote two tasks: {ids}')
+        raise SendRefused(f'the two resends of {send.task_name} wrote two tasks: {ids}')
     return ids[0]
 
 
@@ -181,19 +184,20 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
     if not 0 <= rerun.source < len(sent):
         raise SendRefused(f'{rerun} names no earlier task line')
     source = UUID(sent[rerun.source])
-    match await parity.app.get_result_async(source, timeout_ms=RESULT_WAIT_MS):
-        case Ok(TaskResult(err=TaskError(error_code='REFUSED'))):
+    match await parity.app.get_result_async(source, wait_ms=RESULT_WAIT_MS):
+        case Ok(Failed(TaskError(code='REFUSED'))):
             pass
         case other:
             raise SendRefused(f'the rerun source {source} did not end with REFUSED: {other}')
-    database_url = parity.config.broker.database_url.get_secret_value()
+    database_url = parity.config.database.database_url.get_secret_value()
     engine = create_async_engine(sqlalchemy_url(database_url))
     try:
         async with engine.begin() as connection:
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=source, deadline=None),
+                RerunCommand(source_task_id=source, good_until=None),
                 RERUN_POLICY,
+                registered_task_codes=parity.app.registered_task_codes(),
             )
     finally:
         await engine.dispose()
@@ -210,7 +214,7 @@ async def _every_worker(expected: int) -> list[WorkerPong]:
     answered: list[WorkerPong] = []
     for _attempt in range(PING_ATTEMPTS):
         match await parity.app.ping_workers_async(
-            timeout_seconds=PING_WINDOW_S, min_responses=expected,
+            wait_ms=PING_WAIT_MS, min_responses=MinResponsesAtLeast(count=expected),
         ):
             case Ok(pongs):
                 answered = pongs
@@ -234,7 +238,7 @@ async def _ping(expected: int) -> str:
             raise SendRefused(f'ping_database was refused: {refused}')
     answered = await _every_worker(expected)
     match await parity.app.ping_workers_async(
-        target_worker_id=answered[0].worker_id, timeout_seconds=PING_WINDOW_S,
+        target=PingTargetWorker(worker_id=answered[0].worker_id), wait_ms=PING_WAIT_MS,
     ):
         case Ok(targeted):
             pass

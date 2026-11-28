@@ -4,7 +4,6 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use async_stream::stream;
-use axum::body::to_bytes;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -15,33 +14,78 @@ use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::broker::health::ListedWorkerState;
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
     pause_workflow_action, resolve_monitoring_window, resume_workflow_action, task_breakdown,
-    task_facets, task_stats, CancelTaskBody, LivenessReport, TaskAbsenceReason, TaskBreakdownQuery,
-    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskListQuery,
-    TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
-};
-use crate::monitoring::{
-    class_report_info, slot_health_info, snapshot_profile_info, ClassReportInfo,
+    task_facets, task_status_counts, CancelTaskBody, DatabaseLiveness, ExecutionClassReport,
+    LivenessReport, TaskAbsenceReason, TaskBreakdownQuery, TaskDetailNotFound, TaskDetailRead,
+    TaskFacetsQuery, TaskFilters, TaskListQuery, TaskStatusCountsQuery, WorkerHistoryPoint,
+    WorkerStateInfo, WorkflowRunsQuery,
 };
 use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
 use super::app::WebState;
 use super::common::{
     broker_read_failed, pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool,
-    parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_by,
-    parse_sort_direction, parse_statuses, query_failed, validate_f64_range, validate_i64_range,
-    ApiError, PathInteger, QueryValues,
+    parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_direction,
+    parse_sort_field, parse_statuses, query_failed, refuse_unknown_parameters, validate_f64_range,
+    validate_i64_range, ApiError, PathInteger, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
+use super::request_body::{read_action_body, WorkflowActionBody};
 use super::stdlib_uuid_text::parse_stdlib_uuid_text;
+
+/// The query parameters of the routes that read a query, in declaration
+/// order. A route refuses any other parameter ([`refuse_unknown_parameters`]).
+const TASK_STATS_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+];
+const TASK_FACETS_PARAMETERS: &[&str] =
+    &["since", "until", "status", "error_category", "retried_only"];
+const TASK_BREAKDOWN_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "group_by",
+    "status",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+    "limit",
+];
+const TASK_LIST_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "status",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+    "sort_field",
+    "sort_direction",
+    "offset",
+    "limit",
+];
+const WORKFLOW_LIST_PARAMETERS: &[&str] = &["workflow_name", "status", "limit"];
+const WORKER_PING_PARAMETERS: &[&str] = &["timeout_seconds"];
+const WORKER_HISTORY_PARAMETERS: &[&str] = &["limit"];
 
 pub(crate) fn read_router() -> Router<WebState> {
     Router::new()
-        .route("/tasks/stats", get(read_task_stats))
+        .route("/tasks/status-counts", get(read_task_stats))
         .route("/tasks/facets", get(read_task_facets))
         .route("/tasks/breakdown", get(read_task_breakdown))
         .route("/tasks", get(read_tasks))
@@ -50,7 +94,7 @@ pub(crate) fn read_router() -> Router<WebState> {
         .route("/workflows", get(read_workflows))
         .route("/workflows/{workflow_id}", get(read_workflow))
         .route(
-            "/workflows/{workflow_id}/tasks/{task_index}",
+            "/workflows/{workflow_id}/tasks/{node_index}",
             get(read_workflow_task),
         )
         .route("/workers/ping", get(read_worker_ping))
@@ -83,7 +127,7 @@ impl WindowParams {
         }
     }
 
-    fn resolve(self) -> Result<crate::core::history::reads::pages::HistoryWindow, ApiError> {
+    fn resolve(self) -> Result<crate::core::history::reads::pages::MonitoringWindow, ApiError> {
         resolve_monitoring_window(
             parse_window_bound("since", self.since.as_deref())?,
             parse_window_bound("until", self.until.as_deref())?,
@@ -164,7 +208,7 @@ impl TaskStatsParams {
         })
     }
 
-    fn window(&self) -> Result<crate::core::history::reads::pages::HistoryWindow, ApiError> {
+    fn window(&self) -> Result<crate::core::history::reads::pages::MonitoringWindow, ApiError> {
         WindowParams {
             since: self.window.since.clone(),
             until: self.window.until.clone(),
@@ -179,11 +223,12 @@ async fn read_task_stats(
 ) -> Result<Json<Vec<crate::monitoring::StatusCount>>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_STATS_PARAMETERS)?;
     let params = TaskStatsParams::from_values(&values)?;
-    let query = TaskStatsQuery::new(params.window()?).with_filters(params.filters()?);
+    let query = TaskStatusCountsQuery::new(params.window()?).with_filters(params.filters()?);
     state
         .task_stats_cache
-        .get_or_try_init(cache_key, || task_stats(&state.broker, &query))
+        .get_or_try_init(cache_key, || task_status_counts(&state.broker, &query))
         .await
         .map(Json)
         .map_err(|error| query_failed("Task stats", &error))
@@ -214,6 +259,7 @@ async fn read_task_facets(
 ) -> Result<Json<crate::monitoring::Facets>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_FACETS_PARAMETERS)?;
     let params = TaskFacetsParams::from_values(&values)?;
     let window = params.window.resolve()?;
     let query = TaskFacetsQuery::new(window)
@@ -266,6 +312,7 @@ async fn read_task_breakdown(
 ) -> Result<Json<crate::monitoring::Breakdown>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_BREAKDOWN_PARAMETERS)?;
     let params = TaskBreakdownParams::from_values(&values)?;
     let window = params.window.resolve()?;
     let filters = TaskFilters {
@@ -299,8 +346,8 @@ struct TaskListParams {
     error_code: Vec<String>,
     error_category: Vec<String>,
     retried_only: bool,
-    sort_by: String,
-    sort_dir: String,
+    sort_field: String,
+    sort_direction: String,
     offset: i64,
     limit: i64,
 }
@@ -318,8 +365,14 @@ impl TaskListParams {
             error_code: values.all("error_code"),
             error_category: values.all("error_category"),
             retried_only: parse_fastapi_bool(values, "retried_only", false)?,
-            sort_by: values.last("sort_by").unwrap_or("enqueued_at").to_owned(),
-            sort_dir: values.last("sort_dir").unwrap_or("desc").to_owned(),
+            sort_field: values
+                .last("sort_field")
+                .unwrap_or("enqueued_at")
+                .to_owned(),
+            sort_direction: values
+                .last("sort_direction")
+                .unwrap_or("DESCENDING")
+                .to_owned(),
             offset: validate_i64_range(values, "offset", offset, 0, i64::MAX)?,
             limit: validate_i64_range(values, "limit", limit, 1, 200)?,
         })
@@ -331,6 +384,7 @@ async fn read_tasks(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<crate::monitoring::TaskListPage>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_LIST_PARAMETERS)?;
     let params = TaskListParams::from_values(&values)?;
     let reach = i128::from(params.offset) + i128::from(params.limit);
     if reach > 500 {
@@ -351,8 +405,8 @@ async fn read_tasks(
     let query = TaskListQuery::new(window)
         .with_filters(filters)
         .with_sort(
-            parse_sort_by(&params.sort_by)?,
-            parse_sort_direction(&params.sort_dir)?,
+            parse_sort_field(&params.sort_field)?,
+            parse_sort_direction(&params.sort_direction)?,
         )
         .with_pagination(params.offset, params.limit)
         .map_err(|error| pagination_refused(error, &values, "limit", params.limit))?;
@@ -398,9 +452,11 @@ async fn read_workflow_names(State(state): State<WebState>) -> Result<Json<Vec<S
         .map_err(|error| query_failed("Workflow names", &error))
 }
 
+/// The query of `GET /api/workflows`. The query parameter `name` keeps its
+/// HTTP name; it is the workflow name filter.
 #[derive(Debug)]
 struct WorkflowParams {
-    name: Option<String>,
+    workflow_name: Option<String>,
     status: Option<String>,
     limit: i64,
 }
@@ -409,7 +465,7 @@ impl WorkflowParams {
     fn from_values(values: &QueryValues) -> Result<Self, ApiError> {
         let limit = parse_i64(values, "limit", 30)?;
         Ok(Self {
-            name: values.last("name").map(str::to_owned),
+            workflow_name: values.last("workflow_name").map(str::to_owned),
             status: values.last("status").map(str::to_owned),
             limit: validate_i64_range(values, "limit", limit, 1, 200)?,
         })
@@ -421,9 +477,10 @@ async fn read_workflows(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Vec<crate::monitoring::WorkflowRunSummary>>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKFLOW_LIST_PARAMETERS)?;
     let params = WorkflowParams::from_values(&values)?;
     let query = WorkflowRunsQuery::new()
-        .with_name(params.name)
+        .with_workflow_name(params.workflow_name)
         .with_status(params.status)
         .with_limit(params.limit)
         .map_err(|error| pagination_refused(error, &values, "limit", params.limit))?;
@@ -469,33 +526,33 @@ async fn read_workflow(
 /// no node: 404, with no database call.
 async fn read_workflow_task(
     State(state): State<WebState>,
-    Path((workflow_id, task_index)): Path<(String, String)>,
-) -> Result<Json<crate::monitoring::WorkflowTaskDetail>, ApiError> {
-    let task_index = match parse_path_integer(&task_index) {
-        PathInteger::Fits(task_index) => Some(task_index),
+    Path((workflow_id, node_index)): Path<(String, String)>,
+) -> Result<Json<crate::monitoring::WorkflowNodeDetail>, ApiError> {
+    let node_index = match parse_path_integer(&node_index) {
+        PathInteger::Fits(node_index) => Some(node_index),
         PathInteger::OutsideI32 => None,
         PathInteger::NotAnInteger => {
             return Err(ApiError::Validation(vec![ApiError::path_issue(
-                "task_index",
+                "node_index",
                 "int_parsing",
                 "Input should be a valid integer, unable to parse string as an integer",
-                task_index.as_str(),
+                node_index.as_str(),
             )]))
         }
         PathInteger::TooLong => {
             return Err(ApiError::Validation(vec![ApiError::path_issue(
-                "task_index",
+                "node_index",
                 "int_parsing_size",
                 "Unable to parse input string as an integer, exceeded maximum size",
-                task_index.as_str(),
+                node_index.as_str(),
             )]))
         }
     };
-    let (Some(workflow_id), Some(task_index)) = (parse_stdlib_uuid_text(&workflow_id), task_index)
+    let (Some(workflow_id), Some(node_index)) = (parse_stdlib_uuid_text(&workflow_id), node_index)
     else {
         return Err(workflow_task_not_found());
     };
-    get_workflow_node(&state.broker, workflow_id, task_index)
+    get_workflow_node(&state.broker, workflow_id, node_index)
         .await
         .map_err(|error| query_failed("Workflow task", &error))?
         .map(Json)
@@ -521,30 +578,20 @@ async fn read_worker_ping(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<LivenessReport>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKER_PING_PARAMETERS)?;
     let params = PingParams::from_values(&values)?;
-    let database = state.broker.ping_database().await;
-    let (db_reachable, db_latency_ms) = match database {
-        Ok(ping) => (true, Some(ping.latency_ms)),
-        Err(_) => (false, None),
+    let database = match state.broker.ping_database().await {
+        Ok(ping) => DatabaseLiveness::Ping {
+            latency_ms: ping.latency_ms,
+        },
+        Err(_) => DatabaseLiveness::Unreachable,
     };
     let workers = state
         .broker
         .ping_workers(None, Duration::from_secs_f64(params.timeout_seconds), None)
         .await
-        .map_err(|error| broker_read_failed("Worker ping", &error))?
-        .into_iter()
-        .map(|pong| WorkerPingInfo {
-            worker_id: pong.worker_id,
-            hostname: pong.hostname,
-            pid: pong.pid,
-            round_trip_ms: pong.round_trip_ms,
-        })
-        .collect();
-    Ok(Json(LivenessReport {
-        db_latency_ms,
-        db_reachable,
-        workers,
-    }))
+        .map_err(|error| broker_read_failed("Worker ping", &error))?;
+    Ok(Json(LivenessReport { database, workers }))
 }
 
 async fn read_schedules(
@@ -562,19 +609,20 @@ async fn read_schedules(
 /// ([`broker_read_failed`]).
 async fn read_class_report(
     State(state): State<WebState>,
-) -> Result<Json<ClassReportInfo>, ApiError> {
-    let report = state
+) -> Result<Json<ExecutionClassReport>, ApiError> {
+    state
         .broker
-        .get_class_report()
+        .get_execution_class_report()
         .await
-        .map_err(|error| broker_read_failed("Class report query", &error))?;
-    Ok(Json(class_report_info(&report)))
+        .map(Json)
+        .map_err(|error| broker_read_failed("Execution class report query", &error))
 }
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
 /// fleet check counts the same workers as live (a snapshot at most this
 /// old).
-const STALE_SNAPSHOT_THRESHOLD: TimeDelta = TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_S as i64);
+const STALE_SNAPSHOT_THRESHOLD: TimeDelta =
+    TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_SECONDS as i64);
 
 /// One entry of the worker list.
 ///
@@ -585,29 +633,30 @@ const STALE_SNAPSHOT_THRESHOLD: TimeDelta = TimeDelta::seconds(WORKER_STATE_LIVE
 pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
     let ListedWorkerState { snapshot, read_at } = listed;
     let age = read_at - snapshot.snapshot_at;
-    let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
-    let profile = snapshot_profile_info(&snapshot.profile);
     WorkerStateInfo {
         worker_id: snapshot.worker_id,
         hostname: snapshot.hostname,
         pid: snapshot.pid,
         snapshot_at: snapshot.snapshot_at,
-        snapshot_age_s: Some(age),
+        snapshot_age_seconds: Some(age),
         stale: age > STALE_SNAPSHOT_THRESHOLD,
         worker_started_at: snapshot.worker_started_at,
-        uptime_s: Some(read_at - snapshot.worker_started_at),
-        processes: snapshot.processes,
+        uptime_seconds: Some(read_at - snapshot.worker_started_at),
+        child_count: snapshot.child_count,
         queues: snapshot.queues,
         queue_max_concurrency: snapshot.queue_max_concurrency,
         tasks_running: snapshot.tasks_running,
         tasks_claimed: snapshot.tasks_claimed,
-        cluster_wide_cap: snapshot.cluster_wide_cap,
+        // The web JSON holds the cap as a number, or null for no cap.
+        cluster_wide_cap: snapshot
+            .cluster_wide_cap
+            .claim_parameter()
+            .map(|tasks| i32::try_from(tasks).expect("a stored cap came from an integer column")),
         memory_usage_mb: snapshot.memory_usage_mb,
         memory_percent: snapshot.memory_percent,
         cpu_percent: snapshot.cpu_percent,
-        slot_health,
-        down_slots,
-        profile,
+        slot_health: snapshot.slot_health,
+        profile: snapshot.profile,
     }
 }
 
@@ -642,6 +691,7 @@ async fn read_worker_history(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Vec<WorkerHistoryPoint>>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKER_HISTORY_PARAMETERS)?;
     let params = HistoryParams::from_values(&values)?;
     state
         .broker
@@ -667,7 +717,13 @@ async fn read_worker_history(
 
 async fn read_events(State(state): State<WebState>) -> Response {
     let heartbeat = state.heartbeat;
-    let mut subscription = state.events.subscribe().await;
+    let mut subscription = match state.events.subscribe().await {
+        Ok(subscription) => subscription,
+        Err(refused) => {
+            return ApiError::unavailable(format!("The event stream is refused: {refused}."))
+                .into_response()
+        }
+    };
     let events = stream! {
         while let Some(event) = subscription.recv().await {
             match event {
@@ -710,45 +766,17 @@ fn action_response(route: &'static str, entity_id: Uuid, outcome: ActionOutcome)
     }
 }
 
+/// Cancel one task. The body is read first ([`read_action_body`]: no body,
+/// or `{"policy": "PENDING_OR_CLAIMED_ONLY" | "INCLUDE_RUNNING"}`), then the
+/// path id.
 async fn cancel_task(
     State(state): State<WebState>,
     Path(task_id): Path<String>,
     request: Request,
 ) -> Response {
-    let content_type = request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = match to_bytes(request.into_body(), usize::MAX).await {
-        Ok(bytes) if bytes.is_empty() => CancelTaskBody::default(),
-        Ok(bytes)
-            if content_type
-                .as_deref()
-                .is_some_and(|value| value.starts_with("application/json")) =>
-        {
-            match serde_json::from_slice(&bytes) {
-                Ok(body) => body,
-                Err(error) => {
-                    return ApiError::body_validation(
-                        error.to_string(),
-                        String::from_utf8_lossy(&bytes).into_owned().into(),
-                    )
-                    .into_response();
-                }
-            }
-        }
-        Ok(bytes) => {
-            return ApiError::body_validation(
-                "Input should be a valid JSON object",
-                String::from_utf8_lossy(&bytes).into_owned().into(),
-            )
-            .into_response();
-        }
-        Err(error) => {
-            return ApiError::body_validation(error.to_string(), serde_json::Value::Null)
-                .into_response();
-        }
+    let body: CancelTaskBody = match read_action_body(request).await {
+        Ok(body) => body,
+        Err(refused) => return refused.into_response(),
     };
     let task_uuid = match parse_path_uuid("task_id", &task_id) {
         Ok(task_uuid) => task_uuid,
@@ -757,22 +785,25 @@ async fn cancel_task(
     action_response(
         "tasks.cancel",
         task_uuid,
-        cancel_task_action(&state.broker, task_uuid, body.include_running).await,
+        cancel_task_action(&state.broker, task_uuid, body.policy).await,
     )
 }
 
-/// The workflow path id of an action route. Text that is not a UUID is
-/// refused with 400 `INVALID_INPUT` before any statement, as the task
-/// cancel route refuses its id (Python `require_path_uuid`).
-fn workflow_action_id(workflow_id: &str) -> Result<Uuid, ApiError> {
+/// The input of a workflow action route, read before any statement: the
+/// body first ([`read_action_body`]: no body, or `{}`), then the path id.
+/// Path text that is not a UUID is refused with 400 `INVALID_INPUT`, as the
+/// task cancel route refuses its id (Python `require_path_uuid`).
+async fn workflow_action_input(workflow_id: &str, request: Request) -> Result<Uuid, ApiError> {
+    let WorkflowActionBody {} = read_action_body(request).await?;
     parse_path_uuid("workflow_id", workflow_id)
 }
 
 async fn pause_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };
@@ -786,8 +817,9 @@ async fn pause_workflow(
 async fn resume_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };
@@ -801,8 +833,9 @@ async fn resume_workflow(
 async fn cancel_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };

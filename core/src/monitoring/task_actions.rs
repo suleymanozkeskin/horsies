@@ -8,7 +8,10 @@ use uuid::Uuid;
 use crate::broker::{BrokerError, CancelAnswer, CancelTaskError, PostgresBroker};
 use crate::core::lifecycle::OutcomeDecodeError;
 use crate::core::types::status::TaskStatus;
+use crate::db::StatementFailure;
 use crate::failure_cause::FailureCause;
+
+use super::models::CancelPolicy;
 
 /// Why a task action did not apply.
 ///
@@ -16,18 +19,21 @@ use crate::failure_cause::FailureCause;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
-#[code_catalog(module = "monitoring", base = "str_enum")]
+#[code_catalog(module = "monitoring", values = "equal_text")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskActionErrorCode {
     TaskNotFound,
     TaskNotCancellable,
     TaskIsWorkflowTask,
-    DbOperationFailed,
+    DatabaseOperationFailed,
+    /// The cancel statement went to the server and its reply was lost: the
+    /// cancel may have committed. A repeated cancel tells which, because a
+    /// committed cancel answers `TaskNotCancellable` with `CANCELLED`.
+    OutcomeUnknown,
     /// Stored task data does not parse: a history status that is not a task
     /// status, or a cancel outcome row that does not decode. Nothing changed:
     /// the cancel refused the task. Not retryable: a repeat gives the same
-    /// result until the stored row changes (Python
-    /// `clients/python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    /// result until the stored row changes.
     StoredDataInvalid,
 }
 
@@ -52,20 +58,21 @@ pub enum TaskActionError {
     /// No task has this id. Nothing changed.
     ///
     /// Neither the live table nor history holds the task (retention can
-    /// remove it).
+    /// remove it). Not retryable: the same call returns this error until a
+    /// task with this id exists. A repeat does not create it.
     #[error("{message}")]
     #[error_class(class = "TaskActionNotFound", code = "TaskNotFound", never_retryable)]
     NotFound {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
     },
     /// The task's status does not admit the cancel. Nothing changed.
     ///
     /// ``current_status`` is the status that the cancel found: a terminal
-    /// status, or ``RUNNING`` when ``include_running`` is ``False``. A call
-    /// with ``include_running=True`` cancels a ``RUNNING`` task.
+    /// status, or ``RUNNING`` with the policy ``PENDING_OR_CLAIMED_ONLY``. A
+    /// call with the policy ``INCLUDE_RUNNING`` cancels a ``RUNNING`` task.
     #[error("{message}")]
     #[error_class(
         class = "TaskActionNotCancellable",
@@ -73,11 +80,11 @@ pub enum TaskActionError {
         never_retryable
     )]
     NotCancellable {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskStatus")]
+        #[error_slot(slot_type = "TaskStatus")]
         current_status: TaskStatus,
     },
     /// The task belongs to a workflow. Nothing changed.
@@ -86,62 +93,90 @@ pub enum TaskActionError {
     /// cancel on its workflow. ``current_status`` is the task's status.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionWorkflowTask",
+        class = "TaskActionIsWorkflowTask",
         code = "TaskIsWorkflowTask",
         never_retryable
     )]
-    WorkflowTask {
-        #[error_slot(python = "Str", hidden)]
+    IsWorkflowTask {
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskStatus")]
+        #[error_slot(slot_type = "TaskStatus")]
         current_status: TaskStatus,
     },
-    /// The cancel statement failed with a database or driver error, or the
-    /// core of this process could not run it.
+    /// The cancel failed with a database or driver error, or the core of this
+    /// process could not run it. Nothing changed.
     ///
     /// ``retryable`` is the core's classification of the cause: ``True`` when
-    /// the condition may clear, for example a lost connection. ``exception``
+    /// the condition may clear, for example a lost connection. ``cause``
     /// is the core's class of the cause (a ``CoreFailure`` leaf class, with the
-    /// subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
-    /// committed and its reply was lost: a repeated cancel tells which,
-    /// because a committed cancel answers ``TaskActionNotCancellable`` with
-    /// ``CANCELLED``.
+    /// subject ``cancel_task``), or the ``CoreCallRefusal`` of the core
+    /// boundary. The statement was not sent, or the server refused it: the
+    /// task is as it was. A reply that was lost after the statement was sent
+    /// is ``TaskActionOutcomeUnknown``.
     #[error("{message}")]
     #[error_class(
-        class = "TaskActionDbOperationFailed",
-        code = "DbOperationFailed",
-        exception = "BaseException"
+        class = "TaskActionDatabaseOperationFailed",
+        code = "DatabaseOperationFailed",
+        cause = "required"
     )]
-    DbOperationFailed {
-        #[error_slot(python = "Str", hidden)]
+    DatabaseOperationFailed {
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
         /// The failed connect, client family check or statement.
         #[error_slot(cause)]
         #[source]
         cause: Box<BrokerError>,
     },
+    /// The cancel statement went to the server and its reply was lost. The
+    /// cancel may have committed.
+    ///
+    /// A repeated cancel tells which: a committed cancel answers
+    /// ``TaskActionNotCancellable`` with ``CANCELLED``, and a cancel that
+    /// did not commit cancels the task. ``retryable`` is the core's
+    /// classification of the cause (``True``: the lost connection may
+    /// clear). ``cause`` is the core's class of the cause (a ``CoreFailure``
+    /// leaf class, with the subject ``cancel_task``).
+    #[error("{message}")]
+    #[error_class(
+        class = "TaskActionOutcomeUnknown",
+        code = "OutcomeUnknown",
+        cause = "required"
+    )]
+    OutcomeUnknown {
+        #[error_slot(slot_type = "Str", hidden)]
+        message: String,
+        #[error_slot(slot_type = "Bool")]
+        retryable: bool,
+        #[error_slot(slot_type = "Uuid")]
+        task_id: Uuid,
+        /// The statement whose reply was lost.
+        #[error_slot(cause)]
+        #[source]
+        cause: Box<BrokerError>,
+    },
     /// Stored task data does not parse. Nothing changed: the cancel refused the task.
     ///
-    /// ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
-    /// example a history status that is not a task status. A repeat gives the
-    /// same result until the stored row changes.
+    /// ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
+    /// example a history status that is not a task status. Not retryable: the
+    /// same call returns this error until the stored row is repaired. A repeat
+    /// does not repair it.
     #[error("{message}")]
     #[error_class(
         class = "TaskActionStoredDataInvalid",
         code = "StoredDataInvalid",
         never_retryable,
-        exception = "BaseException"
+        cause = "required"
     )]
     StoredDataInvalid {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
         /// The outcome row that does not decode.
         #[error_slot(cause)]
@@ -152,10 +187,23 @@ pub enum TaskActionError {
 
 impl TaskActionError {
     /// The cancel of `task_id` met `cause`: a failed connect, client family
-    /// check or statement. Nothing was written, or the statement's outcome
-    /// is unknown. `retryable` is the cause's retry rule. Pure.
+    /// check, or a statement that was not sent or that the server refused.
+    /// Nothing was written. `retryable` is the cause's retry rule. Pure.
     pub fn cancel_failed(task_id: Uuid, cause: BrokerError) -> Self {
-        Self::DbOperationFailed {
+        Self::DatabaseOperationFailed {
+            message: format!("Task cancel failed: {cause}"),
+            retryable: cause.is_retryable(),
+            task_id,
+            cause: Box::new(cause),
+        }
+    }
+
+    /// The cancel statement of `task_id` was sent and its reply was lost
+    /// (`failure`): the cancel may have committed. `retryable` is the
+    /// cause's retry rule. Pure.
+    pub fn cancel_outcome_unknown(task_id: Uuid, failure: StatementFailure) -> Self {
+        let cause = BrokerError::Statement(failure);
+        Self::OutcomeUnknown {
             message: format!("Task cancel failed: {cause}"),
             retryable: cause.is_retryable(),
             task_id,
@@ -173,8 +221,9 @@ impl TaskActionError {
         match self {
             Self::NotFound { message, .. }
             | Self::NotCancellable { message, .. }
-            | Self::WorkflowTask { message, .. }
-            | Self::DbOperationFailed { message, .. }
+            | Self::IsWorkflowTask { message, .. }
+            | Self::DatabaseOperationFailed { message, .. }
+            | Self::OutcomeUnknown { message, .. }
             | Self::StoredDataInvalid { message, .. } => message,
         }
     }
@@ -183,10 +232,11 @@ impl TaskActionError {
     /// of the cause of a database failure; every refusal stays. Pure.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::DbOperationFailed { retryable, .. } => *retryable,
+            Self::DatabaseOperationFailed { retryable, .. }
+            | Self::OutcomeUnknown { retryable, .. } => *retryable,
             Self::NotFound { .. }
             | Self::NotCancellable { .. }
-            | Self::WorkflowTask { .. }
+            | Self::IsWorkflowTask { .. }
             | Self::StoredDataInvalid { .. } => false,
         }
     }
@@ -196,8 +246,9 @@ impl TaskActionError {
         match self {
             Self::NotFound { task_id, .. }
             | Self::NotCancellable { task_id, .. }
-            | Self::WorkflowTask { task_id, .. }
-            | Self::DbOperationFailed { task_id, .. }
+            | Self::IsWorkflowTask { task_id, .. }
+            | Self::DatabaseOperationFailed { task_id, .. }
+            | Self::OutcomeUnknown { task_id, .. }
             | Self::StoredDataInvalid { task_id, .. } => *task_id,
         }
     }
@@ -207,9 +258,11 @@ impl TaskActionError {
     /// precondition that does not hold. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::DbOperationFailed { cause, .. } => cause.failure_cause(),
+            Self::DatabaseOperationFailed { cause, .. } | Self::OutcomeUnknown { cause, .. } => {
+                cause.failure_cause()
+            }
             Self::StoredDataInvalid { .. } => FailureCause::ContractViolation,
-            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::WorkflowTask { .. } => {
+            Self::NotFound { .. } | Self::NotCancellable { .. } | Self::IsWorkflowTask { .. } => {
                 FailureCause::PreconditionFailed
             }
         }
@@ -234,7 +287,7 @@ fn not_found(task_id: Uuid) -> TaskActionError {
 }
 
 fn workflow_bound(task_id: Uuid, current_status: TaskStatus) -> TaskActionError {
-    TaskActionError::WorkflowTask {
+    TaskActionError::IsWorkflowTask {
         message: format!("Task {task_id} belongs to a workflow; use the workflow actions instead."),
         task_id,
         current_status,
@@ -262,10 +315,10 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 /// Move a non-workflow live task to CANCELLED (Python
 /// `horsies.monitoring.task_actions.cancel_task`).
 ///
-/// PENDING and CLAIMED are eligible. RUNNING is eligible only when
-/// `include_running` is true: the same statement records the running attempt
-/// with the outcome `CANCELLED`, and the worker that runs it gets the cancel
-/// notice and gives the cancel to the task code. A workflow task, live or
+/// PENDING and CLAIMED are eligible. RUNNING is eligible only with
+/// [`CancelPolicy::IncludeRunning`]: the same statement records the running
+/// attempt with the outcome `CANCELLED`, and the worker that runs it gets the
+/// cancel notice and gives the cancel to the task code. A workflow task, live or
 /// finished, is `TaskIsWorkflowTask`; a finished plain task is
 /// `TaskNotCancellable` with its terminal status; a task held nowhere is
 /// `TaskNotFound`.
@@ -275,8 +328,13 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 pub async fn cancel_task(
     broker: &PostgresBroker,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> TaskActionResult<TaskCancelled> {
+    // The SQL function keeps its schema parameter `p_include_running`.
+    let include_running = match policy {
+        CancelPolicy::IncludeRunning => true,
+        CancelPolicy::PendingOrClaimedOnly => false,
+    };
     match broker.cancel_task(task_id, include_running).await {
         Ok(CancelAnswer::Cancelled { was_status }) => Ok(TaskCancelled {
             task_id,
@@ -290,6 +348,9 @@ pub async fn cancel_task(
         }
         Ok(CancelAnswer::TaskAbsent) => Err(not_found(task_id)),
         Err(CancelTaskError::Broker(error)) => Err(TaskActionError::cancel_failed(task_id, error)),
+        Err(CancelTaskError::OutcomeUnknown(failure)) => {
+            Err(TaskActionError::cancel_outcome_unknown(task_id, failure))
+        }
         Err(CancelTaskError::StoredDataInvalid(error)) => Err(stored_data_invalid(task_id, error)),
     }
 }
@@ -333,9 +394,29 @@ mod tests {
         assert_eq!(failed.failure_cause(), FailureCause::Connection);
         assert!(matches!(
             &failed,
-            TaskActionError::DbOperationFailed { cause, .. }
+            TaskActionError::DatabaseOperationFailed { cause, .. }
                 if matches!(**cause, BrokerError::ConnectionFailed(_))
         ));
+
+        let unknown = TaskActionError::cancel_outcome_unknown(
+            TASK,
+            StatementFailure::OutcomeUnknown {
+                statement: "cancel_task",
+                cause: crate::db::UnknownOutcomeCause::NoReplyWithinBound {
+                    bound: std::time::Duration::from_secs(1),
+                    grace: std::time::Duration::from_secs(1),
+                    cancel: crate::db::CancelRequestOutcome::Sent,
+                },
+            },
+        );
+        assert_eq!(unknown.code(), TaskActionErrorCode::OutcomeUnknown);
+        assert!(unknown
+            .message()
+            .starts_with("Task cancel failed: database error: "));
+        assert!(unknown.retryable());
+        assert_eq!(unknown.failure_cause(), FailureCause::Connection);
+        assert_eq!(unknown.task_id(), TASK);
+        assert_eq!(failed.code(), TaskActionErrorCode::DatabaseOperationFailed);
 
         let invalid = stored_data_invalid(
             TASK,

@@ -15,13 +15,14 @@ from horsies import JsonValue
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
 )
+from horsies.core.types.result import Ok, Result
 from horsies.core.workflows.registry import (
     register_workflow_definition,
     unregister_workflow_definition,
@@ -51,14 +52,14 @@ _ROWS: list[tuple[str, Any, Any, Any]] = [
 
 
 def _task(app: Horsies, name: str, annotation: Any) -> Any:
-    def take(*, value: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def take(*, value: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
     take.__annotations__ = {
         'value': annotation,
-        'return': TaskResult[int, TaskError],
+        'return': Result[int, TaskError],
     }
-    return app.task(task_name=name)(take)
+    return app.task(name=name)(take)
 
 
 def _stored(value: object) -> object:
@@ -112,14 +113,14 @@ class _GrandchildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
-        @app.task(task_name='container_kwargs_grandchild_task')
-        def grandchild_task(*, values: list[int]) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=len(values))
+        @app.task(name='container_kwargs_grandchild_task')
+        def grandchild_task(*, values: list[int]) -> Result[int, TaskError]:
+            return Ok(len(values))
 
-        node = TaskNode(fn=grandchild_task, kwargs={'values': values})
+        node = TaskNode(function=grandchild_task, kwargs={'values': values})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
@@ -132,18 +133,18 @@ class _ChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
-        @app.task(task_name='container_kwargs_child_task')
-        def child_task(*, values: list[int]) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=len(values))
+        @app.task(name='container_kwargs_child_task')
+        def child_task(*, values: list[int]) -> Result[int, TaskError]:
+            return Ok(len(values))
 
-        node = TaskNode(fn=child_task, kwargs={'values': values})
+        node = TaskNode(function=child_task, kwargs={'values': values})
         nested: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=_GrandchildWorkflow,
+            workflow_definition=_GrandchildWorkflow,
             kwargs={'values': values},
         )
         return app.workflow(
             name=cls.name,
-            tasks=[node, nested],
+            nodes=[node, nested],
             output=node,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
@@ -181,12 +182,12 @@ class TestContainerKwargsAtStart:
     ) -> None:
         session, broker, app = setup
         node: TaskNode[int] = TaskNode(
-            fn=_task(app, f'container_{label}', annotation),
+            function=_task(app, f'container_{label}', annotation),
             kwargs={'value': value},
         )
         spec = app.workflow(
             name=f'container_{label}',
-            tasks=[node],
+            nodes=[node],
             output=node,
             definition_key=f'tests.container.{label}.v1',
         )
@@ -207,12 +208,12 @@ class TestContainerKwargsAtStart:
         register_workflow_definition(_ChildWorkflow)
         try:
             node: SubWorkflowNode[int] = SubWorkflowNode(
-                workflow_def=_ChildWorkflow,
+                workflow_definition=_ChildWorkflow,
                 kwargs={'values': [1, 2]},
             )
             spec = app.workflow(
                 name='container_parent',
-                tasks=[node],
+                nodes=[node],
                 output=node,
                 definition_key='tests.container.parent.v1',
             )

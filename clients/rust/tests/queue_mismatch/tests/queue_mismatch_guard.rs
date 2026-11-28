@@ -3,7 +3,7 @@
 //! leaves nothing registered: `main` returns the refusal with `?`, so a
 //! binary with a mismatched task never reaches `horsies::cli::run`.
 
-use horsies::{ErrorCode, Horsies, HorsiesError};
+use horsies::{Horsies, HorsiesError, HorsiesErrorCode};
 use horsies_queue_mismatch_tests::{
     analytics_compute, compute_body, custom_mode_config, default_mode_config, fast_compute, ping,
     slow_compute, ComputeInput, UNUSED_DATABASE_URL,
@@ -41,7 +41,7 @@ fn build_mixed_app() -> Result<Horsies, HorsiesError> {
 fn scenario_1_registration_fails_with_queue_in_default_mode() {
     let mut app = default_app();
     let refused = fast_compute::register(&mut app).expect_err("a queue in Default mode");
-    assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidQueueMode));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
     assert!(
         refused.notes.iter().any(|note| note.contains("fast")),
         "the refusal names the queue: {refused:?}"
@@ -73,7 +73,7 @@ fn scenario_1_worker_never_starts() {
 fn scenario_2_registration_fails_without_queue_in_custom_mode() {
     let mut app = custom_app();
     let refused = ping::register(&mut app).expect_err("no queue in Custom mode");
-    assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidQueueMode));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
     assert!(refused.help_text.is_some(), "the refusal suggests the fix");
 }
 
@@ -100,7 +100,7 @@ fn scenario_2_worker_config_subscribes_to_custom_queues() {
 fn scenario_3_registration_fails_with_unknown_queue() {
     let mut app = custom_app();
     let refused = analytics_compute::register(&mut app).expect_err("an unknown queue");
-    assert_eq!(refused.code, Some(ErrorCode::TaskInvalidQueue));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidQueue));
     assert!(refused.message.contains("analytics"), "{refused:?}");
 }
 
@@ -118,7 +118,7 @@ fn scenario_3_error_lists_valid_queues() {
     );
 }
 
-/// Python: `TestSendTimeValidation::test_validate_queue_name_custom_mode_rejects_unknown`.
+/// Python: `TestSendTimeValidation::test_validate_queue_custom_mode_rejects_unknown`.
 /// Registration by hand meets the same guard.
 #[test]
 fn scenario_3_check_also_catches_unknown_queue_via_raw_register() {
@@ -130,7 +130,7 @@ fn scenario_3_check_also_catches_unknown_queue_via_raw_register() {
             "analytics",
         )
         .expect_err("an unknown queue by hand");
-    assert_eq!(refused.code, Some(ErrorCode::TaskInvalidQueue));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidQueue));
     assert!(refused.message.contains("analytics"));
     assert!(app.validate_queue("analytics").is_err());
 }
@@ -152,7 +152,7 @@ fn scenario_4_registration_succeeds_with_valid_queue() {
     let mut app = custom_app();
     let function = fast_compute::register(&mut app).expect("a configured queue");
     assert_eq!(function.task_name(), "fast_compute");
-    assert_eq!(function.queue_name(), "fast");
+    assert_eq!(function.queue(), "fast");
     assert_eq!(function.priority(), 1);
 }
 
@@ -170,7 +170,7 @@ fn scenario_4_worker_config_is_valid() {
     let mut app = custom_app();
     let fast = fast_compute::register(&mut app).expect("fast");
     let slow = slow_compute::register(&mut app).expect("slow");
-    assert_eq!((fast.queue_name(), slow.queue_name()), ("fast", "slow"));
+    assert_eq!((fast.queue(), slow.queue()), ("fast", "slow"));
     assert_eq!((fast.priority(), slow.priority()), (1, 50));
     assert_check_passes(&app, 2);
 }
@@ -183,7 +183,7 @@ fn scenario_5_registration_succeeds_without_queue() {
     let mut app = default_app();
     let function = ping::register(&mut app).expect("no queue in Default mode");
     assert_eq!(function.task_name(), "ping");
-    assert_eq!(function.queue_name(), "default");
+    assert_eq!(function.queue(), "default");
 }
 
 /// Python: `TestDefaultModeAcceptsNoQueue::test_task_without_queue_succeeds`.
@@ -217,11 +217,11 @@ async fn scenario_5_worker_startup_reaches_broker() {
 #[test]
 fn scenario_6_first_valid_second_invalid_poisons_startup() {
     let refused = build_mixed_app().expect_err("the second registration refuses");
-    assert_eq!(refused.code, Some(ErrorCode::TaskInvalidQueue));
+    assert_eq!(refused.code, Some(HorsiesErrorCode::TaskInvalidQueue));
     assert!(refused.message.contains("analytics"));
 }
 
-/// Python: `TestSendTimeValidation::test_validate_queue_name_custom_mode_rejects_unknown`.
+/// Python: `TestSendTimeValidation::test_validate_queue_custom_mode_rejects_unknown`.
 /// The guard holds on the hand registration path too.
 #[test]
 fn scenario_6_check_fails_if_bad_task_bypassed_register() {

@@ -27,6 +27,7 @@ use crate::broker::OrphanSelfHeal;
 use crate::core::lifecycle::{AttemptPlacement, SlotWait};
 use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
+pub use crate::worker::executor::protocol::MemoryLimit;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
 };
@@ -44,14 +45,6 @@ pub(super) const AFTER_DRAIN_KILL_WAIT: Duration = CHILD_KILL_WAIT;
 pub enum TaskLimit {
     Off,
     After(NonZeroU64),
-}
-
-/// Recycle a child when its reported RSS reaches this many MiB. An
-/// unreadable RSS never recycles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryLimit {
-    Off,
-    AtMb(NonZeroU64),
 }
 
 /// What the slot does when a killed child's exit is not seen within the
@@ -77,7 +70,7 @@ pub struct IsolatedPoolConfig {
     pub init: InitFrame,
     pub worker_id: String,
     /// The orphan self-heal that each run frame carries (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a slot, at most (Python: `2 * max(seats +
     /// prefetch, max_claim_per_worker)`).
@@ -96,9 +89,9 @@ pub struct IsolatedPoolConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub child_pid: ProcessId,
-    /// The kind of the child: the execution class of its slot. A task of a
+    /// The execution class of the child: the class of its slot. A task of a
     /// shared class can run on an isolated child (the route rule).
-    pub child_kind: ExecutionClass,
+    pub child_execution: ExecutionClass,
     /// When the child took the task (monotonic clock of the worker).
     pub at: Instant,
     /// The same time on the wall clock of the worker.
@@ -158,13 +151,13 @@ pub fn watched_placement() -> (PlacementWatch, PlacementReceipt) {
     (PlacementWatch(sender), PlacementReceipt(receiver))
 }
 
-/// Where the placement of one task goes, once its pool knows the kind of
-/// the child.
+/// Where the placement of one task goes, once its pool knows the execution
+/// class of the child.
 enum PlacementNotice {
     Unwatched,
     Watched {
         to: oneshot::Sender<Placed>,
-        child_kind: ExecutionClass,
+        child_execution: ExecutionClass,
     },
 }
 
@@ -184,16 +177,16 @@ impl Answer {
         Self::watched(sender, watch, ExecutionClass::Isolated)
     }
 
-    /// The answer of a task of a pool whose children are of `child_kind`,
-    /// whose placement goes to `watch`.
+    /// The answer of a task of a pool whose children are of the class
+    /// `child_execution`, whose placement goes to `watch`.
     pub(super) fn watched(
         sender: oneshot::Sender<AttemptEnd>,
         watch: PlacementWatch,
-        child_kind: ExecutionClass,
+        child_execution: ExecutionClass,
     ) -> Self {
         let placement = PlacementNotice::Watched {
             to: watch.0,
-            child_kind,
+            child_execution,
         };
         Self {
             sender: Some(sender),
@@ -208,12 +201,15 @@ impl Answer {
         self.fallback = AttemptEnd::EndUnknown { pid };
         match std::mem::replace(&mut self.placement, PlacementNotice::Unwatched) {
             PlacementNotice::Unwatched => {}
-            PlacementNotice::Watched { to, child_kind } => {
+            PlacementNotice::Watched {
+                to,
+                child_execution,
+            } => {
                 // The submitter may have gone away; the placement is then
                 // not needed.
                 let _unread = to.send(Placed {
                     child_pid: pid,
-                    child_kind,
+                    child_execution,
                     at: Instant::now(),
                     wall: Utc::now(),
                 });
@@ -562,6 +558,7 @@ impl IsolatedPool {
                     task_name: task.task_name.clone(),
                     queue_name: QueueName::cut(&task.queue_name),
                     attempt: task.retry.attempt(),
+                    max_retries: task.retry.max_retries_allowed(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,

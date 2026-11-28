@@ -1,6 +1,6 @@
-"""Rust-style error display for horsies startup/validation errors.
+"""Diagnostic display for horsies startup/validation errors.
 
-`ErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
+`HorsiesErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
 renders from horsies-core into `horsies._catalog.error_codes`.
 """
 
@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from horsies._catalog.error_codes import ErrorCode as ErrorCode
+from horsies._catalog.error_codes import HorsiesErrorCode as HorsiesErrorCode
 
 # Absolute path to the horsies package directory.
 # Used by _find_user_frame to distinguish library frames from user code.
@@ -69,13 +69,13 @@ class SourceLocation:
         )
 
     @classmethod
-    def from_function(cls, fn: Callable[..., Any]) -> SourceLocation | None:
+    def from_function(cls, function: Callable[..., Any]) -> SourceLocation | None:
         """Create SourceLocation from a function object.
 
         Returns None if the callable doesn't have source location info
         (e.g., built-in functions, C extensions, or mock objects).
         """
-        code = getattr(fn, '__code__', None)
+        code = getattr(function, '__code__', None)
         if code is None:
             return None
         return cls(
@@ -102,14 +102,14 @@ class SourceLocation:
 class HorsiesError(Exception):
     """Base exception for horsies startup/validation errors.
 
-    Provides Rust-style error formatting with:
+    ``format_diagnostic()`` formats it with:
     - Error code and category
     - Source location with code snippet
     - Notes and help text
     """
 
     message: str
-    code: ErrorCode | None = None
+    code: HorsiesErrorCode | None = None
     location: SourceLocation | None = None
     notes: list[str] = field(default_factory=lambda: [])
     help_text: str | None = None
@@ -145,8 +145,8 @@ class HorsiesError(Exception):
         self.location = SourceLocation.from_frame(frame)
         return self
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
-        """Format the error in Rust style."""
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
+        """Format the error as a report: code, message, location, notes and help."""
         if use_colors is None:
             use_colors = _should_use_colors()
 
@@ -227,7 +227,7 @@ class HorsiesError(Exception):
         - Database storage
         - Non-terminal contexts
         """
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 class _NoColors:
@@ -283,25 +283,26 @@ class RegistryError(HorsiesError):
 
 
 class ValidationReport:
-    """Collects multiple HorsiesError instances within a validation phase.
+    """The refusals of one validation phase: the return of ``Horsies.check()``
+    and the report that ``MultipleValidationErrors`` carries.
 
-    Formats all collected errors together with a summary line,
-    similar to rustc's multi-error output.
+    An empty report is a pass. Formats all refusals together with a summary
+    line, similar to rustc's multi-error output.
     """
 
     def __init__(self, phase_name: str) -> None:
         self.phase_name: str = phase_name
-        self.errors: list[HorsiesError] = []
+        self.refusals: list[HorsiesError] = []
 
     def add(self, error: HorsiesError) -> None:
-        """Append an error to the report."""
-        self.errors.append(error)
+        """Append a refusal to the report."""
+        self.refusals.append(error)
 
     def has_errors(self) -> bool:
-        """Return True if any errors were collected."""
-        return len(self.errors) > 0
+        """Return True if any refusal was collected."""
+        return len(self.refusals) > 0
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
         """Format all collected errors, then append an aborting summary."""
         if use_colors is None:
             use_colors = _should_use_colors()
@@ -309,10 +310,10 @@ class ValidationReport:
         c = _Colors if use_colors else _NoColors
         parts: list[str] = []
 
-        for error in self.errors:
-            parts.append(error.format_rust_style(use_colors=use_colors))
+        for error in self.refusals:
+            parts.append(error.format_diagnostic(use_colors=use_colors))
 
-        count = len(self.errors)
+        count = len(self.refusals)
         parts.append(
             f'\n{c.BOLD}{c.RED}error{c.RESET}: aborting due to {count} previous errors'
         )
@@ -320,7 +321,7 @@ class ValidationReport:
         return '\n'.join(parts)
 
     def __str__(self) -> str:
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 @dataclass
@@ -336,17 +337,17 @@ class MultipleValidationErrors(HorsiesError):
 
     def __post_init__(self) -> None:
         if not self.message:
-            count = len(self.report.errors)
+            count = len(self.report.refusals)
             self.message = f'aborting due to {count} previous errors'
         # Skip auto-location detection — location is per-error in the report
         super(HorsiesError, self).__init__(self.message)
 
-    def format_rust_style(self, use_colors: bool | None = None) -> str:
+    def format_diagnostic(self, use_colors: bool | None = None) -> str:
         """Delegate formatting to the underlying report."""
-        return self.report.format_rust_style(use_colors=use_colors)
+        return self.report.format_diagnostic(use_colors=use_colors)
 
     def __str__(self) -> str:
-        return self.format_rust_style(use_colors=False)
+        return self.format_diagnostic(use_colors=False)
 
 
 def raise_collected(report: ValidationReport) -> None:
@@ -356,11 +357,11 @@ def raise_collected(report: ValidationReport) -> None:
     - 1 error: raises the original error (preserves except clauses)
     - 2+ errors: raises MultipleValidationErrors wrapping the report
     """
-    count = len(report.errors)
+    count = len(report.refusals)
     if count == 0:
         return
     if count == 1:
-        raise report.errors[0]
+        raise report.refusals[0]
     raise MultipleValidationErrors(
         message=f'aborting due to {count} previous errors',
         report=report,

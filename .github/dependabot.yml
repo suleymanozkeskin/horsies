@@ -7,7 +7,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     cooldown:
-      default-days: 7
+      default-days: 10
       semver-major-days: 14
     groups:
       uv-minor-patch:
@@ -21,7 +21,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     cooldown:
-      default-days: 7
+      default-days: 10
       semver-major-days: 14
     groups:
       cargo-minor-patch:
@@ -35,7 +35,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       actions-minor-patch:
         update-types:
@@ -48,7 +48,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     cooldown:
-      default-days: 7
+      default-days: 10
       semver-major-days: 14
     ignore:
       # @astrojs/starlight 0.38+ requires astro 6+. Lift this once astro is on 6.x.
@@ -56,6 +56,25 @@ updates:
         versions: [">=0.38.0"]
     groups:
       bun-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: bun
+    # The workspace of the TypeScript client (package.json, bun.lock).
+    directory: "/clients/typescript"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 10
+      semver-major-days: 14
+    ignore:
+      # The zod major is pinned: the adapter needs the codecs of zod 4.
+      - dependency-name: "zod"
+        versions: [">=5.0.0"]
+    groups:
+      typescript-minor-patch:
         update-types:
           - minor
           - patch

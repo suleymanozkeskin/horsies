@@ -5,40 +5,53 @@
     "groups": {
       "list": {
         "model": {
-          "cancelled": "integer",
-          "claimed": "integer",
-          "completed": "integer",
-          "expired": "integer",
-          "failed": "integer",
-          "group": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "unclaimed": {},
-                "value": {
-                  "value": "string"
+          "fields": {
+            "cancelled": "integer",
+            "claimed": "integer",
+            "completed": "integer",
+            "expired": "integer",
+            "failed": "integer",
+            "group": {
+              "union": {
+                "name": "BreakdownGroup",
+                "tag": "kind",
+                "variants": {
+                  "unclaimed": {
+                    "fields": {},
+                    "name": "BreakdownGroupUnclaimed"
+                  },
+                  "value": {
+                    "fields": {
+                      "value": "string"
+                    },
+                    "name": "BreakdownGroupValue"
+                  }
                 }
               }
-            }
+            },
+            "pending": "integer",
+            "retried": "integer",
+            "running": "integer",
+            "total": "integer"
           },
-          "pending": "integer",
-          "retried": "integer",
-          "running": "integer",
-          "total": "integer"
+          "name": "GroupRow"
         }
       }
     },
     "total": {
       "model": {
-        "cancelled": "integer",
-        "claimed": "integer",
-        "completed": "integer",
-        "expired": "integer",
-        "failed": "integer",
-        "pending": "integer",
-        "retried": "integer",
-        "running": "integer",
-        "total": "integer"
+        "fields": {
+          "cancelled": "integer",
+          "claimed": "integer",
+          "completed": "integer",
+          "expired": "integer",
+          "failed": "integer",
+          "pending": "integer",
+          "retried": "integer",
+          "running": "integer",
+          "total": "integer"
+        },
+        "name": "BreakdownCounts"
       }
     }
   },
@@ -53,108 +66,33 @@
     "running": "integer",
     "total": "integer"
   },
-  "BudgetLoadInfo": {
+  "BudgetLoad": {
     "budget": {
-      "enum": [
-        "ISOLATED",
-        "SHARED_ASYNC",
-        "SHARED_THREAD"
-      ]
-    },
-    "capacity": "integer",
-    "free": "integer",
-    "in_flight": "integer",
-    "serves": {
-      "list": {
-        "enum": [
+      "enum": {
+        "name": "Execution",
+        "values": [
           "ISOLATED",
           "SHARED_ASYNC",
           "SHARED_THREAD"
         ]
       }
-    }
-  },
-  "ClassReportInfo": {
-    "checked_at": "date-time",
-    "live_window_s": "integer",
-    "streams": {
-      "list": {
-        "model": {
-          "coverage": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "no_capacity": {
-                  "workers": "integer"
-                },
-                "served": {
-                  "capacity": "integer",
-                  "workers": "integer"
-                },
-                "unserved": {}
-              }
-            }
-          },
-          "execution": {
-            "enum": [
-              "ISOLATED",
-              "SHARED_ASYNC",
-              "SHARED_THREAD"
-            ]
-          },
-          "queue_name": "string",
-          "wait": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "none_due": {
-                  "next_due_at": "date-time"
-                },
-                "waiting": {
-                  "oldest_due_at": "date-time",
-                  "wait_s": "number"
-                }
-              }
-            }
-          }
-        }
-      }
     },
-    "workers": {
+    "capacity": "integer",
+    "in_flight": "integer",
+    "serves": {
       "list": {
-        "model": {
-          "budgets": {
-            "list": {
-              "model": {
-                "budget": {
-                  "enum": [
-                    "ISOLATED",
-                    "SHARED_ASYNC",
-                    "SHARED_THREAD"
-                  ]
-                },
-                "capacity": "integer",
-                "free": "integer",
-                "in_flight": "integer",
-                "serves": {
-                  "list": {
-                    "enum": [
-                      "ISOLATED",
-                      "SHARED_ASYNC",
-                      "SHARED_THREAD"
-                    ]
-                  }
-                }
-              }
-            }
-          },
-          "snapshot_at": "date-time",
-          "worker_id": "string"
+        "enum": {
+          "name": "Execution",
+          "values": [
+            "ISOLATED",
+            "SHARED_ASYNC",
+            "SHARED_THREAD"
+          ]
         }
       }
     }
   },
-  "DownSlotInfo": {
+  "DownSlot": {
     "cause": "string",
     "detail": "string",
     "down_since": "date-time",
@@ -165,6 +103,120 @@
     "category": "string",
     "count": "integer",
     "value": "string"
+  },
+  "ExecutionClassReport": {
+    "checked_at": "date-time",
+    "live_window_seconds": "number",
+    "streams": {
+      "list": {
+        "model": {
+          "fields": {
+            "coverage": {
+              "union": {
+                "name": "StreamCoverageState",
+                "tag": "kind",
+                "variants": {
+                  "no_capacity": {
+                    "fields": {
+                      "workers": "integer"
+                    },
+                    "name": "StreamCoverageStateNoCapacity"
+                  },
+                  "served": {
+                    "fields": {
+                      "capacity": "integer",
+                      "workers": "integer"
+                    },
+                    "name": "StreamCoverageStateServed"
+                  },
+                  "unserved": {
+                    "fields": {},
+                    "name": "StreamCoverageStateUnserved"
+                  }
+                }
+              }
+            },
+            "execution": {
+              "enum": {
+                "name": "Execution",
+                "values": [
+                  "ISOLATED",
+                  "SHARED_ASYNC",
+                  "SHARED_THREAD"
+                ]
+              }
+            },
+            "queue": "string",
+            "wait": {
+              "union": {
+                "name": "StreamWait",
+                "tag": "kind",
+                "variants": {
+                  "due": {
+                    "fields": {
+                      "oldest_due_at": "date-time",
+                      "wait_seconds": "number"
+                    },
+                    "name": "StreamWaitDue"
+                  },
+                  "none_due": {
+                    "fields": {
+                      "next_due_at": "date-time"
+                    },
+                    "name": "StreamWaitNoneDue"
+                  }
+                }
+              }
+            }
+          },
+          "name": "PendingStream"
+        }
+      }
+    },
+    "workers": {
+      "list": {
+        "model": {
+          "fields": {
+            "budgets": {
+              "list": {
+                "model": {
+                  "fields": {
+                    "budget": {
+                      "enum": {
+                        "name": "Execution",
+                        "values": [
+                          "ISOLATED",
+                          "SHARED_ASYNC",
+                          "SHARED_THREAD"
+                        ]
+                      }
+                    },
+                    "capacity": "integer",
+                    "in_flight": "integer",
+                    "serves": {
+                      "list": {
+                        "enum": {
+                          "name": "Execution",
+                          "values": [
+                            "ISOLATED",
+                            "SHARED_ASYNC",
+                            "SHARED_THREAD"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "name": "BudgetLoad"
+                }
+              }
+            },
+            "snapshot_at": "date-time",
+            "worker_id": "string"
+          },
+          "name": "WorkerExecutionClassLoad"
+        }
+      }
+    }
   },
   "FacetValue": {
     "count": "integer",
@@ -177,33 +229,45 @@
     "error_codes": {
       "list": {
         "model": {
-          "category": "string",
-          "count": "integer",
-          "value": "string"
+          "fields": {
+            "category": "string",
+            "count": "integer",
+            "value": "string"
+          },
+          "name": "ErrorFacet"
         }
       }
     },
     "queues": {
       "list": {
         "model": {
-          "count": "integer",
-          "value": "string"
+          "fields": {
+            "count": "integer",
+            "value": "string"
+          },
+          "name": "FacetValue"
         }
       }
     },
     "task_names": {
       "list": {
         "model": {
-          "count": "integer",
-          "value": "string"
+          "fields": {
+            "count": "integer",
+            "value": "string"
+          },
+          "name": "FacetValue"
         }
       }
     },
     "workers": {
       "list": {
         "model": {
-          "count": "integer",
-          "value": "string"
+          "fields": {
+            "count": "integer",
+            "value": "string"
+          },
+          "name": "FacetValue"
         }
       }
     }
@@ -216,11 +280,18 @@
     "failed": "integer",
     "group": {
       "union": {
+        "name": "BreakdownGroup",
         "tag": "kind",
         "variants": {
-          "unclaimed": {},
+          "unclaimed": {
+            "fields": {},
+            "name": "BreakdownGroupUnclaimed"
+          },
           "value": {
-            "value": "string"
+            "fields": {
+              "value": "string"
+            },
+            "name": "BreakdownGroupValue"
           }
         }
       }
@@ -230,104 +301,93 @@
     "running": "integer",
     "total": "integer"
   },
-  "LeafTaskInfo": {
-    "completed_at": {
-      "nullable": "date-time"
+  "LivenessReport": {
+    "database": {
+      "union": {
+        "name": "DatabaseLiveness",
+        "tag": "kind",
+        "variants": {
+          "ping": {
+            "fields": {
+              "latency_ms": "number"
+            },
+            "name": "DatabasePing"
+          },
+          "unreachable": {
+            "fields": {},
+            "name": "DatabaseUnreachable"
+          }
+        }
+      }
     },
-    "enqueued_at": {
-      "nullable": "date-time"
-    },
-    "error_code": {
-      "nullable": "string"
-    },
-    "exec_s": {
-      "nullable": "number"
+    "workers": {
+      "list": {
+        "model": {
+          "fields": {
+            "hostname": "string",
+            "pid": "integer",
+            "round_trip_ms": "number",
+            "worker_id": "string"
+          },
+          "name": "WorkerPong"
+        }
+      }
+    }
+  },
+  "PendingStream": {
+    "coverage": {
+      "union": {
+        "name": "StreamCoverageState",
+        "tag": "kind",
+        "variants": {
+          "no_capacity": {
+            "fields": {
+              "workers": "integer"
+            },
+            "name": "StreamCoverageStateNoCapacity"
+          },
+          "served": {
+            "fields": {
+              "capacity": "integer",
+              "workers": "integer"
+            },
+            "name": "StreamCoverageStateServed"
+          },
+          "unserved": {
+            "fields": {},
+            "name": "StreamCoverageStateUnserved"
+          }
+        }
+      }
     },
     "execution": {
-      "nullable": {
-        "enum": [
+      "enum": {
+        "name": "Execution",
+        "values": [
           "ISOLATED",
           "SHARED_ASYNC",
           "SHARED_THREAD"
         ]
       }
     },
-    "failed_at": {
-      "nullable": "date-time"
-    },
-    "failed_reason": {
-      "nullable": "string"
-    },
-    "good_until": {
-      "nullable": "date-time"
-    },
-    "max_retries": "integer",
-    "queue_s": {
-      "nullable": "number"
-    },
-    "retry_count": "integer",
-    "started_at": {
-      "nullable": "date-time"
-    },
-    "status": "string",
-    "task_id": "uuid",
-    "trace_id": {
-      "nullable": "string"
-    },
-    "worker_hostname": {
-      "nullable": "string"
-    }
-  },
-  "LivenessReport": {
-    "db_latency_ms": {
-      "nullable": "number"
-    },
-    "db_reachable": "boolean",
-    "workers": {
-      "list": {
-        "model": {
-          "hostname": "string",
-          "pid": "integer",
-          "round_trip_ms": "number",
-          "worker_id": "string"
-        }
-      }
-    }
-  },
-  "PendingStreamInfo": {
-    "coverage": {
-      "union": {
-        "tag": "kind",
-        "variants": {
-          "no_capacity": {
-            "workers": "integer"
-          },
-          "served": {
-            "capacity": "integer",
-            "workers": "integer"
-          },
-          "unserved": {}
-        }
-      }
-    },
-    "execution": {
-      "enum": [
-        "ISOLATED",
-        "SHARED_ASYNC",
-        "SHARED_THREAD"
-      ]
-    },
-    "queue_name": "string",
+    "queue": "string",
     "wait": {
       "union": {
+        "name": "StreamWait",
         "tag": "kind",
         "variants": {
-          "none_due": {
-            "next_due_at": "date-time"
+          "due": {
+            "fields": {
+              "oldest_due_at": "date-time",
+              "wait_seconds": "number"
+            },
+            "name": "StreamWaitDue"
           },
-          "waiting": {
-            "oldest_due_at": "date-time",
-            "wait_s": "number"
+          "none_due": {
+            "fields": {
+              "next_due_at": "date-time"
+            },
+            "name": "StreamWaitNoneDue"
           }
         }
       }
@@ -351,7 +411,7 @@
     "count": "integer",
     "status": "string"
   },
-  "TaskAttemptInfo": {
+  "TaskAttemptDetail": {
     "attempt": "integer",
     "error_code": {
       "nullable": "string"
@@ -368,60 +428,98 @@
     "outcome": "string",
     "phases": {
       "union": {
+        "name": "AttemptPhasesInfo",
         "tag": "kind",
         "variants": {
           "captured": {
-            "claimed_at": "date-time",
-            "claims": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "counted": {
-                    "count": "integer",
-                    "first_claimed_at": "date-time"
-                  },
-                  "not_counted": {}
+            "fields": {
+              "claimed_at": "date-time",
+              "claims": {
+                "union": {
+                  "name": "AttemptClaimsInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "counted": {
+                      "fields": {
+                        "count": "integer",
+                        "first_claimed_at": "date-time"
+                      },
+                      "name": "AttemptClaimsCountedInfo"
+                    },
+                    "not_counted": {
+                      "fields": {},
+                      "name": "AttemptClaimsNotCountedInfo"
+                    }
+                  }
                 }
-              }
-            },
-            "enqueued_at": "date-time",
-            "finalizing": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "marked": {
-                    "finalizing_at": "date-time"
-                  },
-                  "not_marked": {}
+              },
+              "enqueued_at": "date-time",
+              "finalizing": {
+                "union": {
+                  "name": "AttemptFinalizingInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "marked": {
+                      "fields": {
+                        "finalizing_at": "date-time"
+                      },
+                      "name": "AttemptFinalizingMarkedInfo"
+                    },
+                    "not_marked": {
+                      "fields": {},
+                      "name": "AttemptFinalizingNotMarkedInfo"
+                    }
+                  }
                 }
-              }
-            },
-            "recorded_by": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "cancel": {},
-                  "recovery": {
-                    "last_seen_at": "date-time"
-                  },
-                  "worker": {
-                    "placement": {
-                      "union": {
-                        "tag": "kind",
-                        "variants": {
-                          "not_observed": {},
-                          "placed": {
-                            "placed_at": "date-time"
+              },
+              "recorded_by": {
+                "union": {
+                  "name": "AttemptRecordedByInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "cancel": {
+                      "fields": {},
+                      "name": "AttemptRecordedByCancelInfo"
+                    },
+                    "recovery": {
+                      "fields": {
+                        "last_seen_at": "date-time"
+                      },
+                      "name": "AttemptRecordedByRecoveryInfo"
+                    },
+                    "worker": {
+                      "fields": {
+                        "placement": {
+                          "union": {
+                            "name": "AttemptPlacementInfo",
+                            "tag": "kind",
+                            "variants": {
+                              "not_observed": {
+                                "fields": {},
+                                "name": "AttemptPlacementNotObservedInfo"
+                              },
+                              "placed": {
+                                "fields": {
+                                  "placed_at": "date-time"
+                                },
+                                "name": "AttemptPlacementPlacedInfo"
+                              }
+                            }
                           }
                         }
-                      }
+                      },
+                      "name": "AttemptRecordedByWorkerInfo"
                     }
                   }
                 }
               }
-            }
+            },
+            "name": "AttemptPhasesCapturedInfo"
           },
-          "not_captured": {}
+          "not_captured": {
+            "fields": {},
+            "name": "AttemptPhasesNotCapturedInfo"
+          }
         }
       }
     },
@@ -437,86 +535,127 @@
     "attempts": {
       "list": {
         "model": {
-          "attempt": "integer",
-          "error_code": {
-            "nullable": "string"
-          },
-          "error_message": {
-            "nullable": "string"
-          },
-          "failed_reason": {
-            "nullable": "string"
-          },
-          "finished_at": {
-            "nullable": "date-time"
-          },
-          "outcome": "string",
-          "phases": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "captured": {
-                  "claimed_at": "date-time",
-                  "claims": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "counted": {
-                          "count": "integer",
-                          "first_claimed_at": "date-time"
-                        },
-                        "not_counted": {}
-                      }
-                    }
-                  },
-                  "enqueued_at": "date-time",
-                  "finalizing": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "marked": {
-                          "finalizing_at": "date-time"
-                        },
-                        "not_marked": {}
-                      }
-                    }
-                  },
-                  "recorded_by": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "cancel": {},
-                        "recovery": {
-                          "last_seen_at": "date-time"
-                        },
-                        "worker": {
-                          "placement": {
-                            "union": {
-                              "tag": "kind",
-                              "variants": {
-                                "not_observed": {},
-                                "placed": {
-                                  "placed_at": "date-time"
+          "fields": {
+            "attempt": "integer",
+            "error_code": {
+              "nullable": "string"
+            },
+            "error_message": {
+              "nullable": "string"
+            },
+            "failed_reason": {
+              "nullable": "string"
+            },
+            "finished_at": {
+              "nullable": "date-time"
+            },
+            "outcome": "string",
+            "phases": {
+              "union": {
+                "name": "AttemptPhasesInfo",
+                "tag": "kind",
+                "variants": {
+                  "captured": {
+                    "fields": {
+                      "claimed_at": "date-time",
+                      "claims": {
+                        "union": {
+                          "name": "AttemptClaimsInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "counted": {
+                              "fields": {
+                                "count": "integer",
+                                "first_claimed_at": "date-time"
+                              },
+                              "name": "AttemptClaimsCountedInfo"
+                            },
+                            "not_counted": {
+                              "fields": {},
+                              "name": "AttemptClaimsNotCountedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "enqueued_at": "date-time",
+                      "finalizing": {
+                        "union": {
+                          "name": "AttemptFinalizingInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "marked": {
+                              "fields": {
+                                "finalizing_at": "date-time"
+                              },
+                              "name": "AttemptFinalizingMarkedInfo"
+                            },
+                            "not_marked": {
+                              "fields": {},
+                              "name": "AttemptFinalizingNotMarkedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "recorded_by": {
+                        "union": {
+                          "name": "AttemptRecordedByInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "cancel": {
+                              "fields": {},
+                              "name": "AttemptRecordedByCancelInfo"
+                            },
+                            "recovery": {
+                              "fields": {
+                                "last_seen_at": "date-time"
+                              },
+                              "name": "AttemptRecordedByRecoveryInfo"
+                            },
+                            "worker": {
+                              "fields": {
+                                "placement": {
+                                  "union": {
+                                    "name": "AttemptPlacementInfo",
+                                    "tag": "kind",
+                                    "variants": {
+                                      "not_observed": {
+                                        "fields": {},
+                                        "name": "AttemptPlacementNotObservedInfo"
+                                      },
+                                      "placed": {
+                                        "fields": {
+                                          "placed_at": "date-time"
+                                        },
+                                        "name": "AttemptPlacementPlacedInfo"
+                                      }
+                                    }
+                                  }
                                 }
-                              }
+                              },
+                              "name": "AttemptRecordedByWorkerInfo"
                             }
                           }
                         }
                       }
-                    }
+                    },
+                    "name": "AttemptPhasesCapturedInfo"
+                  },
+                  "not_captured": {
+                    "fields": {},
+                    "name": "AttemptPhasesNotCapturedInfo"
                   }
-                },
-                "not_captured": {}
+                }
               }
+            },
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "will_retry": "boolean",
+            "worker_hostname": {
+              "nullable": "string"
             }
           },
-          "started_at": {
-            "nullable": "date-time"
-          },
-          "will_retry": "boolean",
-          "worker_hostname": {
-            "nullable": "string"
-          }
+          "name": "TaskAttemptDetail"
         }
       }
     },
@@ -524,94 +663,47 @@
       "nullable": "string"
     },
     "is_workflow_task": "boolean",
-    "leaf": {
-      "model": {
-        "completed_at": {
-          "nullable": "date-time"
-        },
-        "enqueued_at": {
-          "nullable": "date-time"
-        },
-        "error_code": {
-          "nullable": "string"
-        },
-        "exec_s": {
-          "nullable": "number"
-        },
-        "execution": {
-          "nullable": {
-            "enum": [
-              "ISOLATED",
-              "SHARED_ASYNC",
-              "SHARED_THREAD"
-            ]
-          }
-        },
-        "failed_at": {
-          "nullable": "date-time"
-        },
-        "failed_reason": {
-          "nullable": "string"
-        },
-        "good_until": {
-          "nullable": "date-time"
-        },
-        "max_retries": "integer",
-        "queue_s": {
-          "nullable": "number"
-        },
-        "retry_count": "integer",
-        "started_at": {
-          "nullable": "date-time"
-        },
-        "status": "string",
-        "task_id": "uuid",
-        "trace_id": {
-          "nullable": "string"
-        },
-        "worker_hostname": {
-          "nullable": "string"
-        }
-      }
-    },
     "priority": "integer",
-    "queue_name": "string",
+    "queue": "string",
     "task_name": "string",
-    "workflow_id": {
-      "nullable": "string"
-    },
-    "workflow_task_index": {
-      "nullable": "integer"
-    }
-  },
-  "TaskListPage": {
-    "rows": {
-      "list": {
-        "model": {
+    "task_row": {
+      "model": {
+        "fields": {
           "completed_at": {
             "nullable": "date-time"
           },
           "enqueued_at": {
             "nullable": "date-time"
           },
-          "error_category": {
-            "nullable": "string"
-          },
           "error_code": {
             "nullable": "string"
           },
-          "exec_s": {
+          "execution": {
+            "nullable": {
+              "enum": {
+                "name": "Execution",
+                "values": [
+                  "ISOLATED",
+                  "SHARED_ASYNC",
+                  "SHARED_THREAD"
+                ]
+              }
+            }
+          },
+          "execution_seconds": {
             "nullable": "number"
           },
           "failed_at": {
             "nullable": "date-time"
           },
-          "id": "uuid",
-          "is_workflow_task": "boolean",
+          "failed_reason": {
+            "nullable": "string"
+          },
+          "good_until": {
+            "nullable": "date-time"
+          },
           "max_retries": "integer",
-          "priority": "integer",
-          "queue_name": "string",
-          "queue_s": {
+          "queue_seconds": {
             "nullable": "number"
           },
           "retry_count": "integer",
@@ -619,17 +711,124 @@
             "nullable": "date-time"
           },
           "status": "string",
-          "task_name": "string",
-          "worker_hostname": {
+          "task_id": "uuid",
+          "trace_id": {
             "nullable": "string"
           },
-          "worker_id": {
+          "worker_hostname": {
             "nullable": "string"
           }
+        },
+        "name": "TaskRowInfo"
+      }
+    },
+    "workflow_id": {
+      "nullable": "string"
+    },
+    "workflow_node_index": {
+      "nullable": "integer"
+    }
+  },
+  "TaskListPage": {
+    "rows": {
+      "list": {
+        "model": {
+          "fields": {
+            "completed_at": {
+              "nullable": "date-time"
+            },
+            "enqueued_at": {
+              "nullable": "date-time"
+            },
+            "error_category": {
+              "nullable": "string"
+            },
+            "error_code": {
+              "nullable": "string"
+            },
+            "execution_seconds": {
+              "nullable": "number"
+            },
+            "failed_at": {
+              "nullable": "date-time"
+            },
+            "is_workflow_task": "boolean",
+            "max_retries": "integer",
+            "priority": "integer",
+            "queue": "string",
+            "queue_seconds": {
+              "nullable": "number"
+            },
+            "retry_count": "integer",
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "status": "string",
+            "task_id": "uuid",
+            "task_name": "string",
+            "worker_hostname": {
+              "nullable": "string"
+            },
+            "worker_id": {
+              "nullable": "string"
+            }
+          },
+          "name": "TaskSummary"
         }
       }
     },
     "total": "integer"
+  },
+  "TaskRowInfo": {
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "enqueued_at": {
+      "nullable": "date-time"
+    },
+    "error_code": {
+      "nullable": "string"
+    },
+    "execution": {
+      "nullable": {
+        "enum": {
+          "name": "Execution",
+          "values": [
+            "ISOLATED",
+            "SHARED_ASYNC",
+            "SHARED_THREAD"
+          ]
+        }
+      }
+    },
+    "execution_seconds": {
+      "nullable": "number"
+    },
+    "failed_at": {
+      "nullable": "date-time"
+    },
+    "failed_reason": {
+      "nullable": "string"
+    },
+    "good_until": {
+      "nullable": "date-time"
+    },
+    "max_retries": "integer",
+    "queue_seconds": {
+      "nullable": "number"
+    },
+    "retry_count": "integer",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "status": "string",
+    "task_id": "uuid",
+    "trace_id": {
+      "nullable": "string"
+    },
+    "worker_hostname": {
+      "nullable": "string"
+    }
   },
   "TaskSummary": {
     "completed_at": {
@@ -644,18 +843,17 @@
     "error_code": {
       "nullable": "string"
     },
-    "exec_s": {
+    "execution_seconds": {
       "nullable": "number"
     },
     "failed_at": {
       "nullable": "date-time"
     },
-    "id": "uuid",
     "is_workflow_task": "boolean",
     "max_retries": "integer",
     "priority": "integer",
-    "queue_name": "string",
-    "queue_s": {
+    "queue": "string",
+    "queue_seconds": {
       "nullable": "number"
     },
     "retry_count": "integer",
@@ -663,6 +861,7 @@
       "nullable": "date-time"
     },
     "status": "string",
+    "task_id": "uuid",
     "task_name": "string",
     "worker_hostname": {
       "nullable": "string"
@@ -671,29 +870,37 @@
       "nullable": "string"
     }
   },
-  "WorkerClassLoadInfo": {
+  "WorkerExecutionClassLoad": {
     "budgets": {
       "list": {
         "model": {
-          "budget": {
-            "enum": [
-              "ISOLATED",
-              "SHARED_ASYNC",
-              "SHARED_THREAD"
-            ]
-          },
-          "capacity": "integer",
-          "free": "integer",
-          "in_flight": "integer",
-          "serves": {
-            "list": {
-              "enum": [
-                "ISOLATED",
-                "SHARED_ASYNC",
-                "SHARED_THREAD"
-              ]
+          "fields": {
+            "budget": {
+              "enum": {
+                "name": "Execution",
+                "values": [
+                  "ISOLATED",
+                  "SHARED_ASYNC",
+                  "SHARED_THREAD"
+                ]
+              }
+            },
+            "capacity": "integer",
+            "in_flight": "integer",
+            "serves": {
+              "list": {
+                "enum": {
+                  "name": "Execution",
+                  "values": [
+                    "ISOLATED",
+                    "SHARED_ASYNC",
+                    "SHARED_THREAD"
+                  ]
+                }
+              }
             }
-          }
+          },
+          "name": "BudgetLoad"
         }
       }
     },
@@ -714,29 +921,19 @@
     "tasks_claimed": "integer",
     "tasks_running": "integer"
   },
-  "WorkerPingInfo": {
+  "WorkerPong": {
     "hostname": "string",
     "pid": "integer",
     "round_trip_ms": "number",
     "worker_id": "string"
   },
   "WorkerStateInfo": {
+    "child_count": "integer",
     "cluster_wide_cap": {
       "nullable": "integer"
     },
     "cpu_percent": {
       "nullable": "number"
-    },
-    "down_slots": {
-      "list": {
-        "model": {
-          "cause": "string",
-          "detail": "string",
-          "down_since": "date-time",
-          "failed_boots": "integer",
-          "slot": "integer"
-        }
-      }
     },
     "hostname": "string",
     "memory_percent": {
@@ -746,15 +943,21 @@
       "nullable": "number"
     },
     "pid": "integer",
-    "processes": "integer",
     "profile": {
       "union": {
+        "name": "SnapshotProfile",
         "tag": "kind",
         "variants": {
           "named": {
-            "name": "string"
+            "fields": {
+              "name": "string"
+            },
+            "name": "SnapshotProfileNamed"
           },
-          "not_recorded": {}
+          "not_recorded": {
+            "fields": {},
+            "name": "SnapshotProfileNotRecorded"
+          }
         }
       }
     },
@@ -765,19 +968,44 @@
       "list": "string"
     },
     "slot_health": {
-      "enum": [
-        "all_serving",
-        "slots_down"
-      ]
+      "union": {
+        "name": "SlotHealth",
+        "tag": "kind",
+        "variants": {
+          "all_serving": {
+            "fields": {},
+            "name": "SlotHealthAllServing"
+          },
+          "slots_down": {
+            "fields": {
+              "slots": {
+                "list": {
+                  "model": {
+                    "fields": {
+                      "cause": "string",
+                      "detail": "string",
+                      "down_since": "date-time",
+                      "failed_boots": "integer",
+                      "slot": "integer"
+                    },
+                    "name": "DownSlot"
+                  }
+                }
+              }
+            },
+            "name": "SlotHealthSlotsDown"
+          }
+        }
+      }
     },
-    "snapshot_age_s": {
+    "snapshot_age_seconds": {
       "nullable": "number"
     },
     "snapshot_at": "date-time",
     "stale": "boolean",
     "tasks_claimed": "integer",
     "tasks_running": "integer",
-    "uptime_s": {
+    "uptime_seconds": {
       "nullable": "number"
     },
     "worker_id": "string",
@@ -787,8 +1015,205 @@
     "from_index": "integer",
     "to_index": "integer"
   },
-  "WorkflowNodeInfo": {
-    "allow_failed_deps": "boolean",
+  "WorkflowNodeDetail": {
+    "attempts": {
+      "list": {
+        "model": {
+          "fields": {
+            "attempt": "integer",
+            "error_code": {
+              "nullable": "string"
+            },
+            "error_message": {
+              "nullable": "string"
+            },
+            "failed_reason": {
+              "nullable": "string"
+            },
+            "finished_at": {
+              "nullable": "date-time"
+            },
+            "outcome": "string",
+            "phases": {
+              "union": {
+                "name": "AttemptPhasesInfo",
+                "tag": "kind",
+                "variants": {
+                  "captured": {
+                    "fields": {
+                      "claimed_at": "date-time",
+                      "claims": {
+                        "union": {
+                          "name": "AttemptClaimsInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "counted": {
+                              "fields": {
+                                "count": "integer",
+                                "first_claimed_at": "date-time"
+                              },
+                              "name": "AttemptClaimsCountedInfo"
+                            },
+                            "not_counted": {
+                              "fields": {},
+                              "name": "AttemptClaimsNotCountedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "enqueued_at": "date-time",
+                      "finalizing": {
+                        "union": {
+                          "name": "AttemptFinalizingInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "marked": {
+                              "fields": {
+                                "finalizing_at": "date-time"
+                              },
+                              "name": "AttemptFinalizingMarkedInfo"
+                            },
+                            "not_marked": {
+                              "fields": {},
+                              "name": "AttemptFinalizingNotMarkedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "recorded_by": {
+                        "union": {
+                          "name": "AttemptRecordedByInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "cancel": {
+                              "fields": {},
+                              "name": "AttemptRecordedByCancelInfo"
+                            },
+                            "recovery": {
+                              "fields": {
+                                "last_seen_at": "date-time"
+                              },
+                              "name": "AttemptRecordedByRecoveryInfo"
+                            },
+                            "worker": {
+                              "fields": {
+                                "placement": {
+                                  "union": {
+                                    "name": "AttemptPlacementInfo",
+                                    "tag": "kind",
+                                    "variants": {
+                                      "not_observed": {
+                                        "fields": {},
+                                        "name": "AttemptPlacementNotObservedInfo"
+                                      },
+                                      "placed": {
+                                        "fields": {
+                                          "placed_at": "date-time"
+                                        },
+                                        "name": "AttemptPlacementPlacedInfo"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "name": "AttemptRecordedByWorkerInfo"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "name": "AttemptPhasesCapturedInfo"
+                  },
+                  "not_captured": {
+                    "fields": {},
+                    "name": "AttemptPhasesNotCapturedInfo"
+                  }
+                }
+              }
+            },
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "will_retry": "boolean",
+            "worker_hostname": {
+              "nullable": "string"
+            }
+          },
+          "name": "TaskAttemptDetail"
+        }
+      }
+    },
+    "is_sub_workflow": "boolean",
+    "node_error": {
+      "nullable": "string"
+    },
+    "node_id": {
+      "nullable": "string"
+    },
+    "node_index": "integer",
+    "node_status": "string",
+    "task_name": "string",
+    "task_row": {
+      "nullable": {
+        "model": {
+          "fields": {
+            "completed_at": {
+              "nullable": "date-time"
+            },
+            "enqueued_at": {
+              "nullable": "date-time"
+            },
+            "error_code": {
+              "nullable": "string"
+            },
+            "execution": {
+              "nullable": {
+                "enum": {
+                  "name": "Execution",
+                  "values": [
+                    "ISOLATED",
+                    "SHARED_ASYNC",
+                    "SHARED_THREAD"
+                  ]
+                }
+              }
+            },
+            "execution_seconds": {
+              "nullable": "number"
+            },
+            "failed_at": {
+              "nullable": "date-time"
+            },
+            "failed_reason": {
+              "nullable": "string"
+            },
+            "good_until": {
+              "nullable": "date-time"
+            },
+            "max_retries": "integer",
+            "queue_seconds": {
+              "nullable": "number"
+            },
+            "retry_count": "integer",
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "status": "string",
+            "task_id": "uuid",
+            "trace_id": {
+              "nullable": "string"
+            },
+            "worker_hostname": {
+              "nullable": "string"
+            }
+          },
+          "name": "TaskRowInfo"
+        }
+      }
+    }
+  },
+  "WorkflowNodeSummary": {
+    "allow_failed_dependencies": "boolean",
     "child_failed": {
       "nullable": "integer"
     },
@@ -798,13 +1223,14 @@
     "completed_at": {
       "nullable": "date-time"
     },
-    "exec_s": {
+    "execution_seconds": {
       "nullable": "number"
     },
-    "is_subworkflow": "boolean",
+    "is_sub_workflow": "boolean",
     "node_id": {
       "nullable": "string"
     },
+    "node_index": "integer",
     "node_status": "string",
     "started_at": {
       "nullable": "date-time"
@@ -812,325 +1238,521 @@
     "sub_workflow_id": {
       "nullable": "string"
     },
-    "task_index": "integer",
     "task_name": "string",
     "timing": {
       "union": {
+        "name": "NodeTimingInfo",
         "tag": "kind",
         "variants": {
           "exact": {
-            "endpoint": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "not_terminal": {},
-                  "terminal": {
-                    "at": "date-time",
-                    "status": {
-                      "enum": [
-                        "COMPLETED",
-                        "FAILED",
-                        "SKIPPED"
-                      ]
+            "fields": {
+              "endpoint": {
+                "union": {
+                  "name": "NodeEndpointInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "not_terminal": {
+                      "fields": {},
+                      "name": "NodeEndpointNotTerminalInfo"
+                    },
+                    "terminal": {
+                      "fields": {
+                        "at": "date-time",
+                        "status": {
+                          "enum": {
+                            "name": "TerminalNodeStatus",
+                            "values": [
+                              "COMPLETED",
+                              "FAILED",
+                              "SKIPPED"
+                            ]
+                          }
+                        }
+                      },
+                      "name": "NodeEndpointTerminalInfo"
                     }
                   }
                 }
-              }
-            },
-            "segments": {
-              "list": {
-                "model": {
-                  "end": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "ended": {
-                          "at": "date-time"
-                        },
-                        "open": {}
-                      }
-                    }
-                  },
-                  "phase": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "advancing": {},
-                        "claimed": {
-                          "claim": {
-                            "union": {
-                              "tag": "kind",
-                              "variants": {
-                                "earlier": {
-                                  "count": "integer"
-                                },
-                                "not_recorded": {},
-                                "recorded": {
-                                  "placement": {
-                                    "union": {
-                                      "tag": "kind",
-                                      "variants": {
-                                        "not_observed": {},
-                                        "placed": {
-                                          "placed_at": "date-time"
-                                        }
+              },
+              "segments": {
+                "list": {
+                  "model": {
+                    "fields": {
+                      "end": {
+                        "union": {
+                          "name": "SegmentEndInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "closed": {
+                              "fields": {
+                                "at": "date-time"
+                              },
+                              "name": "SegmentEndClosedInfo"
+                            },
+                            "open": {
+                              "fields": {},
+                              "name": "SegmentEndOpenInfo"
+                            }
+                          }
+                        }
+                      },
+                      "phase": {
+                        "union": {
+                          "name": "SegmentPhaseInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "advancing": {
+                              "fields": {},
+                              "name": "SegmentPhaseAdvancingInfo"
+                            },
+                            "claimed": {
+                              "fields": {
+                                "claim": {
+                                  "union": {
+                                    "name": "SegmentClaimInfo",
+                                    "tag": "kind",
+                                    "variants": {
+                                      "earlier": {
+                                        "fields": {
+                                          "count": "integer"
+                                        },
+                                        "name": "SegmentClaimEarlierInfo"
+                                      },
+                                      "not_recorded": {
+                                        "fields": {},
+                                        "name": "SegmentClaimNotRecordedInfo"
+                                      },
+                                      "recorded": {
+                                        "fields": {
+                                          "placement": {
+                                            "union": {
+                                              "name": "AttemptPlacementInfo",
+                                              "tag": "kind",
+                                              "variants": {
+                                                "not_observed": {
+                                                  "fields": {},
+                                                  "name": "AttemptPlacementNotObservedInfo"
+                                                },
+                                                "placed": {
+                                                  "fields": {
+                                                    "placed_at": "date-time"
+                                                  },
+                                                  "name": "AttemptPlacementPlacedInfo"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "SegmentClaimRecordedInfo"
                                       }
                                     }
                                   }
                                 }
-                              }
+                              },
+                              "name": "SegmentPhaseClaimedInfo"
+                            },
+                            "enqueued": {
+                              "fields": {},
+                              "name": "SegmentPhaseEnqueuedInfo"
+                            },
+                            "finalizing": {
+                              "fields": {},
+                              "name": "SegmentPhaseFinalizingInfo"
+                            },
+                            "pending": {
+                              "fields": {},
+                              "name": "SegmentPhasePendingInfo"
+                            },
+                            "ready": {
+                              "fields": {},
+                              "name": "SegmentPhaseReadyInfo"
+                            },
+                            "retry_wait": {
+                              "fields": {},
+                              "name": "SegmentPhaseRetryWaitInfo"
+                            },
+                            "running": {
+                              "fields": {},
+                              "name": "SegmentPhaseRunningInfo"
+                            },
+                            "unknown": {
+                              "fields": {
+                                "reason": {
+                                  "enum": {
+                                    "name": "UnknownReason",
+                                    "values": [
+                                      "ATTEMPT_NOT_CAPTURED",
+                                      "CLAIMS_NOT_COUNTED",
+                                      "HISTORY_PRUNED",
+                                      "WORKER_LOST"
+                                    ]
+                                  }
+                                }
+                              },
+                              "name": "SegmentPhaseUnknownInfo"
                             }
                           }
-                        },
-                        "enqueued": {},
-                        "finalizing": {},
-                        "pending": {},
-                        "ready": {},
-                        "retry_wait": {},
-                        "running": {},
-                        "unknown": {
-                          "reason": {
-                            "enum": [
-                              "ATTEMPT_NOT_CAPTURED",
-                              "CLAIMS_NOT_COUNTED",
-                              "HISTORY_PRUNED",
-                              "WORKER_LOST"
-                            ]
+                        }
+                      },
+                      "source": {
+                        "union": {
+                          "name": "SegmentSourceInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "attempt": {
+                              "fields": {
+                                "attempt": "integer",
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "name": "SegmentSourceAttemptInfo"
+                            },
+                            "node": {
+                              "fields": {},
+                              "name": "SegmentSourceNodeInfo"
+                            },
+                            "task": {
+                              "fields": {
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "name": "SegmentSourceTaskInfo"
+                            }
                           }
                         }
-                      }
-                    }
-                  },
-                  "source": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "attempt": {
-                          "attempt": "integer",
-                          "generation": "integer",
-                          "task_id": "uuid"
-                        },
-                        "node": {},
-                        "task": {
-                          "generation": "integer",
-                          "task_id": "uuid"
-                        }
-                      }
-                    }
-                  },
-                  "started_at": "date-time"
+                      },
+                      "started_at": "date-time"
+                    },
+                    "name": "TimingSegmentInfo"
+                  }
                 }
               }
-            }
+            },
+            "name": "NodeTimingExactInfo"
           },
           "inconsistent": {
-            "conflict": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "clock_order": {
-                    "earlier": {
-                      "enum": [
-                        "ATTEMPT_ENQUEUED",
-                        "ATTEMPT_RECORDED",
-                        "CHILD_COMPLETED",
-                        "CHILD_CREATED",
-                        "CLAIM",
-                        "FINALIZING",
-                        "FIRST_CLAIM",
-                        "LAST_SEEN",
-                        "NODE_COMPLETED",
-                        "NODE_CREATED",
-                        "NODE_ENQUEUED",
-                        "NODE_READY",
-                        "PLACEMENT",
-                        "READ_TIME",
-                        "RUN_COMPLETED",
-                        "RUN_PAUSED",
-                        "RUN_RESUMED",
-                        "START",
-                        "TASK_CREATED",
-                        "TASK_MOVED"
-                      ]
+            "fields": {
+              "conflict": {
+                "union": {
+                  "name": "TimingConflictInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "clock_order": {
+                      "fields": {
+                        "earlier": {
+                          "enum": {
+                            "name": "TimingBoundary",
+                            "values": [
+                              "ATTEMPT_ENQUEUED",
+                              "ATTEMPT_RECORDED",
+                              "CHILD_COMPLETED",
+                              "CHILD_CREATED",
+                              "CLAIM",
+                              "FINALIZING",
+                              "FIRST_CLAIM",
+                              "LAST_SEEN",
+                              "NODE_COMPLETED",
+                              "NODE_CREATED",
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "PLACEMENT",
+                              "READ_TIME",
+                              "RUN_COMPLETED",
+                              "RUN_PAUSED",
+                              "RUN_RESUMED",
+                              "START",
+                              "TASK_CREATED",
+                              "TASK_MOVED"
+                            ]
+                          }
+                        },
+                        "earlier_at": "date-time",
+                        "later": {
+                          "enum": {
+                            "name": "TimingBoundary",
+                            "values": [
+                              "ATTEMPT_ENQUEUED",
+                              "ATTEMPT_RECORDED",
+                              "CHILD_COMPLETED",
+                              "CHILD_CREATED",
+                              "CLAIM",
+                              "FINALIZING",
+                              "FIRST_CLAIM",
+                              "LAST_SEEN",
+                              "NODE_COMPLETED",
+                              "NODE_CREATED",
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "PLACEMENT",
+                              "READ_TIME",
+                              "RUN_COMPLETED",
+                              "RUN_PAUSED",
+                              "RUN_RESUMED",
+                              "START",
+                              "TASK_CREATED",
+                              "TASK_MOVED"
+                            ]
+                          }
+                        },
+                        "later_at": "date-time"
+                      },
+                      "name": "TimingConflictClockOrderInfo"
                     },
-                    "earlier_at": "date-time",
-                    "later": {
-                      "enum": [
-                        "ATTEMPT_ENQUEUED",
-                        "ATTEMPT_RECORDED",
-                        "CHILD_COMPLETED",
-                        "CHILD_CREATED",
-                        "CLAIM",
-                        "FINALIZING",
-                        "FIRST_CLAIM",
-                        "LAST_SEEN",
-                        "NODE_COMPLETED",
-                        "NODE_CREATED",
-                        "NODE_ENQUEUED",
-                        "NODE_READY",
-                        "PLACEMENT",
-                        "READ_TIME",
-                        "RUN_COMPLETED",
-                        "RUN_PAUSED",
-                        "RUN_RESUMED",
-                        "START",
-                        "TASK_CREATED",
-                        "TASK_MOVED"
-                      ]
+                    "missing_record": {
+                      "fields": {
+                        "record": {
+                          "enum": {
+                            "name": "MissingRecord",
+                            "values": [
+                              "ATTEMPT_ROW",
+                              "CHILD_RUN",
+                              "COMPLETION_TIME",
+                              "LINKED_TASK",
+                              "LINKED_WORK",
+                              "OPEN_ATTEMPT",
+                              "TASK_TIMES"
+                            ]
+                          }
+                        }
+                      },
+                      "name": "TimingConflictMissingRecordInfo"
                     },
-                    "later_at": "date-time"
-                  },
-                  "missing_record": {
-                    "record": {
-                      "enum": [
-                        "ATTEMPT_ROW",
-                        "CHILD_RUN",
-                        "COMPLETION_TIME",
-                        "LINKED_TASK",
-                        "LINKED_WORK",
-                        "OPEN_ATTEMPT",
-                        "TASK_TIMES"
-                      ]
+                    "unexpected_event": {
+                      "fields": {
+                        "event": {
+                          "enum": {
+                            "name": "WorkflowEventKind",
+                            "values": [
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "TASK_MOVED",
+                              "WORKFLOW_PAUSED",
+                              "WORKFLOW_RESUMED"
+                            ]
+                          }
+                        },
+                        "event_id": "integer"
+                      },
+                      "name": "TimingConflictUnexpectedEventInfo"
                     }
-                  },
-                  "unexpected_event": {
-                    "event": {
-                      "enum": [
-                        "NODE_ENQUEUED",
-                        "NODE_READY",
-                        "TASK_MOVED",
-                        "WORKFLOW_PAUSED",
-                        "WORKFLOW_RESUMED"
-                      ]
-                    },
-                    "event_id": "integer"
                   }
                 }
               }
-            }
+            },
+            "name": "NodeTimingInconsistentInfo"
           },
           "partial": {
-            "endpoint": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "not_terminal": {},
-                  "terminal": {
-                    "at": "date-time",
-                    "status": {
-                      "enum": [
-                        "COMPLETED",
-                        "FAILED",
-                        "SKIPPED"
-                      ]
+            "fields": {
+              "endpoint": {
+                "union": {
+                  "name": "NodeEndpointInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "not_terminal": {
+                      "fields": {},
+                      "name": "NodeEndpointNotTerminalInfo"
+                    },
+                    "terminal": {
+                      "fields": {
+                        "at": "date-time",
+                        "status": {
+                          "enum": {
+                            "name": "TerminalNodeStatus",
+                            "values": [
+                              "COMPLETED",
+                              "FAILED",
+                              "SKIPPED"
+                            ]
+                          }
+                        }
+                      },
+                      "name": "NodeEndpointTerminalInfo"
                     }
                   }
                 }
-              }
-            },
-            "reasons": {
-              "list": {
-                "enum": [
-                  "ATTEMPT_NOT_CAPTURED",
-                  "CLAIMS_NOT_COUNTED",
-                  "HISTORY_PRUNED",
-                  "WORKER_LOST"
-                ]
-              }
-            },
-            "segments": {
-              "list": {
-                "model": {
-                  "end": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "ended": {
-                          "at": "date-time"
-                        },
-                        "open": {}
-                      }
-                    }
-                  },
-                  "phase": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "advancing": {},
-                        "claimed": {
-                          "claim": {
-                            "union": {
-                              "tag": "kind",
-                              "variants": {
-                                "earlier": {
-                                  "count": "integer"
-                                },
-                                "not_recorded": {},
-                                "recorded": {
-                                  "placement": {
-                                    "union": {
-                                      "tag": "kind",
-                                      "variants": {
-                                        "not_observed": {},
-                                        "placed": {
-                                          "placed_at": "date-time"
-                                        }
+              },
+              "reasons": {
+                "list": {
+                  "enum": {
+                    "name": "UnknownReason",
+                    "values": [
+                      "ATTEMPT_NOT_CAPTURED",
+                      "CLAIMS_NOT_COUNTED",
+                      "HISTORY_PRUNED",
+                      "WORKER_LOST"
+                    ]
+                  }
+                }
+              },
+              "segments": {
+                "list": {
+                  "model": {
+                    "fields": {
+                      "end": {
+                        "union": {
+                          "name": "SegmentEndInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "closed": {
+                              "fields": {
+                                "at": "date-time"
+                              },
+                              "name": "SegmentEndClosedInfo"
+                            },
+                            "open": {
+                              "fields": {},
+                              "name": "SegmentEndOpenInfo"
+                            }
+                          }
+                        }
+                      },
+                      "phase": {
+                        "union": {
+                          "name": "SegmentPhaseInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "advancing": {
+                              "fields": {},
+                              "name": "SegmentPhaseAdvancingInfo"
+                            },
+                            "claimed": {
+                              "fields": {
+                                "claim": {
+                                  "union": {
+                                    "name": "SegmentClaimInfo",
+                                    "tag": "kind",
+                                    "variants": {
+                                      "earlier": {
+                                        "fields": {
+                                          "count": "integer"
+                                        },
+                                        "name": "SegmentClaimEarlierInfo"
+                                      },
+                                      "not_recorded": {
+                                        "fields": {},
+                                        "name": "SegmentClaimNotRecordedInfo"
+                                      },
+                                      "recorded": {
+                                        "fields": {
+                                          "placement": {
+                                            "union": {
+                                              "name": "AttemptPlacementInfo",
+                                              "tag": "kind",
+                                              "variants": {
+                                                "not_observed": {
+                                                  "fields": {},
+                                                  "name": "AttemptPlacementNotObservedInfo"
+                                                },
+                                                "placed": {
+                                                  "fields": {
+                                                    "placed_at": "date-time"
+                                                  },
+                                                  "name": "AttemptPlacementPlacedInfo"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "name": "SegmentClaimRecordedInfo"
                                       }
                                     }
                                   }
                                 }
-                              }
+                              },
+                              "name": "SegmentPhaseClaimedInfo"
+                            },
+                            "enqueued": {
+                              "fields": {},
+                              "name": "SegmentPhaseEnqueuedInfo"
+                            },
+                            "finalizing": {
+                              "fields": {},
+                              "name": "SegmentPhaseFinalizingInfo"
+                            },
+                            "pending": {
+                              "fields": {},
+                              "name": "SegmentPhasePendingInfo"
+                            },
+                            "ready": {
+                              "fields": {},
+                              "name": "SegmentPhaseReadyInfo"
+                            },
+                            "retry_wait": {
+                              "fields": {},
+                              "name": "SegmentPhaseRetryWaitInfo"
+                            },
+                            "running": {
+                              "fields": {},
+                              "name": "SegmentPhaseRunningInfo"
+                            },
+                            "unknown": {
+                              "fields": {
+                                "reason": {
+                                  "enum": {
+                                    "name": "UnknownReason",
+                                    "values": [
+                                      "ATTEMPT_NOT_CAPTURED",
+                                      "CLAIMS_NOT_COUNTED",
+                                      "HISTORY_PRUNED",
+                                      "WORKER_LOST"
+                                    ]
+                                  }
+                                }
+                              },
+                              "name": "SegmentPhaseUnknownInfo"
                             }
                           }
-                        },
-                        "enqueued": {},
-                        "finalizing": {},
-                        "pending": {},
-                        "ready": {},
-                        "retry_wait": {},
-                        "running": {},
-                        "unknown": {
-                          "reason": {
-                            "enum": [
-                              "ATTEMPT_NOT_CAPTURED",
-                              "CLAIMS_NOT_COUNTED",
-                              "HISTORY_PRUNED",
-                              "WORKER_LOST"
-                            ]
+                        }
+                      },
+                      "source": {
+                        "union": {
+                          "name": "SegmentSourceInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "attempt": {
+                              "fields": {
+                                "attempt": "integer",
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "name": "SegmentSourceAttemptInfo"
+                            },
+                            "node": {
+                              "fields": {},
+                              "name": "SegmentSourceNodeInfo"
+                            },
+                            "task": {
+                              "fields": {
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "name": "SegmentSourceTaskInfo"
+                            }
                           }
                         }
-                      }
-                    }
-                  },
-                  "source": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "attempt": {
-                          "attempt": "integer",
-                          "generation": "integer",
-                          "task_id": "uuid"
-                        },
-                        "node": {},
-                        "task": {
-                          "generation": "integer",
-                          "task_id": "uuid"
-                        }
-                      }
-                    }
-                  },
-                  "started_at": "date-time"
+                      },
+                      "started_at": "date-time"
+                    },
+                    "name": "TimingSegmentInfo"
+                  }
                 }
               }
-            }
+            },
+            "name": "NodeTimingPartialInfo"
           },
           "unavailable": {
-            "reason": {
-              "enum": [
-                "RUN_BEFORE_CAPTURE",
-                "TIMING_BOUND_EXCEEDED"
-              ]
-            }
+            "fields": {
+              "reason": {
+                "enum": {
+                  "name": "UnavailableReason",
+                  "values": [
+                    "RUN_BEFORE_CAPTURE",
+                    "TIMING_BOUND_EXCEEDED"
+                  ]
+                }
+              }
+            },
+            "name": "NodeTimingUnavailableInfo"
           }
         }
       }
@@ -1140,8 +1762,11 @@
     "edges": {
       "list": {
         "model": {
-          "from_index": "integer",
-          "to_index": "integer"
+          "fields": {
+            "from_index": "integer",
+            "to_index": "integer"
+          },
+          "name": "WorkflowEdge"
         }
       }
     },
@@ -1152,536 +1777,804 @@
     "nodes": {
       "list": {
         "model": {
-          "allow_failed_deps": "boolean",
-          "child_failed": {
-            "nullable": "integer"
-          },
-          "child_total": {
-            "nullable": "integer"
-          },
-          "completed_at": {
-            "nullable": "date-time"
-          },
-          "exec_s": {
-            "nullable": "number"
-          },
-          "is_subworkflow": "boolean",
-          "node_id": {
-            "nullable": "string"
-          },
-          "node_status": "string",
-          "started_at": {
-            "nullable": "date-time"
-          },
-          "sub_workflow_id": {
-            "nullable": "string"
-          },
-          "task_index": "integer",
-          "task_name": "string",
-          "timing": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "exact": {
-                  "endpoint": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "not_terminal": {},
-                        "terminal": {
-                          "at": "date-time",
-                          "status": {
-                            "enum": [
-                              "COMPLETED",
-                              "FAILED",
-                              "SKIPPED"
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "segments": {
-                    "list": {
-                      "model": {
-                        "end": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "ended": {
-                                "at": "date-time"
+          "fields": {
+            "allow_failed_dependencies": "boolean",
+            "child_failed": {
+              "nullable": "integer"
+            },
+            "child_total": {
+              "nullable": "integer"
+            },
+            "completed_at": {
+              "nullable": "date-time"
+            },
+            "execution_seconds": {
+              "nullable": "number"
+            },
+            "is_sub_workflow": "boolean",
+            "node_id": {
+              "nullable": "string"
+            },
+            "node_index": "integer",
+            "node_status": "string",
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "sub_workflow_id": {
+              "nullable": "string"
+            },
+            "task_name": "string",
+            "timing": {
+              "union": {
+                "name": "NodeTimingInfo",
+                "tag": "kind",
+                "variants": {
+                  "exact": {
+                    "fields": {
+                      "endpoint": {
+                        "union": {
+                          "name": "NodeEndpointInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "not_terminal": {
+                              "fields": {},
+                              "name": "NodeEndpointNotTerminalInfo"
+                            },
+                            "terminal": {
+                              "fields": {
+                                "at": "date-time",
+                                "status": {
+                                  "enum": {
+                                    "name": "TerminalNodeStatus",
+                                    "values": [
+                                      "COMPLETED",
+                                      "FAILED",
+                                      "SKIPPED"
+                                    ]
+                                  }
+                                }
                               },
-                              "open": {}
+                              "name": "NodeEndpointTerminalInfo"
                             }
                           }
-                        },
-                        "phase": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "advancing": {},
-                              "claimed": {
-                                "claim": {
-                                  "union": {
-                                    "tag": "kind",
-                                    "variants": {
-                                      "earlier": {
-                                        "count": "integer"
+                        }
+                      },
+                      "segments": {
+                        "list": {
+                          "model": {
+                            "fields": {
+                              "end": {
+                                "union": {
+                                  "name": "SegmentEndInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "closed": {
+                                      "fields": {
+                                        "at": "date-time"
                                       },
-                                      "not_recorded": {},
-                                      "recorded": {
-                                        "placement": {
-                                          "union": {
-                                            "tag": "kind",
-                                            "variants": {
-                                              "not_observed": {},
-                                              "placed": {
-                                                "placed_at": "date-time"
-                                              }
-                                            }
-                                          }
-                                        }
-                                      }
+                                      "name": "SegmentEndClosedInfo"
+                                    },
+                                    "open": {
+                                      "fields": {},
+                                      "name": "SegmentEndOpenInfo"
                                     }
                                   }
                                 }
                               },
-                              "enqueued": {},
-                              "finalizing": {},
-                              "pending": {},
-                              "ready": {},
-                              "retry_wait": {},
-                              "running": {},
-                              "unknown": {
-                                "reason": {
-                                  "enum": [
-                                    "ATTEMPT_NOT_CAPTURED",
-                                    "CLAIMS_NOT_COUNTED",
-                                    "HISTORY_PRUNED",
-                                    "WORKER_LOST"
-                                  ]
-                                }
-                              }
-                            }
-                          }
-                        },
-                        "source": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "attempt": {
-                                "attempt": "integer",
-                                "generation": "integer",
-                                "task_id": "uuid"
-                              },
-                              "node": {},
-                              "task": {
-                                "generation": "integer",
-                                "task_id": "uuid"
-                              }
-                            }
-                          }
-                        },
-                        "started_at": "date-time"
-                      }
-                    }
-                  }
-                },
-                "inconsistent": {
-                  "conflict": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "clock_order": {
-                          "earlier": {
-                            "enum": [
-                              "ATTEMPT_ENQUEUED",
-                              "ATTEMPT_RECORDED",
-                              "CHILD_COMPLETED",
-                              "CHILD_CREATED",
-                              "CLAIM",
-                              "FINALIZING",
-                              "FIRST_CLAIM",
-                              "LAST_SEEN",
-                              "NODE_COMPLETED",
-                              "NODE_CREATED",
-                              "NODE_ENQUEUED",
-                              "NODE_READY",
-                              "PLACEMENT",
-                              "READ_TIME",
-                              "RUN_COMPLETED",
-                              "RUN_PAUSED",
-                              "RUN_RESUMED",
-                              "START",
-                              "TASK_CREATED",
-                              "TASK_MOVED"
-                            ]
-                          },
-                          "earlier_at": "date-time",
-                          "later": {
-                            "enum": [
-                              "ATTEMPT_ENQUEUED",
-                              "ATTEMPT_RECORDED",
-                              "CHILD_COMPLETED",
-                              "CHILD_CREATED",
-                              "CLAIM",
-                              "FINALIZING",
-                              "FIRST_CLAIM",
-                              "LAST_SEEN",
-                              "NODE_COMPLETED",
-                              "NODE_CREATED",
-                              "NODE_ENQUEUED",
-                              "NODE_READY",
-                              "PLACEMENT",
-                              "READ_TIME",
-                              "RUN_COMPLETED",
-                              "RUN_PAUSED",
-                              "RUN_RESUMED",
-                              "START",
-                              "TASK_CREATED",
-                              "TASK_MOVED"
-                            ]
-                          },
-                          "later_at": "date-time"
-                        },
-                        "missing_record": {
-                          "record": {
-                            "enum": [
-                              "ATTEMPT_ROW",
-                              "CHILD_RUN",
-                              "COMPLETION_TIME",
-                              "LINKED_TASK",
-                              "LINKED_WORK",
-                              "OPEN_ATTEMPT",
-                              "TASK_TIMES"
-                            ]
-                          }
-                        },
-                        "unexpected_event": {
-                          "event": {
-                            "enum": [
-                              "NODE_ENQUEUED",
-                              "NODE_READY",
-                              "TASK_MOVED",
-                              "WORKFLOW_PAUSED",
-                              "WORKFLOW_RESUMED"
-                            ]
-                          },
-                          "event_id": "integer"
-                        }
-                      }
-                    }
-                  }
-                },
-                "partial": {
-                  "endpoint": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "not_terminal": {},
-                        "terminal": {
-                          "at": "date-time",
-                          "status": {
-                            "enum": [
-                              "COMPLETED",
-                              "FAILED",
-                              "SKIPPED"
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "reasons": {
-                    "list": {
-                      "enum": [
-                        "ATTEMPT_NOT_CAPTURED",
-                        "CLAIMS_NOT_COUNTED",
-                        "HISTORY_PRUNED",
-                        "WORKER_LOST"
-                      ]
-                    }
-                  },
-                  "segments": {
-                    "list": {
-                      "model": {
-                        "end": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "ended": {
-                                "at": "date-time"
-                              },
-                              "open": {}
-                            }
-                          }
-                        },
-                        "phase": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "advancing": {},
-                              "claimed": {
-                                "claim": {
-                                  "union": {
-                                    "tag": "kind",
-                                    "variants": {
-                                      "earlier": {
-                                        "count": "integer"
-                                      },
-                                      "not_recorded": {},
-                                      "recorded": {
-                                        "placement": {
+                              "phase": {
+                                "union": {
+                                  "name": "SegmentPhaseInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "advancing": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseAdvancingInfo"
+                                    },
+                                    "claimed": {
+                                      "fields": {
+                                        "claim": {
                                           "union": {
+                                            "name": "SegmentClaimInfo",
                                             "tag": "kind",
                                             "variants": {
-                                              "not_observed": {},
-                                              "placed": {
-                                                "placed_at": "date-time"
+                                              "earlier": {
+                                                "fields": {
+                                                  "count": "integer"
+                                                },
+                                                "name": "SegmentClaimEarlierInfo"
+                                              },
+                                              "not_recorded": {
+                                                "fields": {},
+                                                "name": "SegmentClaimNotRecordedInfo"
+                                              },
+                                              "recorded": {
+                                                "fields": {
+                                                  "placement": {
+                                                    "union": {
+                                                      "name": "AttemptPlacementInfo",
+                                                      "tag": "kind",
+                                                      "variants": {
+                                                        "not_observed": {
+                                                          "fields": {},
+                                                          "name": "AttemptPlacementNotObservedInfo"
+                                                        },
+                                                        "placed": {
+                                                          "fields": {
+                                                            "placed_at": "date-time"
+                                                          },
+                                                          "name": "AttemptPlacementPlacedInfo"
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "name": "SegmentClaimRecordedInfo"
                                               }
                                             }
                                           }
                                         }
-                                      }
+                                      },
+                                      "name": "SegmentPhaseClaimedInfo"
+                                    },
+                                    "enqueued": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseEnqueuedInfo"
+                                    },
+                                    "finalizing": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseFinalizingInfo"
+                                    },
+                                    "pending": {
+                                      "fields": {},
+                                      "name": "SegmentPhasePendingInfo"
+                                    },
+                                    "ready": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseReadyInfo"
+                                    },
+                                    "retry_wait": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseRetryWaitInfo"
+                                    },
+                                    "running": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseRunningInfo"
+                                    },
+                                    "unknown": {
+                                      "fields": {
+                                        "reason": {
+                                          "enum": {
+                                            "name": "UnknownReason",
+                                            "values": [
+                                              "ATTEMPT_NOT_CAPTURED",
+                                              "CLAIMS_NOT_COUNTED",
+                                              "HISTORY_PRUNED",
+                                              "WORKER_LOST"
+                                            ]
+                                          }
+                                        }
+                                      },
+                                      "name": "SegmentPhaseUnknownInfo"
                                     }
                                   }
                                 }
                               },
-                              "enqueued": {},
-                              "finalizing": {},
-                              "pending": {},
-                              "ready": {},
-                              "retry_wait": {},
-                              "running": {},
-                              "unknown": {
-                                "reason": {
-                                  "enum": [
-                                    "ATTEMPT_NOT_CAPTURED",
-                                    "CLAIMS_NOT_COUNTED",
-                                    "HISTORY_PRUNED",
-                                    "WORKER_LOST"
-                                  ]
+                              "source": {
+                                "union": {
+                                  "name": "SegmentSourceInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "attempt": {
+                                      "fields": {
+                                        "attempt": "integer",
+                                        "generation": "integer",
+                                        "task_id": "uuid"
+                                      },
+                                      "name": "SegmentSourceAttemptInfo"
+                                    },
+                                    "node": {
+                                      "fields": {},
+                                      "name": "SegmentSourceNodeInfo"
+                                    },
+                                    "task": {
+                                      "fields": {
+                                        "generation": "integer",
+                                        "task_id": "uuid"
+                                      },
+                                      "name": "SegmentSourceTaskInfo"
+                                    }
+                                  }
                                 }
-                              }
-                            }
-                          }
-                        },
-                        "source": {
-                          "union": {
-                            "tag": "kind",
-                            "variants": {
-                              "attempt": {
-                                "attempt": "integer",
-                                "generation": "integer",
-                                "task_id": "uuid"
                               },
-                              "node": {},
-                              "task": {
-                                "generation": "integer",
-                                "task_id": "uuid"
-                              }
+                              "started_at": "date-time"
+                            },
+                            "name": "TimingSegmentInfo"
+                          }
+                        }
+                      }
+                    },
+                    "name": "NodeTimingExactInfo"
+                  },
+                  "inconsistent": {
+                    "fields": {
+                      "conflict": {
+                        "union": {
+                          "name": "TimingConflictInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "clock_order": {
+                              "fields": {
+                                "earlier": {
+                                  "enum": {
+                                    "name": "TimingBoundary",
+                                    "values": [
+                                      "ATTEMPT_ENQUEUED",
+                                      "ATTEMPT_RECORDED",
+                                      "CHILD_COMPLETED",
+                                      "CHILD_CREATED",
+                                      "CLAIM",
+                                      "FINALIZING",
+                                      "FIRST_CLAIM",
+                                      "LAST_SEEN",
+                                      "NODE_COMPLETED",
+                                      "NODE_CREATED",
+                                      "NODE_ENQUEUED",
+                                      "NODE_READY",
+                                      "PLACEMENT",
+                                      "READ_TIME",
+                                      "RUN_COMPLETED",
+                                      "RUN_PAUSED",
+                                      "RUN_RESUMED",
+                                      "START",
+                                      "TASK_CREATED",
+                                      "TASK_MOVED"
+                                    ]
+                                  }
+                                },
+                                "earlier_at": "date-time",
+                                "later": {
+                                  "enum": {
+                                    "name": "TimingBoundary",
+                                    "values": [
+                                      "ATTEMPT_ENQUEUED",
+                                      "ATTEMPT_RECORDED",
+                                      "CHILD_COMPLETED",
+                                      "CHILD_CREATED",
+                                      "CLAIM",
+                                      "FINALIZING",
+                                      "FIRST_CLAIM",
+                                      "LAST_SEEN",
+                                      "NODE_COMPLETED",
+                                      "NODE_CREATED",
+                                      "NODE_ENQUEUED",
+                                      "NODE_READY",
+                                      "PLACEMENT",
+                                      "READ_TIME",
+                                      "RUN_COMPLETED",
+                                      "RUN_PAUSED",
+                                      "RUN_RESUMED",
+                                      "START",
+                                      "TASK_CREATED",
+                                      "TASK_MOVED"
+                                    ]
+                                  }
+                                },
+                                "later_at": "date-time"
+                              },
+                              "name": "TimingConflictClockOrderInfo"
+                            },
+                            "missing_record": {
+                              "fields": {
+                                "record": {
+                                  "enum": {
+                                    "name": "MissingRecord",
+                                    "values": [
+                                      "ATTEMPT_ROW",
+                                      "CHILD_RUN",
+                                      "COMPLETION_TIME",
+                                      "LINKED_TASK",
+                                      "LINKED_WORK",
+                                      "OPEN_ATTEMPT",
+                                      "TASK_TIMES"
+                                    ]
+                                  }
+                                }
+                              },
+                              "name": "TimingConflictMissingRecordInfo"
+                            },
+                            "unexpected_event": {
+                              "fields": {
+                                "event": {
+                                  "enum": {
+                                    "name": "WorkflowEventKind",
+                                    "values": [
+                                      "NODE_ENQUEUED",
+                                      "NODE_READY",
+                                      "TASK_MOVED",
+                                      "WORKFLOW_PAUSED",
+                                      "WORKFLOW_RESUMED"
+                                    ]
+                                  }
+                                },
+                                "event_id": "integer"
+                              },
+                              "name": "TimingConflictUnexpectedEventInfo"
                             }
                           }
-                        },
-                        "started_at": "date-time"
+                        }
                       }
-                    }
-                  }
-                },
-                "unavailable": {
-                  "reason": {
-                    "enum": [
-                      "RUN_BEFORE_CAPTURE",
-                      "TIMING_BOUND_EXCEEDED"
-                    ]
+                    },
+                    "name": "NodeTimingInconsistentInfo"
+                  },
+                  "partial": {
+                    "fields": {
+                      "endpoint": {
+                        "union": {
+                          "name": "NodeEndpointInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "not_terminal": {
+                              "fields": {},
+                              "name": "NodeEndpointNotTerminalInfo"
+                            },
+                            "terminal": {
+                              "fields": {
+                                "at": "date-time",
+                                "status": {
+                                  "enum": {
+                                    "name": "TerminalNodeStatus",
+                                    "values": [
+                                      "COMPLETED",
+                                      "FAILED",
+                                      "SKIPPED"
+                                    ]
+                                  }
+                                }
+                              },
+                              "name": "NodeEndpointTerminalInfo"
+                            }
+                          }
+                        }
+                      },
+                      "reasons": {
+                        "list": {
+                          "enum": {
+                            "name": "UnknownReason",
+                            "values": [
+                              "ATTEMPT_NOT_CAPTURED",
+                              "CLAIMS_NOT_COUNTED",
+                              "HISTORY_PRUNED",
+                              "WORKER_LOST"
+                            ]
+                          }
+                        }
+                      },
+                      "segments": {
+                        "list": {
+                          "model": {
+                            "fields": {
+                              "end": {
+                                "union": {
+                                  "name": "SegmentEndInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "closed": {
+                                      "fields": {
+                                        "at": "date-time"
+                                      },
+                                      "name": "SegmentEndClosedInfo"
+                                    },
+                                    "open": {
+                                      "fields": {},
+                                      "name": "SegmentEndOpenInfo"
+                                    }
+                                  }
+                                }
+                              },
+                              "phase": {
+                                "union": {
+                                  "name": "SegmentPhaseInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "advancing": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseAdvancingInfo"
+                                    },
+                                    "claimed": {
+                                      "fields": {
+                                        "claim": {
+                                          "union": {
+                                            "name": "SegmentClaimInfo",
+                                            "tag": "kind",
+                                            "variants": {
+                                              "earlier": {
+                                                "fields": {
+                                                  "count": "integer"
+                                                },
+                                                "name": "SegmentClaimEarlierInfo"
+                                              },
+                                              "not_recorded": {
+                                                "fields": {},
+                                                "name": "SegmentClaimNotRecordedInfo"
+                                              },
+                                              "recorded": {
+                                                "fields": {
+                                                  "placement": {
+                                                    "union": {
+                                                      "name": "AttemptPlacementInfo",
+                                                      "tag": "kind",
+                                                      "variants": {
+                                                        "not_observed": {
+                                                          "fields": {},
+                                                          "name": "AttemptPlacementNotObservedInfo"
+                                                        },
+                                                        "placed": {
+                                                          "fields": {
+                                                            "placed_at": "date-time"
+                                                          },
+                                                          "name": "AttemptPlacementPlacedInfo"
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "name": "SegmentClaimRecordedInfo"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "name": "SegmentPhaseClaimedInfo"
+                                    },
+                                    "enqueued": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseEnqueuedInfo"
+                                    },
+                                    "finalizing": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseFinalizingInfo"
+                                    },
+                                    "pending": {
+                                      "fields": {},
+                                      "name": "SegmentPhasePendingInfo"
+                                    },
+                                    "ready": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseReadyInfo"
+                                    },
+                                    "retry_wait": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseRetryWaitInfo"
+                                    },
+                                    "running": {
+                                      "fields": {},
+                                      "name": "SegmentPhaseRunningInfo"
+                                    },
+                                    "unknown": {
+                                      "fields": {
+                                        "reason": {
+                                          "enum": {
+                                            "name": "UnknownReason",
+                                            "values": [
+                                              "ATTEMPT_NOT_CAPTURED",
+                                              "CLAIMS_NOT_COUNTED",
+                                              "HISTORY_PRUNED",
+                                              "WORKER_LOST"
+                                            ]
+                                          }
+                                        }
+                                      },
+                                      "name": "SegmentPhaseUnknownInfo"
+                                    }
+                                  }
+                                }
+                              },
+                              "source": {
+                                "union": {
+                                  "name": "SegmentSourceInfo",
+                                  "tag": "kind",
+                                  "variants": {
+                                    "attempt": {
+                                      "fields": {
+                                        "attempt": "integer",
+                                        "generation": "integer",
+                                        "task_id": "uuid"
+                                      },
+                                      "name": "SegmentSourceAttemptInfo"
+                                    },
+                                    "node": {
+                                      "fields": {},
+                                      "name": "SegmentSourceNodeInfo"
+                                    },
+                                    "task": {
+                                      "fields": {
+                                        "generation": "integer",
+                                        "task_id": "uuid"
+                                      },
+                                      "name": "SegmentSourceTaskInfo"
+                                    }
+                                  }
+                                }
+                              },
+                              "started_at": "date-time"
+                            },
+                            "name": "TimingSegmentInfo"
+                          }
+                        }
+                      }
+                    },
+                    "name": "NodeTimingPartialInfo"
+                  },
+                  "unavailable": {
+                    "fields": {
+                      "reason": {
+                        "enum": {
+                          "name": "UnavailableReason",
+                          "values": [
+                            "RUN_BEFORE_CAPTURE",
+                            "TIMING_BOUND_EXCEEDED"
+                          ]
+                        }
+                      }
+                    },
+                    "name": "NodeTimingUnavailableInfo"
                   }
                 }
               }
             }
-          }
+          },
+          "name": "WorkflowNodeSummary"
         }
       }
     },
     "run": {
       "model": {
-        "completed_at": {
-          "nullable": "date-time"
+        "fields": {
+          "completed_at": {
+            "nullable": "date-time"
+          },
+          "created_at": {
+            "nullable": "date-time"
+          },
+          "definition_key": {
+            "nullable": "string"
+          },
+          "status": "string",
+          "wall_seconds": {
+            "nullable": "number"
+          },
+          "workflow_id": "string",
+          "workflow_name": "string"
         },
-        "created_at": {
-          "nullable": "date-time"
-        },
-        "definition_key": {
-          "nullable": "string"
-        },
-        "id": "string",
-        "name": "string",
-        "status": "string",
-        "wall_s": {
-          "nullable": "number"
-        }
+        "name": "WorkflowRunSummary"
       }
     },
     "timing": {
       "union": {
+        "name": "RunTimingInfo",
         "tag": "kind",
         "variants": {
           "composed": {
-            "as_of": "date-time",
-            "captured_since": "date-time",
-            "coverage": {
-              "union": {
-                "tag": "kind",
-                "variants": {
-                  "exact": {},
-                  "inconsistent": {
-                    "conflicts": {
-                      "list": {
-                        "union": {
-                          "tag": "kind",
-                          "variants": {
-                            "node": {
-                              "task_index": "integer"
-                            },
-                            "pause": {
-                              "conflict": {
-                                "union": {
-                                  "tag": "kind",
-                                  "variants": {
-                                    "clock_order": {
-                                      "earlier": {
-                                        "enum": [
-                                          "ATTEMPT_ENQUEUED",
-                                          "ATTEMPT_RECORDED",
-                                          "CHILD_COMPLETED",
-                                          "CHILD_CREATED",
-                                          "CLAIM",
-                                          "FINALIZING",
-                                          "FIRST_CLAIM",
-                                          "LAST_SEEN",
-                                          "NODE_COMPLETED",
-                                          "NODE_CREATED",
-                                          "NODE_ENQUEUED",
-                                          "NODE_READY",
-                                          "PLACEMENT",
-                                          "READ_TIME",
-                                          "RUN_COMPLETED",
-                                          "RUN_PAUSED",
-                                          "RUN_RESUMED",
-                                          "START",
-                                          "TASK_CREATED",
-                                          "TASK_MOVED"
-                                        ]
-                                      },
-                                      "earlier_at": "date-time",
-                                      "later": {
-                                        "enum": [
-                                          "ATTEMPT_ENQUEUED",
-                                          "ATTEMPT_RECORDED",
-                                          "CHILD_COMPLETED",
-                                          "CHILD_CREATED",
-                                          "CLAIM",
-                                          "FINALIZING",
-                                          "FIRST_CLAIM",
-                                          "LAST_SEEN",
-                                          "NODE_COMPLETED",
-                                          "NODE_CREATED",
-                                          "NODE_ENQUEUED",
-                                          "NODE_READY",
-                                          "PLACEMENT",
-                                          "READ_TIME",
-                                          "RUN_COMPLETED",
-                                          "RUN_PAUSED",
-                                          "RUN_RESUMED",
-                                          "START",
-                                          "TASK_CREATED",
-                                          "TASK_MOVED"
-                                        ]
-                                      },
-                                      "later_at": "date-time"
-                                    },
-                                    "missing_record": {
-                                      "record": {
-                                        "enum": [
-                                          "ATTEMPT_ROW",
-                                          "CHILD_RUN",
-                                          "COMPLETION_TIME",
-                                          "LINKED_TASK",
-                                          "LINKED_WORK",
-                                          "OPEN_ATTEMPT",
-                                          "TASK_TIMES"
-                                        ]
+            "fields": {
+              "as_of": "date-time",
+              "captured_since": "date-time",
+              "coverage": {
+                "union": {
+                  "name": "RunCoverageInfo",
+                  "tag": "kind",
+                  "variants": {
+                    "exact": {
+                      "fields": {},
+                      "name": "RunCoverageExactInfo"
+                    },
+                    "inconsistent": {
+                      "fields": {
+                        "conflicts": {
+                          "list": {
+                            "union": {
+                              "name": "RunConflictInfo",
+                              "tag": "kind",
+                              "variants": {
+                                "node": {
+                                  "fields": {
+                                    "node_index": "integer"
+                                  },
+                                  "name": "RunConflictNodeInfo"
+                                },
+                                "pause": {
+                                  "fields": {
+                                    "conflict": {
+                                      "union": {
+                                        "name": "TimingConflictInfo",
+                                        "tag": "kind",
+                                        "variants": {
+                                          "clock_order": {
+                                            "fields": {
+                                              "earlier": {
+                                                "enum": {
+                                                  "name": "TimingBoundary",
+                                                  "values": [
+                                                    "ATTEMPT_ENQUEUED",
+                                                    "ATTEMPT_RECORDED",
+                                                    "CHILD_COMPLETED",
+                                                    "CHILD_CREATED",
+                                                    "CLAIM",
+                                                    "FINALIZING",
+                                                    "FIRST_CLAIM",
+                                                    "LAST_SEEN",
+                                                    "NODE_COMPLETED",
+                                                    "NODE_CREATED",
+                                                    "NODE_ENQUEUED",
+                                                    "NODE_READY",
+                                                    "PLACEMENT",
+                                                    "READ_TIME",
+                                                    "RUN_COMPLETED",
+                                                    "RUN_PAUSED",
+                                                    "RUN_RESUMED",
+                                                    "START",
+                                                    "TASK_CREATED",
+                                                    "TASK_MOVED"
+                                                  ]
+                                                }
+                                              },
+                                              "earlier_at": "date-time",
+                                              "later": {
+                                                "enum": {
+                                                  "name": "TimingBoundary",
+                                                  "values": [
+                                                    "ATTEMPT_ENQUEUED",
+                                                    "ATTEMPT_RECORDED",
+                                                    "CHILD_COMPLETED",
+                                                    "CHILD_CREATED",
+                                                    "CLAIM",
+                                                    "FINALIZING",
+                                                    "FIRST_CLAIM",
+                                                    "LAST_SEEN",
+                                                    "NODE_COMPLETED",
+                                                    "NODE_CREATED",
+                                                    "NODE_ENQUEUED",
+                                                    "NODE_READY",
+                                                    "PLACEMENT",
+                                                    "READ_TIME",
+                                                    "RUN_COMPLETED",
+                                                    "RUN_PAUSED",
+                                                    "RUN_RESUMED",
+                                                    "START",
+                                                    "TASK_CREATED",
+                                                    "TASK_MOVED"
+                                                  ]
+                                                }
+                                              },
+                                              "later_at": "date-time"
+                                            },
+                                            "name": "TimingConflictClockOrderInfo"
+                                          },
+                                          "missing_record": {
+                                            "fields": {
+                                              "record": {
+                                                "enum": {
+                                                  "name": "MissingRecord",
+                                                  "values": [
+                                                    "ATTEMPT_ROW",
+                                                    "CHILD_RUN",
+                                                    "COMPLETION_TIME",
+                                                    "LINKED_TASK",
+                                                    "LINKED_WORK",
+                                                    "OPEN_ATTEMPT",
+                                                    "TASK_TIMES"
+                                                  ]
+                                                }
+                                              }
+                                            },
+                                            "name": "TimingConflictMissingRecordInfo"
+                                          },
+                                          "unexpected_event": {
+                                            "fields": {
+                                              "event": {
+                                                "enum": {
+                                                  "name": "WorkflowEventKind",
+                                                  "values": [
+                                                    "NODE_ENQUEUED",
+                                                    "NODE_READY",
+                                                    "TASK_MOVED",
+                                                    "WORKFLOW_PAUSED",
+                                                    "WORKFLOW_RESUMED"
+                                                  ]
+                                                }
+                                              },
+                                              "event_id": "integer"
+                                            },
+                                            "name": "TimingConflictUnexpectedEventInfo"
+                                          }
+                                        }
                                       }
-                                    },
-                                    "unexpected_event": {
-                                      "event": {
-                                        "enum": [
-                                          "NODE_ENQUEUED",
-                                          "NODE_READY",
-                                          "TASK_MOVED",
-                                          "WORKFLOW_PAUSED",
-                                          "WORKFLOW_RESUMED"
-                                        ]
-                                      },
-                                      "event_id": "integer"
                                     }
-                                  }
+                                  },
+                                  "name": "RunConflictPauseInfo"
                                 }
                               }
                             }
                           }
                         }
-                      }
-                    }
-                  },
-                  "partial": {
-                    "reasons": {
-                      "list": {
-                        "enum": [
-                          "ATTEMPT_NOT_CAPTURED",
-                          "CLAIMS_NOT_COUNTED",
-                          "HISTORY_PRUNED",
-                          "WORKER_LOST"
-                        ]
-                      }
+                      },
+                      "name": "RunCoverageInconsistentInfo"
+                    },
+                    "partial": {
+                      "fields": {
+                        "reasons": {
+                          "list": {
+                            "enum": {
+                              "name": "UnknownReason",
+                              "values": [
+                                "ATTEMPT_NOT_CAPTURED",
+                                "CLAIMS_NOT_COUNTED",
+                                "HISTORY_PRUNED",
+                                "WORKER_LOST"
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "name": "RunCoveragePartialInfo"
                     }
                   }
                 }
-              }
-            },
-            "open_segments": "boolean",
-            "pauses": {
-              "list": {
-                "model": {
-                  "end": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "open": {},
-                        "resumed": {
-                          "at": "date-time"
-                        },
-                        "run_ended": {
-                          "at": "date-time"
+              },
+              "open_segments": "boolean",
+              "pauses": {
+                "list": {
+                  "model": {
+                    "fields": {
+                      "end": {
+                        "union": {
+                          "name": "PauseEndInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "open": {
+                              "fields": {},
+                              "name": "PauseEndOpenInfo"
+                            },
+                            "resumed": {
+                              "fields": {
+                                "at": "date-time"
+                              },
+                              "name": "PauseEndResumedInfo"
+                            },
+                            "run_ended": {
+                              "fields": {
+                                "at": "date-time"
+                              },
+                              "name": "PauseEndRunEndedInfo"
+                            }
+                          }
                         }
-                      }
-                    }
-                  },
-                  "started_at": "date-time"
+                      },
+                      "started_at": "date-time"
+                    },
+                    "name": "PauseIntervalInfo"
+                  }
+                }
+              },
+              "range_ended_at": "date-time",
+              "range_started_at": "date-time"
+            },
+            "name": "RunTimingComposedInfo"
+          },
+          "unavailable": {
+            "fields": {
+              "as_of": "date-time",
+              "captured_since": "date-time",
+              "reason": {
+                "enum": {
+                  "name": "UnavailableReason",
+                  "values": [
+                    "RUN_BEFORE_CAPTURE",
+                    "TIMING_BOUND_EXCEEDED"
+                  ]
                 }
               }
             },
-            "range_ended_at": "date-time",
-            "range_started_at": "date-time"
-          },
-          "unavailable": {
-            "as_of": "date-time",
-            "captured_since": "date-time",
-            "reason": {
-              "enum": [
-                "RUN_BEFORE_CAPTURE",
-                "TIMING_BOUND_EXCEEDED"
-              ]
-            }
+            "name": "RunTimingUnavailableInfo"
           }
         }
       }
@@ -1700,161 +2593,11 @@
     "definition_key": {
       "nullable": "string"
     },
-    "id": "string",
-    "name": "string",
     "status": "string",
-    "wall_s": {
+    "wall_seconds": {
       "nullable": "number"
-    }
-  },
-  "WorkflowTaskDetail": {
-    "attempts": {
-      "list": {
-        "model": {
-          "attempt": "integer",
-          "error_code": {
-            "nullable": "string"
-          },
-          "error_message": {
-            "nullable": "string"
-          },
-          "failed_reason": {
-            "nullable": "string"
-          },
-          "finished_at": {
-            "nullable": "date-time"
-          },
-          "outcome": "string",
-          "phases": {
-            "union": {
-              "tag": "kind",
-              "variants": {
-                "captured": {
-                  "claimed_at": "date-time",
-                  "claims": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "counted": {
-                          "count": "integer",
-                          "first_claimed_at": "date-time"
-                        },
-                        "not_counted": {}
-                      }
-                    }
-                  },
-                  "enqueued_at": "date-time",
-                  "finalizing": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "marked": {
-                          "finalizing_at": "date-time"
-                        },
-                        "not_marked": {}
-                      }
-                    }
-                  },
-                  "recorded_by": {
-                    "union": {
-                      "tag": "kind",
-                      "variants": {
-                        "cancel": {},
-                        "recovery": {
-                          "last_seen_at": "date-time"
-                        },
-                        "worker": {
-                          "placement": {
-                            "union": {
-                              "tag": "kind",
-                              "variants": {
-                                "not_observed": {},
-                                "placed": {
-                                  "placed_at": "date-time"
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                },
-                "not_captured": {}
-              }
-            }
-          },
-          "started_at": {
-            "nullable": "date-time"
-          },
-          "will_retry": "boolean",
-          "worker_hostname": {
-            "nullable": "string"
-          }
-        }
-      }
     },
-    "is_subworkflow": "boolean",
-    "leaf": {
-      "nullable": {
-        "model": {
-          "completed_at": {
-            "nullable": "date-time"
-          },
-          "enqueued_at": {
-            "nullable": "date-time"
-          },
-          "error_code": {
-            "nullable": "string"
-          },
-          "exec_s": {
-            "nullable": "number"
-          },
-          "execution": {
-            "nullable": {
-              "enum": [
-                "ISOLATED",
-                "SHARED_ASYNC",
-                "SHARED_THREAD"
-              ]
-            }
-          },
-          "failed_at": {
-            "nullable": "date-time"
-          },
-          "failed_reason": {
-            "nullable": "string"
-          },
-          "good_until": {
-            "nullable": "date-time"
-          },
-          "max_retries": "integer",
-          "queue_s": {
-            "nullable": "number"
-          },
-          "retry_count": "integer",
-          "started_at": {
-            "nullable": "date-time"
-          },
-          "status": "string",
-          "task_id": "uuid",
-          "trace_id": {
-            "nullable": "string"
-          },
-          "worker_hostname": {
-            "nullable": "string"
-          }
-        }
-      }
-    },
-    "node_error": {
-      "nullable": "string"
-    },
-    "node_id": {
-      "nullable": "string"
-    },
-    "node_status": "string",
-    "task_index": "integer",
-    "task_name": "string"
+    "workflow_id": "string",
+    "workflow_name": "string"
   }
 }

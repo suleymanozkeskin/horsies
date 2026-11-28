@@ -23,8 +23,8 @@ use uuid::Uuid;
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::workflow_start::{ClientStartOutcome, ExistingRun, IdHolder};
 use crate::broker::PostgresBroker;
-use crate::core::workflow::node::SubWorkflowParams;
-use crate::core::{AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
+use crate::core::workflow::node::SubWorkflowParameters;
+use crate::core::{AnyNode, OnError, OperationalCode, TaskError, TaskResult, WorkflowSpec};
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
 use crate::telemetry::trace_carrier::StoredTrace;
 use crate::workflow_engine::args_merge::{
@@ -38,7 +38,7 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::merge_good_until_into_options;
 use crate::workflow_engine::start::{
     child_workflow_depth, node_task_facts, require_subworkflow_node_keys,
-    stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError,
+    stored_queue_and_priority, stored_workflow_context_from, ChildSpecError,
 };
 use crate::workflow_engine::start_fingerprint::{StartCommandV1, StartFingerprint, StartNodeV1};
 use crate::workflow_engine::steps::{
@@ -207,8 +207,8 @@ pub(crate) struct StartArguments {
     node_priorities: Vec<i32>,
     node_dependencies: Vec<String>,
     node_args_from: Vec<Option<String>>,
-    node_workflow_ctx_from: Vec<Option<String>>,
-    node_allow_failed_deps: Vec<bool>,
+    node_workflow_context_from: Vec<Option<String>>,
+    node_allow_failed_dependencies: Vec<bool>,
     node_join_types: Vec<String>,
     node_min_successes: Vec<Option<i32>>,
     node_task_options: Vec<Option<String>>,
@@ -429,7 +429,7 @@ pub(crate) struct ChildInput {
 pub(crate) async fn build_child<'a>(
     node: ChildOfNode<'_>,
     input: ChildInput,
-    params: SubWorkflowParams,
+    params: SubWorkflowParameters,
     build: &'a dyn ChildSpecSource,
 ) -> Result<ChildBuildOutcome<'a>, WorkflowError> {
     let depth = match child_workflow_depth(
@@ -607,7 +607,7 @@ fn child_input_error(request: &ChildSpecRequest, message: String) -> TaskError {
                 "task_index": request.task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalCode::WorkerSerializationError, message)
     }
 }
 
@@ -684,7 +684,7 @@ pub fn params_refused_error(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalCode::WorkerSerializationError, message)
     }
 }
 
@@ -745,8 +745,8 @@ fn child_build_failure(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(
-            OperationalErrorCode::WorkflowEnqueueFailed,
+        ..TaskError::built_in(
+            OperationalCode::WorkflowEnqueueFailed,
             format!("Subworkflow build failed: {failure} (workflow {workflow_name}:{task_index})"),
         )
     }
@@ -784,8 +784,8 @@ pub fn subworkflow_load_failed_error(
         data: Some(crate::core::codec::JsonText::of_engine_value(
             &serde_json::json!({ "definition_key": definition_key }),
         )),
-        ..TaskError::builtin(
-            OperationalErrorCode::SubworkflowLoadFailed,
+        ..TaskError::built_in(
+            OperationalCode::SubworkflowLoadFailed,
             format!(
                 "Failed to load subworkflow definition for {parent_workflow_name}:{task_index}"
             ),
@@ -858,8 +858,8 @@ impl StartArguments {
             priority: self.node_priorities[position],
             dependencies: &self.node_dependencies[position],
             args_from: self.node_args_from[position].as_deref(),
-            workflow_ctx_from: self.node_workflow_ctx_from[position].as_deref(),
-            allow_failed_deps: self.node_allow_failed_deps[position],
+            workflow_context_from: self.node_workflow_context_from[position].as_deref(),
+            allow_failed_dependencies: self.node_allow_failed_dependencies[position],
             join_type: &self.node_join_types[position],
             min_success: self.node_min_successes[position],
             task_options: self.node_task_options[position].as_deref(),
@@ -946,7 +946,7 @@ impl StartArguments {
             )?),
         };
         // NULL for no list and for an empty list: the node takes no context.
-        let workflow_ctx_from = stored_workflow_ctx_from(node)
+        let workflow_context_from = stored_workflow_context_from(node)
             .map(serde_json::to_string)
             .transpose()?;
         self.node_workflow_ids.push(workflow_id);
@@ -959,8 +959,9 @@ impl StartArguments {
         self.node_dependencies
             .push(serde_json::to_string(&dependencies)?);
         self.node_args_from.push(args_from);
-        self.node_workflow_ctx_from.push(workflow_ctx_from);
-        self.node_allow_failed_deps.push(node.allow_failed_deps);
+        self.node_workflow_context_from.push(workflow_context_from);
+        self.node_allow_failed_dependencies
+            .push(node.allow_failed_dependencies);
         self.node_join_types.push(node.join.to_string());
         self.node_min_successes.push(node.min_success);
         self.node_task_options.push(merged_task_options);
@@ -1027,8 +1028,11 @@ impl StartArguments {
             .value(&self.node_priorities)
             .value(&self.node_dependencies)
             .value(&self.node_args_from)
-            .value(&self.node_workflow_ctx_from)
-            .value(&self.node_allow_failed_deps)
+            // By position into `p_node_workflow_ctx_from` and
+            // `p_node_allow_failed_deps`: the stored names differ from the
+            // public names on purpose.
+            .value(&self.node_workflow_context_from)
+            .value(&self.node_allow_failed_dependencies)
             .value(&self.node_join_types)
             .value(&self.node_min_successes)
             .value(&self.node_task_options)

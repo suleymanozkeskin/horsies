@@ -14,11 +14,14 @@ import uuid
 
 from horsies import (
     Err,
+    Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
+    Result,
     RetryPolicy,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 
 from .. import simulate, store, tuning
@@ -33,6 +36,7 @@ from ..domain import (
     PaymentCapture,
     PaymentIntent,
     PaymentRefund,
+    PaymentRetryCode,
     ReconciliationReport,
 )
 from . import store_failure
@@ -41,7 +45,7 @@ from . import store_failure
 def _stored_authorization(
     order_id: str,
     attempt: int,
-) -> TaskResult[PaymentAuthorization, TaskError] | None:
+) -> Result[PaymentAuthorization, TaskError] | None:
     """The hold this order already carries, as a replay result. None when absent.
 
     A task can run twice: a child can die after its work and before its result,
@@ -50,12 +54,12 @@ def _stored_authorization(
     """
     match store.find_payment(order_id, 'authorization'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(payment):
             if payment is None:
                 return None
-            return TaskResult(
-                ok=PaymentAuthorization(
+            return Ok(
+                PaymentAuthorization(
                     order_id=payment.order_id,
                     authorization_id=payment.payment_id,
                     amount_cents=payment.amount_cents,
@@ -68,27 +72,28 @@ def _stored_authorization(
 
 @app.task(
     'authorize_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
+    error_codes=PaymentRetryCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.PSP_RETRY_BASE_SECONDS,
         max_retries=tuning.PSP_MAX_RETRIES,
-        auto_retry_for=[PSP_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[PaymentRetryCode.PSP_UNAVAILABLE, OperationalCode.WORKER_CRASHED],
     ),
 )
 def authorize_payment(
     *,
     order_id: str,
     amount_cents: int,
-) -> TaskResult[PaymentAuthorization, TaskError]:
+) -> Result[PaymentAuthorization, TaskError]:
     """Place a hold on the customer's card."""
     match store.count_authorization_attempt(order_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(counted):
             if counted is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                return Err(
+                    TaskError(
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to authorize',
                         data={'order_id': order_id},
                     ),
@@ -102,9 +107,9 @@ def authorize_payment(
     simulate.perform(tuning.AUTHORIZE_PAYMENT_WORK, order_id, 'authorize')
 
     if simulate.draw(tuning.CARD_DECLINE_RATE, order_id, 'card'):
-        return TaskResult(
-            err=TaskError(
-                error_code=CARD_DECLINED,
+        return Err(
+            TaskError(
+                code=CARD_DECLINED,
                 message=f'issuer declined the card for order {order_id}',
                 data={
                     'order_id': order_id,
@@ -116,9 +121,9 @@ def authorize_payment(
 
     provider_down = simulate.draw(tuning.PSP_UNAVAILABLE_RATE, order_id, 'psp')
     if provider_down and attempt <= tuning.PSP_FAILING_ATTEMPTS:
-        return TaskResult(
-            err=TaskError(
-                error_code=PSP_UNAVAILABLE,
+        return Err(
+            TaskError(
+                code=PSP_UNAVAILABLE,
                 message=f'payment provider unreachable on attempt {attempt}',
                 data={
                     'order_id': order_id,
@@ -131,11 +136,11 @@ def authorize_payment(
     psp_reference = f'psp_{uuid.uuid4().hex[:12]}'
     match store.record_payment(order_id, 'authorization', amount_cents, psp_reference):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(payment):
             if payment is not None:
-                return TaskResult(
-                    ok=PaymentAuthorization(
+                return Ok(
+                    PaymentAuthorization(
                         order_id=order_id,
                         authorization_id=payment.payment_id,
                         amount_cents=amount_cents,
@@ -148,9 +153,9 @@ def authorize_payment(
     concurrent = _stored_authorization(order_id, attempt)
     if concurrent is not None:
         return concurrent
-    return TaskResult(
-        err=TaskError(
-            error_code=STORE_UNAVAILABLE,
+    return Err(
+        TaskError(
+            code=STORE_UNAVAILABLE,
             message='authorization conflicted on insert but no row was found',
             data={'order_id': order_id},
         ),
@@ -159,25 +164,27 @@ def authorize_payment(
 
 @app.task(
     'capture_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def capture_payment(
     *,
     order_id: str,
-    authorization: TaskResult[PaymentAuthorization, TaskError],
-) -> TaskResult[PaymentCapture, TaskError]:
+    authorization: TaskOutcome[PaymentAuthorization, TaskError],
+) -> Result[PaymentCapture, TaskError]:
     """Settle the held funds, using the hold the authorization node produced."""
-    if authorization.is_err():
-        return TaskResult(err=authorization.err_value)
-    hold = authorization.ok_value
+    match authorization:
+        case Failed(upstream_error):
+            return Err(upstream_error)
+        case Succeeded(authorized):
+            hold = authorized
 
     match store.find_payment(order_id, 'capture'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(existing):
             if existing is not None:
                 return _capture_of(existing, hold)
@@ -186,12 +193,12 @@ def capture_payment(
 
     match store.record_payment(order_id, 'capture', hold.amount_cents, hold.psp_reference):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(payment):
             if payment is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=PAYMENT_ALREADY_CAPTURED,
+                return Err(
+                    TaskError(
+                        code=PAYMENT_ALREADY_CAPTURED,
                         message=f'order {order_id} was captured by another attempt',
                         data={'order_id': order_id},
                     ),
@@ -200,10 +207,10 @@ def capture_payment(
 
     match store.set_order_status(order_id, 'captured'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
-            return TaskResult(
-                ok=PaymentCapture(
+            return Ok(
+                PaymentCapture(
                     order_id=order_id,
                     capture_id=capture.payment_id,
                     authorization_id=hold.authorization_id,
@@ -216,7 +223,7 @@ def capture_payment(
 def _capture_of(
     existing: PaymentIntent,
     hold: PaymentAuthorization,
-) -> TaskResult[PaymentCapture, TaskError]:
+) -> Result[PaymentCapture, TaskError]:
     """Read a recorded capture as a replay, or refuse a second, different one.
 
     The unique constraint on (order_id, kind) is what makes a double capture
@@ -224,9 +231,9 @@ def _capture_of(
     task's own earlier run or a genuinely different settlement.
     """
     if existing.psp_reference != hold.psp_reference:
-        return TaskResult(
-            err=TaskError(
-                error_code=PAYMENT_ALREADY_CAPTURED,
+        return Err(
+            TaskError(
+                code=PAYMENT_ALREADY_CAPTURED,
                 message=(
                     f'order {existing.order_id} is already captured under a '
                     f'different authorization'
@@ -238,8 +245,8 @@ def _capture_of(
                 },
             ),
         )
-    return TaskResult(
-        ok=PaymentCapture(
+    return Ok(
+        PaymentCapture(
             order_id=existing.order_id,
             capture_id=existing.payment_id,
             authorization_id=hold.authorization_id,
@@ -251,26 +258,26 @@ def _capture_of(
 
 @app.task(
     'refund_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def refund_payment(
     *,
     order_id: str,
     amount_cents: int,
-) -> TaskResult[PaymentRefund, TaskError]:
+) -> Result[PaymentRefund, TaskError]:
     """Return money for an accepted return."""
     match store.find_payment(order_id, 'capture'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(capture):
             if capture is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                return Err(
+                    TaskError(
+                        code=ORDER_NOT_FOUND,
                         message=f'order {order_id} has no capture to refund',
                         data={'order_id': order_id},
                     ),
@@ -280,12 +287,12 @@ def refund_payment(
 
     match store.record_payment(order_id, 'refund', amount_cents, capture.psp_reference):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(refund):
             if refund is None:
                 return _stored_refund(order_id)
-            return TaskResult(
-                ok=PaymentRefund(
+            return Ok(
+                PaymentRefund(
                     order_id=order_id,
                     refund_id=refund.payment_id,
                     amount_cents=refund.amount_cents,
@@ -295,13 +302,13 @@ def refund_payment(
 
 @app.task(
     'reconcile_payments',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
-def reconcile_payments(*, window: str) -> TaskResult[ReconciliationReport, TaskError]:
+def reconcile_payments(*, window: str) -> Result[ReconciliationReport, TaskError]:
     """Check authorizations against captures.
 
     Runs on a `CronSchedule` — every 4 hours at :15, written as typed cron
@@ -311,11 +318,11 @@ def reconcile_payments(*, window: str) -> TaskResult[ReconciliationReport, TaskE
 
     match store.payment_reconciliation():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(counts):
             authorizations, captures, unmatched = counts
-            return TaskResult(
-                ok=ReconciliationReport(
+            return Ok(
+                ReconciliationReport(
                     authorizations=authorizations,
                     captures=captures,
                     unmatched=unmatched,
@@ -323,22 +330,22 @@ def reconcile_payments(*, window: str) -> TaskResult[ReconciliationReport, TaskE
             )
 
 
-def _stored_refund(order_id: str) -> TaskResult[PaymentRefund, TaskError]:
+def _stored_refund(order_id: str) -> Result[PaymentRefund, TaskError]:
     """Report the refund an earlier run of this task already recorded."""
     match store.find_payment(order_id, 'refund'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(refund):
             if refund is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=STORE_UNAVAILABLE,
+                return Err(
+                    TaskError(
+                        code=STORE_UNAVAILABLE,
                         message='refund conflicted on insert but no row was found',
                         data={'order_id': order_id},
                     ),
                 )
-            return TaskResult(
-                ok=PaymentRefund(
+            return Ok(
+                PaymentRefund(
                     order_id=order_id,
                     refund_id=refund.payment_id,
                     amount_cents=refund.amount_cents,

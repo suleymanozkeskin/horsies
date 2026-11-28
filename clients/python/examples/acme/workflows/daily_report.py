@@ -18,7 +18,7 @@ threshold are parameters of the report being built.
 
 `abandoned_cart_sweep` is the same task the HourlySchedule runs. Its `rollup`
 parameter defaults to `None`, so it works standalone; inside this workflow
-`from_node` injects the rollup's `TaskResult` and the sweep reports against it.
+`from_node` injects the rollup's `TaskOutcome` and the sweep reports against it.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from ..tasks.notify import winback_blast
 DEFINITION_KEY: Final[str] = 'acme.daily_report.v1'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'window': 'CHECK', 'older_than_minutes': tuning.ABANDONED_CART_AGE_MINUTES}],
 )
 def build_daily_report(
@@ -56,7 +56,7 @@ def build_daily_report(
 
     return app.workflow(
         name='daily_report',
-        tasks=[rollup, sweep, blast],
+        nodes=[rollup, sweep, blast],
         on_error=OnError.FAIL,
         output=sweep,
         definition_key=DEFINITION_KEY,

@@ -1,0 +1,44 @@
+// The test export of the addon: `probeCallback`. Only a build with the cargo feature `test-probes`
+// exports it (`bun run --cwd bridge build:dev`); a published addon does not.
+
+import { requireAddon } from "../../../horsies/src/native/call/addon.ts";
+import type { NotRunCause } from "../../../horsies/src/native/call/callback.ts";
+import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
+
+/** How long a call of `probeCallback` waits for the settle call. */
+export type ProbeWait =
+  | { readonly kind: "within"; readonly millis: number }
+  | { readonly kind: "noBound" };
+
+/** How one call of `probeCallback` ended. */
+export type CallbackProbe =
+  | { readonly kind: "answered"; readonly answer: string }
+  | { readonly kind: "notRun"; readonly cause: NotRunCause }
+  | { readonly kind: "noAnswer" }
+  | { readonly kind: "threw"; readonly callId: bigint; readonly name: string; readonly message: string }
+  | { readonly kind: "panicked"; readonly cause: string }
+  | { readonly kind: "answerRefused"; readonly cause: string }
+  | { readonly kind: "nodeApiRefused"; readonly status: string }
+  | { readonly kind: "onJavaScriptThread" };
+
+/** The test functions of the addon. */
+export interface ProbeAddon {
+  probeCallback(
+    callback: (callId: bigint, argument: string) => void,
+    argument: string,
+    wait: ProbeWait,
+  ): Promise<NativeEnvelope<CallbackProbe>>;
+}
+
+/** The test functions of the addon. Throws when the addon was built without `test-probes`. */
+export function probeAddon(): ProbeAddon {
+  const exports = requireAddon();
+
+  if (!("probeCallback" in exports)) {
+    throw new Error("the addon exports no probeCallback: build it with the cargo feature test-probes (build:dev)");
+  }
+
+  // SAFETY: a build with `test-probes` registers this function with this signature; the declaration
+  // test of the `call` area compares this interface with the declarations that the build writes.
+  return exports as ProbeAddon;
+}

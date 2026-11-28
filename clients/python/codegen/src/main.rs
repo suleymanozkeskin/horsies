@@ -1,6 +1,6 @@
 //! `horsies-codegen`: renders the Python files that come from horsies-core.
 //!
-//! - `_catalog/<module>.py`: the code catalogs (`str, Enum` or `Enum`
+//! - `_catalog/<module>.py`: the code catalogs (`StrEnum` or `Enum`
 //!   classes) of `horsies_core::catalog::CODE_CATALOGS`.
 //! - `_catalog/manifest.py`: the producer manifest
 //!   (`horsies_core::manifest_schema::PRODUCER_MANIFEST`) as frozen

@@ -10,7 +10,7 @@ use super::support::{
     start_claimed_task, task_node, workflow, workflow_error_code, workflow_status,
     IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::{OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
+use crate::core::{OperationalCode, TaskError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
@@ -187,7 +187,7 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
 
 /// `test_recover_pending_deps_failed_allow_continue` (case 0)
 #[tokio::test]
-async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
+async fn a_pending_allow_failed_dependencies_node_after_a_failure_is_enqueued() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(
@@ -199,7 +199,7 @@ async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .allow_failed_deps(),
+            .allow_failed_dependencies(),
     )
     .await;
 
@@ -260,8 +260,8 @@ async fn seed_parent_of_an_ended_child(
         "FAILED" => {
             child_seed.error = Some(
                 serde_json::to_string(
-                    &TaskError::new("CHILD_CRASH", "child task crashed")
-                        .expect("a user error code"),
+                    &TaskError::custom("CHILD_CRASH", "child task crashed")
+                        .expect("a custom error code"),
                 )
                 .expect("encode the child error"),
             );
@@ -426,7 +426,7 @@ async fn recovery_fails_a_workflow_whose_node_failed_with_its_error_and_no_resul
 async fn recovery_fails_a_workflow_with_the_error_of_its_first_failed_node() {
     let db = IsolatedDatabase::create().await;
     let later = serde_json::to_string(
-        &TaskError::new("SECOND_ERROR", "Second failure").expect("a user error code"),
+        &TaskError::custom("SECOND_ERROR", "Second failure").expect("a custom error code"),
     )
     .expect("encode the stored error");
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().error(later)).await;
@@ -521,8 +521,8 @@ async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
         .await
         .task_id
         .expect("node 0 has a task");
-    let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::builtin(
-        OperationalErrorCode::WorkerCrashed,
+    let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::built_in(
+        OperationalCode::WorkerCrashed,
         "Worker died",
     ));
     let _stored = finish_phase1(pool, task_id, &crashed).await;

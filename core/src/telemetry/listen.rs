@@ -1,5 +1,5 @@
-//! The address that a metrics endpoint binds, as a `--listen HOST:PORT` or
-//! `--metrics-listen HOST:PORT` argument gives it. A metrics endpoint has no
+//! The address that a metrics endpoint binds, as a `--metrics-listen HOST:PORT`
+//! argument gives it. A metrics endpoint has no
 //! default address: the argument turns it on and names where it listens.
 //!
 //! The worker manifest carries the address as its two parts, [`ListenHost`]
@@ -10,7 +10,7 @@ use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 /// The most bytes of a listen host: the longest DNS name (RFC 1035, 253
 /// characters without the final dot). An IP address is shorter.
@@ -70,7 +70,7 @@ impl From<ListenHost> for String {
 }
 
 impl ManifestValue for ListenHost {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// The port of a listen address: 1 to 65535.
@@ -104,7 +104,7 @@ impl From<ListenPort> for u32 {
 }
 
 impl ManifestValue for ListenPort {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "LISTEN_PORT",
         min: 1,
         max: u16::MAX as u64,

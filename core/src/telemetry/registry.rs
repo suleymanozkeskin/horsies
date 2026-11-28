@@ -257,7 +257,7 @@ impl RegistryLabels {
             DeclaredSource::QueueNames => self.queues.texts(),
             DeclaredSource::HandlerNames => self.handlers.texts(),
             DeclaredSource::ScheduleNames => self.schedules.texts(),
-            DeclaredSource::UserErrorCodes => {
+            DeclaredSource::CustomErrorCodes => {
                 let mut texts = self.error_codes.declared().to_vec();
                 texts.push(source.fallback().to_owned());
                 texts

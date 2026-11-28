@@ -65,7 +65,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefusedError,
     shortage_or,
 )
-from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import OperationalCode, TaskError
 from horsies.core.telemetry.attempt_span import flush_attempt_spans_at_stop
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
@@ -397,7 +397,7 @@ def read_python_init_frame(
         case core.InitFrame(program=core.PythonProgram()):
             return frame
         case core.InitFrame():
-            _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
+            _exit_bad_parent_frame('Parent sent the init frame of a host child')
         case (
             core.RunFrame()
             | core.SharedRunFrame()
@@ -447,11 +447,11 @@ def task_child_kind_of(init: core.InitFrame) -> TaskChildKind:
 
 def python_program_of(init: core.InitFrame) -> core.PythonProgram:
     """The Python program of an init frame that ``read_init_frame`` took. A
-    Rust program here is a defect: ``AssertionError``."""
+    host program here is a defect: ``AssertionError``."""
     match init.program:
         case core.PythonProgram() as program:
             return program
-        case 'RUST':
+        case 'HOST':
             raise AssertionError('read_init_frame takes only the init frame of a Python child')
         case _ as unreachable:
             assert_never(unreachable)
@@ -486,12 +486,10 @@ def bounded_envelope(task_name: str, result: ResultEnvelope) -> ResultEnvelope:
         f'{MAX_BODY_BYTES} byte bound'
     )
     logger.error(message)
-    failure: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            message=message,
-            data={'task_name': task_name, 'result_bytes': size},
-        ),
+    failure = TaskError(
+        code=OperationalCode.WORKER_SERIALIZATION_ERROR,
+        message=message,
+        data={'task_name': task_name, 'result_bytes': size},
     )
     return ResultEnvelope(serialize_error_payload(failure))
 
@@ -1311,6 +1309,7 @@ def run_child_task(
         orphan_self_heal=frame.orphan_self_heal,
         queue_name=frame.queue_name,
         attempt=frame.attempt,
+        max_retries=frame.max_retries,
         trace=run_trace_of(frame.trace),
         cancel=cancel,
     )

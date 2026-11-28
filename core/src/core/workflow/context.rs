@@ -21,15 +21,18 @@ pub const WORKFLOW_META_KWARG: &str = "__h_workflow_meta__";
 /// Context passed to workflow tasks that need access to upstream results.
 ///
 /// Constructed by the workflow engine and injected into task kwargs when
-/// a node declares `workflow_ctx_from`. The struct definition lives here
+/// a node declares `workflow_context_from`. The struct definition lives here
 /// in horsies-core; the injection logic lives in horsies-workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowContext {
     /// ID of the running workflow instance.
     pub workflow_id: Uuid,
 
-    /// Index of the current task within the workflow.
-    pub task_index: i32,
+    /// Index of the current node within the workflow. The stored key keeps
+    /// the schema name `task_index`: the SQL function that writes the
+    /// context writes that key.
+    #[serde(rename = "task_index")]
+    pub node_index: i32,
 
     /// Registered task function name.
     pub task_name: String,
@@ -49,14 +52,14 @@ impl WorkflowContext {
     /// Create a new context with pre-populated upstream results.
     pub fn new(
         workflow_id: Uuid,
-        task_index: i32,
+        node_index: i32,
         task_name: String,
         results_by_id: HashMap<String, TaskResult<JsonText>>,
         summaries_by_id: HashMap<String, SubWorkflowSummary>,
     ) -> Self {
         Self {
             workflow_id,
-            task_index,
+            node_index,
             task_name,
             results_by_id,
             summaries_by_id,
@@ -72,8 +75,8 @@ impl WorkflowContext {
         key: &NodeKey<T>,
     ) -> Result<TaskResult<T>, TaskError> {
         let value = self.results_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+            TaskError::built_in(
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no result found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -84,8 +87,8 @@ impl WorkflowContext {
         match value {
             TaskResult::Ok(ok_value) => {
                 let parsed = ok_value.decode::<T>().map_err(|e| {
-                    TaskError::builtin(
-                        crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
+                    TaskError::built_in(
+                        crate::core::task::error::OperationalCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize result for node_id '{}': {}",
                             key.node_id(),
@@ -107,8 +110,8 @@ impl WorkflowContext {
     /// Retrieve the sub-workflow summary for a node.
     pub fn summary_for<T>(&self, key: &NodeKey<T>) -> Result<SubWorkflowSummary, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+            TaskError::built_in(
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -123,7 +126,7 @@ impl WorkflowContext {
     /// Mirrors [`Self::result_for`]: uses `T` from the `NodeKey` to decode the
     /// child workflow's stored `output` slot. Returns `Ok(None)` when the
     /// summary has no output (no `output_index` was set on the child), a
-    /// `WorkflowCtxMissingId` error when the node_id is absent, or a
+    /// `NodeNotInContext` error when the node id is not in the context, or a
     /// `ResultDeserializationError` when the stored output fails to decode
     /// into `T`.
     pub fn output_for<T: DeserializeOwned>(
@@ -131,8 +134,8 @@ impl WorkflowContext {
         key: &NodeKey<T>,
     ) -> Result<Option<T>, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
-                crate::core::task::error::ContractCode::WorkflowCtxMissingId,
+            TaskError::built_in(
+                crate::core::task::error::ContractCode::NodeNotInContext,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
                     key.node_id(),
@@ -144,8 +147,8 @@ impl WorkflowContext {
             None => Ok(None),
             Some(output) => {
                 let parsed = output.decode::<T>().map_err(|e| {
-                    TaskError::builtin(
-                        crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
+                    TaskError::built_in(
+                        crate::core::task::error::OperationalCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize sub-workflow output for node_id '{}': {}",
                             key.node_id(),
@@ -167,6 +170,7 @@ impl WorkflowContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::task::error::{BuiltInTaskCode, TaskErrorCode};
     use crate::core::workflow::status::WorkflowStatus;
 
     fn make_ctx() -> WorkflowContext {
@@ -221,6 +225,12 @@ mod tests {
         let key: NodeKey<String> = NodeKey::new("nonexistent".to_owned());
         let err = ctx.result_for(&key).unwrap_err();
         assert!(err.message.as_ref().unwrap().contains("nonexistent"));
+        assert_eq!(
+            err.error_code,
+            TaskErrorCode::BuiltIn(BuiltInTaskCode::Contract(
+                crate::core::task::error::ContractCode::NodeNotInContext
+            ))
+        );
     }
 
     #[test]
@@ -255,7 +265,7 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         let back: WorkflowContext = serde_json::from_str(&json).unwrap();
         assert_eq!(back.workflow_id, Uuid::nil());
-        assert_eq!(back.task_index, 2);
+        assert_eq!(back.node_index, 2);
         assert_eq!(back.task_name, "process");
         assert!(back.has_result("fetch:0"));
         assert!(back.has_result("count:1"));
@@ -275,10 +285,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: Some(JsonText::parse("42").unwrap()),
-                total_tasks: 3,
-                completed_tasks: 3,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 3,
+                completed_nodes: 3,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -298,7 +308,7 @@ mod tests {
         let restored = back.summary_for(&key).unwrap();
         assert_eq!(restored.status, WorkflowStatus::Completed);
         assert_eq!(restored.output, Some(JsonText::parse("42").unwrap()));
-        assert_eq!(restored.total_tasks, 3);
+        assert_eq!(restored.total_nodes, 3);
     }
 
     #[test]
@@ -322,10 +332,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: None,
-                total_tasks: 2,
-                completed_tasks: 2,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 2,
+                completed_nodes: 2,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -388,10 +398,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: Some(JsonText::parse(r#"{"total": 7, "label": "done"}"#).unwrap()),
-                total_tasks: 2,
-                completed_tasks: 2,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 2,
+                completed_nodes: 2,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -445,10 +455,10 @@ mod tests {
             r#"{"workflow_id": "00000000-0000-0000-0000-000000000000", "task_index": 1, "task_name": "t","#,
             r#" "summaries_by_id": {"#,
             r#""wide": {"status": "COMPLETED", "output": 340282366920938463463374607431768211455,"#,
-            r#" "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0,"#,
+            r#" "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0,"#,
             r#" "error_summary": null},"#,
             r#""below": {"status": "COMPLETED", "output": -9223372036854775809,"#,
-            r#" "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0,"#,
+            r#" "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0,"#,
             r#" "error_summary": null}}}"#,
         );
         let ctx: WorkflowContext = serde_json::from_str(text).unwrap();
@@ -488,7 +498,7 @@ mod tests {
         results.insert(
             "failed:0".to_owned(),
             TaskResult::Err(
-                TaskError::new("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
+                TaskError::custom("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
             ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
@@ -500,7 +510,9 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap()),
+            TaskResult::Err(
+                TaskError::custom("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap(),
+            ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         let key: NodeKey<String> = NodeKey::new("failed:0".to_owned());
@@ -522,7 +534,7 @@ mod tests {
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();
         assert_eq!(ctx.workflow_id, Uuid::nil());
-        assert_eq!(ctx.task_index, 3);
+        assert_eq!(ctx.node_index, 3);
         assert!(ctx.has_result("fetch:0"));
         assert!(!ctx.has_summary("anything"));
     }

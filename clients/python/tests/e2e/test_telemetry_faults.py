@@ -63,11 +63,13 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Succeeded
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.tracing import OtelTracing
 from horsies.core.task_decorator import TaskFunction, TaskHandle
+from horsies.core.types.result import Ok, Result
 
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.worker import kill_stale_workers, worker_env
 from tests.e2e.tasks import instance_telemetry_faults as instance
 from tests.e2e.tasks.instance_telemetry_faults import (
@@ -182,7 +184,7 @@ def _worker(
             'worker',
             INSTANCE,
             f'--profile={PROFILE}',
-            '--loglevel=warning',
+            '--log-level=warning',
             *extra_arguments,
         ],
         stdout=handle,
@@ -239,9 +241,9 @@ async def _wait_ready(worker: RunningWorker) -> None:
     deadline = time.monotonic() + READY_BOUND.total_seconds()
     while time.monotonic() < deadline:
         _assert_running(worker)
-        result = await handle.get_async(timeout_ms=1_000)
-        if result.is_ok():
-            assert result.ok_value == 'ready'
+        result = await handle.get_async(wait_ms=1_000)
+        if read_succeeded(result):
+            assert succeeded_value(result) == 'ready'
             return
     pytest.fail(f'the worker did not run its first task within {READY_BOUND}')
 
@@ -262,9 +264,10 @@ async def _assert_wave_completes(wave: int) -> None:
         remaining_ms = int(
             max(0.0, WAVE_BOUND.total_seconds() - (time.monotonic() - started)) * 1_000
         )
-        result = await handle.get_async(timeout_ms=max(1, remaining_ms))
-        assert result.is_ok(), f'task {handle.task_id} of wave {wave}: {result}'
-        assert result.ok_value == expected
+        result = await handle.get_async(wait_ms=max(1, remaining_ms))
+        assert result == Ok(Succeeded(expected)), (
+            f'task {handle.task_id} of wave {wave}: {result}'
+        )
 
 
 # --- The snapshot and the endpoint --------------------------------------------
@@ -574,14 +577,14 @@ class TracedProducer:
 def _traced_producer() -> TracedProducer:
     app = Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(instance.DB_URL)),
+            database=PostgresConfig(database_url=SecretStr(instance.DB_URL)),
             tracing=OtelTracing(),
         ),
     )
 
-    @app.task(task_name='e2e_telemetry_faults_add')
-    def traced_add(*, left: int, right: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=left + right)
+    @app.task(name='e2e_telemetry_faults_add')
+    def traced_add(*, left: int, right: int) -> Result[int, TaskError]:
+        return Ok(left + right)
 
     return TracedProducer(app=app, add=traced_add)
 
@@ -623,10 +626,9 @@ async def test_a_carrier_over_its_bound_is_not_stored_and_changes_no_task(
         await _wait_ready(worker)
         for handle, expected in ((under, 3), (over, 7)):
             result = await handle.get_async(
-                timeout_ms=int(WAVE_BOUND.total_seconds() * 1_000)
+                wait_ms=int(WAVE_BOUND.total_seconds() * 1_000)
             )
-            assert result.is_ok(), result
-            assert result.ok_value == expected
+            assert result == Ok(Succeeded(expected)), result
         _assert_stops_clean(worker)
 
 

@@ -35,7 +35,7 @@ use crate::db::StatementFailure;
 
 use super::aggregates::plan_rows_from_explain_text;
 use super::detail::{history_detail_from_wire, HistoryDetailWireRow};
-use super::pages::HistoryWindow;
+use super::pages::MonitoringWindow;
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
     decode_result_row, HistoryResultPayload, LiveTaskResult, ResultWireRow, TaskResultRead,
@@ -54,10 +54,12 @@ fn timestamp(value: &str) -> DateTime<Utc> {
 #[test]
 fn history_window_is_increasing_and_at_most_thirty_days() {
     let lower = timestamp("2026-08-01T00:00:00Z");
-    assert!(HistoryWindow::new(lower, lower + Duration::days(30)).is_ok());
-    assert!(HistoryWindow::new(lower, lower + Duration::days(30) + Duration::seconds(1)).is_err());
-    assert!(HistoryWindow::new(lower, lower).is_err());
-    assert!(HistoryWindow::new(lower + Duration::days(1), lower).is_err());
+    assert!(MonitoringWindow::new(lower, lower + Duration::days(30)).is_ok());
+    assert!(
+        MonitoringWindow::new(lower, lower + Duration::days(30) + Duration::seconds(1)).is_err()
+    );
+    assert!(MonitoringWindow::new(lower, lower).is_err());
+    assert!(MonitoringWindow::new(lower + Duration::days(1), lower).is_err());
 }
 
 /// The row estimate of an `EXPLAIN (FORMAT JSON)` text is the top plan's
@@ -1244,7 +1246,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .expect_err("the first broker call after the drop fails");
     assert_eq!(
         refused.code(),
-        crate::broker::BrokerErrorCode::TaskInfoQueryFailed,
+        crate::broker::DatabaseErrorCode::TaskInfoQueryFailed,
         "{refused:?}"
     );
     assert!(

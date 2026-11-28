@@ -25,14 +25,14 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 pytestmark = [pytest.mark.integration]
@@ -45,7 +45,7 @@ def _custom_app(broker: PostgresBroker) -> Horsies:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.CUSTOM,
-            broker=broker.config,
+            database=broker.config,
             custom_queues=[
                 CustomQueueConfig(
                     name='scraping', priority=SCRAPING_PRIORITY, max_concurrency=1,
@@ -70,9 +70,9 @@ class TestSubworkflowPriorityBinding:
         app = _custom_app(broker)
         suffix = uuid.uuid4().hex[:8]
 
-        @app.task(task_name=f'scrape_{suffix}', queue_name='scraping')
-        def scrape_task(*, run_postproc: bool = False) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)  # pragma: no cover - never executed in this test
+        @app.task(name=f'scrape_{suffix}', queue='scraping')
+        def scrape_task(*, run_postproc: bool = False) -> Result[int, TaskError]:
+            return Ok(1)  # pragma: no cover - never executed in this test
 
         class ClientSync(WorkflowDefinition[int]):
             name = f'client_sync_{suffix}'
@@ -83,13 +83,13 @@ class TestSubworkflowPriorityBinding:
                 # Direct WorkflowSpec — bypasses app.workflow() binding, exactly
                 # like the documented parameterized-subworkflow pattern.
                 scrape = TaskNode(
-                    fn=scrape_task, kwargs={'run_postproc': False}, node_id='scrape',
+                    function=scrape_task, kwargs={'run_postproc': False}, node_id='scrape',
                 )
-                return WorkflowSpec(name=cls.name, tasks=[scrape], output=scrape)
+                return WorkflowSpec(name=cls.name, nodes=[scrape], output=scrape)
 
         parent = app.workflow(
             f'parent_{suffix}',
-            [SubWorkflowNode(workflow_def=ClientSync)],
+            [SubWorkflowNode(workflow_definition=ClientSync)],
             definition_key=f'parent-{suffix}',
         )
         r = await start_workflow_async(parent, broker)

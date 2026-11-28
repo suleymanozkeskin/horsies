@@ -32,7 +32,7 @@ async def phase2_recovery_pass(
     outcome = await handle.recover_workflow_phase2_async(
         grace_ms=grace_ms,
         max_rows=PHASE2_RECOVERY_ROWS,
-        quarantine_after_attempts=_DEFAULTS.phase2_quarantine_after_attempts,
+        quarantine_after_attempts=_DEFAULTS.finalization_quarantine_after_attempts,
     )
     match outcome:
         case core.Phase2RecoveryRecord():

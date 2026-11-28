@@ -81,11 +81,6 @@ MANIFEST_VERSION_MAX: Final = 1
 type SchemaMode = Literal['MIGRATE_AND_VALIDATE', 'OBSERVE_ONLY', 'ASSUME_INITIALIZED']
 """Schema behaviour of a handle.
 
-The Python broker flags map to it: `assume_initialized=True` is
-`ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
-`run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
-`OBSERVE_ONLY`.
-
 `MIGRATE_AND_VALIDATE`: The first operation applies the migrations and checks the schema version.
 
 `OBSERVE_ONLY`: The handle never runs schema DDL (monitoring reads).
@@ -116,7 +111,7 @@ type SessionDatabase = SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparat
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PoolRecycleNever:
-    """A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`)."""
+    """A connection is never replaced by age."""
 
     kind: Literal['NEVER'] = 'NEVER'
 
@@ -133,9 +128,7 @@ class PoolRecycleAfterSeconds:
 
 
 type PoolRecycle = PoolRecycleNever | PoolRecycleAfterSeconds
-"""When the pool replaces a connection by its age (SQLAlchemy's
-`pool_recycle`).
-"""
+"""When the pool replaces a connection by its age."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -158,9 +151,7 @@ class TcpKeepalivesConfigOn:
 
 
 type TcpKeepalivesConfig = TcpKeepalivesConfigOff | TcpKeepalivesConfigOn
-"""TCP keepalives of every core connection. Python's
-`tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
-"""
+"""TCP keepalives of every core connection, checked form."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -182,9 +173,7 @@ class TcpUserTimeoutConfigAfter:
 
 
 type TcpUserTimeoutConfig = TcpUserTimeoutConfigSystemDefault | TcpUserTimeoutConfigAfter
-"""The TCP user timeout of every core connection. Python's
-`tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
-"""
+"""The TCP user timeout of every core connection, checked form."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -199,24 +188,23 @@ class DatabaseManifest:
     """The main URL points at a PgBouncer transaction-pool endpoint."""
 
     pool_pre_ping: bool
-    """Ping a pooled connection before use (Python's rule: only after it
+    """Ping a pooled connection before use (only after it
     waited in the pool for more than 1 s).
     """
 
     pool_size: int
     """Connections the pool keeps. Always a number: the core bounds its
-    connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    connections, so a pool size of 0 (no limit) has no form here.
     """
 
     max_overflow: int
-    """Connections past `pool_size`. Always a number: SQLAlchemy's
-    `max_overflow=-1` (no limit) has no form here.
+    """Connections past `pool_size`. Always a number: an overflow
+    of -1 (no limit) has no form here.
     """
 
-    pool_timeout: int
+    pool_timeout_seconds: int
     """The longest a checkout waits for a free connection. 0 means a checkout
-    does not wait: it fails at once when no connection is free, as
-    SQLAlchemy's `pool_timeout=0`.
+    does not wait: it fails at once when no connection is free.
     """
 
     pool_recycle: PoolRecycle
@@ -225,14 +213,10 @@ class DatabaseManifest:
     """Log every statement through the log bridge."""
 
     tcp_keepalives: TcpKeepalivesConfig
-    """TCP keepalives of every core connection (Python `tcp_keepalives` and
-    its three values).
-    """
+    """TCP keepalives of every core connection."""
 
     tcp_user_timeout: TcpUserTimeoutConfig
-    """TCP user timeout of every core connection (Python
-    `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
-    """
+    """TCP user timeout of every core connection."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

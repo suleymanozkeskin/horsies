@@ -24,9 +24,9 @@ from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
 from tests.e2e.helpers.assertions import (
-    assert_ok,
+    read_succeeded,
     start_ok_in_thread,
-    unwrap_get_result,
+    succeeded_value,
     unwrap_send,
 )
 from tests.e2e.helpers.db import wait_for_status
@@ -47,15 +47,14 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
 
 async def _result_of(handle: TaskHandle[str]) -> str:
-    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_ok(result)
-    return result.unwrap()
+    result = await asyncio.to_thread(handle.get, wait_ms=RESULT_TIMEOUT_MS)
+    return succeeded_value(result)
 
 
 @pytest.mark.e2e
@@ -104,15 +103,12 @@ async def test_an_async_task_sends_with_send_async(
         for x in (3, 4):
             sender = unwrap_send(await async_tasks.async_sends.send_async(x=x))
             sent_id = await _result_of(sender)
-            result = unwrap_get_result(
-                await asyncio.to_thread(
-                    app.get_result,
-                    UUID(sent_id),
-                    timeout_ms=RESULT_TIMEOUT_MS,
-                ),
+            result = await asyncio.to_thread(
+                app.get_result,
+                UUID(sent_id),
+                wait_ms=RESULT_TIMEOUT_MS,
             )
-            assert_ok(result)
-            assert result.unwrap() == x * 2
+            assert succeeded_value(result) == x * 2
 
 
 @pytest.mark.e2e
@@ -133,9 +129,8 @@ async def test_an_async_task_runs_as_a_workflow_node(broker: PostgresBroker) -> 
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        assert result.unwrap() == 12
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
+        assert succeeded_value(result) == 12
 
 
 @pytest.mark.e2e
@@ -253,8 +248,7 @@ async def test_a_workflow_successor_starts_after_the_work_its_upstream_left(
             str(handle.workflow_id),
             timeout_s=30.0,
         )
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
     assert status == 'COMPLETED'
-    assert_ok(result)
-    assert result.unwrap() == 'ended'
+    assert succeeded_value(result) == 'ended'

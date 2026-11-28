@@ -40,6 +40,14 @@ encoder, and the Python tests check that it still does.
     today in place of Python's. The Rust tests assert this text, so a change of
     either client fails a test; the finding is in [Findings](#findings). The
     Rust tests still read Python's text back to the value.
+  - `typescript_cannot_express`: the TypeScript client has no type for the
+    value; the text gives the reason. The TypeScript tests skip the row.
+  - `typescript_drift`: `{"text", "finding"}`: the text that the TypeScript
+    client writes in place of Python's. The TypeScript tests assert this
+    text and read Python's text back to the value.
+  - A row has at most one mark per client. The core, the Python tests and
+    the Rust tests do not read the TypeScript marks; their row readers skip
+    keys that they do not name.
 - `refused_values`: values that every encoder refuses.
 - `refused_texts`: texts that every reader refuses. `core_refusal` names the
   core's `StrictJsonError` variant. `refusal_text`, for a refusal that
@@ -69,7 +77,7 @@ every writer stores as the characters, not as `\u` escapes:
 | Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
 | Workflow spec data | `non_ascii_text` |
 
-The task options hold no user text: an error code of `auto_retry_for` is
+The task options hold no user text: an error code of `retry_for` is
 UPPER_SNAKE_CASE ASCII in both clients.
 
 ## Value notation
@@ -89,6 +97,7 @@ file rounds one.
 | `datetime_offset` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<FixedOffset>>` |
 | `datetime_naive` | ISO 8601 text | naive `datetime` | `StoredDateTime<NaiveDateTime>` |
 | `date` | ISO 8601 date | `date` | `NaiveDate` |
+| `time` | ISO 8601 time of day, no offset | naive `time` | `StoredTime` (wraps `NaiveTime`) |
 | `uuid` | hyphenated text | `UUID` | `Uuid` |
 | `decimal` | decimal text | `Decimal` | none |
 | `bytes` | UTF-8 text | `bytes` | none |
@@ -105,6 +114,10 @@ A date-time's Rust type is `horsies::StoredDateTime`
 fraction: 6 digits when the microsecond is not 0, else none. chrono's own
 serde form of `DateTime` and `NaiveDateTime` writes a whole millisecond with
 3 digits (`.500Z`); both clients read either text to the same value.
+A time of day's Rust type is `horsies::StoredTime` (same file), which writes
+Python's fraction by the same rule. chrono's own serde form of `NaiveTime`
+writes a whole millisecond with 3 digits (`09:10:12.500`); Python writes
+`09:10:12.500000` (finding `time-milliseconds`). Both clients read either text.
 
 ## Task input (`task_input.json`)
 
@@ -151,7 +164,7 @@ Decoders:
 `{"__h_task_result__":true,"ok":null,"err":<error>}`. An error object has the
 keys `exception`, `error_code`, `data`, `message`, in this order, nulls kept;
 a sub-workflow error adds `sub_workflow_id` and `sub_workflow_summary`. A
-built-in code is `{"__builtin_task_code__": "<NAME>"}`, a user code its text.
+built-in code is `{"__builtin_task_code__": "<NAME>"}`, a custom code its text.
 A vector holds an `ok` typed value (the notation above) or an `err` task error
 (`{"error_code": {"built_in" | "user": ...}, "message", "data", "exception",
 "sub_workflow"?}`).
@@ -206,7 +219,7 @@ Decoders:
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and
-`TaskError::user` and `TaskError::library` take a message: the Rust tests only
+`TaskError::custom` and `TaskError::built_in` take a message: the Rust tests only
 read those vectors.
 
 ## Error data (`error_data.json`)
@@ -237,14 +250,16 @@ made, and the core writer is the only writer.
 | `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `core/src/workflow_engine/recovery.rs:1748` |
 | `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `clients/python/horsies/core/workflows/lifecycle.py:845-857` | `core/src/workflow_engine/lifecycle.rs:300` |
 | `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `clients/python/horsies/core/task_decorator.py:2031-2036` | `core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
+| `WORKER_SERIALIZATION_ERROR`, stored options that the worker cannot use (3 vectors: `field` `task_options`, `timeout_ms` and `cancel_grace_ms`) | `task_name`, `field`; then `min_ms`, `max_ms` for `timeout_ms` and `cancel_grace_ms` | `clients/python/horsies/core/worker/child_runner.py:289-326` (`_stored_timeout_refusal_response`) | `core/src/worker/executor/child_host/run.rs` (`refusal_end`) |
 
 The SQL writer is `horsies_task_error_envelope`
 (`core/baseline/0005_workflow_functions.sql:99`); a DB test
 calls it with the code, the message and the data text of each engine vector.
 The core's tests call `timeout_write`, `killed_child_write`,
-`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error` and
-`node_error`; the other core writers build their data with `json!` in the key
-order of the table, and the generic test pins the encoding of each vector.
+`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error`,
+`node_error` and `refusal_end`; the other core writers build their data
+with `json!` in the key order of the table, and the generic test pins the
+encoding of each vector.
 The Rust client writes none of these errors; its test reads each envelope
 through `outcome_of_record`.
 
@@ -252,9 +267,9 @@ through `outcome_of_record`.
 
 `{"retry_policy": <policy or null>, "good_until": <instant or null>,
 "timeout_ms": <ms or null>, "execution": <class>, "cancel_grace_ms": <ms or
-null>}`, in this order; the policy holds `max_retries`, `intervals`,
+null>}`, in this order; the policy holds `max_retries`, `intervals_seconds`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
-`auto_retry_for`, codes by name. Every task stores the text, nulls included.
+`retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
 deadline: the task's text with the deadline in `good_until`, in
 `isoformat()`) or `node` (a workflow
@@ -338,7 +353,9 @@ refused carrier is not an error of the send: the row stores no carrier.
 ## Findings
 
 Differences that the vectors found. A fixed one names its PR; an open one is a
-`rust_drift` or a `rust_cannot_express` row, and is described on #1603.
+`rust_drift` or a `rust_cannot_express` row, and is described on #1603 or on
+its own issue. A difference of the TypeScript client is a `typescript_drift` or
+a `typescript_cannot_express` row.
 
 | Finding | Form | Facts | State |
 |---|---|---|---|
@@ -354,3 +371,6 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
 | `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | fixed: `StoredDateTime` writes Python's text for a user value, and the node deadline uses `python_isoformat_utc`; chrono's own serde form is unchanged |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |
+| `time-milliseconds` | task input, result | chrono's `NaiveTime` writes a whole millisecond with 3 digits (`09:10:12.500`); Python writes 6 (`09:10:12.500000`). Microseconds and whole seconds agree. Both clients read either text | fixed: `StoredTime` writes Python's text for a user value; chrono's own serde form is unchanged |
+| `integer-like-record-keys` | task input | a JavaScript object puts integer-like keys first, in ascending order, then the other keys in insertion order: the record that Python writes `{"b":1,"10":2,"2":3}` is `{"2":3,"10":2,"b":1}` in the TypeScript client. Python writes insertion order | kept: the TypeScript client keeps the JavaScript order; the `typescript_drift` row `map_integer_like_keys` pins both texts |
+| not expressible in TypeScript | task input, result | `bytes`: Python refuses `bytes` in a task signature (`clients/python/horsies/core/codec/signature_check.py`), so the TypeScript client has no bytes kind | `typescript_cannot_express` rows `bytes_utf8`, `ok_bytes` |

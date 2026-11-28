@@ -19,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
+from horsies.core.types.result import Ok, Result
 
 from tests.integration.conftest import start_ok
 
@@ -28,9 +30,9 @@ pytestmark = [pytest.mark.integration]
 
 
 def _task(app: Horsies, prefix: str) -> Any:
-    @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
-    def fn(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    @app.task(name=f'{prefix}_{uuid.uuid4().hex[:8]}')
+    def fn(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return fn
 
@@ -47,7 +49,7 @@ def _child_with_param(app: Horsies) -> type[WorkflowDefinition[int]]:
         def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
             cls, app: Horsies, value: int,
         ) -> Any:
-            node = TaskNode(fn=child_fn, kwargs={'value': value})
+            node = TaskNode(function=child_fn, kwargs={'value': value})
             return app.workflow(cls.name, [node], output=node)
 
     return ChildWithParam
@@ -63,10 +65,14 @@ def _child_with_result(app: Horsies) -> type[WorkflowDefinition[int]]:
 
         @classmethod
         def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
-            cls, app: Horsies, value: TaskResult[int, TaskError],
+            cls, app: Horsies, value: TaskOutcome[int, TaskError],
         ) -> Any:
-            node = TaskNode(fn=child_fn, kwargs={'value': value.unwrap()})
-            return app.workflow(cls.name, [node], output=node)
+            match value:
+                case Succeeded(value=succeeded_value):
+                    node = TaskNode(function=child_fn, kwargs={'value': succeeded_value})
+                    return app.workflow(cls.name, [node], output=node)
+                case Failed(error=error):
+                    raise AssertionError(f'build_with got a failed upstream: {error!r}')
 
     return ChildWithResult
 
@@ -89,7 +95,7 @@ def _static_child(
             _ = (args, params)
             match nodes:
                 case None:
-                    node = TaskNode(fn=child_fn, kwargs={'value': 1})
+                    node = TaskNode(function=child_fn, kwargs={'value': 1})
                     return app.workflow(cls.name, [node], output=node)
                 case build_nodes:
                     spec_nodes = build_nodes(child_fn)
@@ -120,11 +126,11 @@ class TestSubWorkflowParams:
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        producer = TaskNode(fn=_task(app, 'params_producer'), kwargs={'value': 1})
-        given = SubWorkflowNode(workflow_def=_child_with_param(app), kwargs={'value': 2})
-        not_given = SubWorkflowNode(workflow_def=_static_child(app))
+        producer = TaskNode(function=_task(app, 'params_producer'), kwargs={'value': 1})
+        given = SubWorkflowNode(workflow_definition=_child_with_param(app), kwargs={'value': 2})
+        not_given = SubWorkflowNode(workflow_definition=_static_child(app))
         injected = SubWorkflowNode(
-            workflow_def=_child_with_result(app),
+            workflow_definition=_child_with_result(app),
             waits_for=[producer],
             args_from={'value': producer},
         )
@@ -151,13 +157,13 @@ class TestSubWorkflowParams:
         grandchild = _child_with_param(app)
 
         def child_nodes(child_fn: Any) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
-            root = TaskNode(fn=child_fn, kwargs={'value': 1})
+            root = TaskNode(function=child_fn, kwargs={'value': 1})
             nested = SubWorkflowNode(
-                workflow_def=grandchild, kwargs={'value': 3}, waits_for=[root],
+                workflow_definition=grandchild, kwargs={'value': 3}, waits_for=[root],
             )
             return [root, nested]
 
-        parent = SubWorkflowNode(workflow_def=_static_child(app, child_nodes))
+        parent = SubWorkflowNode(workflow_definition=_static_child(app, child_nodes))
         spec = app.workflow(
             f'params_parent_{uuid.uuid4().hex[:6]}', [parent],
             definition_key=f'params-parent-{uuid.uuid4().hex[:6]}',

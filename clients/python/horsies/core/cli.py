@@ -31,11 +31,11 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
+from horsies.core.brokers.result_types import DatabaseOperationError
 from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import (
     ConfigurationError,
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     ValidationReport,
 )
@@ -43,6 +43,7 @@ from horsies.core.fleet_metrics import listen_address, run_fleet_metrics
 from horsies.core.logging import TEXT_LOGS, get_logger
 from horsies.core.models.log_format import JsonLogs, TextLogs
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.schema_mode import AppRole, SchemaMode
 from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
 from horsies.core.models.worker_profile import (
     WorkerProfile,
@@ -57,9 +58,9 @@ from horsies.core.utils.imports import (
 )
 
 
-def _raise_schema_error(err: BrokerOperationError) -> NoReturn:
+def _raise_schema_error(err: DatabaseOperationError) -> NoReturn:
     """Raise ``RuntimeError(err.message)``, chained from the cause when there is one."""
-    match broker_error_cause(err):
+    match err.failure_cause():
         case NoCause():
             raise RuntimeError(err.message)
         case cause:
@@ -90,11 +91,11 @@ async def _ensure_schema_with_retry(
             _raise_schema_error(err)
 
         attempts += 1
-        match resilience.db_retry_max_attempts:
+        match resilience.database_retry_max_attempts:
             case 0:
                 should_retry = True
             case _:
-                should_retry = attempts <= resilience.db_retry_max_attempts
+                should_retry = attempts <= resilience.database_retry_max_attempts
 
         if not should_retry:
             logger.error(
@@ -104,15 +105,15 @@ async def _ensure_schema_with_retry(
 
         exponent = max(0, attempts - 1)
         base_ms = min(
-            resilience.db_retry_max_ms,
-            int(resilience.db_retry_initial_ms * (2**exponent)),
+            resilience.database_retry_max_ms,
+            int(resilience.database_retry_initial_ms * (2**exponent)),
         )
         jitter_range = base_ms * 0.25
         delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
         delay_s = max(0.1, delay_ms / 1000.0)
         logger.error(
             f'Database initialization failed: {err.message}. Retrying in {delay_s:.1f}s '
-            f'(attempt {attempts}/{resilience.db_retry_max_attempts or "inf"})'
+            f'(attempt {attempts}/{resilience.database_retry_max_attempts or "inf"})'
         )
         await asyncio.sleep(delay_s)
 
@@ -126,13 +127,13 @@ async def _close_broker(broker: Any, logger: logging.Logger) -> None:
 def _resolve_module_argument(args: argparse.Namespace) -> str:
     """Return module path from --module or positional, error if missing or conflicting."""
     module_flag = getattr(args, 'module', None)
-    module_pos = getattr(args, 'module_pos', None)
-    if module_flag and module_pos and module_flag != module_pos:
+    module_positional = getattr(args, 'module_positional', None)
+    if module_flag and module_positional and module_flag != module_positional:
         raise ConfigurationError(
             message='conflicting module paths provided',
-            code=ErrorCode.CLI_INVALID_ARGS,
+            code=HorsiesErrorCode.CLI_INVALID_ARGS,
             notes=[
-                f'--module={module_flag!r} conflicts with positional {module_pos!r}',
+                f'--module={module_flag!r} conflicts with positional {module_positional!r}',
                 'pass the module path exactly once (either as -m/--module or positionally)',
             ],
             help_text=(
@@ -141,11 +142,11 @@ def _resolve_module_argument(args: argparse.Namespace) -> str:
                 '  horsies worker -m app.configs.horsies:app  (flag)'
             ),
         )
-    module_path = module_flag or module_pos
+    module_path = module_flag or module_positional
     if not module_path:
         raise ConfigurationError(
             message='module path is required',
-            code=ErrorCode.CLI_INVALID_ARGS,
+            code=HorsiesErrorCode.CLI_INVALID_ARGS,
             notes=['no --module flag or positional module argument provided'],
             help_text=(
                 'provide module path in one of these formats:\n'
@@ -231,7 +232,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                     help_lines += '\nwhere <app_name> is the variable name of your Horsies instance'
                 raise ConfigurationError(
                     message=f"ambiguous module locator: '{module_locator}'",
-                    code=ErrorCode.CLI_INVALID_ARGS,
+                    code=HorsiesErrorCode.CLI_INVALID_ARGS,
                     notes=[
                         f"'{module_path}' mixes dotted module notation with a .py file extension",
                     ],
@@ -239,7 +240,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
                 )
             raise ConfigurationError(
                 message=f'module file not found: {file_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f"resolved path: '{file_path}'"],
                 help_text='check that the file path is correct and the file exists',
             )
@@ -252,14 +253,14 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ImportError as e:
             raise ConfigurationError(
                 message=f'failed to import module: {file_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[str(e)],
                 help_text='check that the module and its dependencies are importable',
             )
         except Exception as e:
             raise ConfigurationError(
                 message=f'error while importing module: {file_path}',
-                code=ErrorCode.MODULE_EXEC_ERROR,
+                code=HorsiesErrorCode.MODULE_IMPORT_ERROR,
                 notes=[f'{type(e).__name__}: {e}'],
                 help_text=(
                     'the module was found but raised an error during import;\n'
@@ -277,7 +278,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ModuleNotFoundError as e:
             raise ConfigurationError(
                 message=f'module not found: {module_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     str(e),
                     f'sys.path: {sys.path[:5]}...',
@@ -290,7 +291,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except ImportError as e:
             raise ConfigurationError(
                 message=f'failed to import module: {module_path}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[str(e)],
                 help_text=(
                     'ensure the module and its dependencies are importable;\n'
@@ -300,7 +301,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         except Exception as e:
             raise ConfigurationError(
                 message=f'error while importing module: {module_path}',
-                code=ErrorCode.MODULE_EXEC_ERROR,
+                code=HorsiesErrorCode.MODULE_IMPORT_ERROR,
                 notes=[f'{type(e).__name__}: {e}'],
                 help_text=(
                     'the module was found but raised an error during import;\n'
@@ -316,7 +317,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not hasattr(module, attr_name):
             raise ConfigurationError(
                 message=f"module '{module_name}' has no attribute '{attr_name}'",
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     f"available attributes: {[n for n in dir(module) if not n.startswith('_')]}"
                 ],
@@ -326,7 +327,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not isinstance(obj, Horsies):
             raise ConfigurationError(
                 message=f"'{attr_name}' in module '{module_name}' is not a Horsies instance",
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f'got {type(obj).__name__} instead of Horsies'],
                 help_text='ensure the variable points to a Horsies() instance',
             )
@@ -344,7 +345,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
         if not app_instances:
             raise ConfigurationError(
                 message=f'no Horsies instance found in {module_name}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f"scanned module '{module_name}' for Horsies instances"],
                 help_text='specify the variable name: module.path:variable',
             )
@@ -353,7 +354,7 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
             var_names = [name for _, name in app_instances]
             raise ConfigurationError(
                 message=f'multiple Horsies instances found in {module_name}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[f'found: {var_names}'],
                 help_text='specify which one: module.path:variable',
             )
@@ -364,13 +365,13 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
     return app, var_name, module_name, sys_path_root
 
 
-def setup_logging(loglevel: str, log_format: TextLogs | JsonLogs = TEXT_LOGS) -> None:
-    """Configure the horsies logging of this process at ``loglevel``, in
+def setup_logging(log_level: str, log_format: TextLogs | JsonLogs = TEXT_LOGS) -> None:
+    """Configure the horsies logging of this process at ``log_level``, in
     ``log_format``. A command calls it first with the default format, then
     with ``AppConfig.log_format`` once it has found the app."""
     from horsies.core.logging import configure_logging
 
-    level = getattr(logging, loglevel.upper(), logging.INFO)
+    level = getattr(logging, log_level.upper(), logging.INFO)
     configure_logging(level, log_format=log_format)
 
 
@@ -448,7 +449,7 @@ def _profile_selection_error(
         case ProfileNotGiven(defined=defined):
             config_error = ConfigurationError(
                 message='--profile is required',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[
                     'a worker takes its settings from a named profile in '
                     'AppConfig.worker_profiles; there is no default profile',
@@ -459,7 +460,7 @@ def _profile_selection_error(
         case ProfileUnknown(requested=requested, defined=defined):
             config_error = ConfigurationError(
                 message=f'unknown worker profile {requested!r}',
-                code=ErrorCode.CLI_INVALID_ARGS,
+                code=HorsiesErrorCode.CLI_INVALID_ARGS,
                 notes=[_defined_profiles_note(defined)],
                 help_text=_profile_help(defined),
             )
@@ -480,15 +481,15 @@ def worker_command(args: argparse.Namespace) -> None:
     logger = get_logger('cli')
 
     # Setup logging first
-    loglevel: str = args.loglevel
-    setup_logging(loglevel)
-    logger.info(f'Starting horsies worker with loglevel={loglevel}')
+    log_level: str = args.log_level
+    setup_logging(log_level)
+    logger.info(f'Starting horsies worker with log_level={log_level}')
 
     # Discover app
     try:
         module_locator: str = _resolve_module_argument(args)
         app, var_name, module_name, sys_path_root = discover_app(module_locator)
-        app.set_role('worker')
+        app.set_role(AppRole.WORKER)
     except HorsiesError as e:
         logger.error(str(e))
         sys.exit(1)
@@ -498,7 +499,7 @@ def worker_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
-    setup_logging(loglevel, app.config.log_format)
+    setup_logging(log_level, app.config.log_format)
 
     # The profile is chosen before anything starts. AppConfig validation
     # already checked every profile when the app module built the config;
@@ -515,7 +516,7 @@ def worker_command(args: argparse.Namespace) -> None:
     )
 
     # Strict startup validation before worker accepts tasks.
-    startup_errors = app.check(live=False)
+    startup_errors = app.check(live=False).refusals
     if startup_errors:
         _print_worker_startup_report(startup_errors)
         sys.exit(1)
@@ -547,7 +548,7 @@ def worker_command(args: argparse.Namespace) -> None:
         imports=tuple(discovered_modules),
         sys_path_roots=(sys_path_root,) if sys_path_root else (),
         profile=selected.name,
-        loglevel=loglevel,
+        log_level=log_level,
         metrics_endpoint=metrics_endpoint,
     )
     exit_code = run_core_worker(app, launch, logger, _print_worker_startup_report)
@@ -560,7 +561,7 @@ def _print_worker_startup_report(errors: Sequence[HorsiesError]) -> None:
     report = ValidationReport('worker-startup')
     for error in errors:
         report.add(error)
-    print(report.format_rust_style(), file=sys.stderr)
+    print(report.format_diagnostic(), file=sys.stderr)
 
 
 def scheduler_command(args: argparse.Namespace) -> None:
@@ -573,15 +574,15 @@ def scheduler_command(args: argparse.Namespace) -> None:
     logger = get_logger('cli')
 
     # Setup logging first
-    loglevel: str = args.loglevel
-    setup_logging(loglevel)
-    logger.info(f'Starting scheduler with loglevel={loglevel}')
+    log_level: str = args.log_level
+    setup_logging(log_level)
+    logger.info(f'Starting scheduler with log_level={log_level}')
 
     # Discover app
     try:
         module_locator: str = _resolve_module_argument(args)
         app, _var_name, _module_name, _sys_path_root = discover_app(module_locator)
-        app.set_role('scheduler')
+        app.set_role(AppRole.SCHEDULER)
     except HorsiesError as e:
         logger.error(str(e))
         sys.exit(1)
@@ -591,7 +592,7 @@ def scheduler_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
-    setup_logging(loglevel, app.config.log_format)
+    setup_logging(log_level, app.config.log_format)
 
     # Validate schedule config
     if not app.config.schedule:
@@ -603,12 +604,12 @@ def scheduler_command(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Strict startup validation before scheduler starts.
-    startup_errors = app.check(live=False)
+    startup_errors = app.check(live=False).refusals
     if startup_errors:
         report = ValidationReport('scheduler-startup')
         for error in startup_errors:
             report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        print(report.format_diagnostic(), file=sys.stderr)
         sys.exit(1)
 
     # Import task modules for validation
@@ -707,8 +708,8 @@ def check_command(args: argparse.Namespace) -> None:
     logger = get_logger('cli')
 
     # Setup logging
-    loglevel: str = args.loglevel
-    setup_logging(loglevel)
+    log_level: str = args.log_level
+    setup_logging(log_level)
 
     # Discover app
     try:
@@ -723,22 +724,22 @@ def check_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
-    setup_logging(loglevel, app.config.log_format)
+    setup_logging(log_level, app.config.log_format)
 
     # Run phased validation
     live: bool = args.live
-    errors = app.check(live=live)
+    errors = app.check(live=live).refusals
 
     if errors:
         report = ValidationReport('check')
         for error in errors:
             report.add(error)
-        print(report.format_rust_style(), file=sys.stderr)
+        print(report.format_diagnostic(), file=sys.stderr)
         sys.exit(1)
     else:
         print(
             check_passed_text(
-                task_count=len(app.list_tasks()),
+                task_count=len(app.registered_task_names()),
                 declared_error_codes=app.declared_error_codes(),
                 tracing=app.config.tracing,
             ),
@@ -748,14 +749,14 @@ def check_command(args: argparse.Namespace) -> None:
 
 def metrics_command(args: argparse.Namespace) -> None:
     """Handle the metrics command: serve the fleet metrics of the app's
-    database at `GET /metrics` on `--listen`.
+    database at `GET /metrics` on `--metrics-listen`.
 
     Exit contract: 2 for arguments that do not parse (argparse); 0 at
     `SIGTERM` or `SIGINT`; 1 when the app cannot be discovered, the broker
     does not build, or the address does not bind.
     """
     logger = get_logger('cli')
-    setup_logging(args.loglevel)
+    setup_logging(args.log_level)
     try:
         module_locator: str = _resolve_module_argument(args)
         app, _var_name, _module_name, _sys_path_root = discover_app(module_locator)
@@ -768,7 +769,7 @@ def metrics_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
-    sys.exit(run_fleet_metrics(app, args.listen, logger))
+    sys.exit(run_fleet_metrics(app, args.metrics_listen, logger))
 
 
 def check_passed_text(
@@ -897,19 +898,29 @@ def _registryless_app(args: argparse.Namespace) -> Horsies:
     from pydantic import SecretStr
 
     from horsies.core.models.app import AppConfig
-    from horsies.core.models.broker import PostgresConfig
+    from horsies.core.models.broker import (
+        PostgresConfig,
+        SessionDatabaseSameAsDatabaseUrl,
+        SessionDatabaseSeparate,
+    )
 
     session_url: str | None = args.session_database_url
+    session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate
+    match session_url:
+        case None | '':
+            session_database = SessionDatabaseSameAsDatabaseUrl()
+        case url:
+            session_database = SessionDatabaseSeparate(url=SecretStr(url))
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(args.database_url),
-                session_database_url=(SecretStr(session_url) if session_url else None),
+                session_database=session_database,
                 pgbouncer_transaction_mode=args.pgbouncer_transaction_mode,
             )
         ),
         # The monitoring tool never migrates a database it is only reading.
-        run_schema_migrations=False,
+        schema_mode=SchemaMode.OBSERVE_ONLY,
     )
 
 
@@ -919,15 +930,15 @@ def resolve_web_app(args: argparse.Namespace) -> Horsies:
     Exactly one source is allowed: a module locator, or a database URL. Both
     or neither is a usage error.
     """
-    locator: str | None = args.app_path
+    locator: str | None = args.module
     database_url: str | None = args.database_url
 
     match (locator is not None, database_url is not None):
         case (True, True):
-            _web_arg_error('pass either an app path or --database-url, not both')
+            _web_arg_error('pass either a module or --database-url, not both')
         case (False, False):
             _web_arg_error(
-                'provide an app path (e.g. myapp.tasks:app) or --database-url'
+                'provide a module (e.g. myapp.tasks:app) or --database-url'
             )
         case (True, False):
             app, _var_name, _module_name, _root = discover_app(str(locator))
@@ -936,47 +947,60 @@ def resolve_web_app(args: argparse.Namespace) -> Horsies:
             return _registryless_app(args)
 
 
-def resolve_web_auth_policy(args: argparse.Namespace) -> Any:
+def resolve_web_authorization_policy(args: argparse.Namespace) -> Any:
     """Build the authorization policy for a ``horsies web`` invocation.
 
     Binding beyond loopback without a proxy-supplied identity is refused: the
     default posture is that anyone who can reach the port can read the
     deployment's task data.
     """
-    from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
+    from horsies.web.authorization import AllowAll, TrustedHeader, ViewOnly
 
     host: str = args.host
     enable_actions: bool = args.enable_actions
 
-    match args.auth:
+    match args.authorization:
         case 'trusted-header':
             header: str = args.trusted_header
             if not header.strip():
                 _web_arg_error('--trusted-header requires a header name')
             print(_TRUSTED_HEADER_WARNING % header, file=sys.stderr)
-            return TrustedHeader(header, allow_actions=enable_actions)
+            return TrustedHeader(header, actions=web_actions(args))
         case 'none':
             if not _is_loopback(host):
                 _web_arg_error(
-                    f'--auth none is only allowed on a loopback host; '
+                    f'--authorization none is only allowed on a loopback host; '
                     f'{host!r} is reachable from the network. Use '
-                    f'--auth trusted-header with a proxy-set header.'
+                    f'--authorization trusted-header with a proxy-set header.'
                 )
             return AllowAll() if enable_actions else ViewOnly()
         case _:
-            _web_arg_error(f'unknown --auth value {args.auth!r}')
+            _web_arg_error(f'unknown --authorization value {args.authorization!r}')
+
+
+def web_actions(args: argparse.Namespace) -> Any:
+    """The actions switch of a ``horsies web`` invocation: ``ENABLED`` with
+    ``--enable-actions``, else ``DISABLED``. Pure."""
+    from horsies.web.authorization import Actions
+
+    enable_actions: bool = args.enable_actions
+    match enable_actions:
+        case True:
+            return Actions.ENABLED
+        case False:
+            return Actions.DISABLED
 
 
 def resolve_web_ui_config(args: argparse.Namespace) -> Any:
     """The page settings of a ``horsies web`` invocation: the trace link
     of ``--trace-link``, or none. A template that the core refuses is a bad
     invocation (exit 2) that names the rule."""
-    from horsies.web import MonitoringUIConfig, NoTraceLink, TraceLinkTemplate
+    from horsies.web import MonitoringUIConfig, TraceLinkTemplate, TraceLinkText
 
     template: str | None = args.trace_link
     match template:
         case None:
-            return MonitoringUIConfig(trace_link=NoTraceLink())
+            return MonitoringUIConfig(trace_link=TraceLinkText())
         case str():
             try:
                 return MonitoringUIConfig(
@@ -992,7 +1016,7 @@ def web_command(args: argparse.Namespace) -> None:
     Exit contract: 2 for a bad invocation (argparse convention), 1 when the
     app cannot be discovered or the web extra is missing.
     """
-    setup_logging(args.loglevel)
+    setup_logging(args.log_level)
     logger = get_logger('cli')
 
     try:
@@ -1020,20 +1044,20 @@ def web_command(args: argparse.Namespace) -> None:
     # needs the source task's registered OkT. The `--database-url` form has no
     # app to import and stays registry-less by design.
     if args.database_url is None:
-        startup_errors = app.check(live=False)
+        startup_errors = app.check(live=False).refusals
         if startup_errors:
             report = ValidationReport('web-startup')
             for error in startup_errors:
                 report.add(error)
-            print(report.format_rust_style(), file=sys.stderr)
+            print(report.format_diagnostic(), file=sys.stderr)
             sys.exit(1)
 
-    policy = resolve_web_auth_policy(args)
+    policy = resolve_web_authorization_policy(args)
     monitoring_app = create_monitoring_app(
         app,
-        auth_policy=policy,
-        config=ui_config,
-        actions_enabled=args.enable_actions,
+        authorization_policy=policy,
+        ui=ui_config,
+        actions=web_actions(args),
     )
 
     try:
@@ -1089,7 +1113,7 @@ REMOVED_WORKER_FLAGS: Final[Mapping[str, str]] = {
         'recycle=IsolatedRecycle(above=MemoryLimit(mb=N)))'
     ),
     '--drain-timeout': 'drain_timeout=timedelta(seconds=N)',
-    '--child-preload': 'preload=ChildPreload.LIBRARY, .APP or .NONE',
+    '--child-preload': 'preload=ChildPreload.LIBRARY, .APP or .NO_PRELOAD',
 }
 """The worker flags that moved into a worker profile, and the profile field
 that replaces each one."""
@@ -1147,7 +1171,7 @@ Examples:
   horsies check app.configs.horsies:app --live
 
   # Serve the fleet metrics of the app's database at GET /metrics
-  horsies metrics app.configs.horsies:app --listen 127.0.0.1:9100
+  horsies metrics app.configs.horsies:app --metrics-listen 127.0.0.1:9100
 """,
         )
         subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1165,12 +1189,13 @@ Examples:
             help='Module path (e.g., app.configs.horsies:app)',
         )
         worker_parser.add_argument(
-            'module_pos',
+            'module_positional',
+            metavar='module',
             nargs='?',
             help='Module path (e.g., app.configs.horsies:app)',
         )
         worker_parser.add_argument(
-            '--loglevel',
+            '--log-level',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
             default='INFO',
             type=str.upper,
@@ -1217,12 +1242,13 @@ Examples:
             help='Module path (e.g., app.configs.horsies:app)',
         )
         scheduler_parser.add_argument(
-            'module_pos',
+            'module_positional',
+            metavar='module',
             nargs='?',
             help='Module path (e.g., app.configs.horsies:app)',
         )
         scheduler_parser.add_argument(
-            '--loglevel',
+            '--log-level',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
             default='INFO',
             type=str.upper,
@@ -1242,12 +1268,13 @@ Examples:
             help='Module path (e.g., app.configs.horsies:app)',
         )
         check_parser.add_argument(
-            'module_pos',
+            'module_positional',
+            metavar='module',
             nargs='?',
             help='Module path (e.g., app.configs.horsies:app)',
         )
         check_parser.add_argument(
-            '--loglevel',
+            '--log-level',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
             default='WARNING',
             type=str.upper,
@@ -1272,19 +1299,21 @@ Examples:
             help='Module path (e.g., app.configs.horsies:app)',
         )
         metrics_parser.add_argument(
-            'module_pos',
+            'module_positional',
+            metavar='module',
             nargs='?',
             help='Module path (e.g., app.configs.horsies:app)',
         )
         metrics_parser.add_argument(
-            '--listen',
+            '--metrics-listen',
+            dest='metrics_listen',
             required=True,
             type=listen_address,
             metavar='HOST:PORT',
             help='Address to serve on: HOST:PORT or [IPV6]:PORT. Required; there is no default.',
         )
         metrics_parser.add_argument(
-            '--loglevel',
+            '--log-level',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
             default='INFO',
             type=str.upper,
@@ -1306,11 +1335,11 @@ Examples:
 
   # Behind a proxy that authenticates callers and sets the header
   horsies web myapp.tasks:app --host 0.0.0.0 \\
-      --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+      --authorization trusted-header --trusted-header X-Forwarded-User --enable-actions
 """,
         )
         web_parser.add_argument(
-            'app_path',
+            'module',
             nargs='?',
             help='App locator (e.g. myapp.tasks:app); omit when using --database-url',
         )
@@ -1335,7 +1364,7 @@ Examples:
             '--port', type=int, default=8600, help='Bind port (default: 8600)'
         )
         web_parser.add_argument(
-            '--auth',
+            '--authorization',
             choices=['none', 'trusted-header'],
             default='none',
             help='Authorization mode (default: none, loopback only)',
@@ -1361,7 +1390,7 @@ Examples:
             ),
         )
         web_parser.add_argument(
-            '--loglevel',
+            '--log-level',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
             default='INFO',
             type=str.upper,

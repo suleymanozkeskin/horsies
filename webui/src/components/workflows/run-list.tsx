@@ -81,30 +81,30 @@ export function RunList({ selectedRunId, onSelect }: RunListProps) {
         ) : (
           <ul className="flex flex-col gap-0.5 pb-2">
             {runs.map(run => (
-              <li key={run.id}>
+              <li key={run.workflow_id}>
                 <button
                   type="button"
                   onClick={() => onSelect(run)}
                   className={cn(
                     'flex w-full flex-col gap-1.5 rounded-lg px-3 py-2.5 text-left transition-colors',
-                    run.id === selectedRunId
+                    run.workflow_id === selectedRunId
                       ? 'bg-accent-surface'
                       : 'hover:bg-surface-hover'
                   )}
                 >
-                  <span className="truncate text-sm font-medium" title={run.name}>
-                    {run.name}
+                  <span className="truncate text-sm font-medium" title={run.workflow_name}>
+                    {run.workflow_name}
                   </span>
                   <div className="flex items-center justify-between gap-2">
                     <StatusChip status={run.status} />
                     <span className="font-mono text-xs text-muted-foreground">
-                      {formatDuration(run.wall_s)}
+                      {formatDuration(run.wall_seconds)}
                     </span>
                   </div>
                   <span className="truncate font-mono text-10 text-muted-foreground">
                     {run.definition_key
-                      ? `${run.definition_key} · ${run.id.slice(0, 8)}`
-                      : run.id.slice(0, 8)}
+                      ? `${run.definition_key} · ${run.workflow_id.slice(0, 8)}`
+                      : run.workflow_id.slice(0, 8)}
                   </span>
                 </button>
               </li>

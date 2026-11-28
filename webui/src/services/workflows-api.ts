@@ -2,7 +2,7 @@ import { apiGet } from '@/lib/http';
 import type {
   WorkflowRunDetail,
   WorkflowRunSummary,
-  WorkflowTaskDetail,
+  WorkflowNodeDetail,
 } from '@/types/workflows';
 
 /** Distinct root-workflow names, for the run-picker filter. */
@@ -14,7 +14,7 @@ export const listWorkflowRuns = (
   params: { name?: string; status?: string; limit?: number } = {}
 ): Promise<WorkflowRunSummary[]> =>
   apiGet<WorkflowRunSummary[]>('/workflows', {
-    ...(params.name === undefined ? {} : { name: params.name }),
+    ...(params.name === undefined ? {} : { workflow_name: params.name }),
     ...(params.status === undefined ? {} : { status: params.status }),
     ...(params.limit === undefined ? {} : { limit: params.limit }),
   });
@@ -29,7 +29,7 @@ export const getWorkflowRun = (
 export const getWorkflowTask = (
   workflowId: string,
   taskIndex: number
-): Promise<WorkflowTaskDetail> =>
-  apiGet<WorkflowTaskDetail>(
+): Promise<WorkflowNodeDetail> =>
+  apiGet<WorkflowNodeDetail>(
     `/workflows/${encodeURIComponent(workflowId)}/tasks/${taskIndex}`
   );

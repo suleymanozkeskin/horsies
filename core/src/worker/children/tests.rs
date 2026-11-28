@@ -113,6 +113,7 @@ fn each_kind_gets_the_resolved_pool_of_its_setting() {
                 false
             ),
             task_send_pool: task_send(u64::from(DEFAULT_TASK_SEND_POOL_CONNECTIONS)),
+            recycle_above: MemoryLimit::Off,
         })
     );
 }
@@ -152,6 +153,7 @@ fn every_child_of_a_kind_gets_the_same_pool() {
             seats: ThreadSeats::new(4).expect("4 seats"),
             pool: pool(0, 7, false),
             task_send_pool: task_send(u64::from(DEFAULT_TASK_SEND_POOL_CONNECTIONS)),
+            recycle_above: MemoryLimit::Off,
         })
     );
     assert_eq!(
@@ -293,11 +295,11 @@ fn the_pending_limit_covers_the_claim_budget() {
 #[test]
 fn the_exit_rule_follows_stale_running_recovery() {
     let mut recovery = RecoveryConfig {
-        auto_fail_stale_running: true,
+        fail_stale_running: true,
         ..RecoveryConfig::default()
     };
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::LeaveToRecovery);
-    recovery.auto_fail_stale_running = false;
+    recovery.fail_stale_running = false;
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::WaitForExit);
 }
 
@@ -403,7 +405,7 @@ fn the_preload_plan_takes_the_mode_the_command_and_the_init_frame_of_the_first_k
 fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
     let no_preload = profile(serde_json::json!({
         "isolated": {"kind": "isolated_children", "count": 1},
-        "preload": "none",
+        "preload": "no_preload",
     }));
     assert!(preload_plan(&no_preload, &launch_with_preload()).is_none());
     let library = profile(serde_json::json!({
@@ -411,4 +413,46 @@ fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
         "preload": "library",
     }));
     assert!(preload_plan(&library, &launch()).is_none());
+}
+
+/// The init frame of a shared thread child carries the `recycle.above` of
+/// its profile, as the limit that the parent recycles at.
+#[test]
+fn the_shared_thread_init_frame_carries_the_memory_limit_of_the_profile() {
+    let limited = profile(serde_json::json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4,
+                          "recycle": {"above": {"kind": "memory_limit", "mb": 700}}}
+    }));
+    let unlimited = profile(serde_json::json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4,
+                          "recycle": {"above": {"kind": "no_memory_limit"}}}
+    }));
+    let recycle_above_of =
+        |profile: &WorkerProfile| match shared_thread_pool_config(profile, &launch(), &facts(8))
+            .expect("shared thread children")
+            .init
+            .child_kind
+        {
+            ChildKind::SharedThread(child) => child.recycle_above,
+            other => panic!("a shared thread pool builds a shared thread kind: {other:?}"),
+        };
+
+    assert_eq!(
+        recycle_above_of(&limited),
+        MemoryLimit::AtMb(NonZeroU64::new(700).expect("700"))
+    );
+    assert_eq!(recycle_above_of(&unlimited), MemoryLimit::Off);
+}
+
+/// The README of the crate names the three clients that run on the core.
+#[test]
+fn the_readme_names_three_clients() {
+    let readme = include_str!("../../../README.md");
+    for client in [
+        "the `horsies` package on PyPI",
+        "the `horsies` crate",
+        "the `horsies` package on npm",
+    ] {
+        assert!(readme.contains(client), "the README lacks {client}");
+    }
 }

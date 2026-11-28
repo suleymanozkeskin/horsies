@@ -127,7 +127,7 @@ Every label takes values from a closed set that the worker knows at its start. A
 
 ### Error Codes
 
-The `error_code` label takes the codes that each task declares: Python `@app.task(..., error_codes=...)` and the codes of the exception mappers of the task and of the app; Rust `UserErrorCode::CODES` of the code type of the task, with no user work. A user code that the task does not declare counts as `undeclared` in this label only: the task error, the attempt record, the events, the spans and the log records keep the exact code. See [Declared Error Codes](/horsies/tasks/errors/#declared-error-codes).
+The `error_code` label takes the codes that each task declares: Python `@app.task(..., error_codes=...)` and the codes of the exception mappers of the task and of the app; Rust `CustomErrorCode::CODES` of the code type of the task, with no user work. A custom code that the task does not declare counts as `undeclared` in this label only: the task error, the attempt record, the events, the spans and the log records keep the exact code. See [Declared Error Codes](/horsies/tasks/errors/#declared-error-codes).
 
 ### A Name That Cannot Be a Label Value
 

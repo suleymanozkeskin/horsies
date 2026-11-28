@@ -1,0 +1,254 @@
+// The app: the contract list, the config, and the members that send, read and register implementations. Each area of
+// the package adds its members in one block here.
+
+import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
+import type { Execution } from "./_catalog/monitoring_models.ts";
+import type { ContextUse, TaskContract } from "./contract/define-task.ts";
+import type { TaskId, WorkflowId } from "./contract/ids.ts";
+import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
+import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
+import type { RetryableSendError, TaskSendError } from "./send/errors.ts";
+import type { TaskSendOptions } from "./send/options.ts";
+import { resend, sendTask } from "./send/send.ts";
+import { err, ok, type Result } from "./wire/result.ts";
+import type { AppContext } from "./app/context.ts";
+import {
+  createApp,
+  type CreateEnvironment,
+  type ValidationReport,
+  type HorsiesConfig,
+  processEnvironment,
+} from "./app/create.ts";
+import { registerImplementation } from "./app/implement.ts";
+import { recordAppContext } from "./app/internals.ts";
+import { createWorkflowArea, type WorkflowArea } from "./workflow/app-area.ts";
+import { workflowCoreOf } from "./workflow/core.ts";
+import type { WorkflowContract } from "./workflow/define.ts";
+import type { WorkflowHandle, WorkflowHandleById } from "./workflow/handle.ts";
+import type { BuildReturn } from "./workflow/node.ts";
+import type { StartOptions } from "./workflow/start.ts";
+import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
+import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
+import type { StateKey } from "./child/state.ts";
+import type { EventTypeName } from "./_catalog/worker_manifest.ts";
+import { onEventFor, onHandlerChildStartFor } from "./events/register.ts";
+import { tracingPartsOfApp } from "./telemetry/create-hook.ts";
+import type { EventHandler, EventHandlerOptions, HandlerChildStartHook } from "./events/types.ts";
+import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
+import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
+import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
+import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
+import type { CallerTransaction } from "./rerun/caller.ts";
+import { registeredCodesOf } from "./rerun/registered-codes.ts";
+import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
+import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
+
+/** The constructor of an app, for `createHorsies` in this module. */
+let constructApp: (context: AppContext) => Horsies;
+
+/** A horsies app. `Horsies.create` builds it. */
+export class Horsies {
+  readonly #context: AppContext;
+  readonly #workflows: WorkflowArea;
+  readonly #monitoringArea: MonitoringArea;
+  readonly #rerunArea: RerunArea;
+
+  /**
+   * The monitoring reads, the health reads and the operator cancel. A monitoring read installs no schema and writes
+   * nothing. A health read installs the schema once per handle, as a send does; then it reads only. The cancel writes
+   * the cancellation.
+   */
+  readonly monitoring: Monitoring;
+
+  static {
+    constructApp = (context: AppContext): Horsies => new Horsies(context);
+  }
+
+  private constructor(context: AppContext) {
+    this.#context = context;
+    this.#workflows = createWorkflowArea({
+      core: workflowCoreOf(context.core),
+      registry: context.workflows,
+      observer: tracingPartsOfApp(context).startObserver,
+      now: () => Temporal.Now.instant(),
+      newWorkflowId: () => crypto.randomUUID(),
+    });
+    this.#monitoringArea = createMonitoringArea(context.core);
+    this.monitoring = this.#monitoringArea.monitoring;
+    this.#rerunArea = rerunAreaOfCore(
+      context.core,
+      () => context.observer.activeCarrier(),
+      () => registeredCodesOf(context.listed),
+    );
+    recordAppContext(this, context);
+  }
+
+  /**
+   * The app of `config`, or every refusal: the config first, then the contracts in list order. On a main thread the
+   * core checks the config and each contract (the addon loads; the core does not start); on a worker thread only the
+   * checks that are TypeScript code run.
+   */
+  static create(config: HorsiesConfig): Result<Horsies, ValidationReport> {
+    return createHorsies(config, processEnvironment());
+  }
+
+  /**
+   * The implementation of a listed contract. Never throws and calls no addon function: a contract that the app does
+   * not list, or a second implementation, is a refusal that `check` and the worker start report.
+   */
+  implement<
+    P extends ParameterSchemas,
+    O extends OutputSchema,
+    E extends string,
+    X extends Execution,
+    C extends ContextUse,
+  >(
+    contract: TaskContract<P, O, E, X, C>,
+    body: NoInfer<BodyFor<P, O, E, X, C>>,
+    options: ImplementOptions<NoInfer<E>> = {},
+  ): Implementation<P, O, E, X, C> {
+    const implementation = implementationOf(contract, body, options.exceptionMapper ?? []);
+
+    registerImplementation(this.#context, implementation);
+
+    return implementation;
+  }
+
+  /**
+   * Add a provider of app state and give its key; `runtime.state(key)` gives the value. Calls nothing: the factory
+   * runs in each task child, before the child reports ready, in registration order and before the `onChildStart`
+   * hooks, for at most 10 s. In a `SHARED_THREAD` child it runs in each seat isolate instead (a pool cannot cross
+   * isolates, so each seat builds its own), and the 10 s bound holds for the boot of all of them. A factory that
+   * throws, rejects or runs past its bound stops the worker with `CHILD_HOOK_FAILED` (exit 173). A call after
+   * `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>> {
+    return provideFor(this.#context, factory);
+  }
+
+  /**
+   * Run `hook` once in each task child, a replacement child included, after the providers and before the child
+   * reports ready, for at most 10 s. A hook that throws, rejects or runs past its bound stops the worker with
+   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  onChildStart(hook: ChildStartHook): void {
+    onChildStartFor(this.#context, hook);
+  }
+
+  /**
+   * Run `handler` for each event of `eventType` in the handler child of a worker, never in the worker parent. Several
+   * handlers may take one type; each has its own queue of 10,000 events, and a full queue drops the event for that
+   * handler and counts it. A throw or a rejection is counted and logged with `name`; the handler takes its next event.
+   * Calls nothing and never throws: a refused registration (an unknown type, a handler that is not a function, a
+   * name outside the name rule or repeated, a 33rd handler) goes to the refusal list, which `check` reports and the
+   * worker start refuses. A call after `cli.run` serves the handler child is a defect: `ClientDefect`.
+   */
+  onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void {
+    onEventFor(this.#context, eventType, options, handler);
+  }
+
+  /**
+   * Run `hook` once in each handler child, before it takes its first event, in registration order, for at most 10 s.
+   * A hook that throws, rejects or runs past its bound ends the handler child with 173; it stays down until the worker
+   * restarts, and the worker runs its tasks on. The `onChildStart` hooks do not run there. Set the OpenTelemetry SDK
+   * of the handler child here, or at the top of the entry. A call after `cli.run` serves the handler child is a
+   * defect: `ClientDefect`.
+   */
+  onHandlerChildStart(hook: HandlerChildStartHook): void {
+    onHandlerChildStartFor(this.#context, hook);
+  }
+
+  /** Send a task: its handle, or the send error. A delay is the only start option. */
+  async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
+    contract: TaskContract<P, O, E, X>,
+    input: NoInfer<SendableInput<P>>,
+    options: TaskSendOptions = {},
+  ): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>> {
+    return sendTask<SchemaValue<O>, E>(this.#context.send, contract, Object(input), options);
+  }
+
+  /**
+   * Send again the payload of `ENQUEUE_FAILED`, under the same task id. Takes an error
+   * of another app instance too, when this app lists its task.
+   */
+  async resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
+    return resend(this.#context.send, error);
+  }
+
+  /**
+   * Start a workflow: its handle, or the start error. The same `workflowId` with the same parameters returns the
+   * existing run; other parameters under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it
+   * `WORKFLOW_ID_CONFLICT`.
+   */
+  async start<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    parameters: NoInfer<SendableInput<P>>,
+    options: StartOptions = {},
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.start(workflow, parameters, options);
+  }
+
+  /** Send again the spec of `ENQUEUE_FAILED`, under the same workflow id. */
+  async resendStart<R extends BuildReturn>(
+    error: StartEnqueueFailed<R>,
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.resendStart(error);
+  }
+
+  /** A typed handle of a stored workflow id, with no I/O. `resultFor` takes the node's contract. */
+  workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    workflowId: WorkflowId,
+  ): WorkflowHandleById<R> {
+    return this.#workflows.workflowHandle(workflow, workflowId);
+  }
+
+  /** A typed handle of a stored task id, with no I/O. The contract gives the types only; the app need not list it. */
+  taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
+    contract: TaskContract<P, O, E, X>,
+    taskId: TaskId,
+  ): TaskHandle<SchemaValue<O>, E> {
+    return taskHandleOf(this.#context.core, readFormOf(contract), taskId);
+  }
+
+  /** A timed `SELECT 1` round trip: the latency of the database, or `DATABASE_PING_FAILED`. */
+  async pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>> {
+    return this.#monitoringArea.pingDatabase();
+  }
+
+  /**
+   * Ping the workers and collect the distinct replies by worker id. The defaults: every worker, a window of 2,000 ms,
+   * the full window. A worker in `monitoring.listWorkerStates()` that is not in the answer did not reply.
+   */
+  async pingWorkers(options: PingWorkersOptions = {}): Promise<Result<readonly WorkerPong[], PingWorkersError>> {
+    return this.#monitoringArea.pingWorkers(options);
+  }
+
+  /**
+   * Rerun a retained terminal task in a transaction of the app's handle, and commit it. The handle connects and
+   * installs the schema once, as a send does. Only `enqueued` writes. The new task stores the carrier of the active
+   * trace context; the rerun opens no span.
+   */
+  async rerunTask(command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, RerunError>> {
+    return this.#rerunArea.rerunTask(command, policy);
+  }
+
+  /**
+   * Rerun a retained terminal task in `transaction`, which the caller owns, so the rerun commits or rolls back with
+   * the caller's own writes. Nothing commits here; after an error the caller does not commit.
+   */
+  async rerunTaskIn(
+    transaction: CallerTransaction,
+    command: RerunCommand,
+    policy: RerunEnqueuePolicy,
+  ): Promise<Result<RerunOutcome, CallerRerunError>> {
+    return this.#rerunArea.rerunTaskIn(transaction, command, policy);
+  }
+}
+
+/** The app of `config` in the process facts `environment` (a test gives its own). Not exported from an entry point. */
+export function createHorsies(config: HorsiesConfig, environment: CreateEnvironment): Result<Horsies, ValidationReport> {
+  const created = createApp(config, environment);
+
+  return created.ok ? ok(constructApp(created.value)) : err(created.error);
+}

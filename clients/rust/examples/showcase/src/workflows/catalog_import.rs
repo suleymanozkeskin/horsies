@@ -1,8 +1,10 @@
-//! The catalog import: one node per chunk and no output node. Its result
-//! is the outcome of every chunk by node id (`OutputlessResults`).
+//! The catalog import: one node per chunk and no output node. It declares
+//! `NoWorkflowOutput`; `results()` of its handle gives the outcome of every
+//! chunk by node id.
 
 use horsies::{
-    HorsiesError, OutputlessResults, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    HorsiesError, NoWorkflowOutput, WorkflowDefinition, WorkflowDefinitionConfig,
+    WorkflowSpecBuilder,
 };
 
 use crate::tasks::analytics::catalog_import_chunk;
@@ -15,8 +17,8 @@ pub const IMPORT_ID: &str = "CHECK-IMPORT";
 pub struct CatalogImport;
 
 impl WorkflowDefinition for CatalogImport {
-    type Output = OutputlessResults;
-    type Params = ();
+    type Output = NoWorkflowOutput;
+    type Parameters = ();
 
     fn name() -> &'static str {
         "catalog_import"
@@ -26,20 +28,20 @@ impl WorkflowDefinition for CatalogImport {
         "acme.catalog_import.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let chunks = i32::try_from(tuning::CATALOG_IMPORT_CHUNKS)
             .map_err(|_| HorsiesError::new("CATALOG_IMPORT_CHUNKS is above i32::MAX"))?;
         for chunk_index in 0..chunks {
             let _chunk = builder.task(
-                catalog_import_chunk::node()?
+                catalog_import_chunk::node()
                     .node_id(format!("chunk_{chunk_index:02}"))
                     .set(
-                        catalog_import_chunk::params::import_id(),
+                        catalog_import_chunk::fields::import_id(),
                         IMPORT_ID.to_owned(),
                     )?
-                    .set(catalog_import_chunk::params::chunk_index(), chunk_index)?,
-            );
+                    .set(catalog_import_chunk::fields::chunk_index(), chunk_index)?,
+            )?;
         }
-        Ok(WorkflowDefConfig::new())
+        Ok(WorkflowDefinitionConfig::new())
     }
 }

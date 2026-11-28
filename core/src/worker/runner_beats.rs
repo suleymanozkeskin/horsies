@@ -5,14 +5,14 @@
 //!   connection outside the shared pool, so a busy pool cannot starve it.
 //! - A beat lands only on a row that is RUNNING, owned by this worker, at the
 //!   claim generation of the dispatch, and without the finalizing marker.
-//! - With `auto_fail_stale_running` on, a watchdog on its own OS thread fails
+//! - With `fail_stale_running` on, a watchdog on its own OS thread fails
 //!   closed when no beat lands for half of `running_stale_threshold_ms`, so
 //!   no task runs without a beat when the reaper fails its row. It closes the
 //!   registry, kills every child that holds a task, and asks the worker to
-//!   stop; the process exits with [`RUNNER_HEARTBEAT_LOST_EXIT_CODE`] when
-//!   the worker has not stopped within [`FAIL_CLOSED_EXIT_GRACE`]. The
-//!   watchdog does not depend on the async runtime: a blocked runtime cannot
-//!   keep it from acting.
+//!   stop; the process exits with [`RUNNER_HEARTBEAT_LOST_EXIT_CODE`],
+//!   through the worker's [`ProcessExit`], when the worker has not stopped
+//!   within [`FAIL_CLOSED_EXIT_GRACE`]. The watchdog does not depend on the
+//!   async runtime: a blocked runtime cannot keep it from acting.
 //! - With it off, no reaper fails a RUNNING row: late beats are logged and
 //!   the worker runs on. A writer that dies is logged once, and the worker
 //!   runs on without runner beats.
@@ -46,6 +46,7 @@ use crate::db::{
     CorePool, IdlePing, ParameterType, PoolPlan, PoolRole, PoolSizing, Reserve, Row,
     SocketSettings, StatementBound, StatementFailure, StatementProtocol, TypedStatement,
 };
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
@@ -527,7 +528,7 @@ pub enum StaleRunningRecovery {
 impl StaleRunningRecovery {
     /// Read the rule from the worker's recovery config.
     pub fn from_config(recovery: &RecoveryConfig) -> Self {
-        match recovery.auto_fail_stale_running {
+        match recovery.fail_stale_running {
             true => Self::On {
                 threshold: Duration::from_millis(recovery.running_stale_threshold_ms),
             },
@@ -824,6 +825,8 @@ struct WatchContext {
     dead_writer: DeadWriter,
     live: LiveDispatches,
     fail_closed_stop: FailClosedStop,
+    /// How the watchdog ends the process when the worker did not stop.
+    exit: ProcessExit,
 }
 
 /// Why the beat writer ended with no stop request, recorded once for the
@@ -857,7 +860,8 @@ impl Drop for AbortWriterOnDrop {
 /// thread. Returns the watchdog and the task that the worker supervises with
 /// its other service loops. The writer stops when `cancel` fires; the
 /// watchdog when [`RunnerBeatWatch::stop`] runs. A watchdog that fails
-/// closed asks for the stop through `fail_closed_stop`.
+/// closed asks for the stop through `fail_closed_stop`, and ends the
+/// process through `exit` when the worker did not stop.
 ///
 /// The supervised task, per `stale_running`:
 /// - on: the writer itself. A writer that ends with no stop request ends the
@@ -880,6 +884,7 @@ pub fn launch_runner_beats(
     live: LiveDispatches,
     cancel: CancellationToken,
     fail_closed_stop: FailClosedStop,
+    exit: ProcessExit,
 ) -> std::io::Result<(RunnerBeatWatch, JoinHandle<()>)> {
     let writer_live = live.clone();
     let writer_cancel = cancel.clone();
@@ -889,6 +894,7 @@ pub fn launch_runner_beats(
         live,
         cancel,
         fail_closed_stop,
+        exit,
         move |coverage| {
             run_beats(
                 pool,
@@ -914,6 +920,7 @@ fn launch_with_writer<W>(
     live: LiveDispatches,
     cancel: CancellationToken,
     fail_closed_stop: FailClosedStop,
+    exit: ProcessExit,
     writer: impl FnOnce(SharedCoverage) -> W,
 ) -> std::io::Result<(RunnerBeatWatch, JoinHandle<()>)>
 where
@@ -929,6 +936,7 @@ where
         dead_writer: dead_writer.clone(),
         live,
         fail_closed_stop,
+        exit,
     };
     // The watchdog thread and the writer log to the dispatcher of their
     // starter.
@@ -1192,8 +1200,8 @@ fn run_watch(context: &WatchContext, stop: &Receiver<()>) {
 /// No runner beat landed within the fail-closed window, so the reaper may
 /// fail rows whose attempts still run here (Python `_fail_closed`). Close
 /// the registry, kill every child that held a task, ask the worker to stop,
-/// and exit when it has not stopped within [`FAIL_CLOSED_EXIT_GRACE`]. A
-/// panic here also ends the process.
+/// and exit through the worker's [`ProcessExit`] when it has not stopped
+/// within [`FAIL_CLOSED_EXIT_GRACE`]. A panic here also ends the process.
 fn fail_closed(context: &WatchContext, verdict: &WatchVerdict, stop: &Receiver<()>) {
     let cause = describe(verdict);
     tracing::error!(
@@ -1216,15 +1224,22 @@ fn fail_closed(context: &WatchContext, verdict: &WatchVerdict, stop: &Receiver<(
             }
         }
     }));
+    exit_unless_stopped(&context.exit, &stopped);
+}
+
+/// After a fail-closed request: return when the worker stopped; else end the
+/// process through `exit` with [`RUNNER_HEARTBEAT_LOST_EXIT_CODE`], also
+/// when the steps before panicked.
+fn exit_unless_stopped(exit: &ProcessExit, stopped: &std::thread::Result<WorkerStop>) {
     match stopped {
         Ok(WorkerStop::Stopped) => {}
-        Ok(WorkerStop::NotStopped) => std::process::exit(RUNNER_HEARTBEAT_LOST_EXIT_CODE),
+        Ok(WorkerStop::NotStopped) => exit.end(RUNNER_HEARTBEAT_LOST_EXIT_CODE),
         Err(_) => {
             tracing::error!(
                 exit_code = RUNNER_HEARTBEAT_LOST_EXIT_CODE,
                 "failing closed panicked; ending the process",
             );
-            std::process::exit(RUNNER_HEARTBEAT_LOST_EXIT_CODE);
+            exit.end(RUNNER_HEARTBEAT_LOST_EXIT_CODE);
         }
     }
 }
@@ -1370,7 +1385,7 @@ fn watch_and_log(
             tracing::error!(
                 cause = %reason,
                 "{DEAD_WRITER_LINE}: {reason}. The worker runs on without runner heartbeats, \
-                 because no reaper fails a RUNNING row (auto_fail_stale_running is off, or no \
+                 because no reaper fails a RUNNING row (fail_stale_running is off, or no \
                  recovery config)",
             );
             return;
@@ -1383,7 +1398,7 @@ fn watch_and_log(
                     tracing::warn!(
                         cause = %describe(&verdict),
                         "runner heartbeats are late; the worker runs on, because no \
-                         reaper fails a RUNNING row (auto_fail_stale_running is off)",
+                         reaper fails a RUNNING row (fail_stale_running is off)",
                     );
                 }
             }
@@ -1569,7 +1584,7 @@ mod tests {
         };
         let StaleRunningRecovery::On { threshold } = StaleRunningRecovery::from_config(&recovery)
         else {
-            panic!("auto_fail_stale_running is on by default");
+            panic!("fail_stale_running is on by default");
         };
         assert_eq!(
             fail_closed_window(threshold),
@@ -1579,7 +1594,7 @@ mod tests {
         );
 
         let off = RecoveryConfig {
-            auto_fail_stale_running: false,
+            fail_stale_running: false,
             ..recovery
         };
         assert_eq!(

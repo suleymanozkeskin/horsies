@@ -1,6 +1,7 @@
 //! App state and the task runtime: `provide` gives a value to task bodies,
 //! which read it with `TaskRuntime::state`; `on_child_start` runs once in
-//! each worker child before its first task; a task body sends another task.
+//! each worker child before its first task; a task body sends another task
+//! through the typed function that its runtime gives (`audit::handle`).
 //!
 //! Every worker child runs `main` again, so each child builds its own state.
 //!
@@ -15,7 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime,
     WaitLimit,
 };
 use horsies_examples::{
@@ -28,7 +29,7 @@ struct Greeter {
 }
 
 /// The codes of `welcome`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum WelcomeCode {
     NotConfigured,
     AuditNotSent,
@@ -38,12 +39,18 @@ enum WelcomeCode {
 async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<WelcomeCode>> {
     let greeter = rt
         .state::<Greeter>()
-        .map_err(|missing| TaskError::user(WelcomeCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WelcomeCode::NotConfigured, missing.to_string()))?;
     let message = format!("{}, {user}", greeter.greeting);
-    // A send from a task body goes through the producer pool of the child.
-    let _audit = audit::send(message.clone())
+    // A send from a task body goes through the app of its runtime and the
+    // producer pool of the child.
+    let audit_function = audit::function(&rt)
+        .map_err(|missing| TaskError::custom(WelcomeCode::AuditNotSent, missing.to_string()))?;
+    let _audit = audit_function
+        .send(audit::Input {
+            entry: message.clone(),
+        })
         .await
-        .map_err(|error| TaskError::user(WelcomeCode::AuditNotSent, error.to_string()))?;
+        .map_err(|error| TaskError::custom(WelcomeCode::AuditNotSent, error.to_string()))?;
     Ok(message)
 }
 
@@ -53,7 +60,7 @@ async fn audit(entry: String) -> Result<usize, TaskError<Infallible>> {
 }
 
 fn build_app() -> Result<Horsies, HorsiesError> {
-    let mut config = AppConfig::for_database_url(database_url());
+    let mut config = AppConfig::from_database_url(database_url());
     config.worker_profiles = BTreeMap::from([(DEFAULT_PROFILE.to_owned(), isolated_profile())]);
     let mut app = Horsies::new(config)?;
     app.provide(Greeter {
@@ -68,9 +75,9 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
-    let handle = welcome::send("ada".to_owned()).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+async fn demo(app: Horsies) -> DemoResult {
+    let handle = welcome::send(&app, "ada".to_owned()).await?;
+    let limit = WaitLimit::Within(Duration::from_secs(30));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(message) => println!("{message}"),
         TaskOutcome::Failed(error) => println!("welcome failed: {error}"),

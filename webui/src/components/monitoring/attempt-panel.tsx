@@ -225,7 +225,7 @@ export function AttemptPanel({
   titleEnd?: ReactNode;
   actions?: ReactNode;
 }) {
-  const leaf = detail.leaf;
+  const leaf = detail.task_row;
   const story = attemptStory(detail.attempts, leaf);
   const model = panelModel(story);
   const tips = useMarkTips<PanelHighlight>();
@@ -249,7 +249,7 @@ export function AttemptPanel({
         {titleEnd}
       </header>
       <p data-task-meta className="-mt-2 mb-0 flex flex-wrap gap-x-3.5 gap-y-0.5 text-xs">
-        <Meta label="queue">{detail.queue_name}</Meta>
+        <Meta label="queue">{detail.queue}</Meta>
         <Meta label="priority">{detail.priority}</Meta>
         {attemptOf !== null && <Meta label="attempt">{attemptOf}</Meta>}
       </p>

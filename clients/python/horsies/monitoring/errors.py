@@ -17,7 +17,7 @@ from horsies._catalog.monitoring import (
 )
 from horsies._catalog.monitoring_errors import (
     MonitoringQueryCoreError as MonitoringQueryCoreError,
-    MonitoringQueryDbOperationFailed as MonitoringQueryDbOperationFailed,
+    MonitoringQueryDatabaseOperationFailed as MonitoringQueryDatabaseOperationFailed,
     MonitoringQueryHistoryContractViolation as MonitoringQueryHistoryContractViolation,
 )
 from horsies.core.types.result import Result

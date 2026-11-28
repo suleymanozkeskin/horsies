@@ -15,7 +15,7 @@ from typing import (
     cast,
 )
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 
 from .enums import OkT_co, OnError
 from .nodes import TaskNode, SubWorkflowNode, AnyNode, SuccessPolicy, SuccessCase
@@ -60,7 +60,7 @@ class WorkflowDefinitionConfig(Generic[OkT_co]):
         success_policy: Custom success policy.
     """
 
-    output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
+    output: TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co] | None = None
     on_error: OnError = OnError.FAIL
     success_policy: SuccessPolicy | None = None
 
@@ -78,7 +78,7 @@ def _check_definition_config(cls: type) -> None:
                 f"workflow class '{cls.__qualname__}' defines 'Meta', which is "
                 'not read; set config = WorkflowDefinitionConfig(...) in the class body'
             ),
-            code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+            code=HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
             notes=[
                 'config = WorkflowDefinitionConfig(output=..., on_error=..., success_policy=...) '
                 'can name the nodes of the same class body',
@@ -96,7 +96,7 @@ def _check_definition_config(cls: type) -> None:
                     f"workflow class '{cls.__qualname__}' sets 'config' to "
                     f'{type(other).__name__}, not WorkflowDefinitionConfig'
                 ),
-                code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+                code=HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
                 help_text="set 'config = WorkflowDefinitionConfig(...)' in the class body",
             )
 
@@ -132,7 +132,7 @@ class WorkflowDefinitionMeta(type):
         # Stamp node_id = attr_name on unstamped nodes so that condition
         # closures captured at module level always see a valid node_id —
         # even in fresh worker processes where build() is never called.
-        nodes: list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]] = []
+        nodes: list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]] = []
         for attr_name, attr_value in namespace.items():
             if isinstance(attr_value, (TaskNode, SubWorkflowNode)):
                 if attr_value.node_id is None:
@@ -175,7 +175,7 @@ class WorkflowDefinitionMeta(type):
             klass: type,
             app: Any,
             *bw_args: Any,
-            **bw_params: Any,
+            **bw_parameters: Any,
         ) -> WorkflowSpec[Any]:
             call_token = str(uuid_module.uuid4())
             ctx_token = _workflow_def_context.set(
@@ -183,7 +183,7 @@ class WorkflowDefinitionMeta(type):
             )
             call_token_reset = _build_call_token.set(call_token)
             try:
-                spec = original_fn(klass, app, *bw_args, **bw_params)
+                spec = original_fn(klass, app, *bw_args, **bw_parameters)
             finally:
                 _workflow_def_context.reset(ctx_token)
                 _build_call_token.reset(call_token_reset)
@@ -198,7 +198,7 @@ class WorkflowDefinitionMeta(type):
                     f"not constructed during this call. "
                     f"build_with() must return a fresh WorkflowSpec per call — "
                     f"cached or prebuilt spec reuse is not supported.",
-                    code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+                    code=HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                     help_text='build a new WorkflowSpec inside build_with() on each call',
                 )
             validate_workflow_generic_output_match(klass, spec)
@@ -230,9 +230,9 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         class ScrapeWorkflow(WorkflowDefinition[PersistResult]):
             name = "scrape_pipeline"
 
-            fetch = TaskNode(fn=fetch_listing, kwargs={"url": "url"})
-            parse = TaskNode(fn=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
-            persist = TaskNode(fn=persist_listing, waits_for=[parse], args_from={"data": parse})
+            fetch = TaskNode(function=fetch_listing, kwargs={"url": "url"})
+            parse = TaskNode(function=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
+            persist = TaskNode(function=persist_listing, waits_for=[parse], args_from={"data": parse})
 
             config = WorkflowDefinitionConfig(
                 output=persist,  # Output type is PersistResult
@@ -255,17 +255,17 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     config: ClassVar[WorkflowDefinitionConfig[Any]] = WorkflowDefinitionConfig()
 
     # Populated by metaclass
-    _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]]
+    _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]]]
 
     @classmethod
     def get_workflow_nodes(
         cls,
-    ) -> list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]:
+    ) -> list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]]:
         """Return collected workflow nodes or an empty list if none were defined."""
         nodes = getattr(cls, '_workflow_nodes', None)
         if not isinstance(nodes, list):
             return []
-        return cast(list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]], nodes)
+        return cast(list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]], nodes)
 
     @classmethod
     def build(cls, app: Horsies) -> WorkflowSpec[OkT_co]:
@@ -288,7 +288,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         if not hasattr(cls, 'name') or not cls.name:
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' must define a 'name' class attribute",
-                code=ErrorCode.WORKFLOW_NO_NAME,
+                code=HorsiesErrorCode.WORKFLOW_NO_NAME,
                 help_text="add a class attribute, for example name = 'my_workflow'",
             )
 
@@ -297,7 +297,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         if not nodes:
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes",
-                code=ErrorCode.WORKFLOW_NO_NODES,
+                code=HorsiesErrorCode.WORKFLOW_NO_NODES,
                 help_text=(
                     'declare a TaskNode or SubWorkflowNode as a class attribute, '
                     'or override build_with() and call it in place of build()'
@@ -307,8 +307,8 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
 
         # Copy-on-build: shallow-copy class-level nodes so app.workflow()
         # enrichment (queue/priority) never mutates class-level originals.
-        old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+        old_to_new: dict[int, TaskNode[Any, Any] | SubWorkflowNode[Any]] = {}
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]] = []
         for attr_name, node in nodes:
             node_copy = copy_module.copy(node)
             if node_copy.node_id is None:
@@ -328,23 +328,23 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 k: old_to_new.get(id(v), v)
                 for k, v in node_copy.args_from.items()
             }
-            if node_copy.workflow_ctx_from is not None:
-                node_copy.workflow_ctx_from = unique_node_refs([
+            if node_copy.workflow_context_from is not None:
+                node_copy.workflow_context_from = unique_node_refs([
                     old_to_new.get(id(ref), ref)
-                    for ref in node_copy.workflow_ctx_from
+                    for ref in node_copy.workflow_context_from
                 ])
 
         # Read the config, remapping output/success_policy refs to copies.
         # Class creation guarantees that config is a WorkflowDefinitionConfig.
         config = cls.config
-        output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
+        output: TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co] | None = None
         on_error: OnError = config.on_error
         success_policy: SuccessPolicy | None = None
 
         raw_output = config.output
         if raw_output is not None:
             output = cast(
-                'TaskNode[OkT_co] | SubWorkflowNode[OkT_co]',
+                'TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co]',
                 old_to_new.get(id(raw_output), raw_output),
             )
         raw_policy = config.success_policy
@@ -370,30 +370,29 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
 
         # Build WorkflowSpec — split paths for correct type inference.
         # When output is set, overload resolves WorkflowSpec[OkT_co] directly.
-        # When output is None, app.workflow() returns terminal results for a
-        # top-level handle. The validation below only allows this shape for
-        # WorkflowDefinition[None] (or Any), so SubWorkflowNode never promises
-        # a concrete output type that an outputless child cannot produce.
+        # When output is None, app.workflow() returns WorkflowSpec[NoWorkflowOutput].
+        # The validation only allows this shape for
+        # WorkflowDefinition[NoWorkflowOutput].
         if output is not None:
             spec = app.workflow(
                 name=cls.name,
-                tasks=tasks,
+                nodes=tasks,
                 output=output,
                 on_error=on_error,
                 success_policy=success_policy,
                 definition_key=definition_key,
-                workflow_def_cls=cls,
+                workflow_definition=cls,
             )
         else:
             spec = cast(
                 'WorkflowSpec[OkT_co]',
                 app.workflow(
                     name=cls.name,
-                    tasks=tasks,
+                    nodes=tasks,
                     on_error=on_error,
                     success_policy=success_policy,
                     definition_key=definition_key,
-                    workflow_def_cls=cls,
+                    workflow_definition=cls,
                 ),
             )
         validate_workflow_generic_output_match(cls, spec)
@@ -403,15 +402,15 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     def build_with(
         cls,
         app: Horsies,
-        **params: Any,
+        **parameters: Any,
     ) -> WorkflowSpec[OkT_co]:
         """
         Build a WorkflowSpec with runtime parameters.
 
-        Subclasses can override this to apply keyword params to TaskNodes.
+        Subclasses can override this to apply keyword parameters to TaskNodes.
         Default implementation forwards to build().
         """
-        _ = params
+        _ = parameters
         return cls.build(app)
 
     @classmethod
@@ -423,7 +422,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     f"WorkflowDefinition '{cls.__name__}' must define a non-empty "
                     "'definition_key' class attribute"
                 ),
-                code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+                code=HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY,
                 help_text=(
                     'add a class attribute, for example '
                     "definition_key = 'myapp.my_workflow.v1'"

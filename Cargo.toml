@@ -3,10 +3,12 @@ resolver = "2"
 members = [
     "clients/rust/horsies",
     "clients/python/codegen",
+    "clients/typescript/codegen",
     "core",
     "core/derive",
     "clients/rust/macros",
     "clients/python/bridge",
+    "clients/typescript/bridge",
     "clients/rust/examples",
     "clients/rust/examples/showcase",
     "clients/rust/tests/arbitrary-precision",

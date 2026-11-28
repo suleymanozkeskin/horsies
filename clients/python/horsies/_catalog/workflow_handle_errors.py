@@ -6,26 +6,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from horsies._catalog.workflow_handle import HandleErrorCode
+from horsies._catalog.error_detail import NoCause
+from horsies._catalog.workflow_handle import WorkflowHandleErrorCode
 
-__all__ = ['HandleWorkflowNotFound', 'HandleDbOperationFailed', 'HandleStoredDataInvalid', 'HandleResumeRecoveryFailed', 'HandleAsyncContext', 'HandleCoreError']
+__all__ = ['WorkflowHandleNotFound', 'WorkflowHandleDatabaseOperationFailed', 'WorkflowHandleStoredDataInvalid', 'WorkflowHandleResumeRecoveryFailed', 'WorkflowHandleAsyncContext', 'HandleCoreError']
 
 
 @dataclass(slots=True, frozen=True)
-class HandleWorkflowNotFound:
+class WorkflowHandleNotFound:
     """No workflow has this id. Nothing changed.
 
-    The same call returns this error while no workflow has this id.
+    Not retryable: the same call returns this error until a workflow with
+    this id exists. A repeat does not create it.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.WORKFLOW_NOT_FOUND
+    code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     workflow_id: str
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
-class HandleDbOperationFailed:
+class WorkflowHandleDatabaseOperationFailed:
     """The operation failed with a database or driver error.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
@@ -34,32 +44,49 @@ class HandleDbOperationFailed:
     rolled back, or its commit outcome is unknown.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.DB_OPERATION_FAILED
+    code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
     message: str = field(repr=False)
     retryable: bool
     workflow_id: str
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
-class HandleStoredDataInvalid:
+class WorkflowHandleStoredDataInvalid:
     """A stored value of the workflow does not parse. Nothing changed.
 
     The value is a workflow status that is not a ``WorkflowStatus``
     (``status``), or a subworkflow summary that is not valid (``tasks``).
-    ``exception`` is a ``CoreContractViolation`` with the core's message.
-    The same call returns this error until the stored value changes.
+    ``cause`` is a ``CoreContractViolation`` with the core's message.
+    Not retryable: the same call returns this error until the stored value
+    is repaired. A repeat does not repair it.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.STORED_DATA_INVALID
+    code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.STORED_DATA_INVALID
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     workflow_id: str
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
-class HandleResumeRecoveryFailed:
+class WorkflowHandleResumeRecoveryFailed:
     """``resume`` committed, and the recovery pass for the workflow tree failed.
 
     The workflow is ``RUNNING`` and the resume enqueued its ready nodes. The
@@ -67,37 +94,54 @@ class HandleResumeRecoveryFailed:
     completes the propagation for a task that finished while the resume
     transaction ran, when the completion callback saw the workflow as
     ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
-    ``exception`` is the core's class of the cause (a ``CoreFailure`` leaf
-    class). The worker reaper runs the same pass over all workflows. A
-    repeated ``resume`` returns ``Ok(False)``.
+    ``cause`` is the core's class of the cause (a ``CoreFailure`` leaf
+    class). The worker reaper runs the same pass over all workflows. Not
+    retryable: a repeated ``resume`` returns ``Ok(False)``, and the reaper
+    completes the pass.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.RESUME_RECOVERY_FAILED
+    code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.RESUME_RECOVERY_FAILED
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     workflow_id: str
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
-class HandleAsyncContext:
+class WorkflowHandleAsyncContext:
     """A sync method was called on a thread that runs an event loop. Nothing ran.
 
-    Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    Its wait would stall that loop. Call the async form; a sync call on
     that thread returns this error again.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.ASYNC_CONTEXT
+    code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.ASYNC_CONTEXT
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
     workflow_id: str
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 type HandleCoreError = (
-    HandleWorkflowNotFound
-    | HandleDbOperationFailed
-    | HandleStoredDataInvalid
-    | HandleResumeRecoveryFailed
-    | HandleAsyncContext
+    WorkflowHandleNotFound
+    | WorkflowHandleDatabaseOperationFailed
+    | WorkflowHandleStoredDataInvalid
+    | WorkflowHandleResumeRecoveryFailed
+    | WorkflowHandleAsyncContext
 )
 """Every failure of a workflow handle operation that the core gives: one class per state."""

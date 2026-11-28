@@ -5,7 +5,7 @@
 core started) and ``CoreStopped`` (a core background task panicked) are
 states of the process, not of one call. Each call family below raises them
 unchanged after one call of the core handle; none answers them as its
-failure code. The sends, the retry methods and ``PostgresBroker.enqueue``
+failure code. The sends, the resend methods and ``PostgresBroker.enqueue``
 are in ``test_send_process_state_refusals.py``. The core handle is a
 stand-in; touches no database.
 """
@@ -29,20 +29,27 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health_reads import (
+    MinResponsesFullWindow,
+    PingTargetEveryWorker,
+    WorkerHistoryLimitAllRetained,
+)
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowHandle, WorkflowSpec
+from horsies.core.types.result import Ok, Result
 from horsies.core.workflows.lifecycle import (
+    pause_workflow_async,
     pause_workflow,
-    pause_workflow_sync,
+    resume_workflow_async,
     resume_workflow,
-    resume_workflow_sync,
     start_workflow,
     start_workflow_async,
 )
 from horsies.monitoring import (
     BreakdownLimit,
     MonitoringWindow,
+    SortDirection,
     TaskPage,
     WorkflowRunsLimit,
     cancel_task,
@@ -55,7 +62,7 @@ from horsies.monitoring import (
     list_workflow_runs,
     task_breakdown,
     task_facets,
-    task_stats,
+    task_status_counts,
 )
 from horsies.web.schema import SchemaProbe
 
@@ -71,14 +78,14 @@ _WINDOW: Final = MonitoringWindow(lower=_UPPER - timedelta(days=1), upper=_UPPER
 _APP: Final = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
-        broker=PostgresConfig(database_url=SecretStr(_URL)),
+        database=PostgresConfig(database_url=SecretStr(_URL)),
     ),
 )
 
 
-@_APP.task(task_name='refusals.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+@_APP.task(name='refusals.value')
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 def _refusals() -> list[Any]:
@@ -117,6 +124,14 @@ def broker() -> Iterator[PostgresBroker]:
     yield built
 
 
+def _app_of(broker: PostgresBroker) -> Horsies:
+    """An app whose broker is ``broker``: the monitoring reads and the
+    cancel take the app."""
+    app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(_URL))))
+    app._broker = broker  # pyright: ignore[reportPrivateUsage]
+    return app
+
+
 def _raising(broker: PostgresBroker, method: str, refusal: CoreError) -> MagicMock:
     """Make ``method`` of the broker's core handle raise ``refusal``."""
     call = _core_call(method, refusal)
@@ -136,6 +151,7 @@ def _assert_raises_once(
 
 
 BrokerCall = Callable[[PostgresBroker], object]
+AppCall = Callable[[Horsies], object]
 
 _TASK_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_task_info_async': (
@@ -162,16 +178,18 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
         'worker_state_history_async',
         lambda b: asyncio.run(b.get_worker_state_history_async(_WORKER_ID)),
     ),
-    'get_class_coverage_async': (
-        'class_coverage_async', lambda b: asyncio.run(b.get_class_coverage_async()),
+    'get_execution_class_coverage_async': (
+        'execution_class_coverage_async', lambda b: asyncio.run(b.get_execution_class_coverage_async()),
     ),
-    'get_class_report_async': (
-        'class_report_async', lambda b: asyncio.run(b.get_class_report_async()),
+    'get_execution_class_report_async': (
+        'execution_class_report_async', lambda b: asyncio.run(b.get_execution_class_report_async()),
     ),
     'ping_workers_blocking': (
         'ping_workers',
         lambda b: b._ping_workers_blocking(
-            target_worker_id=None, timeout_seconds=2.0, min_responses=None,
+            target=PingTargetEveryWorker(),
+            wait_ms=2_000,
+            min_responses=MinResponsesFullWindow(),
         ),
     ),
     'list_worker_states_blocking': ('worker_states', lambda b: b._list_worker_states_blocking()),
@@ -180,15 +198,19 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'get_worker_state_history_blocking': (
         'worker_state_history',
-        lambda b: b._get_worker_state_history_blocking(_WORKER_ID, limit=None),
+        lambda b: b._get_worker_state_history_blocking(
+            _WORKER_ID, limit=WorkerHistoryLimitAllRetained(),
+        ),
     ),
-    'get_class_coverage_blocking': ('class_coverage', lambda b: b._get_class_coverage_blocking()),
-    'get_class_report_blocking': ('class_report', lambda b: b._get_class_report_blocking()),
+    'get_execution_class_coverage_blocking': ('execution_class_coverage', lambda b: b._get_execution_class_coverage_blocking()),
+    'get_execution_class_report_blocking': ('execution_class_report', lambda b: b._get_execution_class_report_blocking()),
 }
 
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_stale_tasks': ('stale_tasks_async', lambda b: asyncio.run(b.get_stale_tasks())),
+    'get_stale_tasks_blocking': ('stale_tasks', lambda b: b._get_stale_tasks_blocking(2)),
     'get_expired_tasks': ('expired_tasks_async', lambda b: asyncio.run(b.get_expired_tasks())),
+    'get_expired_tasks_blocking': ('expired_tasks', lambda b: b._get_expired_tasks_blocking()),
     'mark_stale_tasks_as_failed': (
         'mark_stale_running_async', lambda b: asyncio.run(b.mark_stale_tasks_as_failed()),
     ),
@@ -331,11 +353,11 @@ class TestAppLiveCheck:
     )
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_live_step_raises_the_refusal(self, step: str, refusal: CoreError) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(_URL))))
+        app = Horsies(AppConfig(database=PostgresConfig(database_url=SecretStr(_URL))))
 
         with _live_check(step, refusal) as built:
             with pytest.raises(type(refusal)) as raised:
-                _ = app.check(live=True)
+                _ = app.check(live=True).refusals
 
         assert raised.value is refusal
         [handle] = built
@@ -343,7 +365,7 @@ class TestAppLiveCheck:
 
 
 def _spec() -> WorkflowSpec[int]:
-    node = TaskNode(fn=value_task, kwargs={'value': 1})
+    node = TaskNode(function=value_task, kwargs={'value': 1})
     return _APP.workflow('refusals.flow', [node], output=node, definition_key='refusals.flow.v1')
 
 
@@ -382,7 +404,7 @@ _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
         lambda h: asyncio.run(h.result_for_async(NodeKey[int](node_id='first'))),
     ),
     'results_async': ('workflow_node_results_async', lambda h: asyncio.run(h.results_async())),
-    'tasks_async': ('workflow_nodes_async', lambda h: asyncio.run(h.tasks_async())),
+    'nodes_async': ('workflow_nodes_async', lambda h: asyncio.run(h.nodes_async())),
     'cancel_async': ('cancel_workflow_async', lambda h: asyncio.run(h.cancel_async())),
     'pause_async': ('pause_workflow_async', lambda h: asyncio.run(h.pause_async())),
     'resume_async': ('resume_workflow_async', lambda h: asyncio.run(h.resume_async())),
@@ -390,7 +412,7 @@ _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
         'workflow_node_result', lambda h: h.result_for(NodeKey[int](node_id='first')),
     ),
     'results': ('workflow_node_results', lambda h: h.results()),
-    'tasks': ('workflow_nodes', lambda h: h.tasks()),
+    'nodes': ('workflow_nodes', lambda h: h.nodes()),
     'cancel': ('cancel_workflow', lambda h: h.cancel()),
     'pause': ('pause_workflow', lambda h: h.pause()),
     'resume': ('resume_workflow', lambda h: h.resume()),
@@ -411,14 +433,14 @@ class TestWorkflowHandle:
 
 
 _LIFECYCLE_CALLS: Final[dict[str, tuple[str, BrokerCall]]] = {
-    'pause_workflow': (
-        'pause_workflow_async', lambda b: asyncio.run(pause_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'pause_workflow_async': (
+        'pause_workflow_async', lambda b: asyncio.run(pause_workflow_async(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'pause_workflow_sync': ('pause_workflow', lambda b: pause_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
-    'resume_workflow': (
-        'resume_workflow_async', lambda b: asyncio.run(resume_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'pause_workflow': ('pause_workflow', lambda b: pause_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'resume_workflow_async': (
+        'resume_workflow_async', lambda b: asyncio.run(resume_workflow_async(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'resume_workflow_sync': ('resume_workflow', lambda b: resume_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
+    'resume_workflow': ('resume_workflow', lambda b: resume_workflow(b, uuid.UUID(_WORKFLOW_ID))),
 }
 
 
@@ -434,11 +456,11 @@ class TestWorkflowLifecycle:
         _assert_raises_once(refusal, call, lambda: run(broker))
 
 
-_MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
-    'task_stats': (
-        'monitoring_task_stats_async',
-        lambda b: asyncio.run(task_stats(
-            b,
+_MONITORING_READS: Final[dict[str, tuple[str, AppCall]]] = {
+    'task_status_counts': (
+        'monitoring_task_status_counts_async',
+        lambda app: asyncio.run(task_status_counts(
+            app,
             window=_WINDOW,
             task_names=[],
             queues=[],
@@ -450,14 +472,14 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'task_facets': (
         'monitoring_task_facets_async',
-        lambda b: asyncio.run(task_facets(
-            b, window=_WINDOW, statuses=[], error_categories=[], retried_only=False,
+        lambda app: asyncio.run(task_facets(
+            app, window=_WINDOW, statuses=[], error_categories=[], retried_only=False,
         )),
     ),
     'task_breakdown': (
         'monitoring_task_breakdown_async',
-        lambda b: asyncio.run(task_breakdown(
-            b,
+        lambda app: asyncio.run(task_breakdown(
+            app,
             window=_WINDOW,
             group_by='worker',
             statuses=[],
@@ -472,8 +494,8 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'list_tasks': (
         'monitoring_list_tasks_async',
-        lambda b: asyncio.run(list_tasks(
-            b,
+        lambda app: asyncio.run(list_tasks(
+            app,
             window=_WINDOW,
             statuses=[],
             task_names=[],
@@ -482,31 +504,32 @@ _MONITORING_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            sort_by='enqueued_at',
-            sort_dir='desc',
+            sort_field='enqueued_at',
+            sort_direction=SortDirection.DESCENDING,
             page=TaskPage(offset=0, limit=50),
         )),
     ),
     'get_task_detail': (
-        'monitoring_task_detail_async', lambda b: asyncio.run(get_task_detail(b, _TASK_ID)),
+        'monitoring_task_detail_async', lambda app: asyncio.run(get_task_detail(app, _TASK_ID)),
     ),
     'list_workflow_names': (
-        'monitoring_workflow_names_async', lambda b: asyncio.run(list_workflow_names(b)),
+        'monitoring_workflow_names_async', lambda app: asyncio.run(list_workflow_names(app)),
     ),
     'list_workflow_runs': (
         'monitoring_workflow_runs_async',
-        lambda b: asyncio.run(list_workflow_runs(
-            b, name=None, status=None, limit=WorkflowRunsLimit(value=30),
+        lambda app: asyncio.run(list_workflow_runs(
+            app, workflow_name=None, status=None, limit=WorkflowRunsLimit(value=30),
         )),
     ),
     'get_workflow_run': (
-        'monitoring_workflow_run_async', lambda b: asyncio.run(get_workflow_run(b, _WORKFLOW_ID)),
+        'monitoring_workflow_run_async',
+        lambda app: asyncio.run(get_workflow_run(app, _WORKFLOW_ID)),
     ),
     'get_workflow_node': (
         'monitoring_workflow_node_async',
-        lambda b: asyncio.run(get_workflow_node(b, _WORKFLOW_ID, 0)),
+        lambda app: asyncio.run(get_workflow_node(app, _WORKFLOW_ID, 0)),
     ),
-    'list_schedules': ('monitoring_schedules_async', lambda b: asyncio.run(list_schedules(b))),
+    'list_schedules': ('monitoring_schedules_async', lambda app: asyncio.run(list_schedules(app))),
 }
 
 
@@ -519,7 +542,7 @@ class TestMonitoringReads:
         method, run = _MONITORING_READS[form]
         call = _raising(broker, method, refusal)
 
-        _assert_raises_once(refusal, call, lambda: run(broker))
+        _assert_raises_once(refusal, call, lambda: run(_app_of(broker)))
 
 
 class TestTaskActions:
@@ -530,7 +553,7 @@ class TestTaskActions:
         call = _raising(broker, 'cancel_task_async', refusal)
 
         _assert_raises_once(
-            refusal, call, lambda: asyncio.run(cancel_task(broker, _TASK_ID)),
+            refusal, call, lambda: asyncio.run(cancel_task(_app_of(broker), _TASK_ID)),
         )
 
 

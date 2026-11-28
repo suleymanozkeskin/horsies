@@ -230,7 +230,7 @@ fn child_counts_the_threads_of_a_first_send() {
     let url = std::env::var(CHILD_URL_VARIABLE)
         .unwrap_or_else(|error| panic!("{CHILD_URL_VARIABLE} names the database: {error}"));
     let before_app = os_thread_count();
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the producer app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the producer app");
     let echo_function = echo::register(&mut app).expect("register the task");
     let after_app = os_thread_count();
     let sent = echo_function.blocking().send(echo::Input { value: 1 });

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import horsies._core as core
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
@@ -65,16 +65,16 @@ class TestLeaseHeartbeatValidation:
             match='claim lease too short relative to claimer heartbeat',
         ) as exc_info:
             AppConfig(
-                broker=BROKER,
+                database=BROKER,
                 claim_lease_ms=5_000,
                 recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
             )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert exc_info.value.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
 
     def test_lease_at_2x_heartbeat_passes(self) -> None:
         """claim_lease_ms=20000 with heartbeat=10000 (min_lease=20000) must pass."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=20_000,
             recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
         )
@@ -83,7 +83,7 @@ class TestLeaseHeartbeatValidation:
     def test_lease_above_2x_heartbeat_passes(self) -> None:
         """claim_lease_ms=60000 with heartbeat=10000 is valid."""
         config = AppConfig(
-            broker=BROKER,
+            database=BROKER,
             claim_lease_ms=60_000,
             recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
         )
@@ -96,18 +96,18 @@ class TestLeaseHeartbeatValidation:
             match='claim lease too short relative to claimer heartbeat',
         ) as exc_info:
             AppConfig(
-                broker=BROKER,
+                database=BROKER,
                 # claim_lease_ms=None → default 60_000ms
                 recovery=RecoveryConfig(claimer_heartbeat_interval_ms=35_000),
             )
         err = exc_info.value
-        assert err.code == ErrorCode.CONFIG_INVALID_PREFETCH
+        assert err.code == HorsiesErrorCode.CONFIG_INVALID_PREFETCH
         # Error message must mention the default
         assert 'default lease=60000ms' in str(err)
 
     def test_default_lease_with_default_heartbeat_passes(self) -> None:
         """Default 60s lease with default 30s heartbeat (min_lease=60000) passes."""
-        config = AppConfig(broker=BROKER)
+        config = AppConfig(database=BROKER)
         assert config.claim_lease_ms is None  # None → worker applies 60s internally
 
 

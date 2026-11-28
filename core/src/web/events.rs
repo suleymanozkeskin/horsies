@@ -38,6 +38,23 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// process.
 pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
+/// The most event streams that one handler keeps open. A subscription past
+/// the bound is refused ([`EventStreamsRefused`]). Each open stream holds a
+/// queue of at most [`SUBSCRIBER_QUEUE_CAPACITY`] items, so the bound limits
+/// the memory that the streams of one process hold.
+pub const MAX_OPEN_EVENT_STREAMS: usize = 256;
+
+/// A subscription that the handler refused: [`EventBroadcaster::subscribe`]
+/// found `open` streams open, and its bound is `bound`. Nothing was
+/// subscribed. A stream that ends frees its place, so the same call can
+/// succeed later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{open} event streams are open; at most {bound} are served")]
+pub struct EventStreamsRefused {
+    pub open: usize,
+    pub bound: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicEvent {
     pub topic: String,
@@ -298,6 +315,7 @@ impl EventSubscription {
 pub struct EventBroadcaster {
     broker: Arc<PostgresBroker>,
     debounce: Duration,
+    max_open_streams: usize,
     subscribers: Mutex<Vec<Weak<SubscriberQueue>>>,
     start_lock: Mutex<()>,
     task: Mutex<Option<JoinHandle<()>>>,
@@ -318,9 +336,18 @@ impl EventBroadcaster {
     }
 
     pub(crate) fn with_debounce(broker: Arc<PostgresBroker>, debounce: Duration) -> Arc<Self> {
+        Self::with_limits(broker, debounce, MAX_OPEN_EVENT_STREAMS)
+    }
+
+    pub(crate) fn with_limits(
+        broker: Arc<PostgresBroker>,
+        debounce: Duration,
+        max_open_streams: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             broker,
             debounce,
+            max_open_streams,
             subscribers: Mutex::new(Vec::new()),
             start_lock: Mutex::new(()),
             task: Mutex::new(None),
@@ -334,15 +361,29 @@ impl EventBroadcaster {
         self.degraded.load(Ordering::Acquire)
     }
 
-    pub async fn subscribe(self: &Arc<Self>) -> EventSubscription {
+    /// Subscribe one client stream.
+    ///
+    /// Errors: [`EventStreamsRefused`] when [`MAX_OPEN_EVENT_STREAMS`]
+    /// streams are open. Nothing is subscribed.
+    pub async fn subscribe(self: &Arc<Self>) -> Result<EventSubscription, EventStreamsRefused> {
         let queue = Arc::new(SubscriberQueue::default());
-        self.subscribers.lock().await.push(Arc::downgrade(&queue));
+        {
+            let mut subscribers = self.subscribers.lock().await;
+            subscribers.retain(|subscriber| subscriber.strong_count() > 0);
+            if subscribers.len() >= self.max_open_streams {
+                return Err(EventStreamsRefused {
+                    open: subscribers.len(),
+                    bound: self.max_open_streams,
+                });
+            }
+            subscribers.push(Arc::downgrade(&queue));
+        }
         if self.degraded() {
             self.degrade().await;
         } else if !self.started.load(Ordering::Acquire) {
             self.start().await;
         }
-        EventSubscription { queue }
+        Ok(EventSubscription { queue })
     }
 
     async fn start(self: &Arc<Self>) {
@@ -574,6 +615,15 @@ impl EventFrames {
         }
     }
 
+    /// A stream that sends the degraded frame, then ends: the answer to a
+    /// subscription that was refused.
+    pub(crate) fn degraded(heartbeat: Duration) -> Self {
+        let queue = Arc::new(SubscriberQueue::default());
+        queue.push(None);
+        queue.close();
+        Self::new(EventSubscription { queue }, heartbeat)
+    }
+
     /// The next item: a frame, or the end. Waits at most `heartbeat` for an
     /// event; the heartbeat frame answers a wait that ended without one.
     /// Cancel-safe: a call dropped before it returns loses no event.
@@ -773,7 +823,10 @@ mod queue_tests {
             "postgresql://horsies@127.0.0.1:1/horsies",
             crate::ClientFamily::Rust,
         )));
-        let subscription = broadcaster.subscribe().await;
+        let subscription = broadcaster
+            .subscribe()
+            .await
+            .expect("the first stream is under the bound");
         assert!(broadcaster.degraded());
 
         for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
@@ -905,6 +958,30 @@ mod queue_tests {
         assert_eq!(python_json_text("\u{1}\u{7f}"), "\"\\u0001\\u007f\"");
         assert_eq!(python_json_text("é"), "\"\\u00e9\"");
         assert_eq!(python_json_text("😀"), "\"\\ud83d\\ude00\"");
+    }
+
+    /// A subscription past the bound is refused and subscribes nothing; a
+    /// stream that ended frees its place.
+    #[tokio::test]
+    async fn a_subscription_past_the_bound_is_refused() {
+        let broadcaster = EventBroadcaster::with_limits(
+            Arc::new(PostgresBroker::from_test_url(
+                "postgresql://horsies@127.0.0.1:1/horsies",
+                crate::ClientFamily::Rust,
+            )),
+            DEBOUNCE,
+            2,
+        );
+        let first = broadcaster.subscribe().await.expect("one of two");
+        let _second = broadcaster.subscribe().await.expect("two of two");
+
+        let refused = broadcaster.subscribe().await.err().expect("past the bound");
+
+        assert_eq!(refused, EventStreamsRefused { open: 2, bound: 2 });
+        assert_eq!(broadcaster.subscribers.lock().await.len(), 2);
+
+        drop(first);
+        let _third = broadcaster.subscribe().await.expect("a place is free");
     }
 
     /// A dropped client stream is removed at the next publish.

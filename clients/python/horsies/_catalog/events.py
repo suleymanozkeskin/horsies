@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Final, Literal, cast
 
-from horsies._catalog.task_codes import ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode
+from horsies._catalog.task_codes import ContractCode, OperationalCode, OutcomeCode, RetrievalCode
 from horsies.core.types.result import Err, Ok, Result
 
 __all__ = [
@@ -26,8 +26,8 @@ __all__ = [
     'ShortageErrno',
     'ReleaseReason',
     'AttemptErrorCodeBuiltIn',
-    'AttemptErrorCodeUser',
-    'AttemptErrorCodeUserOverBound',
+    'AttemptErrorCodeCustom',
+    'AttemptErrorCodeCustomOverBound',
     'AttemptErrorCode',
     'OperatorCancelEnd',
     'ChildResultCompleted',
@@ -84,11 +84,11 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 7
+EVENT_CONTRACT_VERSION: Final = 9
 """The version of the event contract that this module reads."""
 
 
-type BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode
+type BuiltInTaskCode = OperationalCode | ContractCode | RetrievalCode | OutcomeCode
 """A built-in task error code: a member of one of the four built-in code catalogs."""
 
 
@@ -98,7 +98,7 @@ The executor of the worker uses this type too (`ExecutionClass` there):
 the class of a row, the budget of a claim and the kind of a child are
 one set of values.
 
-The order is the order of Python's `Execution` members: `ISOLATED`,
+The order is `ISOLATED`,
 `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
 serializes as its stored value.
 
@@ -131,13 +131,13 @@ start's miss path wrote what each case needs, except for
 
 type ShortageErrno = Literal['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN']
 """An errno that names an OS resource limit. A boot that failed with one can
-succeed later, when the resource is free again (Python `ShortageErrno`).
+succeed later, when the resource is free again.
 """
 
 
 type ReleaseReason = Literal['POOL_STOPPING', 'POOL_FAILED', 'QUEUE_FULL', 'NO_CHILD_OF_ITS_KIND', 'RUNNER_BEATS_FAILED_CLOSED', 'HELD_FOR_QUEUE_CAP', 'WORKFLOW_NOT_RUNNABLE', 'RETURNED_AS_ISOLATED']
 """Why the worker released a claimed task before it ran (the `reason` label
-of `horsies.task.claims.released`, and the `reason` of a `ClaimReleased`
+of the claims-released metric, and the `reason` of a `ClaimReleased`
 event).
 
 `POOL_STOPPING`: The worker is stopping.
@@ -160,20 +160,20 @@ event).
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptErrorCodeBuiltIn:
-    """A built-in code of horsies."""
+    """A built-in code of the core."""
 
     code: BuiltInTaskCode
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class AttemptErrorCodeUser:
+class AttemptErrorCodeCustom:
     """A code that the task chose, of at most 128 characters."""
 
     code: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class AttemptErrorCodeUserOverBound:
+class AttemptErrorCodeCustomOverBound:
     """A code that the task chose, of more than 128 characters. The event
     does not carry it; the attempt row and the history row keep it.
     """
@@ -181,15 +181,15 @@ class AttemptErrorCodeUserOverBound:
 
 type AttemptErrorCode = (
     AttemptErrorCodeBuiltIn
-    | AttemptErrorCodeUser
-    | AttemptErrorCodeUserOverBound
+    | AttemptErrorCodeCustom
+    | AttemptErrorCodeCustomOverBound
 )
 """The error code of an attempt that ended with a task error."""
 
 
 type OperatorCancelEnd = Literal['RETURNED_AFTER_SIGNAL', 'DROPPED_AFTER_GRACE', 'BEFORE_BODY']
 """How a run ended after an operator cancelled its task (`cancel_task` with
-`include_running`). The cancel statement recorded the attempt as
+the policy `INCLUDE_RUNNING`). The cancel statement recorded the attempt as
 `CANCELLED` and moved the task to history; what the body returned is
 dropped.
 
@@ -218,7 +218,7 @@ class ChildResultFailed:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildResultWorkerFailure:
     """The worker code of the child failed, not the task. The attempt
-    outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
+    outcome is `WORKER_FAILURE`, with the code `DATABASE_ERROR`.
     """
 
 
@@ -355,9 +355,9 @@ class AttemptEndDecidedByWorker:
     worker): the start of the span.
     """
 
-    child_kind: Execution = field(repr=False)
-    """Internal: the kind of the child that ran the attempt, the
-    `horsies.task.execution` of the span.
+    child_execution: Execution = field(repr=False)
+    """Internal: the execution class of the child that ran the
+    attempt, the execution class of the span.
     """
 
     worker_id: str = field(repr=False)
@@ -468,7 +468,7 @@ type AttemptRecord = (
 
 type RecoveryAction = Literal['RUNNING_FAILED', 'RUNNING_RETRIED', 'CLAIM_REQUEUED', 'ORPHAN_CANCELLED', 'PENDING_EXPIRED']
 """What the reaper did to a task row (the `action` label of
-`horsies.recovery.tasks`, and the `action` of a `TaskRecovered` event).
+the recovered-tasks metric, and the `action` of a `TaskRecovered` event).
 
 `RUNNING_FAILED`: A stale RUNNING row failed.
 
@@ -484,7 +484,7 @@ type RecoveryAction = Literal['RUNNING_FAILED', 'RUNNING_RETRIED', 'CLAIM_REQUEU
 
 type ReplaceReason = Literal['CHILD_DIED', 'CHANNEL_LOST', 'PROTOCOL_VIOLATION', 'PROTOCOL_MISMATCH', 'KILLED_BY_PARENT', 'SLOT_DEFECT', 'SPAWNER_STOPPED', 'TASK_COUNT', 'MEMORY_LIMIT', 'SECOND_CANCEL', 'LOOP_BLOCKED', 'LEFTOVER_WORK', 'AT_DEADLINE', 'CORE_STOPPED']
 """Why a child ended and was replaced (the `reason` label of
-`horsies.worker.children.replaced`): the loss causes of a child, and the
+the children-replaced metric): the loss causes of a child, and the
 reasons why a child retires after a task. The `reason` of a
 `ChildReplaced` event too.
 
@@ -601,10 +601,10 @@ class AttemptPlaced:
 
     attempt: int
 
-    child_kind: Execution
-    """The kind of the child that took the task. A worker that runs no
-    child of a shared class serves that class on its isolated children,
-    so a task of a shared class can run on an isolated child.
+    child_execution: Execution
+    """The execution class of the child that took the task. A worker that
+    runs no child of a shared class serves that class on its isolated
+    children, so a task of a shared class can run on an isolated child.
     """
 
     child_pid: int
@@ -708,8 +708,8 @@ class ChildStarted:
     at: datetime
     """When the ready frame reached the worker (wall clock of the worker)."""
 
-    child_kind: Execution
-    """The kind of the child: the execution class of its slot."""
+    child_execution: Execution
+    """The execution class of the child: the class of its slot."""
 
     slot: int
 
@@ -728,7 +728,7 @@ class ChildReplaced:
     at: datetime
     """When the worker ended the old child (wall clock of the worker)."""
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -745,7 +745,7 @@ class SlotDown:
     at: datetime
     """When the boot failed (wall clock of the worker)."""
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -761,7 +761,7 @@ class SlotRecovered:
     worker).
     """
 
-    child_kind: Execution
+    child_execution: Execution
 
     slot: int
 
@@ -990,7 +990,7 @@ def _read_variant(value: object, at: _At, type_name: str) -> Result[tuple[str, l
 
 
 _BUILT_IN_TASK_CODE_MEMBERS: Final[dict[str, BuiltInTaskCode]] = {
-    member.value: member for catalog in (OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode) for member in catalog
+    member.value: member for catalog in (OperationalCode, ContractCode, RetrievalCode, OutcomeCode) for member in catalog
 }
 """The members of `BuiltInTaskCode` by their wire value."""
 
@@ -1095,10 +1095,10 @@ def _read_attempt_error_code(value: object, at: _At) -> Result[AttemptErrorCode,
     match tag:
         case 'BuiltIn':
             return _read_attempt_error_code_built_in(fields, at.inside('BuiltIn'))
-        case 'User':
-            return _read_attempt_error_code_user(fields, at.inside('User'))
-        case 'UserOverBound':
-            return _read_attempt_error_code_user_over_bound(fields, at.inside('UserOverBound'))
+        case 'Custom':
+            return _read_attempt_error_code_custom(fields, at.inside('Custom'))
+        case 'CustomOverBound':
+            return _read_attempt_error_code_custom_over_bound(fields, at.inside('CustomOverBound'))
         case _:
             return at.refuse(f'AttemptErrorCode has no value {tag[:_MAX_REFUSED_NAME_CHARS]!r}')
 
@@ -1124,8 +1124,8 @@ def _read_attempt_error_code_built_in(fields: list[object], here: _At) -> Result
     )
 
 
-def _read_attempt_error_code_user(fields: list[object], here: _At) -> Result[AttemptErrorCodeUser, MalformedEvent]:
-    """A variant `AttemptErrorCodeUser` from the items of its fields."""
+def _read_attempt_error_code_custom(fields: list[object], here: _At) -> Result[AttemptErrorCodeCustom, MalformedEvent]:
+    """A variant `AttemptErrorCodeCustom` from the items of its fields."""
     match fields:
         case [
             wire_code,
@@ -1139,20 +1139,20 @@ def _read_attempt_error_code_user(fields: list[object], here: _At) -> Result[Att
         case Err() as refused:
             return refused
     return Ok(
-        AttemptErrorCodeUser(
+        AttemptErrorCodeCustom(
             code=value_code,
         )
     )
 
 
-def _read_attempt_error_code_user_over_bound(fields: list[object], here: _At) -> Result[AttemptErrorCodeUserOverBound, MalformedEvent]:
-    """A variant `AttemptErrorCodeUserOverBound` from the items of its fields."""
+def _read_attempt_error_code_custom_over_bound(fields: list[object], here: _At) -> Result[AttemptErrorCodeCustomOverBound, MalformedEvent]:
+    """A variant `AttemptErrorCodeCustomOverBound` from the items of its fields."""
     match fields:
         case []:
             pass
         case _:
             return here.refuse(f'expected 0 items, found {len(fields)}')
-    return Ok(AttemptErrorCodeUserOverBound())
+    return Ok(AttemptErrorCodeCustomOverBound())
 
 
 def _read_operator_cancel_end(value: object, at: _At) -> Result[OperatorCancelEnd, MalformedEvent]:
@@ -1446,7 +1446,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             wire_error_code,
             wire_trace,
             wire_placed_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_worker_id,
             wire_workflow,
         ]:
@@ -1473,8 +1473,8 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -1494,7 +1494,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             error_code=value_error_code,
             trace=value_trace,
             placed_at=value_placed_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             worker_id=value_worker_id,
             workflow=value_workflow,
         )
@@ -1904,7 +1904,7 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             wire_queue,
             wire_execution,
             wire_attempt,
-            wire_child_kind,
+            wire_child_execution,
             wire_child_pid,
             wire_slot_wait,
         ]:
@@ -1941,8 +1941,8 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -1964,7 +1964,7 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             queue=value_queue,
             execution=value_execution,
             attempt=value_attempt,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             child_pid=value_child_pid,
             slot_wait=value_slot_wait,
         )
@@ -2214,7 +2214,7 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_child_pid,
             wire_boot_duration,
@@ -2227,8 +2227,8 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2250,7 +2250,7 @@ def _read_child_started(fields: list[object], here: _At) -> Result[ChildStarted,
     return Ok(
         ChildStarted(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             child_pid=value_child_pid,
             boot_duration=value_boot_duration,
@@ -2263,7 +2263,7 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_child_pid,
             wire_reason,
@@ -2276,8 +2276,8 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2299,7 +2299,7 @@ def _read_child_replaced(fields: list[object], here: _At) -> Result[ChildReplace
     return Ok(
         ChildReplaced(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             child_pid=value_child_pid,
             reason=value_reason,
@@ -2312,7 +2312,7 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
             wire_cause,
         ]:
@@ -2324,8 +2324,8 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2342,7 +2342,7 @@ def _read_slot_down(fields: list[object], here: _At) -> Result[SlotDown, Malform
     return Ok(
         SlotDown(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
             cause=value_cause,
         )
@@ -2354,7 +2354,7 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
     match fields:
         case [
             wire_at,
-            wire_child_kind,
+            wire_child_execution,
             wire_slot,
         ]:
             pass
@@ -2365,8 +2365,8 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
             pass
         case Err() as refused:
             return refused
-    match _read_execution(wire_child_kind, here.inside('child_kind')):
-        case Ok(value_child_kind):
+    match _read_execution(wire_child_execution, here.inside('child_execution')):
+        case Ok(value_child_execution):
             pass
         case Err() as refused:
             return refused
@@ -2378,7 +2378,7 @@ def _read_slot_recovered(fields: list[object], here: _At) -> Result[SlotRecovere
     return Ok(
         SlotRecovered(
             at=value_at,
-            child_kind=value_child_kind,
+            child_execution=value_child_execution,
             slot=value_slot,
         )
     )

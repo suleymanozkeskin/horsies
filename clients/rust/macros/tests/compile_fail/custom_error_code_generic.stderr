@@ -1,0 +1,5 @@
+error: CustomErrorCode cannot be derived for a generic enum
+ --> tests/compile_fail/custom_error_code_generic.rs:4:16
+  |
+4 | enum ChargeCode<T> {
+  |                ^^^

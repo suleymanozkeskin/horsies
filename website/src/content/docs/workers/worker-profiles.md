@@ -35,7 +35,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -114,15 +114,16 @@ from horsies import (
     Execution,
     Horsies,
     IsolatedChildren,
+    Ok,
     PostgresConfig,
+    Result,
     SharedAsyncChildren,
     TaskError,
-    TaskResult,
     WorkerProfile,
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -140,9 +141,9 @@ app = Horsies(AppConfig(
     timeout_ms=10_000,
     cancel_grace_ms=2_000,
 )
-async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+async def fetch_quote(*, symbol: str) -> Result[str, TaskError]:
     await asyncio.sleep(0.1)
-    return TaskResult(ok=symbol)
+    return Ok(symbol)
 ```
 
 ```bash
@@ -161,15 +162,16 @@ from horsies import (
     Execution,
     Horsies,
     IsolatedChildren,
+    Ok,
     PostgresConfig,
+    Result,
     SharedThreadChildren,
     TaskError,
-    TaskResult,
     WorkerProfile,
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -182,12 +184,12 @@ app = Horsies(AppConfig(
 
 
 @app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def digest_file(*, path: str) -> TaskResult[str, TaskError]:
+def digest_file(*, path: str) -> Result[str, TaskError]:
     digest = hashlib.sha256()
     with open(path, 'rb') as source:
         for block in iter(lambda: source.read(1 << 20), b''):
             digest.update(block)
-    return TaskResult(ok=digest.hexdigest())
+    return Ok(digest.hexdigest())
 ```
 
 ```bash
@@ -214,7 +216,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
     ),
     worker_profiles={
@@ -240,23 +242,23 @@ One task of each mode:
 import asyncio
 import zlib
 
-from horsies import Execution, TaskError, TaskResult
+from horsies import Execution, Ok, Result, TaskError
 
 
 @app.task('fetch_rate', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def fetch_rate(*, currency: str) -> TaskResult[str, TaskError]:
+async def fetch_rate(*, currency: str) -> Result[str, TaskError]:
     await asyncio.sleep(0.1)  # stands in for an HTTP call with its own timeout
-    return TaskResult(ok=currency)
+    return Ok(currency)
 
 
 @app.task('compress_report', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def compress_report(*, text: str) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=len(zlib.compress(text.encode(), level=6)))
+def compress_report(*, text: str) -> Result[int, TaskError]:
+    return Ok(len(zlib.compress(text.encode(), level=6)))
 
 
 @app.task('render_invoice')
-def render_invoice(*, invoice_id: int) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=f'invoice-{invoice_id}.pdf')
+def render_invoice(*, invoice_id: int) -> Result[str, TaskError]:
+    return Ok(f'invoice-{invoice_id}.pdf')
 ```
 
 ```bash
@@ -363,7 +365,7 @@ from horsies import (
 remote_profile = WorkerProfile(
     isolated=IsolatedChildren(
         count=4,
-        pool=IsolatedPool(max_size=PoolSize(connections=1), check=False),
+        pool=IsolatedPool(max_size=PoolSize(connections=1), pre_ping=False),
     ),
     shared_async=SharedAsyncChildren(
         count=2,
@@ -378,7 +380,7 @@ remote_profile = WorkerProfile(
 The worker logs the resolved values of each kind, and the resolved pool of the worker process, in its start line:
 
 ```text
-Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off; task_send_pool 2 connections), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check off; executor 16 threads; task_send_pool 2 connections), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 2 connections, derived from seats, check off; task_send_pool 2 connections), pool=20 connections (derived from 220 seats), ...
+Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, pre_ping off; task_send_pool 2 connections), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, pre_ping off; executor 16 threads; task_send_pool 2 connections), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 2 connections, derived from seats, pre_ping off; task_send_pool 2 connections), pool=20 connections (derived from 220 seats), ...
 ```
 
 ### The Task-Send Pool
@@ -636,7 +638,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize` | `PoolSize(connections=1)` | The most connections of the pool. An isolated child runs one task, and its two writes run one after the other, so it never uses a second connection |
-| `check` | `bool` | `False` | Check each connection when a write takes it from the pool: one database round trip per checkout. Each connection is in autocommit, and a write of the child is one statement, so the check doubles its round trips. Off, a dead connection fails the write that takes it. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
+| `pre_ping` | `bool` | `False` | Check each connection when a write takes it from the pool: one database round trip per checkout. Each connection is in autocommit, and a write of the child is one statement, so the check doubles its round trips. Off, a dead connection fails the write that takes it. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 
 ### `SharedPool`
 
@@ -644,7 +646,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize \| PoolSizeFromSeats` | `PoolSizeFromSeats()` | The most connections of the pool. See [Sizes Derived from the Seats](#sizes-derived-from-the-seats) |
-| `check` | `bool` | `False` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
+| `pre_ping` | `bool` | `False` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
 
 Validation refuses a `min_size` above the resolved `max_size` of the pool.
 
@@ -690,7 +692,7 @@ The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig
 |--------|-------|-------------------------------------------------------|
 | `LIBRARY` | `library` | Library code. Each child imports the app itself |
 | `APP` | `app` | Library and app. Children share module state from the app's import |
-| `NONE` | `none` | Nothing. Every child starts with `exec` |
+| `NO_PRELOAD` | `no_preload` | Nothing. Every child starts with `exec` |
 
 Other platforms start every child with `exec`.
 
@@ -738,7 +740,7 @@ One worker opens this many Postgres connections itself:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ pool max_size                                         # session pool, when session_database_url differs from database_url
++ pool max_size                                         # session pool, when the session database URL differs from database_url
 + 1                                                     # listener
 + 1                                                     # runner heartbeat
 + 1                                                     # liveness lock
@@ -747,7 +749,7 @@ pool max_size                                           # pool of the worker pro
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. One connection on the session URL holds the [liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) of the worker process. When `session_database_url` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no `session_database_url`, a profile of 8 isolated children needs `5 + 1 + 1 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. One connection on the session URL holds the [liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) of the worker process. When the URL of a separate `session_database` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no separate `session_database`, a profile of 8 isolated children needs `5 + 1 + 1 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
 
 ```text
 parent pool max_size 12 + listener 1 + runner heartbeat 1 + liveness lock 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 29
@@ -822,7 +824,7 @@ PSYCOPG_IMPL=binary
 PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
 ```
 
-Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NO_PRELOAD`.
 
 ## Migrating from Worker Flags
 

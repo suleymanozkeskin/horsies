@@ -68,7 +68,7 @@ class TestTheFieldIsTheOnlyCopy:
         config = self._mapped(7)
         config.queue_retention['emails'] = timedelta(days=365)
         assert resolve_queue_retention_class(config, 'emails') == 'standard_365d'
-        assert config.registrable_classes() == (
+        assert config.registrable_periods() == (
             ('standard_365d', timedelta(days=365)),
         )
 
@@ -76,7 +76,7 @@ class TestTheFieldIsTheOnlyCopy:
         config = self._mapped(7)
         config.queue_retention = {'emails': timedelta(days=365)}
         assert resolve_queue_retention_class(config, 'emails') == 'standard_365d'
-        assert config.registrable_classes() == (
+        assert config.registrable_periods() == (
             ('standard_365d', timedelta(days=365)),
         )
 

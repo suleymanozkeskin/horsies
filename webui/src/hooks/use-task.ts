@@ -13,7 +13,7 @@ const ACTIVE_STATUSES: ReadonlySet<string> = new Set([
 const POLL_WHILE_ACTIVE_MS = 4_000;
 
 const isActive = (detail: TaskDetail | undefined): boolean =>
-  detail !== undefined && ACTIVE_STATUSES.has(detail.leaf.status);
+  detail !== undefined && ACTIVE_STATUSES.has(detail.task_row.status);
 
 /**
  * Single task detail plus attempt history. `boostInterval` overrides the normal

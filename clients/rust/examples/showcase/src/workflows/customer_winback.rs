@@ -1,7 +1,7 @@
 //! The win-back workflow: sweep the abandoned carts, then send the
 //! win-back segment to them.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::MarketingBlast;
 use crate::tasks::analytics::abandoned_cart_sweep;
@@ -16,7 +16,7 @@ pub struct CustomerWinback;
 
 impl WorkflowDefinition for CustomerWinback {
     type Output = MarketingBlast;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "customer_winback"
@@ -26,21 +26,21 @@ impl WorkflowDefinition for CustomerWinback {
         "acme.customer_winback.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let sweep = builder.task(
-            abandoned_cart_sweep::node()?
+            abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
-                    abandoned_cart_sweep::params::older_than_minutes(),
+                    abandoned_cart_sweep::fields::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?,
-        );
+        )?;
         let blast = builder.task(
-            winback_blast::node()?
+            winback_blast::node()
                 .node_id("winback_blast")
-                .set(winback_blast::params::segment(), SEGMENT.to_owned())?
-                .arg_from(winback_blast::params::sweep(), sweep),
-        );
-        Ok(WorkflowDefConfig::new().output(blast))
+                .set(winback_blast::fields::segment(), SEGMENT.to_owned())?
+                .arg_from(winback_blast::fields::sweep(), sweep),
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(blast))
     }
 }

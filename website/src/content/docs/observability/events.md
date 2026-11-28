@@ -12,6 +12,7 @@ The worker emits one typed event at each lifecycle step of a task and of its chi
 |--------|--------------------|----------|
 | Python | `@app.on_event(EventType)` on a `def` or an `async def` function; the event types are in `horsies.telemetry` | [Event Handlers (Python)](/horsies/workers/event-handlers/) |
 | Rust | `app.on_event::<E>(name, handler)` for an async handler, `app.on_event_blocking::<E>(name, handler)` for a blocking one; the event types are in `horsies::events` | [Event Handlers (Rust)](/horsies/rust/monitoring/event-handlers/) |
+| TypeScript | `app.onEvent(eventType, { name }, handler)` for a sync or async handler; the event types are exported by `horsies`. All handlers of a handler child share one event loop | [Event Handlers (TypeScript)](/horsies/typescript/monitoring/event-handlers/) |
 
 ## Why and When
 
@@ -19,9 +20,9 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 ## The Event Contract
 
-The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
+The core defines each event type once. The Python client generates its classes from the core, the Rust client re-exports the core types, and the TypeScript client generates its types from the core, so the three clients read the same events.
 
-- The contract has a version. This release has version 7: `core/tests/fixtures/event_contract/v7.txt` in the repository holds its text. Version 7 adds the variants of an operator cancel of a running task. A change of an event type, a field or a closed type of a field is a new version.
+- The contract has a version. This release has version 9: `core/tests/fixtures/event_contract/v9.txt` in the repository holds its text. Version 9 renames the field `child_kind` to `child_execution` in `AttemptPlaced`, `ChildStarted`, `ChildReplaced`, `SlotDown` and `SlotRecovered`, and adds the built-in code `UNKNOWN_CUSTOM_CODE`. Version 8 renamed the variants of an error code that the task chose to `Custom` and `CustomOverBound`. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
 - Each field has a closed type or a bound. A duration is a duration type, a time is a UTC time, and a state that can be missing or not known is a named variant.
 - A handler takes the events of one type, never the union of the types. A later version can add an event type, and that changes no handler of another type.
@@ -36,18 +37,18 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 |-------|------|--------|
 | `TaskClaimed` | The worker claimed a task | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `priority`, `queue_wait` |
 | `ClaimReleased` | A claimed task went back to the queue before it reached a child | `task_id`, `task_name`, `queue`, `reason` |
-| `AttemptPlaced` | A task reached a child | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `child_kind`, `child_pid`, `slot_wait` |
+| `AttemptPlaced` | A task reached a child | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `child_execution`, `child_pid`, `slot_wait` |
 | `AttemptNotStarted` | The child stopped before it set the task `RUNNING`: no task code ran | `task_id`, `task_name`, `queue`, `attempt`, `reason` |
 | `AttemptEnded` | An attempt ended | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `end`, `run_duration` |
 | `AttemptRecorded` | The worker recorded the end of an attempt | `task_id`, `task_name`, `queue`, `attempt`, `record`, `record_duration` |
 | `TaskRecovered` | A recovery pass of the worker changed a task | `task_id`, `task_name`, `queue`, `action` |
-| `ChildStarted` | A child of a slot sent its ready frame | `child_kind`, `slot`, `child_pid`, `boot_duration` |
-| `ChildReplaced` | A slot replaced its child | `child_kind`, `slot`, `child_pid`, `reason` |
-| `SlotDown` | A slot is down after a boot failure that can clear | `child_kind`, `slot`, `cause` |
-| `SlotRecovered` | A slot that was down serves again | `child_kind`, `slot` |
+| `ChildStarted` | A child of a slot sent its ready frame | `child_execution`, `slot`, `child_pid`, `boot_duration` |
+| `ChildReplaced` | A slot replaced its child | `child_execution`, `slot`, `child_pid`, `reason` |
+| `SlotDown` | A slot is down after a boot failure that can clear | `child_execution`, `slot`, `cause` |
+| `SlotRecovered` | A slot that was down serves again | `child_execution`, `slot` |
 
 - `attempt` is the retry count of the row plus 1. `task_name` has at most 255 characters, `queue` at most 52. `priority` is 1 to 100.
-- `execution` is the execution class of the task. `child_kind` is the class of the child that took it: a shared task can run on an isolated child.
+- `execution` is the execution class of the task. `child_execution` is the execution class of the child that took it: a shared task can run on an isolated child.
 - `queue_wait` runs from the due time of the row to its claim. `slot_wait` runs from the claim result to the placement. `run_duration` runs from the placement to the end that the worker saw. `record_duration` runs from that end to the end of the outcome write.
 
 ### The End of an Attempt
@@ -60,7 +61,7 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 | `DecidedByWorker` | The worker ended it, with no result frame of the child | `reason`: `TIMED_OUT` (the worker killed the child at the deadline), `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`, `CHILD_LOST`, `KILLED_AFTER_CANCEL` (the worker killed the child after an operator cancel: the kill after `cancel_grace_ms` of an `ISOLATED` task, the deadline, a blocked loop or the stop of the worker) or `LOST_AFTER_CANCEL` (the child was lost after an operator cancel, with its exit seen) |
 | `NotKnown` | The worker killed the child and did not see its exit; recovery decides the row | `child_pid` |
 
-An error code is a built-in code, a user code of at most 128 characters, or `UserOverBound` for a longer user code. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.
+An error code is `BuiltIn` with a built-in code, `Custom` with a code that the task chose, of at most 128 characters, or `CustomOverBound` for a longer code that the task chose. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.
 
 The `end` of `Cancelled` tells how the run ended after the cancel:
 
@@ -93,7 +94,7 @@ The handler child never stops the worker, and it is not a slot: the claim budget
 
 ### Start Hook
 
-A handler child runs its own start hooks, never the start hooks of the task children: Python `@app.on_handler_child_start`, Rust `app.on_handler_child_start(hook)`. Each hook runs once in each handler child, a replacement child included, before the handlers start, for at most 10 seconds. A hook that fails or runs longer ends the child and leaves it down until the worker restarts; the worker runs its tasks. Set up what the handlers share there, for example the OpenTelemetry SDK of the child.
+A handler child runs its own start hooks, never the start hooks of the task children: Python `@app.on_handler_child_start`, Rust `app.on_handler_child_start(hook)`, TypeScript `app.onHandlerChildStart(hook)`. Each hook runs once in each handler child, a replacement child included, before the handlers start, for at most 10 seconds. A hook that fails or runs longer ends the child and leaves it down until the worker restarts; the worker runs its tasks. Set up what the handlers share there, for example the OpenTelemetry SDK of the child.
 
 ### Delivery, Drops and Stats
 
@@ -106,8 +107,8 @@ A handler child runs its own start hooks, never the start hooks of the task chil
 
 - Delivery is at most once. An event that drops is never sent again.
 - The child sends the totals of each handler to the worker every 5 seconds, and once more at its stop. The worker metrics take them, with the resident memory of the child: `horsies.worker.memory.rss{process="handler_child"}`.
-- The `handler` label is the name of the handler: the qualified name of the function in Python, the name given at registration in Rust. An app has at most 32 handlers.
-- A handler that blocks delays only its own queue. A handler that never returns fills its own queue, and its events drop.
+- The `handler` label is the name of the handler: the qualified name of the function in Python, the name given at registration in Rust and TypeScript. An app has at most 32 handlers.
+- A handler that blocks delays only its own queue. A handler that never returns fills its own queue, and its events drop. In the TypeScript client, all handlers share one event loop: a handler that holds the loop with sync work delays every handler.
 
 ## Things to Avoid
 

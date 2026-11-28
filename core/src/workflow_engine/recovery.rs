@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, query_in, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::{OperationalErrorCode, TaskError};
+use crate::core::{OperationalCode, TaskError};
 use crate::db::{CheckoutClass, IsolationLevel, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
@@ -1762,7 +1762,7 @@ async fn fail_tree_orphan(
 /// the message of 0.7.0.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(&TaskError {
-        error_code: OperationalErrorCode::WorkflowStartIncomplete.into(),
+        error_code: OperationalCode::WorkflowStartIncomplete.into(),
         message: Some(format!(
             "Orphaned workflow '{name}': no workflow_tasks found. \
              Workflow task insertion did not complete."

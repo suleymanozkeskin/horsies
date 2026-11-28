@@ -21,7 +21,7 @@ pub const RESTOCK_SOURCE: &str = "restock";
     "reserve_stock",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn reserve_stock(
     rt: TaskRuntime,
@@ -39,7 +39,7 @@ pub async fn reserve_stock(
     "release_stock",
     queue = "fulfillment",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn release_stock(
     rt: TaskRuntime,
@@ -56,7 +56,7 @@ pub async fn release_stock(
     "replenish_catalog",
     queue = "analytics",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn replenish_catalog(
     rt: TaskRuntime,
@@ -73,7 +73,7 @@ pub async fn replenish_catalog(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::supplier_retry(),
-    auto_retry_for = ["SUPPLIER_TIMEOUT", "WORKER_CRASHED"]
+    retry_for = ["SUPPLIER_TIMEOUT", "WORKER_CRASHED"]
 )]
 pub async fn sync_supplier_feed(supplier: String) -> Result<SupplierFeed, TaskError<AcmeCode>> {
     let changed_count = simulate::integer(0, 5, &[&supplier, "changed"]);
@@ -93,15 +93,15 @@ pub async fn sync_supplier_feed(supplier: String) -> Result<SupplierFeed, TaskEr
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"],
-    workflow_ctx
+    retry_for = ["WORKER_CRASHED"],
+    workflow_context
 )]
 pub async fn update_stock_levels(
     feed_node_ids: Vec<String>,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<StockUpdate, TaskError<AcmeCode>> {
-    let context = workflow_ctx.ok_or_else(|| {
-        TaskError::user(
+    let context = workflow_context.ok_or_else(|| {
+        TaskError::custom(
             AcmeCode::NoWorkflowContext,
             "update_stock_levels runs as a node of the restock workflow",
         )
@@ -118,7 +118,7 @@ pub async fn update_stock_levels(
     let required = payload_len(tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(feed_node_ids.len()));
     let reporting = payload_len(feed_node_ids.len()) - skipped;
     if reporting < required {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::QuorumNotMet,
             format!("{reporting} supplier feeds reported, {required} needed"),
         ));

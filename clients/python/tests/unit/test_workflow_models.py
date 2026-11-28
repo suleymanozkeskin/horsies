@@ -9,31 +9,35 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from horsies import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, from_node
-from horsies.core.types.result import Ok
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions, from_node
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
+    NoWorkflowOutput,
     NodeKey,
     TaskNode,
     SubWorkflowNode,
     SubWorkflowSummary,
-    WorkflowTerminalResults,
     WorkflowSpec,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     OnError,
     WorkflowValidationError,
     SuccessPolicy,
     SuccessCase,
     WorkflowDefinition,
     WorkflowDefinitionConfig,
-    slugify,
+    node_id_from_text,
+    NodeNotInContext,
+    WorkflowContextMissingId,
 )
-from horsies.core.errors import ErrorCode, HorsiesError, MultipleValidationErrors
+from horsies._catalog.task_codes import ContractCode
+from horsies.core.errors import HorsiesErrorCode, HorsiesError, MultipleValidationErrors
 
 
 _definition_key_counter = 0
@@ -54,42 +58,42 @@ def _open_target(
     *,
     payload: JsonValue = None,
     url: str = '',
-    data: TaskResult[Any, TaskError] | None = None,
-    input: TaskResult[Any, TaskError] | None = None,
-) -> TaskResult[Any, TaskError]:
+    data: TaskOutcome[Any, TaskError] | None = None,
+    input: TaskOutcome[Any, TaskError] | None = None,
+) -> Result[Any, TaskError]:
     """The typed callable behind `MockTaskWrapper`: a node binds to its names."""
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 def _ctx_target(
     *,
-    input: TaskResult[Any, TaskError] | None = None,
-    workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+    input: TaskOutcome[Any, TaskError] | None = None,
+    workflow_context: WorkflowContext | None = None,
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 def _params_target(
-    required: TaskResult[int, TaskError],
+    required: TaskOutcome[int, TaskError],
     *,
     flag: bool,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 @dataclass
 class MockTaskWrapper(TaskFunction[Any, Any]):
     """Mock TaskWrapper for unit tests."""
 
-    _original_fn = staticmethod(_open_target)
+    _original_function = staticmethod(_open_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -97,49 +101,37 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -149,22 +141,22 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
 
 @dataclass
 class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
-    """Mock TaskWrapper that accepts workflow_ctx."""
+    """Mock TaskWrapper that accepts workflow_context."""
 
-    _original_fn = staticmethod(_ctx_target)
+    _original_function = staticmethod(_ctx_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -172,49 +164,37 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -226,20 +206,20 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
 class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required parameters for signature validation."""
 
-    _original_fn = staticmethod(_params_target)
+    _original_function = staticmethod(_params_target)
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        required: TaskResult[int, TaskError],
+        required: TaskOutcome[int, TaskError],
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -247,49 +227,37 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -302,15 +270,15 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     """Mock TaskWrapper whose args_from target has a default value."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        maybe_result: TaskResult[int, TaskError] | None = None,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+        maybe_result: TaskOutcome[int, TaskError] | None = None,
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -318,49 +286,37 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -373,13 +329,13 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts **kwargs (validation should allow any key)."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, **kwargs: Any) -> TaskResult[Any, TaskError]:
+    def __call__(self, **kwargs: Any) -> Result[Any, TaskError]:
         _ = kwargs
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -387,49 +343,37 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -442,16 +386,16 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required workflow_meta for signature validation."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        workflow_meta: WorkflowMeta,
-    ) -> TaskResult[Any, TaskError]:
+        workflow_meta: WorkflowMetadata,
+    ) -> Result[Any, TaskError]:
         _ = workflow_meta
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -459,49 +403,37 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -514,14 +446,14 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     """Mock producer wrapper with concrete ok-type int."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = int
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[int, TaskError]:
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[int, TaskError]:
         _ = args
         _ = kwargs
-        return TaskResult(ok=1)
+        return Ok(1)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
@@ -529,49 +461,37 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, int]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -581,22 +501,22 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
 
 @dataclass
 class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
-    """Mock consumer expecting TaskResult[str, TaskError] for args_from."""
+    """Mock consumer expecting TaskOutcome[str, TaskError] for args_from."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
-        required: TaskResult[str, TaskError],
+        required: TaskOutcome[str, TaskError],
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
+    ) -> Result[Any, TaskError]:
         _ = required
         _ = flag
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -604,49 +524,37 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -656,10 +564,10 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
 
 @dataclass
 class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
-    """Mock consumer with non-TaskResult annotation for args_from validation."""
+    """Mock consumer with non-TaskOutcome annotation for args_from validation."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
@@ -668,10 +576,10 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         required: int,
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
+    ) -> Result[Any, TaskError]:
         _ = required
         _ = flag
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -679,49 +587,37 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
         node_id: Any = None,
     ) -> NodeFactory[Any, Any]:
         return NodeFactory(
-            fn=self,  # type: ignore[arg-type]
+            function=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -742,11 +638,11 @@ class TestTaskNode:
         """TaskNode can be constructed with fn and kwargs."""
         mock_fn = MockTaskWrapper(task_name='test_task')
         node = TaskNode(
-            fn=mock_fn,
+            function=mock_fn,
             kwargs={'key': 'value'},
         )
 
-        assert node.fn == mock_fn
+        assert node.function == mock_fn
         assert node.args == ()
         assert node.kwargs == {'key': 'value'}
 
@@ -754,42 +650,42 @@ class TestTaskNode:
         """TaskNode constructor rejects args=... (kwargs-only contract)."""
         mock_fn = MockTaskWrapper(task_name='test_task')
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
-            TaskNode(fn=mock_fn, args=(1,))  # type: ignore[call-arg]
+            TaskNode(function=mock_fn, args=(1,))  # type: ignore[call-arg]
 
-    def test_tasknode_name_property(self) -> None:
-        """name property returns fn.task_name."""
+    def test_tasknode_task_name_property(self) -> None:
+        """task_name property returns fn.task_name."""
         mock_fn = MockTaskWrapper(task_name='my_task_name')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
-        assert node.name == 'my_task_name'
+        assert node.task_name == 'my_task_name'
 
     def test_tasknode_defaults(self) -> None:
         """Default values for optional fields."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
         assert node.args == ()
         assert node.kwargs == {}
         assert node.waits_for == []
         assert node.args_from == {}
-        assert node.workflow_ctx_from is None
+        assert node.workflow_context_from is None
         assert node.queue is None
         assert node.priority is None
         assert node.index is None
 
-    def test_tasknode_allow_failed_deps_default(self) -> None:
-        """allow_failed_deps defaults to False."""
+    def test_tasknode_allow_failed_dependencies_default(self) -> None:
+        """allow_failed_dependencies defaults to False."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn)
+        node = TaskNode(function=mock_fn)
 
-        assert node.allow_failed_deps is False
+        assert node.allow_failed_dependencies is False
 
-    def test_tasknode_allow_failed_deps_true(self) -> None:
-        """allow_failed_deps can be set to True."""
+    def test_tasknode_allow_failed_dependencies_true(self) -> None:
+        """allow_failed_dependencies can be set to True."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn, allow_failed_deps=True)
+        node = TaskNode(function=mock_fn, allow_failed_dependencies=True)
 
-        assert node.allow_failed_deps is True
+        assert node.allow_failed_dependencies is True
 
 
 # =============================================================================
@@ -803,9 +699,9 @@ class TestWorkflowSpecValidation:
 
     def test_empty_tasks_raises_no_nodes(self) -> None:
         """WorkflowSpec with tasks=[] raises WORKFLOW_NO_NODES."""
-        with pytest.raises(WorkflowValidationError, match='has no tasks') as exc_info:
-            WorkflowSpec(name='empty', tasks=[])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
+        with pytest.raises(WorkflowValidationError, match='has no nodes') as exc_info:
+            WorkflowSpec(name='empty', nodes=[])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NODES
 
     def test_valid_linear_dag(self) -> None:
         """A -> B -> C passes validation."""
@@ -813,13 +709,13 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
         # Should not raise
-        spec = WorkflowSpec(name='linear', tasks=[node_a, node_b, node_c])
-        assert len(spec.tasks) == 3
+        spec = WorkflowSpec(name='linear', nodes=[node_a, node_b, node_c])
+        assert len(spec.nodes) == 3
 
     def test_valid_diamond_dag(self) -> None:
         """A -> [B, C] -> D passes validation."""
@@ -828,13 +724,13 @@ class TestWorkflowSpecValidation:
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
         fn_d = MockTaskWrapper(task_name='task_d')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_a])
-        node_d = TaskNode(fn=fn_d, waits_for=[node_b, node_c])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_a])
+        node_d = TaskNode(function=fn_d, waits_for=[node_b, node_c])
 
-        spec = WorkflowSpec(name='diamond', tasks=[node_a, node_b, node_c, node_d])
-        assert len(spec.tasks) == 4
+        spec = WorkflowSpec(name='diamond', nodes=[node_a, node_b, node_c, node_d])
+        assert len(spec.nodes) == 4
 
     def test_no_roots_raises(self) -> None:
         """All tasks have deps raises error with WORKFLOW_NO_ROOT_TASKS code."""
@@ -842,8 +738,8 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
 
         # Create circular dependency manually (both depend on each other)
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
 
         # Manually set deps to create no-root scenario
         node_a.waits_for = [node_b]
@@ -851,32 +747,32 @@ class TestWorkflowSpecValidation:
 
         # Mutual deps trigger both no_roots and cycle → MultipleValidationErrors
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='no_roots', tasks=[node_a, node_b])
+            WorkflowSpec(name='no_roots', nodes=[node_a, node_b])
 
-        codes = [e.code for e in exc_info.value.report.errors]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        codes = [e.code for e in exc_info.value.report.refusals]
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
     def test_cycle_detection_simple(self) -> None:
         """A -> B -> A raises MultipleValidationErrors with cycle and no-root codes."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
         # Create cycle: A waits for B
         node_a.waits_for = [node_b]
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='cycle', tasks=[node_a, node_b])
+            WorkflowSpec(name='cycle', nodes=[node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
-        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        cycle_error = next(e for e in errors if e.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED)
         assert 'task_a' in cycle_error.notes[0]
         assert 'task_b' in cycle_error.notes[0]
 
@@ -886,22 +782,22 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
         # Create cycle: A waits for C
         node_a.waits_for = [node_c]
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='indirect_cycle', tasks=[node_a, node_b, node_c])
+            WorkflowSpec(name='indirect_cycle', nodes=[node_a, node_b, node_c])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
-        assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
-        assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
+        assert HorsiesErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
+        assert HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
-        cycle_error = next(e for e in errors if e.code == ErrorCode.WORKFLOW_CYCLE_DETECTED)
+        cycle_error = next(e for e in errors if e.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED)
         assert 'task_a' in cycle_error.notes[0]
         assert 'task_b' in cycle_error.notes[0]
         assert 'task_c' in cycle_error.notes[0]
@@ -915,13 +811,13 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a, node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a, node_a])
 
-        spec = WorkflowSpec(name='duplicate_dep', tasks=[node_a, node_b])
+        spec = WorkflowSpec(name='duplicate_dep', nodes=[node_a, node_b])
 
-        assert len(spec.tasks[1].waits_for) == 1
-        assert spec.tasks[1].waits_for[0] is spec.tasks[0]
+        assert len(spec.nodes[1].waits_for) == 1
+        assert spec.nodes[1].waits_for[0] is spec.nodes[0]
 
     def test_duplicate_waits_for_preserves_first_seen_order(self) -> None:
         """Mixed duplicates collapse to first-seen order, matching the helper's contract."""
@@ -929,16 +825,16 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
-        node_c = TaskNode(fn=fn_c, waits_for=[node_a, node_b, node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
+        node_c = TaskNode(function=fn_c, waits_for=[node_a, node_b, node_a])
 
-        spec = WorkflowSpec(name='ordered_dupes', tasks=[node_a, node_b, node_c])
+        spec = WorkflowSpec(name='ordered_dupes', nodes=[node_a, node_b, node_c])
 
-        deps = spec.tasks[2].waits_for
+        deps = spec.nodes[2].waits_for
         assert len(deps) == 2
-        assert deps[0] is spec.tasks[0]
-        assert deps[1] is spec.tasks[1]
+        assert deps[0] is spec.nodes[0]
+        assert deps[1] is spec.nodes[1]
 
     def test_collect_dag_errors_robust_to_duplicate_waits_for(self) -> None:
         """_collect_dag_errors handles duplicate refs without relying on unique_node_refs.
@@ -950,18 +846,18 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
-        spec = WorkflowSpec(name='post_construction_dupe', tasks=[node_a, node_b])
+        spec = WorkflowSpec(name='post_construction_dupe', nodes=[node_a, node_b])
 
         # Bypass _freeze_graph + unique_node_refs to expose the algorithm
         # to duplicates directly.
-        copied_b = spec.tasks[1]
+        copied_b = spec.nodes[1]
         object.__setattr__(
             copied_b,
             'waits_for',
-            (spec.tasks[0], spec.tasks[0], spec.tasks[0]),
+            (spec.nodes[0], spec.nodes[0], spec.nodes[0]),
         )
 
         errors = spec._collect_dag_errors()
@@ -973,15 +869,15 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_external])
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
+        node_b = TaskNode(function=fn_b, waits_for=[node_external])
 
         # node_external is NOT in tasks list
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
-            WorkflowSpec(name='invalid_dep', tasks=[node_a, node_b])
+            WorkflowSpec(name='invalid_dep', nodes=[node_a, node_b])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEPENDENCY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEPENDENCY
 
     def test_args_from_not_in_waits_for(self) -> None:
         """args_from ref not in waits_for raises WORKFLOW_INVALID_ARGS_FROM."""
@@ -989,79 +885,79 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         # node_c has args_from pointing to node_a, but only waits_for node_b
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
             args_from={'input': node_a},
         )
 
         with pytest.raises(WorkflowValidationError, match='not in waits_for') as exc_info:
-            WorkflowSpec(name='bad_args_from', tasks=[node_a, node_b, node_c])
+            WorkflowSpec(name='bad_args_from', nodes=[node_a, node_b, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
-    def test_workflow_ctx_from_not_in_waits_for(self) -> None:
-        """ctx_from ref not in waits_for raises WORKFLOW_INVALID_CTX_FROM."""
+    def test_workflow_context_from_not_in_waits_for(self) -> None:
+        """ctx_from ref not in waits_for raises WORKFLOW_INVALID_CONTEXT_FROM."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         # Use MockTaskWrapperWithCtx so only the waits_for check fires
-        # (not also CTX_PARAM_MISSING for lacking workflow_ctx param)
+        # (not also CTX_PARAM_MISSING for lacking workflow_context param)
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
-        # node_c has workflow_ctx_from pointing to node_a, but only waits_for node_b
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
+        # node_c has workflow_context_from pointing to node_a, but only waits_for node_b
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(WorkflowValidationError, match='not in waits_for') as exc_info:
-            WorkflowSpec(name='bad_ctx_from', tasks=[node_a, node_b, node_c])
+            WorkflowSpec(name='bad_ctx_from', nodes=[node_a, node_b, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_CTX_FROM
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM
 
-    def test_workflow_ctx_from_requires_workflow_ctx_param(self) -> None:
-        """workflow_ctx_from requires workflow_ctx param → WORKFLOW_CTX_PARAM_MISSING."""
+    def test_workflow_context_from_requires_workflow_ctx_param(self) -> None:
+        """workflow_context_from requires workflow_context param → WORKFLOW_CONTEXT_PARAMETER_MISSING."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_with_ctx,
+            function=fn_with_ctx,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
-        WorkflowSpec(name='ctx_param_ok', tasks=[node_a, node_b])
+        WorkflowSpec(name='ctx_param_ok', nodes=[node_a, node_b])
 
         node_c = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(
-            WorkflowValidationError, match='missing workflow_ctx param',
+            WorkflowValidationError, match='missing workflow_context param',
         ) as exc_info:
-            WorkflowSpec(name='ctx_param_missing', tasks=[node_a, node_c])
+            WorkflowSpec(name='ctx_param_missing', nodes=[node_a, node_c])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING
 
     def test_tasknode_args_kw_rejected(self) -> None:
         """TaskNode constructor rejects args=... directly."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         _ = node_a
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             TaskNode(  # type: ignore[call-arg]
-                fn=fn_b,
+                function=fn_b,
                 args=(1,),
                 waits_for=[node_a],
                 args_from={'input': node_a},
@@ -1074,15 +970,15 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_args_with_args_from'
             definition_key = _definition_key('child_args_with_args_from')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         _ = node_a
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             SubWorkflowNode(  # type: ignore[call-arg]
-                workflow_def=ChildWorkflow,
+                workflow_definition=ChildWorkflow,
                 args=(1,),
                 waits_for=[node_a],
                 args_from={'value': node_a},
@@ -1095,19 +991,19 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_default_build_with'
             definition_key = _definition_key('child_default_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             kwargs={'x': 1},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_default_build_with_kwargs', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_default_build_with_kwargs', nodes=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
     def test_subworkflow_inherited_default_build_with_requires_override(self) -> None:
         """Inherited default build_with must still reject runtime params (HRS-022)."""
@@ -1116,29 +1012,29 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_default_build_with'
             definition_key = _definition_key('base_child_default_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         class InheritedDefaultWorkflow(BaseChildWorkflow):
             name = 'inherited_default_build_with'
             definition_key = _definition_key('inherited_default_build_with')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
-            workflow_def=InheritedDefaultWorkflow,
+            workflow_definition=InheritedDefaultWorkflow,
             kwargs={'x': 1},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(
                 name='subworkflow_inherited_default_build_with_kwargs',
-                tasks=[child_node],
+                nodes=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
 
     def test_subworkflow_default_build_with_no_params_allowed(self) -> None:
         """Default build_with remains valid when no params are passed."""
@@ -1147,14 +1043,14 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_default_build_with_no_params'
             definition_key = _definition_key('child_default_build_with_no_params')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        child_node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        child_node = SubWorkflowNode(workflow_definition=ChildWorkflow)
 
-        spec = WorkflowSpec(name='subworkflow_default_build_with_no_params_ok', tasks=[child_node])
-        assert len(spec.tasks) == 1
+        spec = WorkflowSpec(name='subworkflow_default_build_with_no_params_ok', nodes=[child_node])
+        assert len(spec.nodes) == 1
 
     def test_subworkflow_inherited_custom_build_with_missing_param_rejected(self) -> None:
         """Inherited custom build_with keeps required-param validation (HRS-020)."""
@@ -1163,7 +1059,7 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_custom_build_with_missing'
             definition_key = _definition_key('base_child_custom_build_with_missing')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1175,22 +1071,22 @@ class TestWorkflowSpecValidation:
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_missing'
             definition_key = _definition_key('inherited_custom_build_with_missing')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
-            workflow_def=InheritedCustomWorkflow,
+            workflow_definition=InheritedCustomWorkflow,
             kwargs={},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(
                 name='subworkflow_inherited_custom_build_with_missing',
-                tasks=[child_node],
+                nodes=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_subworkflow_inherited_custom_build_with_invalid_kwarg_rejected(self) -> None:
         """Inherited custom build_with keeps kwarg-key validation (HRS-019)."""
@@ -1199,7 +1095,7 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_custom_build_with_invalid_key'
             definition_key = _definition_key('base_child_custom_build_with_invalid_key')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1211,22 +1107,22 @@ class TestWorkflowSpecValidation:
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_invalid_key'
             definition_key = _definition_key('inherited_custom_build_with_invalid_key')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
-            workflow_def=InheritedCustomWorkflow,
+            workflow_definition=InheritedCustomWorkflow,
             kwargs={'value': 1, 'typo': 2},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(
                 name='subworkflow_inherited_custom_build_with_invalid_key',
-                tasks=[child_node],
+                nodes=[child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_inherited_definition_key_rejected(self) -> None:
         """Concrete child workflow must declare its own definition_key."""
@@ -1235,25 +1131,25 @@ class TestWorkflowSpecValidation:
         class BaseChildWorkflow(WorkflowDefinition[int]):
             name = 'base_child_inherited_definition_key'
             definition_key = _definition_key('base_child_inherited_definition_key')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         class InheritedKeyWorkflow(BaseChildWorkflow):
             name = 'inherited_definition_key_child'
             definition_key = _definition_key('inherited_definition_key_child')
-            child2 = TaskNode(fn=fn_a)
+            child2 = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child2)
 
         delattr(InheritedKeyWorkflow, 'definition_key')
 
-        child_node = SubWorkflowNode(workflow_def=InheritedKeyWorkflow)
+        child_node = SubWorkflowNode(workflow_definition=InheritedKeyWorkflow)
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_inherited_definition_key', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_inherited_definition_key', nodes=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
 
     def test_subworkflow_build_with_positional_args_constructor_rejected(self) -> None:
         """SubWorkflowNode constructor rejects args=... immediately."""
@@ -1262,7 +1158,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_build_with_positional_rejected'
             definition_key = _definition_key('child_build_with_positional_rejected')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1273,7 +1169,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             SubWorkflowNode(  # type: ignore[call-arg]
-                workflow_def=ChildWorkflow,
+                workflow_definition=ChildWorkflow,
                 args=(1,),
                 kwargs={'value': 2},
             )
@@ -1285,7 +1181,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_build_with_mutated_args'
             definition_key = _definition_key('child_build_with_mutated_args')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1294,117 +1190,117 @@ class TestWorkflowSpecValidation:
                 _ = value
                 return cls.build(app)
 
-        child_node = SubWorkflowNode(workflow_def=ChildWorkflow, kwargs={'value': 2})
+        child_node = SubWorkflowNode(workflow_definition=ChildWorkflow, kwargs={'value': 2})
         child_node.args = (1,)  # defensive validation path
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_mutated_positional', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_mutated_positional', nodes=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
     def test_invalid_args_from_key_rejected(self) -> None:
         """args_from key must match function parameter name."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a, 'typo': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='invalid_args_from_key', tasks=[node_a, node_b])
+            WorkflowSpec(name='invalid_args_from_key', nodes=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_kwargs_args_from_overlap_rejected(self) -> None:
         """Overlapping kwargs and args_from keys raises HRS-021."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'required': 42, 'flag': True},
             args_from={'required': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='overlap_rejected', tasks=[node_a, node_b])
+            WorkflowSpec(name='overlap_rejected', nodes=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
 
     def test_kwargs_args_from_disjoint_accepted(self) -> None:
         """Disjoint kwargs and args_from keys pass validation."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapperWithParams(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
         )
 
-        spec = WorkflowSpec(name='disjoint_ok', tasks=[node_a, node_b])
-        assert len(spec.tasks) == 2
+        spec = WorkflowSpec(name='disjoint_ok', nodes=[node_a, node_b])
+        assert len(spec.nodes) == 2
 
     def test_args_from_type_mismatch_rejected(self) -> None:
-        """args_from source ok-type must match consumer TaskResult ok-type."""
+        """args_from source ok-type must match consumer TaskOutcome ok-type."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithStringResultParam(task_name='task_b_expects_str')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='args_from_type_mismatch', tasks=[node_a, node_b])
+            WorkflowSpec(name='args_from_type_mismatch', nodes=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-    def test_args_from_requires_taskresult_param_annotation(self) -> None:
-        """args_from target param must be annotated as TaskResult[OkT, TaskError]."""
+    def test_args_from_requires_outcome_param_annotation(self) -> None:
+        """args_from target param must be annotated as TaskOutcome[OkT, TaskError]."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithRawParam(task_name='task_b_raw_param')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='args_from_raw_param', tasks=[node_a, node_b])
+            WorkflowSpec(name='args_from_raw_param', nodes=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_args_from_type_match_accepted(self) -> None:
-        """args_from passes when producer and consumer TaskResult ok-types match."""
+        """args_from passes when producer and consumer TaskOutcome ok-types match."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithParams(task_name='task_b_expects_int')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'flag': True},
             args_from={'required': node_a},
         )
 
-        spec = WorkflowSpec(name='args_from_type_match', tasks=[node_a, node_b])
-        assert len(spec.tasks) == 2
+        spec = WorkflowSpec(name='args_from_type_match', nodes=[node_a, node_b])
+        assert len(spec.nodes) == 2
 
     def test_subworkflow_kwargs_args_from_overlap_rejected(self) -> None:
         """SubWorkflowNode with overlapping kwargs and args_from raises HRS-021."""
@@ -1413,7 +1309,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_overlap'
             definition_key = _definition_key('child_overlap')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1422,9 +1318,9 @@ class TestWorkflowSpecValidation:
                 _ = value
                 return cls.build(app)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             waits_for=[node_a],
             kwargs={'value': 10},
             args_from={'value': node_a},
@@ -1433,63 +1329,63 @@ class TestWorkflowSpecValidation:
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(
                 name='subworkflow_overlap',
-                tasks=[node_a, child_node],
+                nodes=[node_a, child_node],
             )
 
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
 
     def test_tasknode_positional_args_constructor_rejected(self) -> None:
         """TaskNode constructor rejects args=... immediately."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
-            TaskNode(fn=fn_a, args=(1,), kwargs={'flag': True})  # type: ignore[call-arg]
+            TaskNode(function=fn_a, args=(1,), kwargs={'flag': True})  # type: ignore[call-arg]
 
     def test_mutated_tasknode_positional_args_rejected_by_validator(self) -> None:
         """Validator rejects positional args even if set after construction."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        node_a = TaskNode(fn=fn_a, kwargs={'required': 1, 'flag': True})
+        node_a = TaskNode(function=fn_a, kwargs={'required': 1, 'flag': True})
         node_a.args = (1,)  # defensive validation path
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='mutated_positional_args', tasks=[node_a])
+            WorkflowSpec(name='mutated_positional_args', nodes=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
 
     def test_from_node_marker_in_direct_kwargs_rejected(self) -> None:
         """Raw from_node() marker in TaskNode kwargs is rejected."""
         fn_a = MockTaskWrapper(task_name='producer')
         fn_b = MockTaskWrapper(task_name='consumer')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             kwargs={'payload': from_node(node_a)},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='marker_in_kwargs', tasks=[node_a, node_b])
+            WorkflowSpec(name='marker_in_kwargs', nodes=[node_a, node_b])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
     def test_missing_required_params_rejected(self) -> None:
         """Missing required parameters raises validation error."""
         fn_a = MockTaskWrapperWithParams(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='missing_required', tasks=[node_a])
+            WorkflowSpec(name='missing_required', nodes=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_required_workflow_meta_treated_as_injected(self) -> None:
         """Required workflow_meta is treated as auto-injected by validator."""
         fn_a = MockTaskWrapperWithRequiredMeta(task_name='task_requires_meta')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         # Should not raise WORKFLOW_MISSING_REQUIRED_PARAMS
-        spec = WorkflowSpec(name='required_workflow_meta_ok', tasks=[node_a])
-        assert len(spec.tasks) == 1
+        spec = WorkflowSpec(name='required_workflow_meta_ok', nodes=[node_a])
+        assert len(spec.nodes) == 1
 
     def test_subworkflow_missing_required_params_rejected(self) -> None:
         """SubWorkflowNode build_with required params must be provided."""
@@ -1498,7 +1394,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_missing_required'
             definition_key = _definition_key('child_missing_required')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1508,13 +1404,13 @@ class TestWorkflowSpecValidation:
                 return cls.build(app)
 
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_missing_required', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_missing_required', nodes=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS
 
     def test_subworkflow_invalid_kwargs_key_rejected(self) -> None:
         """SubWorkflowNode kwargs keys must match build_with signature."""
@@ -1523,7 +1419,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_invalid_kwargs'
             definition_key = _definition_key('child_invalid_kwargs')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1533,14 +1429,14 @@ class TestWorkflowSpecValidation:
                 return cls.build(app)
 
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             kwargs={'source': 'ok', 'typo': 'bad'},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_invalid_kwargs', tasks=[child_node])
+            WorkflowSpec(name='subworkflow_invalid_kwargs', nodes=[child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_invalid_args_from_key_rejected(self) -> None:
         """SubWorkflowNode args_from keys must match build_with signature."""
@@ -1549,7 +1445,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_invalid_args_from'
             definition_key = _definition_key('child_invalid_args_from')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1558,61 +1454,61 @@ class TestWorkflowSpecValidation:
                 _ = source
                 return cls.build(app)
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             waits_for=[node_a],
             kwargs={'source': 'ok'},
             args_from={'typo': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_invalid_args_from', tasks=[node_a, child_node])
+            WorkflowSpec(name='subworkflow_invalid_args_from', nodes=[node_a, child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_args_from_type_mismatch_rejected(self) -> None:
-        """SubWorkflowNode args_from must match build_with TaskResult ok-type annotations."""
+        """SubWorkflowNode args_from must match build_with TaskOutcome ok-type annotations."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_type_mismatch'
             definition_key = _definition_key('child_type_mismatch')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(
-                cls, app: Any, *, source: TaskResult[str, TaskError]
+                cls, app: Any, *, source: TaskOutcome[str, TaskError]
             ) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
 
-        node_a = TaskNode(fn=MockTaskWrapperInt(task_name='producer_int'))
+        node_a = TaskNode(function=MockTaskWrapperInt(task_name='producer_int'))
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             waits_for=[node_a],
             args_from={'source': node_a},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_args_from_type_mismatch', tasks=[node_a, child_node])
+            WorkflowSpec(name='subworkflow_args_from_type_mismatch', nodes=[node_a, child_node])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_a_kwargs_catch_all_takes_nothing_from_a_node(self) -> None:
         """A catch-all has no declared type, so no key binds to it."""
         fn_a = MockTaskWrapperWithKwargs(task_name='task_a')
         node_a = TaskNode(
-            fn=fn_a,
+            function=fn_a,
             kwargs={'unknown': 1, 'another': 2},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='kwargs_task', tasks=[node_a])
+            WorkflowSpec(name='kwargs_task', nodes=[node_a])
 
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_kwargs_rejected_for_untyped_build_with(self) -> None:
         """A key that reaches `**kwargs` of a build_with is an invalid key: each
@@ -1622,7 +1518,7 @@ class TestWorkflowSpecValidation:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_kwargs_build_with'
             definition_key = _definition_key('child_kwargs_build_with')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
@@ -1632,14 +1528,14 @@ class TestWorkflowSpecValidation:
                 return cls.build(app)
 
         child_node = SubWorkflowNode(
-            workflow_def=ChildWorkflow,
+            workflow_definition=ChildWorkflow,
             kwargs={'unknown': 1},
             args_from={},
         )
 
         with pytest.raises(WorkflowValidationError) as exc:
-            WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
-        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+            WorkflowSpec(name='subworkflow_kwargs_ok', nodes=[child_node])
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
         """Same workflow name in distinct definitions is not a cycle."""
@@ -1648,16 +1544,16 @@ class TestWorkflowSpecValidation:
         class SameNameLeafWorkflow(WorkflowDefinition[int]):
             name = 'same_name_child'
             definition_key = _definition_key('same_name_leaf')
-            leaf = TaskNode(fn=fn_leaf)
+            leaf = TaskNode(function=fn_leaf)
 
         class SameNameParentWorkflow(WorkflowDefinition[int]):
             name = 'same_name_child'
             definition_key = _definition_key('same_name_parent')
-            child = SubWorkflowNode(workflow_def=SameNameLeafWorkflow)
+            child = SubWorkflowNode(workflow_definition=SameNameLeafWorkflow)
 
-        parent_node = SubWorkflowNode(workflow_def=SameNameParentWorkflow)
+        parent_node = SubWorkflowNode(workflow_definition=SameNameParentWorkflow)
 
-        WorkflowSpec(name='same_name_distinct_definitions', tasks=[parent_node])
+        WorkflowSpec(name='same_name_distinct_definitions', nodes=[parent_node])
 
     def test_subworkflow_cycle_detection_does_not_skip_same_name_cycle(self) -> None:
         """Visited same-name definitions must not hide a real later cycle."""
@@ -1666,7 +1562,7 @@ class TestWorkflowSpecValidation:
         class SafeSharedNameWorkflow(WorkflowDefinition[int]):
             name = 'shared_workflow_name'
             definition_key = _definition_key('safe_shared_name')
-            leaf = TaskNode(fn=fn_safe)
+            leaf = TaskNode(function=fn_safe)
 
         class CyclicSharedNameWorkflow(WorkflowDefinition[int]):
             name = 'shared_workflow_name'
@@ -1675,32 +1571,32 @@ class TestWorkflowSpecValidation:
         class CycleMiddleWorkflow(WorkflowDefinition[int]):
             name = 'cycle_middle'
             definition_key = _definition_key('cycle_middle')
-            child = SubWorkflowNode(workflow_def=CyclicSharedNameWorkflow)
+            child = SubWorkflowNode(workflow_definition=CyclicSharedNameWorkflow)
 
         CyclicSharedNameWorkflow._workflow_nodes = [
-            ('middle', SubWorkflowNode(workflow_def=CycleMiddleWorkflow)),
+            ('middle', SubWorkflowNode(workflow_definition=CycleMiddleWorkflow)),
         ]
 
-        safe_node = SubWorkflowNode(workflow_def=SafeSharedNameWorkflow)
-        cyclic_node = SubWorkflowNode(workflow_def=CyclicSharedNameWorkflow)
+        safe_node = SubWorkflowNode(workflow_definition=SafeSharedNameWorkflow)
+        cyclic_node = SubWorkflowNode(workflow_definition=CyclicSharedNameWorkflow)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
-            WorkflowSpec(name='same_name_cycle_not_skipped', tasks=[safe_node, cyclic_node])
+            WorkflowSpec(name='same_name_cycle_not_skipped', nodes=[safe_node, cyclic_node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED
 
     def test_output_not_in_workflow(self) -> None:
         """output task not in tasks raises HRS-011."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
 
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
-            WorkflowSpec(name='bad_output', tasks=[node_a], output=node_external)
+            WorkflowSpec(name='bad_output', nodes=[node_a], output=node_external)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_OUTPUT
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_OUTPUT
 
     def test_index_assignment(self) -> None:
         """index assigned based on list position."""
@@ -1708,101 +1604,101 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
-        node_c = TaskNode(fn=fn_c, waits_for=[node_b])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
+        node_c = TaskNode(function=fn_c, waits_for=[node_b])
 
-        spec = WorkflowSpec(name='indexed', tasks=[node_a, node_b, node_c])
+        spec = WorkflowSpec(name='indexed', nodes=[node_a, node_b, node_c])
 
-        assert spec.tasks[0].index == 0
-        assert spec.tasks[1].index == 1
-        assert spec.tasks[2].index == 2
+        assert spec.nodes[0].index == 0
+        assert spec.nodes[1].index == 1
+        assert spec.nodes[2].index == 2
 
     def test_node_id_auto_assigned(self) -> None:
         """node_id is auto-assigned when not provided."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
 
-        spec = WorkflowSpec(name='node_id_auto', tasks=[node_a, node_b])
-        assert spec.tasks[0].node_id == 'node_id_auto:0'
-        assert spec.tasks[1].node_id == 'node_id_auto:1'
+        spec = WorkflowSpec(name='node_id_auto', nodes=[node_a, node_b])
+        assert spec.nodes[0].node_id == 'node_id_auto:0'
+        assert spec.nodes[1].node_id == 'node_id_auto:1'
 
     def test_node_id_duplicate_raises(self) -> None:
         """Duplicate node_id raises WORKFLOW_DUPLICATE_NODE_ID."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a, node_id='dup')
-        node_b = TaskNode(fn=fn_b, node_id='dup')
+        node_a = TaskNode(function=fn_a, node_id='dup')
+        node_b = TaskNode(function=fn_b, node_id='dup')
 
         with pytest.raises(WorkflowValidationError, match='duplicate node_id') as exc_info:
-            WorkflowSpec(name='dup_ids', tasks=[node_a, node_b])
+            WorkflowSpec(name='dup_ids', nodes=[node_a, node_b])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_DUPLICATE_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_DUPLICATE_NODE_ID
 
     def test_node_id_invalid_characters_raises(self) -> None:
         """Invalid node_id characters raise WORKFLOW_INVALID_NODE_ID."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a, node_id='bad id')
+        node_a = TaskNode(function=fn_a, node_id='bad id')
 
         with pytest.raises(
             WorkflowValidationError, match='contains invalid characters',
         ) as exc_info:
-            WorkflowSpec(name='bad_id', tasks=[node_a])
+            WorkflowSpec(name='bad_id', nodes=[node_a])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID
 
     def test_success_policy_empty_cases_raises(self) -> None:
         """SuccessPolicy with empty cases list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         policy = SuccessPolicy(cases=[])
 
         with pytest.raises(WorkflowValidationError, match='at least one SuccessCase') as exc_info:
-            WorkflowSpec(name='empty_cases', tasks=[node_a], success_policy=policy)
+            WorkflowSpec(name='empty_cases', nodes=[node_a], success_policy=policy)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_empty_required_raises(self) -> None:
         """SuccessCase with empty required list raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[])])
 
         with pytest.raises(WorkflowValidationError, match='has no required tasks') as exc_info:
-            WorkflowSpec(name='empty_required', tasks=[node_a], success_policy=policy)
+            WorkflowSpec(name='empty_required', nodes=[node_a], success_policy=policy)
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_invalid_task_raises(self) -> None:
         """SuccessCase referencing task not in workflow raises HRS-012."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)  # Not in tasks list
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)  # Not in tasks list
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(
-                name='invalid_policy_task', tasks=[node_a], success_policy=policy
+                name='invalid_policy_task', nodes=[node_a], success_policy=policy
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
     def test_success_policy_valid(self) -> None:
         """Valid success policy passes validation."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[node_a])],
@@ -1811,7 +1707,7 @@ class TestWorkflowSpecValidation:
 
         spec = WorkflowSpec(
             name='valid_policy',
-            tasks=[node_a, node_b],
+            nodes=[node_a, node_b],
             success_policy=policy,
         )
         assert spec.success_policy is not None
@@ -1822,60 +1718,60 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             # min_success not set
         )
 
         with pytest.raises(WorkflowValidationError, match='min_success is not set') as exc_info:
-            WorkflowSpec(name='quorum_no_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+            WorkflowSpec(name='quorum_no_min', nodes=[node_a, node_b])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_too_high_raises(self) -> None:
         """min_success exceeding dependency count raises error."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             min_success=5,  # Only 1 dep, but min_success is 5
         )
 
         with pytest.raises(WorkflowValidationError, match='exceeds dependency count') as exc_info:
-            WorkflowSpec(name='quorum_too_high', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+            WorkflowSpec(name='quorum_too_high', nodes=[node_a, node_b])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_quorum_min_success_zero_raises(self) -> None:
         """min_success < 1 raises error."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='quorum',
             min_success=0,
         )
 
         with pytest.raises(WorkflowValidationError, match='must be >= 1') as exc_info:
-            WorkflowSpec(name='quorum_zero', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+            WorkflowSpec(name='quorum_zero', nodes=[node_a, node_b])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_all_join_with_min_success_raises(self) -> None:
         """min_success set with join='all' raises error."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='all',
             min_success=1,  # Invalid - min_success only for quorum
@@ -1884,17 +1780,17 @@ class TestWorkflowSpecValidation:
         with pytest.raises(
             WorkflowValidationError, match="only used with join='quorum'"
         ) as exc_info:
-            WorkflowSpec(name='all_with_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+            WorkflowSpec(name='all_with_min', nodes=[node_a, node_b])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_with_min_success_raises(self) -> None:
         """min_success set with join='any' raises error."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        node_a = TaskNode(fn=fn_a)
+        node_a = TaskNode(function=fn_a)
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a],
             join='any',
             min_success=1,  # Invalid - min_success only for quorum
@@ -1903,8 +1799,8 @@ class TestWorkflowSpecValidation:
         with pytest.raises(
             WorkflowValidationError, match="only used with join='quorum'"
         ) as exc_info:
-            WorkflowSpec(name='any_with_min', tasks=[node_a, node_b])
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+            WorkflowSpec(name='any_with_min', nodes=[node_a, node_b])
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_args_from_without_default_raises(self) -> None:
         """join='any' + args_from targeting a no-default param is rejected.
@@ -1917,10 +1813,10 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithParams(task_name='task_b_required')
 
-        node_a = TaskNode(fn=fn_a)
-        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_a = TaskNode(function=fn_a)
+        node_c = TaskNode(function=MockTaskWrapperInt(task_name='task_c_int'))
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a, node_c],
             kwargs={'flag': True},
             args_from={'required': node_a},
@@ -1932,19 +1828,19 @@ class TestWorkflowSpecValidation:
         ) as exc_info:
             WorkflowSpec(
                 name='any_args_from_no_default',
-                tasks=[node_a, node_c, node_b],
+                nodes=[node_a, node_c, node_b],
             )
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_JOIN
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_JOIN
 
     def test_any_join_args_from_with_default_accepted(self) -> None:
         """join='any' + args_from is supported when the param has a default."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithOptionalParam(task_name='task_b_optional')
 
-        node_a = TaskNode(fn=fn_a)
-        node_c = TaskNode(fn=MockTaskWrapperInt(task_name='task_c_int'))
+        node_a = TaskNode(function=fn_a)
+        node_c = TaskNode(function=MockTaskWrapperInt(task_name='task_c_int'))
         node_b = TaskNode(
-            fn=fn_b,
+            function=fn_b,
             waits_for=[node_a, node_c],
             args_from={'maybe_result': node_a},
             join='any',
@@ -1952,9 +1848,9 @@ class TestWorkflowSpecValidation:
 
         spec = WorkflowSpec(
             name='any_args_from_with_default',
-            tasks=[node_a, node_c, node_b],
+            nodes=[node_a, node_c, node_b],
         )
-        assert spec.tasks[2].join == 'any'
+        assert spec.nodes[2].join == 'any'
 
     def test_valid_quorum_join(self) -> None:
         """Valid quorum configuration passes validation."""
@@ -1963,19 +1859,19 @@ class TestWorkflowSpecValidation:
         fn_c = MockTaskWrapper(task_name='task_c')
         fn_d = MockTaskWrapper(task_name='task_d')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
-        node_c = TaskNode(fn=fn_c)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
+        node_c = TaskNode(function=fn_c)
         node_d = TaskNode(
-            fn=fn_d,
+            function=fn_d,
             waits_for=[node_a, node_b, node_c],
             join='quorum',
             min_success=2,  # 2 out of 3
         )
 
-        spec = WorkflowSpec(name='valid_quorum', tasks=[node_a, node_b, node_c, node_d])
-        assert spec.tasks[3].join == 'quorum'
-        assert spec.tasks[3].min_success == 2
+        spec = WorkflowSpec(name='valid_quorum', nodes=[node_a, node_b, node_c, node_d])
+        assert spec.nodes[3].join == 'quorum'
+        assert spec.nodes[3].min_success == 2
 
     def test_valid_any_join(self) -> None:
         """Valid any join configuration passes validation."""
@@ -1983,17 +1879,17 @@ class TestWorkflowSpecValidation:
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
 
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_a, node_b],
             join='any',
         )
 
-        spec = WorkflowSpec(name='valid_any', tasks=[node_a, node_b, node_c])
-        assert spec.tasks[2].join == 'any'
-        assert spec.tasks[2].min_success is None
+        spec = WorkflowSpec(name='valid_any', nodes=[node_a, node_b, node_c])
+        assert spec.nodes[2].join == 'any'
+        assert spec.nodes[2].min_success is None
 
 
 # =============================================================================
@@ -2007,66 +1903,64 @@ class TestWorkflowContext:
 
     def test_from_serialized_reconstruction(self) -> None:
         """from_serialized() creates valid WorkflowContext."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
-        results_by_id: dict[str, TaskResult[Any, TaskError]] = {'node-0': result_0}
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]] = {'node-0': result_0}
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=2,
+            node_index=2,
             task_name='my_task',
-            results_by_id=results_by_id,
+            results_by_node_id=results_by_node_id,
         )
 
         assert ctx.workflow_id == 'wf-123'
-        assert ctx.task_index == 2
+        assert ctx.node_index == 2
         assert ctx.task_name == 'my_task'
 
     def test_result_for_returns_correct_result(self) -> None:
-        """result_for(node) returns the correct TaskResult."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
-        results_by_id: dict[str, TaskResult[Any, TaskError]] = {'node-0': result_0}
+        """result_for(node) returns the correct TaskOutcome."""
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]] = {'node-0': result_0}
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id=results_by_id,
+            results_by_node_id=results_by_node_id,
         )
 
         # Create a mock node with node_id set
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         node.node_id = 'node-0'  # Simulate WorkflowSpec having assigned node_id
 
         result = ctx.result_for(node)
-        assert result.is_ok()
-        assert result.unwrap() == 42
+        assert result == Succeeded(42)
 
     def test_result_for_node_key(self) -> None:
-        """result_for(NodeKey) returns the correct TaskResult."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=7)
+        """result_for(NodeKey) returns the correct TaskOutcome."""
+        result_0: TaskOutcome[int, TaskError] = Succeeded(7)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={'node-0': result_0},
+            results_by_node_id={'node-0': result_0},
         )
 
         key = NodeKey[int]('node-0')
         result = ctx.result_for(key)
-        assert result.is_ok()
-        assert result.unwrap() == 7
+        assert result == Succeeded(7)
 
     def test_result_for_accepts_subworkflow_node(self) -> None:
         """result_for(node) accepts a SubWorkflowNode and returns its terminal
-        TaskResult (the type signature must allow it — pyright previously
+        outcome (the type signature must allow it — pyright previously
         refused what the runtime accepts)."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=99)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(99)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={'sub-node': result_0},
+            results_by_node_id={'sub-node': result_0},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -2074,49 +1968,47 @@ class TestWorkflowContext:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_result_for'
             definition_key = _definition_key('child_result_for')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         node: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=ChildWorkflow, node_id='sub-node',
+            workflow_definition=ChildWorkflow, node_id='sub-node',
         )
 
         result = ctx.result_for(node)
-        assert result.is_ok()
-        assert result.unwrap() == 99
+        assert result == Succeeded(99)
 
     def test_model_dump_round_trips_results(self) -> None:
         """model_dump() preserves dependency results through model_validate()."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={'node-0': result_0},
+            results_by_node_id={'node-0': result_0},
         )
 
         dumped = ctx.model_dump()
-        assert dumped['results_by_id']['node-0'] is result_0
+        assert dumped['results_by_node_id']['node-0'] is result_0
 
         restored = WorkflowContext.model_validate(dumped)
         restored_result = restored.result_for(NodeKey[int]('node-0'))
-        assert restored_result.is_ok()
-        assert restored_result.unwrap() == 42
+        assert restored_result == Succeeded(42)
 
     def test_model_dump_json_mode_raises_not_implemented(self) -> None:
         """Strict-serde phase 7: model_dump(mode='json') is dropped.
 
         WorkflowContext can't carry a wire form because per-result
         ok_type lives at the engine/worker boundary, not on the model.
-        Reconstruction is via from_serialized with pre-typed TaskResult
-        instances.
+        Reconstruction is via from_serialized with pre-typed TaskOutcome
+        values.
         """
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={'node-0': TaskResult(ok=42)},
+            results_by_node_id={'node-0': Succeeded(42)},
         )
 
         with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
@@ -2129,52 +2021,57 @@ class TestWorkflowContext:
         """result_for(node) raises RuntimeError if node has no node_id."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
+            results_by_node_id={},
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         # node.node_id is None (not assigned)
 
-        with pytest.raises(RuntimeError, match='TaskNode node_id is not set'):
+        with pytest.raises(
+            WorkflowContextMissingId, match='TaskNode node_id is not set'
+        ) as raised:
             ctx.result_for(node)
+        assert raised.value.code is ContractCode.WORKFLOW_CONTEXT_MISSING_ID
 
     def test_result_for_raises_on_missing_result(self) -> None:
-        """result_for(node) raises KeyError if result not in context."""
+        """result_for(node) raises NodeNotInContext (NODE_NOT_IN_CONTEXT) if the
+        node has an id and its result is not in context."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},  # Empty
+            results_by_node_id={},  # Empty
         )
 
         mock_task = MockTaskWrapper('producer')
-        node: TaskNode[int] = TaskNode(fn=mock_task)
+        node: TaskNode[int] = TaskNode(function=mock_task)
         node.node_id = 'node-0'
 
-        with pytest.raises(KeyError, match='not in workflow context'):
+        with pytest.raises(NodeNotInContext, match='not in workflow context') as raised:
             ctx.result_for(node)
+        assert raised.value.code is ContractCode.NODE_NOT_IN_CONTEXT
 
     def test_has_result(self) -> None:
         """has_result(node) returns True if result exists."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={'node-0': result_0},
+            results_by_node_id={'node-0': result_0},
         )
 
         mock_task = MockTaskWrapper('producer')
-        node_with_result: TaskNode[int] = TaskNode(fn=mock_task)
+        node_with_result: TaskNode[int] = TaskNode(function=mock_task)
         node_with_result.node_id = 'node-0'
 
-        node_without_result: TaskNode[int] = TaskNode(fn=mock_task)
+        node_without_result: TaskNode[int] = TaskNode(function=mock_task)
         node_without_result.node_id = 'node-99'
 
-        node_no_index: TaskNode[int] = TaskNode(fn=mock_task)
+        node_no_index: TaskNode[int] = TaskNode(function=mock_task)
         # node_no_index.node_id is None
 
         assert ctx.has_result(node_with_result) is True
@@ -2183,24 +2080,24 @@ class TestWorkflowContext:
 
 
 # =============================================================================
-# WorkflowMeta Tests
+# WorkflowMetadata Tests
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestWorkflowMeta:
-    """Tests for WorkflowMeta dataclass."""
+class TestWorkflowMetadata:
+    """Tests for WorkflowMetadata dataclass."""
 
     def test_workflow_meta_creation(self) -> None:
-        """WorkflowMeta can be created with all fields."""
-        meta = WorkflowMeta(
+        """WorkflowMetadata can be created with all fields."""
+        meta = WorkflowMetadata(
             workflow_id='wf-123',
-            task_index=5,
+            node_index=5,
             task_name='my_task',
         )
 
         assert meta.workflow_id == 'wf-123'
-        assert meta.task_index == 5
+        assert meta.node_index == 5
         assert meta.task_name == 'my_task'
 
 
@@ -2224,13 +2121,13 @@ class TestEnums:
 
     def test_workflow_task_status_values(self) -> None:
         """All task status values exist."""
-        assert WorkflowTaskStatus.PENDING == 'PENDING'
-        assert WorkflowTaskStatus.READY == 'READY'
-        assert WorkflowTaskStatus.ENQUEUED == 'ENQUEUED'
-        assert WorkflowTaskStatus.RUNNING == 'RUNNING'
-        assert WorkflowTaskStatus.COMPLETED == 'COMPLETED'
-        assert WorkflowTaskStatus.FAILED == 'FAILED'
-        assert WorkflowTaskStatus.SKIPPED == 'SKIPPED'
+        assert WorkflowNodeStatus.PENDING == 'PENDING'
+        assert WorkflowNodeStatus.READY == 'READY'
+        assert WorkflowNodeStatus.ENQUEUED == 'ENQUEUED'
+        assert WorkflowNodeStatus.RUNNING == 'RUNNING'
+        assert WorkflowNodeStatus.COMPLETED == 'COMPLETED'
+        assert WorkflowNodeStatus.FAILED == 'FAILED'
+        assert WorkflowNodeStatus.SKIPPED == 'SKIPPED'
 
     def test_on_error_values(self) -> None:
         """FAIL and PAUSE exist."""
@@ -2257,16 +2154,16 @@ class TestWorkflowDefinition:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        class SimpleWorkflow(WorkflowDefinition):
+        class SimpleWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'simple'
             definition_key = _definition_key('simple_workflow')
-            fetch = TaskNode(fn=fn_a, kwargs={'payload': 1})
-            process = TaskNode(fn=fn_b, waits_for=[fetch], args_from={'data': fetch})
+            fetch = TaskNode(function=fn_a, kwargs={'payload': 1})
+            process = TaskNode(function=fn_b, waits_for=[fetch], args_from={'data': fetch})
 
         # Create minimal app (no broker connection needed for build)
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2275,7 +2172,7 @@ class TestWorkflowDefinition:
         spec = SimpleWorkflow.build(app)
 
         assert spec.name == 'simple'
-        assert len(spec.tasks) == 2
+        assert len(spec.nodes) == 2
         assert spec.on_error == OnError.FAIL
 
     def test_node_id_from_attribute_name(self) -> None:
@@ -2288,15 +2185,15 @@ class TestWorkflowDefinition:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        class NodeIdWorkflow(WorkflowDefinition):
+        class NodeIdWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'node_id_test'
             definition_key = _definition_key('node_id_workflow')
-            fetch = TaskNode(fn=fn_a)
-            parse = TaskNode(fn=fn_b, waits_for=[fetch])
+            fetch = TaskNode(function=fn_a)
+            parse = TaskNode(function=fn_b, waits_for=[fetch])
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2305,8 +2202,8 @@ class TestWorkflowDefinition:
         spec = NodeIdWorkflow.build(app)
 
         # node_id should be attribute name, not workflow_name:index
-        assert spec.tasks[0].node_id == 'fetch'
-        assert spec.tasks[1].node_id == 'parse'
+        assert spec.nodes[0].node_id == 'fetch'
+        assert spec.nodes[1].node_id == 'parse'
 
     def test_explicit_node_id_preserved(self) -> None:
         """Explicit node_id is not overwritten."""
@@ -2317,14 +2214,14 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class ExplicitIdWorkflow(WorkflowDefinition):
+        class ExplicitIdWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'explicit_id'
             definition_key = _definition_key('explicit_id_workflow')
-            fetch = TaskNode(fn=fn_a, node_id='my_custom_id')
+            fetch = TaskNode(function=fn_a, node_id='my_custom_id')
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2332,7 +2229,7 @@ class TestWorkflowDefinition:
 
         spec = ExplicitIdWorkflow.build(app)
 
-        assert spec.tasks[0].node_id == 'my_custom_id'
+        assert spec.nodes[0].node_id == 'my_custom_id'
 
     def test_config_output_names_a_class_body_node(self) -> None:
         """config.output can name a node of the same class body."""
@@ -2347,14 +2244,14 @@ class TestWorkflowDefinition:
         class OutputWorkflow(WorkflowDefinition):
             name = 'output_test'
             definition_key = _definition_key('output_workflow')
-            fetch = TaskNode(fn=fn_a)
-            process = TaskNode(fn=fn_b, waits_for=[fetch])
+            fetch = TaskNode(function=fn_a)
+            process = TaskNode(function=fn_b, waits_for=[fetch])
 
             config = WorkflowDefinitionConfig(output=process)
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2363,7 +2260,7 @@ class TestWorkflowDefinition:
         spec = OutputWorkflow.build(app)
 
         assert spec.output is not None
-        assert spec.output.name == 'task_b'
+        assert spec.output.task_name == 'task_b'
 
     def test_config_on_error_sets_error_policy(self) -> None:
         """config.on_error sets the error policy."""
@@ -2374,16 +2271,16 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class PauseWorkflow(WorkflowDefinition):
+        class PauseWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'pause_test'
             definition_key = _definition_key('pause_workflow')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2402,14 +2299,14 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class NoNameWorkflow(WorkflowDefinition):
+        class NoNameWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             definition_key = _definition_key('no_name_workflow')
             # name not defined
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2417,7 +2314,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match="must define a 'name'") as exc_info:
             NoNameWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NAME
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NAME
 
     def test_no_tasks_raises(self) -> None:
         """No TaskNode attributes raises WorkflowValidationError."""
@@ -2426,14 +2323,14 @@ class TestWorkflowDefinition:
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
 
-        class EmptyWorkflow(WorkflowDefinition):
+        class EmptyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'empty'
             definition_key = _definition_key('empty_workflow')
             # No TaskNode attributes
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2441,7 +2338,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match='has no TaskNode') as exc_info:
             EmptyWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_NODES
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_NODES
 
     def test_missing_definition_key_raises(self) -> None:
         """WorkflowDefinition must declare an explicit definition_key."""
@@ -2452,13 +2349,13 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class MissingTypeWorkflow(WorkflowDefinition):
+        class MissingTypeWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'missing_type'
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2466,7 +2363,7 @@ class TestWorkflowDefinition:
 
         with pytest.raises(WorkflowValidationError, match="definition_key") as exc_info:
             MissingTypeWorkflow.build(app)
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY
 
     def test_duplicate_task_function_allowed(self) -> None:
         """Same task function can be used multiple times."""
@@ -2477,16 +2374,16 @@ class TestWorkflowDefinition:
 
         fn_fetch = MockTaskWrapper(task_name='fetch')
 
-        class MultiFetchWorkflow(WorkflowDefinition):
+        class MultiFetchWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'multi_fetch'
             definition_key = _definition_key('multi_fetch_workflow')
-            fetch_a = TaskNode(fn=fn_fetch, kwargs={'url': 'url_a'})
-            fetch_b = TaskNode(fn=fn_fetch, kwargs={'url': 'url_b'})
-            fetch_c = TaskNode(fn=fn_fetch, kwargs={'url': 'url_c'})
+            fetch_a = TaskNode(function=fn_fetch, kwargs={'url': 'url_a'})
+            fetch_b = TaskNode(function=fn_fetch, kwargs={'url': 'url_b'})
+            fetch_c = TaskNode(function=fn_fetch, kwargs={'url': 'url_c'})
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2494,34 +2391,34 @@ class TestWorkflowDefinition:
 
         spec = MultiFetchWorkflow.build(app)
 
-        assert len(spec.tasks) == 3
+        assert len(spec.nodes) == 3
         # Each gets unique node_id from attribute name
-        assert spec.tasks[0].node_id == 'fetch_a'
-        assert spec.tasks[1].node_id == 'fetch_b'
-        assert spec.tasks[2].node_id == 'fetch_c'
+        assert spec.nodes[0].node_id == 'fetch_a'
+        assert spec.nodes[1].node_id == 'fetch_b'
+        assert spec.nodes[2].node_id == 'fetch_c'
 
-    def test_workflow_ctx_from_supported(self) -> None:
-        """workflow_ctx_from works in class-based definition."""
+    def test_workflow_context_from_supported(self) -> None:
+        """workflow_context_from works in class-based definition."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
 
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        # fn_c must accept workflow_ctx since audit_node uses workflow_ctx_from
+        # fn_c must accept workflow_context since audit_node uses workflow_context_from
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        # Define nodes outside so we can reference them in waits_for and workflow_ctx_from
-        fetch_node = TaskNode(fn=fn_a)
-        parse_node = TaskNode(fn=fn_b, waits_for=[fetch_node])
-        # audit waits for both fetch and parse so workflow_ctx_from is valid
+        # Define nodes outside so we can reference them in waits_for and workflow_context_from
+        fetch_node = TaskNode(function=fn_a)
+        parse_node = TaskNode(function=fn_b, waits_for=[fetch_node])
+        # audit waits for both fetch and parse so workflow_context_from is valid
         audit_node = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[fetch_node, parse_node],
-            workflow_ctx_from=[fetch_node, parse_node],
+            workflow_context_from=[fetch_node, parse_node],
         )
 
-        class CtxWorkflow(WorkflowDefinition):
+        class CtxWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'ctx_test'
             definition_key = _definition_key('ctx_workflow')
             fetch = fetch_node
@@ -2530,7 +2427,7 @@ class TestWorkflowDefinition:
 
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test'
                 ),
             )
@@ -2538,8 +2435,8 @@ class TestWorkflowDefinition:
 
         spec = CtxWorkflow.build(app)
 
-        assert spec.tasks[2].workflow_ctx_from is not None
-        assert len(spec.tasks[2].workflow_ctx_from) == 2
+        assert spec.nodes[2].workflow_context_from is not None
+        assert len(spec.nodes[2].workflow_context_from) == 2
 
 
 # =============================================================================
@@ -2559,7 +2456,7 @@ class TestWorkflowOutputTypeMismatch:
 
         return Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url='postgresql://test:test@localhost/test',
                 ),
             ),
@@ -2573,7 +2470,7 @@ class TestWorkflowOutputTypeMismatch:
         class IntWorkflow(WorkflowDefinition[int]):
             name = 'int_workflow'
             definition_key = _definition_key('int_workflow')
-            produce = TaskNode(fn=fn_int)
+            produce = TaskNode(function=fn_int)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2589,7 +2486,7 @@ class TestWorkflowOutputTypeMismatch:
         class MismatchWorkflow(WorkflowDefinition[int]):
             name = 'mismatch_workflow'
             definition_key = _definition_key('mismatch_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2597,7 +2494,7 @@ class TestWorkflowOutputTypeMismatch:
             MismatchWorkflow.build(app)
 
         err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert 'int' in err.message
         assert 'str' in err.message
 
@@ -2609,7 +2506,7 @@ class TestWorkflowOutputTypeMismatch:
         class UntypedWorkflow(WorkflowDefinition):
             name = 'untyped_workflow'
             definition_key = _definition_key('untyped_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2625,7 +2522,7 @@ class TestWorkflowOutputTypeMismatch:
         class AnyWorkflow(WorkflowDefinition[Any]):
             name = 'any_workflow'
             definition_key = _definition_key('any_workflow')
-            produce = TaskNode(fn=fn_str)
+            produce = TaskNode(function=fn_str)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2641,58 +2538,81 @@ class TestWorkflowOutputTypeMismatch:
         class NoOutputWorkflow(WorkflowDefinition[int]):
             name = 'no_output_workflow'
             definition_key = _definition_key('no_output_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
             NoOutputWorkflow.build(app)
 
         err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert err.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
         assert 'config.output' in err.message
         assert 'int' in err.message
 
-    def test_none_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[None] may omit config.output."""
+    def test_no_workflow_output_type_allows_outputless_definition(self) -> None:
+        """WorkflowDefinition[NoWorkflowOutput] may omit config.output."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
-        class NoOutputWorkflow(WorkflowDefinition[None]):
+        class NoOutputWorkflow(WorkflowDefinition[NoWorkflowOutput]):
+            name = 'no_workflow_output_workflow'
+            definition_key = _definition_key('no_workflow_output_workflow')
+            task_a = TaskNode(function=fn_a)
+
+        spec = NoOutputWorkflow.build(app)
+        assert spec.output is None
+
+    def test_none_output_type_is_refused_for_an_outputless_definition(self) -> None:
+        """None is a value that a node returns: it does not declare the absence of an output."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoneOutputWorkflow(WorkflowDefinition[None]):
             name = 'none_output_workflow'
             definition_key = _definition_key('none_output_workflow')
-            task_a = TaskNode(fn=fn_a)
-
-        spec = NoOutputWorkflow.build(app)
-        assert spec.output is None
-
-    def test_any_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[Any] may omit config.output as a compatibility escape hatch."""
-        fn_a = MockTaskWrapper(task_name='task_a')
-        app = self._make_app()
-
-        class NoOutputWorkflow(WorkflowDefinition[Any]):
-            name = 'any_outputless_workflow'
-            definition_key = _definition_key('any_outputless_workflow')
-            task_a = TaskNode(fn=fn_a)
-
-        spec = NoOutputWorkflow.build(app)
-        assert spec.output is None
-
-    def test_terminal_results_output_type_requires_explicit_output(self) -> None:
-        """WorkflowTerminalResults is top-level handle behavior, not a subworkflow output."""
-        fn_a = MockTaskWrapper(task_name='task_a')
-        app = self._make_app()
-
-        class NoOutputWorkflow(WorkflowDefinition[WorkflowTerminalResults]):
-            name = 'terminal_results_outputless_workflow'
-            definition_key = _definition_key('terminal_results_outputless_workflow')
-            task_a = TaskNode(fn=fn_a)
+            task_a = TaskNode(function=fn_a)
 
         with pytest.raises(WorkflowValidationError) as exc:
-            NoOutputWorkflow.build(app)
+            NoneOutputWorkflow.build(app)
 
-        err = exc.value
-        assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
-        assert 'config.output' in err.message
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
+
+    def test_any_output_type_is_refused_for_an_outputless_definition(self) -> None:
+        """WorkflowDefinition[Any] without config.output is refused."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class AnyOutputWorkflow(WorkflowDefinition[Any]):
+            name = 'any_outputless_workflow'
+            definition_key = _definition_key('any_outputless_workflow')
+            task_a = TaskNode(function=fn_a)
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            AnyOutputWorkflow.build(app)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'Any' in exc.value.message
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
+
+    def test_no_generic_is_refused_for_an_outputless_definition(self) -> None:
+        """A subclass with no generic parameter and no config.output is refused."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class UndeclaredWorkflow(WorkflowDefinition):  # pyright: ignore[reportMissingTypeArgument]
+            name = 'undeclared_outputless_workflow'
+            definition_key = _definition_key('undeclared_outputless_workflow')
+            task_a = TaskNode(function=fn_a)
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            UndeclaredWorkflow.build(app)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert 'no generic parameter' in exc.value.message
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
 
     def test_subclass_compatible_output_accepted(self) -> None:
         """Subclass of declared type is compatible."""
@@ -2710,7 +2630,7 @@ class TestWorkflowOutputTypeMismatch:
         class SubclassWorkflow(WorkflowDefinition[Base]):
             name = 'subclass_workflow'
             definition_key = _definition_key('subclass_workflow')
-            produce = TaskNode(fn=fn_derived)
+            produce = TaskNode(function=fn_derived)
 
             config = WorkflowDefinitionConfig(output=produce)
 
@@ -2738,7 +2658,7 @@ class TestWorkflowDefinitionConfig:
 
         return Horsies(
             config=AppConfig(
-                broker=PostgresConfig(
+                database=PostgresConfig(
                     database_url=SecretStr('postgresql://test:test@localhost/test'),
                 ),
             ),
@@ -2748,10 +2668,10 @@ class TestWorkflowDefinitionConfig:
         """A class without config gets the default WorkflowDefinitionConfig."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class DefaultWorkflow(WorkflowDefinition[None]):
+        class DefaultWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'default_config'
             definition_key = _definition_key('default_config')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
         spec = DefaultWorkflow.build(self._make_app())
 
@@ -2764,17 +2684,17 @@ class TestWorkflowDefinitionConfig:
         """A subclass without its own config uses the parent's config."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class ParentWorkflow(WorkflowDefinition[None]):
+        class ParentWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'parent_config'
             definition_key = _definition_key('parent_config')
-            fetch = TaskNode(fn=fn_a)
+            fetch = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
 
         class ChildWorkflow(ParentWorkflow):
             name = 'child_inherits_config'
             definition_key = _definition_key('child_inherits_config')
-            other = TaskNode(fn=fn_a)
+            other = TaskNode(function=fn_a)
 
         spec = ChildWorkflow.build(self._make_app())
 
@@ -2790,14 +2710,14 @@ class TestWorkflowDefinitionConfig:
             class OldStyleWorkflow(WorkflowDefinition[None]):
                 name = 'old_style_meta'
                 definition_key = _definition_key('old_style_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
                 class Meta:
                     on_error = OnError.PAUSE
 
             _ = OldStyleWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
         assert "OldStyleWorkflow' defines 'Meta'" in exc_info.value.message
         assert 'config = WorkflowDefinitionConfig(...)' in exc_info.value.message
 
@@ -2812,12 +2732,12 @@ class TestWorkflowDefinitionConfig:
             class NamespaceMetaWorkflow(WorkflowDefinition[None]):
                 name = 'namespace_meta'
                 definition_key = _definition_key('namespace_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
                 Meta = SimpleNamespace(on_error=OnError.PAUSE)
 
             _ = NamespaceMetaWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
 
     def test_meta_from_a_mixin_base_is_refused(self) -> None:
         """A Meta that a non-workflow base class defines is refused too."""
@@ -2832,11 +2752,11 @@ class TestWorkflowDefinitionConfig:
             class MixinWorkflow(OptionsMixin, WorkflowDefinition[None]):
                 name = 'mixin_meta'
                 definition_key = _definition_key('mixin_meta')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
             _ = MixinWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
 
     def test_config_that_is_not_a_definition_config_is_refused(self) -> None:
         """config of another type raises HRS-033 at class creation and names the type."""
@@ -2847,13 +2767,13 @@ class TestWorkflowDefinitionConfig:
             class WrongConfigWorkflow(WorkflowDefinition[None]):
                 name = 'wrong_config'
                 definition_key = _definition_key('wrong_config')
-                fetch = TaskNode(fn=fn_a)
+                fetch = TaskNode(function=fn_a)
 
                 config = {'on_error': OnError.PAUSE}  # type: ignore[assignment]
 
             _ = WrongConfigWorkflow  # not reached: class creation raises
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
         assert "sets 'config' to dict, not WorkflowDefinitionConfig" in exc_info.value.message
 
     def test_config_is_frozen(self) -> None:
@@ -2879,15 +2799,15 @@ class TestMultiErrorWorkflowCollection:
         """Circular DAG collects both 'no roots' and 'cycle' errors."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b)
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b)
         node_a.waits_for = [node_b]
         node_b.waits_for = [node_a]
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='cycle_test', tasks=[node_a, node_b])
+            WorkflowSpec(name='cycle_test', nodes=[node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
         assert 'no root tasks found' in messages
@@ -2898,53 +2818,53 @@ class TestMultiErrorWorkflowCollection:
         fn_root = MockTaskWrapper(task_name='root')
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        root = TaskNode(fn=fn_root)
-        node_a = TaskNode(fn=fn_a, waits_for=[root], join='quorum')  # missing min_success
-        node_b = TaskNode(fn=fn_b, waits_for=[root], join='all', min_success=3)  # min_success on 'all'
+        root = TaskNode(function=fn_root)
+        node_a = TaskNode(function=fn_a, waits_for=[root], join='quorum')  # missing min_success
+        node_b = TaskNode(function=fn_b, waits_for=[root], join='all', min_success=3)  # min_success on 'all'
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='bad_joins', tasks=[root, node_a, node_b])
+            WorkflowSpec(name='bad_joins', nodes=[root, node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
 
     def test_node_id_errors_gate_remaining_validation(self) -> None:
         """Node ID errors prevent subsequent validation from running."""
         fn_a = MockTaskWrapper(task_name='task_a')
         # Explicitly set an invalid node_id
-        node_a = TaskNode(fn=fn_a, node_id='invalid chars!')
+        node_a = TaskNode(function=fn_a, node_id='invalid chars!')
 
         with pytest.raises(WorkflowValidationError, match='invalid characters'):
-            WorkflowSpec(name='bad_id', tasks=[node_a])
+            WorkflowSpec(name='bad_id', nodes=[node_a])
 
     def test_duplicate_node_ids_collected(self) -> None:
         """Multiple duplicate node_id errors are collected."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         fn_c = MockTaskWrapper(task_name='task_c')
-        node_a = TaskNode(fn=fn_a, node_id='shared')
-        node_b = TaskNode(fn=fn_b, node_id='shared')
-        node_c = TaskNode(fn=fn_c, node_id='shared')
+        node_a = TaskNode(function=fn_a, node_id='shared')
+        node_b = TaskNode(function=fn_b, node_id='shared')
+        node_c = TaskNode(function=fn_c, node_id='shared')
 
         with pytest.raises(HorsiesError, match='duplicate node_id'):
-            WorkflowSpec(name='dup_ids', tasks=[node_a, node_b, node_c])
+            WorkflowSpec(name='dup_ids', nodes=[node_a, node_b, node_c])
 
     def test_single_error_preserves_original_type(self) -> None:
         """Single workflow validation error preserves original type."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        node_a = TaskNode(fn=fn_a)
-        node_b = TaskNode(fn=fn_b, waits_for=[node_a])
+        node_a = TaskNode(function=fn_a)
+        node_b = TaskNode(function=fn_b, waits_for=[node_a])
         # args_from ref not in waits_for — single error
         fn_c = MockTaskWrapper(task_name='task_c')
         node_c = TaskNode(
-            fn=fn_c,
+            function=fn_c,
             waits_for=[node_b],
             args_from={'input': node_a},
         )
 
         with pytest.raises(WorkflowValidationError, match='not in waits_for'):
-            WorkflowSpec(name='single_err', tasks=[node_a, node_b, node_c])
+            WorkflowSpec(name='single_err', nodes=[node_a, node_b, node_c])
 
     def test_kwargs_args_from_overlap_does_not_mask_type_errors(self) -> None:
         """A kwargs/args_from overlap must not suppress type-checking of other keys.
@@ -2956,21 +2876,21 @@ class TestMultiErrorWorkflowCollection:
         producer = MockTaskWrapperInt(task_name='producer_int')
         consumer = MockTaskWrapperWithParams(task_name='consumer')
 
-        node_a = TaskNode(fn=producer)
+        node_a = TaskNode(function=producer)
         node_b = TaskNode(
-            fn=consumer,
+            function=consumer,
             waits_for=[node_a],
             kwargs={'required': 42},  # overlaps with args_from key below
-            # 'required' overlaps; 'flag' is bool (not TaskResult) -> type mismatch
+            # 'required' overlaps; 'flag' is bool (not TaskOutcome) -> type mismatch
             args_from={'required': node_a, 'flag': node_a},
         )
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='overlap_no_mask', tasks=[node_a, node_b])
+            WorkflowSpec(name='overlap_no_mask', nodes=[node_a, node_b])
 
-        codes = {e.code for e in exc_info.value.report.errors}
-        assert ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
-        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+        codes = {e.code for e in exc_info.value.report.refusals}
+        assert HorsiesErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
+        assert HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
     def test_non_dependency_args_from_source_does_not_mask_type_errors(self) -> None:
         """A non-dependency args_from source must not suppress type-checking of other keys.
@@ -2983,10 +2903,10 @@ class TestMultiErrorWorkflowCollection:
         orphan = MockTaskWrapperInt(task_name='orphan_int')
         consumer = MockTaskWrapperWithParams(task_name='consumer')
 
-        node_dep = TaskNode(fn=dep)
-        node_orphan = TaskNode(fn=orphan)  # in tasks, but not in consumer.waits_for
+        node_dep = TaskNode(function=dep)
+        node_orphan = TaskNode(function=orphan)  # in tasks, but not in consumer.waits_for
         node_b = TaskNode(
-            fn=consumer,
+            function=consumer,
             waits_for=[node_dep],
             # 'flag' source is a dependency but bool-typed -> type mismatch;
             # 'required' source is the orphan -> WORKFLOW_INVALID_ARGS_FROM
@@ -2994,11 +2914,11 @@ class TestMultiErrorWorkflowCollection:
         )
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='nondep_no_mask', tasks=[node_dep, node_orphan, node_b])
+            WorkflowSpec(name='nondep_no_mask', nodes=[node_dep, node_orphan, node_b])
 
-        codes = {e.code for e in exc_info.value.report.errors}
-        assert ErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
-        assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
+        codes = {e.code for e in exc_info.value.report.refusals}
+        assert HorsiesErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
+        assert HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
 
 # =============================================================================
@@ -3013,7 +2933,7 @@ class TestNodeKey:
     def test_tasknode_key_returns_node_key(self) -> None:
         """TaskNode.key() returns NodeKey with correct node_id."""
         fn = MockTaskWrapper(task_name='task_a')
-        node = TaskNode(fn=fn, node_id='my-node')
+        node = TaskNode(function=fn, node_id='my-node')
 
         key = node.key()
 
@@ -3023,7 +2943,7 @@ class TestNodeKey:
     def test_tasknode_key_raises_when_node_id_none(self) -> None:
         """TaskNode.key() raises WorkflowValidationError if node_id is None."""
         fn = MockTaskWrapper(task_name='task_a')
-        node = TaskNode(fn=fn)
+        node = TaskNode(function=fn)
         # node_id is None by default
 
         with pytest.raises(WorkflowValidationError, match='node_id is not set'):
@@ -3036,11 +2956,11 @@ class TestNodeKey:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_key_test'
             definition_key = _definition_key('child_key_test')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
         key = node.key()
 
@@ -3054,11 +2974,11 @@ class TestNodeKey:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_key_none'
             definition_key = _definition_key('child_key_none')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow)
         # node_id is None by default
 
         with pytest.raises(WorkflowValidationError, match='node_id is not set'):
@@ -3081,37 +3001,37 @@ class TestSubWorkflowNode:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_defaults'
             definition_key = _definition_key('child_defaults')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow)
 
         assert node.args == ()
         assert node.kwargs == {}
         assert node.waits_for == []
         assert node.args_from == {}
-        assert node.workflow_ctx_from is None
+        assert node.workflow_context_from is None
         assert node.join == 'all'
         assert node.min_success is None
-        assert node.allow_failed_deps is False
+        assert node.allow_failed_dependencies is False
         assert node.index is None
         assert node.node_id is None
 
-    def test_name_property(self) -> None:
-        """name property returns workflow_def.name."""
+    def test_workflow_name_property(self) -> None:
+        """workflow_name property returns workflow_definition.name."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'my_child_workflow'
             definition_key = _definition_key('my_child_workflow')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow)
 
-        assert node.name == 'my_child_workflow'
+        assert node.workflow_name == 'my_child_workflow'
 
 
 # =============================================================================
@@ -3128,18 +3048,18 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=42,
-            total_tasks=3,
-            completed_tasks=3,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=3,
+            completed_nodes=3,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3147,17 +3067,17 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary'
             definition_key = _definition_key('child_summary')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
         result = ctx.summary_for(node)
 
         assert result.status == WorkflowStatus.COMPLETED
         assert result.output == 42
-        assert result.total_tasks == 3
+        assert result.total_nodes == 3
 
     def test_summary_for_decodes_pydantic_output(self) -> None:
         """Strict-serde phase 6+: ``summary_for`` decodes the raw output
@@ -3179,18 +3099,18 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=raw_output,
-            total_tasks=1,
-            completed_tasks=1,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=1,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-decode-pydantic',
-            task_index=0,
+            node_index=0,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3198,12 +3118,12 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_pydantic_output'
             definition_key = _definition_key('child_pydantic_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(
-            workflow_def=ChildWorkflow, node_id='sub-node',
+            workflow_definition=ChildWorkflow, node_id='sub-node',
         )
 
         result = ctx.summary_for(node)
@@ -3219,18 +3139,18 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=raw_output,
-            total_tasks=1,
-            completed_tasks=1,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=1,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-any-output',
-            task_index=0,
+            node_index=0,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3238,12 +3158,12 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[Any]):
             name = 'child_any_output'
             definition_key = _definition_key('child_any_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(
-            workflow_def=ChildWorkflow, node_id='sub-node',
+            workflow_definition=ChildWorkflow, node_id='sub-node',
         )
 
         result = ctx.summary_for(node)
@@ -3265,18 +3185,18 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=raw_output,
-            total_tasks=1,
-            completed_tasks=1,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=1,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-no-mutation',
-            task_index=0,
+            node_index=0,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3284,12 +3204,12 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_no_mutation'
             definition_key = _definition_key('child_no_mutation')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(
-            workflow_def=ChildWorkflow, node_id='sub-node',
+            workflow_definition=ChildWorkflow, node_id='sub-node',
         )
 
         decoded = ctx.summary_for(node)
@@ -3311,19 +3231,19 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=1,
-            completed_tasks=0,
-            failed_tasks=1,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=0,
+            failed_nodes=1,
+            skipped_nodes=0,
             error_summary='child failed',
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-none-output',
-            task_index=0,
+            node_index=0,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3331,12 +3251,12 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[ChildOutput]):
             name = 'child_none_output'
             definition_key = _definition_key('child_none_output')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(
-            workflow_def=ChildWorkflow, node_id='sub-node',
+            workflow_definition=ChildWorkflow, node_id='sub-node',
         )
 
         result = ctx.summary_for(node)
@@ -3348,39 +3268,39 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=42,
-            total_tasks=3,
-            completed_tasks=3,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=3,
+            completed_nodes=3,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         dumped = ctx.model_dump()
-        assert dumped['summaries_by_id']['sub-node'] is summary
+        assert dumped['summaries_by_node_id']['sub-node'] is summary
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary_dump'
             definition_key = _definition_key('child_summary_dump')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
         restored = WorkflowContext.model_validate(dumped)
 
         restored_summary = restored.summary_for(node)
         assert restored_summary.status == WorkflowStatus.COMPLETED
         assert restored_summary.output == 42
-        assert restored_summary.total_tasks == 3
+        assert restored_summary.total_nodes == 3
 
     def test_model_dump_json_summaries_raises_not_implemented(self) -> None:
         """Strict-serde phase 7: model_dump(mode='json') drops legacy
@@ -3393,18 +3313,18 @@ class TestWorkflowContextSummary:
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=42,
-            total_tasks=3,
-            completed_tasks=3,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=3,
+            completed_nodes=3,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
@@ -3413,32 +3333,32 @@ class TestWorkflowContextSummary:
         # ``model_dump()`` (python mode) preserves identity — the canonical
         # way callers should access summaries in-process.
         dumped = ctx.model_dump()
-        assert dumped['summaries_by_id']['sub-node'] is summary
+        assert dumped['summaries_by_node_id']['sub-node'] is summary
 
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_summary_json_dump'
             definition_key = _definition_key('child_summary_json_dump')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
         restored = WorkflowContext.model_validate(dumped)
 
         restored_summary = restored.summary_for(node)
         assert restored_summary.status == WorkflowStatus.COMPLETED
         assert restored_summary.output == 42
-        assert restored_summary.total_tasks == 3
+        assert restored_summary.total_nodes == 3
 
     def test_summary_for_raises_on_missing_node_id(self) -> None:
         """summary_for(node) raises RuntimeError if node_id is None."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
+            results_by_node_id={},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3446,24 +3366,25 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_id'
             definition_key = _definition_key('child_no_id')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow)
         # node_id is None
 
         with pytest.raises(RuntimeError, match='node_id is not set'):
             ctx.summary_for(node)
 
     def test_summary_for_raises_on_missing_summary(self) -> None:
-        """summary_for(node) raises KeyError if summary not in context."""
+        """summary_for(node) raises NodeNotInContext if the summary is not in
+        context."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={},
+            results_by_node_id={},
+            summaries_by_node_id={},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3471,32 +3392,33 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_missing'
             definition_key = _definition_key('child_missing')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
-        with pytest.raises(KeyError, match='not in workflow context'):
+        with pytest.raises(NodeNotInContext, match='not in workflow context') as raised:
             ctx.summary_for(node)
+        assert raised.value.code is ContractCode.NODE_NOT_IN_CONTEXT
 
     def test_has_summary_true(self) -> None:
         """has_summary returns True when summary exists."""
         summary = SubWorkflowSummary(
             status=WorkflowStatus.COMPLETED,
             output=1,
-            total_tasks=1,
-            completed_tasks=1,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=1,
+            failed_nodes=0,
+            skipped_nodes=0,
         )
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={'sub-node': summary},
+            results_by_node_id={},
+            summaries_by_node_id={'sub-node': summary},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3504,11 +3426,11 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_has_sum'
             definition_key = _definition_key('child_has_sum')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
         assert ctx.has_summary(node) is True
 
@@ -3516,10 +3438,10 @@ class TestWorkflowContextSummary:
         """has_summary returns False when summary does not exist."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
-            summaries_by_id={},
+            results_by_node_id={},
+            summaries_by_node_id={},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3527,11 +3449,11 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_sum'
             definition_key = _definition_key('child_no_sum')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
         assert ctx.has_summary(node) is False
 
@@ -3539,9 +3461,9 @@ class TestWorkflowContextSummary:
         """has_summary returns False when node_id is None."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
-            task_index=1,
+            node_index=1,
             task_name='consumer',
-            results_by_id={},
+            results_by_node_id={},
         )
 
         fn_a = MockTaskWrapper(task_name='task_a')
@@ -3549,11 +3471,11 @@ class TestWorkflowContextSummary:
         class ChildWorkflow(WorkflowDefinition[int]):
             name = 'child_no_id2'
             definition_key = _definition_key('child_no_id2')
-            child = TaskNode(fn=fn_a)
+            child = TaskNode(function=fn_a)
 
             config = WorkflowDefinitionConfig(output=child)
 
-        node = SubWorkflowNode(workflow_def=ChildWorkflow)
+        node = SubWorkflowNode(workflow_definition=ChildWorkflow)
 
         assert ctx.has_summary(node) is False
 
@@ -3572,23 +3494,23 @@ class TestSubWorkflowSummaryFromJson:
         summary = SubWorkflowSummary.from_json({
             'status': 'COMPLETED',
             'output': 42,
-            'total_tasks': 3,
-            'completed_tasks': 3,
-            'failed_tasks': 0,
-            'skipped_tasks': 0,
+            'total_nodes': 3,
+            'completed_nodes': 3,
+            'failed_nodes': 0,
+            'skipped_nodes': 0,
         })
         assert summary.status == WorkflowStatus.COMPLETED
         assert summary.output == 42
-        assert summary.total_tasks == 3
+        assert summary.total_nodes == 3
 
     def test_valid_status_enum_instance_parsed(self) -> None:
         """An already-typed WorkflowStatus value is accepted as-is."""
         summary = SubWorkflowSummary.from_json({
             'status': WorkflowStatus.FAILED,
-            'total_tasks': 1,
-            'completed_tasks': 0,
-            'failed_tasks': 1,
-            'skipped_tasks': 0,
+            'total_nodes': 1,
+            'completed_nodes': 0,
+            'failed_nodes': 1,
+            'skipped_nodes': 0,
         })
         assert summary.status == WorkflowStatus.FAILED
 
@@ -3597,10 +3519,10 @@ class TestSubWorkflowSummaryFromJson:
         original = SubWorkflowSummary(
             status=WorkflowStatus.PAUSED,
             output={'k': 'v'},
-            total_tasks=2,
-            completed_tasks=1,
-            failed_tasks=0,
-            skipped_tasks=0,
+            total_nodes=2,
+            completed_nodes=1,
+            failed_nodes=0,
+            skipped_nodes=0,
             error_summary='partial',
         )
         payload = original.to_json()
@@ -3611,7 +3533,7 @@ class TestSubWorkflowSummaryFromJson:
         restored = SubWorkflowSummary.from_json(payload)
         assert restored.status == WorkflowStatus.PAUSED
         assert restored.output == {'k': 'v'}
-        assert restored.total_tasks == 2
+        assert restored.total_nodes == 2
         assert restored.error_summary == 'partial'
 
     def test_legacy_dataclass_envelope_no_longer_unwrapped(self) -> None:
@@ -3622,23 +3544,23 @@ class TestSubWorkflowSummaryFromJson:
                 '__dataclass__': True,
                 'module': 'horsies.core.models.workflow.context',
                 'qualname': 'SubWorkflowSummary',
-                'data': {'status': 'PAUSED', 'total_tasks': 2,
-                         'completed_tasks': 1, 'failed_tasks': 0, 'skipped_tasks': 0},
+                'data': {'status': 'PAUSED', 'total_nodes': 2,
+                         'completed_nodes': 1, 'failed_nodes': 0, 'skipped_nodes': 0},
             })
 
     def test_error_summary_string_preserved(self) -> None:
         """A string error_summary is preserved verbatim."""
         summary = SubWorkflowSummary.from_json({
-            'status': 'FAILED', 'total_tasks': 1, 'completed_tasks': 0,
-            'failed_tasks': 1, 'skipped_tasks': 0, 'error_summary': 'boom',
+            'status': 'FAILED', 'total_nodes': 1, 'completed_nodes': 0,
+            'failed_nodes': 1, 'skipped_nodes': 0, 'error_summary': 'boom',
         })
         assert summary.error_summary == 'boom'
 
     def test_error_summary_null_is_none(self) -> None:
         """A missing/null error_summary maps to None."""
         summary = SubWorkflowSummary.from_json({
-            'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
-            'failed_tasks': 0, 'skipped_tasks': 0,
+            'status': 'COMPLETED', 'total_nodes': 1, 'completed_nodes': 1,
+            'failed_nodes': 0, 'skipped_nodes': 0,
         })
         assert summary.error_summary is None
 
@@ -3646,46 +3568,46 @@ class TestSubWorkflowSummaryFromJson:
         """A non-string error_summary is surfaced, not coerced via str()."""
         with pytest.raises(ValueError, match='error_summary must be a string or null'):
             SubWorkflowSummary.from_json({
-                'status': 'FAILED', 'total_tasks': 1, 'completed_tasks': 0,
-                'failed_tasks': 1, 'skipped_tasks': 0, 'error_summary': {'code': 5},
+                'status': 'FAILED', 'total_nodes': 1, 'completed_nodes': 0,
+                'failed_nodes': 1, 'skipped_nodes': 0, 'error_summary': {'code': 5},
             })
 
     def test_missing_count_raises(self) -> None:
         """A missing count is surfaced, not defaulted to 0."""
-        with pytest.raises(ValueError, match='total_tasks must be a non-negative integer'):
+        with pytest.raises(ValueError, match='total_nodes must be a non-negative integer'):
             SubWorkflowSummary.from_json({
-                'status': 'COMPLETED', 'completed_tasks': 0,
-                'failed_tasks': 0, 'skipped_tasks': 0,
+                'status': 'COMPLETED', 'completed_nodes': 0,
+                'failed_nodes': 0, 'skipped_nodes': 0,
             })
 
     def test_non_numeric_count_raises(self) -> None:
         """A non-numeric count is surfaced, not silently coerced to 0."""
-        with pytest.raises(ValueError, match='completed_tasks must be a non-negative integer'):
+        with pytest.raises(ValueError, match='completed_nodes must be a non-negative integer'):
             SubWorkflowSummary.from_json({
-                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 'two',
-                'failed_tasks': 0, 'skipped_tasks': 0,
+                'status': 'COMPLETED', 'total_nodes': 1, 'completed_nodes': 'two',
+                'failed_nodes': 0, 'skipped_nodes': 0,
             })
 
     def test_negative_count_raises(self) -> None:
         """A negative count is rejected."""
-        with pytest.raises(ValueError, match='failed_tasks must be a non-negative integer'):
+        with pytest.raises(ValueError, match='failed_nodes must be a non-negative integer'):
             SubWorkflowSummary.from_json({
-                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
-                'failed_tasks': -1, 'skipped_tasks': 0,
+                'status': 'COMPLETED', 'total_nodes': 1, 'completed_nodes': 1,
+                'failed_nodes': -1, 'skipped_nodes': 0,
             })
 
     def test_bool_count_raises(self) -> None:
         """A bool count (int subclass) is rejected as not a real count."""
-        with pytest.raises(ValueError, match='skipped_tasks must be a non-negative integer'):
+        with pytest.raises(ValueError, match='skipped_nodes must be a non-negative integer'):
             SubWorkflowSummary.from_json({
-                'status': 'COMPLETED', 'total_tasks': 1, 'completed_tasks': 1,
-                'failed_tasks': 0, 'skipped_tasks': True,
+                'status': 'COMPLETED', 'total_nodes': 1, 'completed_nodes': 1,
+                'failed_nodes': 0, 'skipped_nodes': True,
             })
 
     def test_unrecognized_status_string_raises(self) -> None:
         """An invalid status string is surfaced, not coerced to FAILED."""
         with pytest.raises(ValueError, match='unrecognized status'):
-            SubWorkflowSummary.from_json({'status': 'NOT_A_STATUS', 'total_tasks': 1})
+            SubWorkflowSummary.from_json({'status': 'NOT_A_STATUS', 'total_nodes': 1})
 
     def test_non_string_status_raises(self) -> None:
         """A non-string, non-enum status is surfaced, not coerced to FAILED."""
@@ -3695,7 +3617,7 @@ class TestSubWorkflowSummaryFromJson:
     def test_missing_status_raises(self) -> None:
         """A missing status is surfaced, not coerced to FAILED."""
         with pytest.raises(ValueError, match='status must be a status string'):
-            SubWorkflowSummary.from_json({'total_tasks': 1})
+            SubWorkflowSummary.from_json({'total_nodes': 1})
 
     def test_non_dict_payload_raises(self) -> None:
         """A non-dict payload is rejected with a clear error (not AttributeError)."""
@@ -3726,16 +3648,16 @@ class TestEnumIsTerminal:
 
     def test_workflow_task_status_terminal_states(self) -> None:
         """COMPLETED, FAILED, SKIPPED are terminal."""
-        assert WorkflowTaskStatus.COMPLETED.is_terminal is True
-        assert WorkflowTaskStatus.FAILED.is_terminal is True
-        assert WorkflowTaskStatus.SKIPPED.is_terminal is True
+        assert WorkflowNodeStatus.COMPLETED.is_terminal is True
+        assert WorkflowNodeStatus.FAILED.is_terminal is True
+        assert WorkflowNodeStatus.SKIPPED.is_terminal is True
 
     def test_workflow_task_status_non_terminal_states(self) -> None:
         """PENDING, READY, ENQUEUED, RUNNING are not terminal."""
-        assert WorkflowTaskStatus.PENDING.is_terminal is False
-        assert WorkflowTaskStatus.READY.is_terminal is False
-        assert WorkflowTaskStatus.ENQUEUED.is_terminal is False
-        assert WorkflowTaskStatus.RUNNING.is_terminal is False
+        assert WorkflowNodeStatus.PENDING.is_terminal is False
+        assert WorkflowNodeStatus.READY.is_terminal is False
+        assert WorkflowNodeStatus.ENQUEUED.is_terminal is False
+        assert WorkflowNodeStatus.RUNNING.is_terminal is False
 
 
 # =============================================================================
@@ -3751,12 +3673,12 @@ class TestNodeIdLengthValidation:
         """Explicit node_id > 128 characters raises WORKFLOW_INVALID_NODE_ID."""
         fn_a = MockTaskWrapper(task_name='task_a')
         long_id = 'a' * 129
-        node_a = TaskNode(fn=fn_a, node_id=long_id)
+        node_a = TaskNode(function=fn_a, node_id=long_id)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
-            WorkflowSpec(name='long_id', tasks=[node_a])
+            WorkflowSpec(name='long_id', nodes=[node_a])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID
 
 
 # =============================================================================
@@ -3773,7 +3695,7 @@ def _minimal_app() -> Any:
 
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://test:test@localhost/test'),
             ),
         )
@@ -3786,34 +3708,34 @@ class TestTaskNodeOptionValidation:
 
     @pytest.mark.parametrize('priority', [0, 101, -1])
     def test_priority_outside_the_range_is_refused(self, priority: int) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+        node = TaskNode(function=MockTaskWrapper(task_name='rank'), priority=priority)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
-            WorkflowSpec(name='bad_priority', tasks=[node])
+            WorkflowSpec(name='bad_priority', nodes=[node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
         assert f"node 'rank' sets priority={priority}" in exc_info.value.notes
 
     @pytest.mark.parametrize('priority', [1, 100, None])
     def test_priority_inside_the_range_or_unset_is_accepted(
         self, priority: int | None,
     ) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+        node = TaskNode(function=MockTaskWrapper(task_name='rank'), priority=priority)
 
-        spec: WorkflowSpec[Any] = WorkflowSpec(name='good_priority', tasks=[node])
+        spec: WorkflowSpec[Any] = WorkflowSpec(name='good_priority', nodes=[node])
 
-        built = spec.tasks[0]
+        built = spec.nodes[0]
         assert isinstance(built, TaskNode)
         assert built.priority == priority
 
     def test_naive_good_until_is_refused(self) -> None:
         naive = datetime(2030, 1, 1, 12, 0)
-        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=naive)
+        node = TaskNode(function=MockTaskWrapper(task_name='expire'), good_until=naive)
 
         with pytest.raises(WorkflowValidationError) as exc_info:
-            WorkflowSpec(name='naive_deadline', tasks=[node])
+            WorkflowSpec(name='naive_deadline', nodes=[node])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
         assert "node 'expire'" in exc_info.value.notes[0]
 
     @pytest.mark.parametrize(
@@ -3828,40 +3750,40 @@ class TestTaskNodeOptionValidation:
     def test_aware_or_unset_good_until_is_accepted(
         self, good_until: datetime | None,
     ) -> None:
-        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=good_until)
+        node = TaskNode(function=MockTaskWrapper(task_name='expire'), good_until=good_until)
 
-        spec: WorkflowSpec[Any] = WorkflowSpec(name='aware_deadline', tasks=[node])
+        spec: WorkflowSpec[Any] = WorkflowSpec(name='aware_deadline', nodes=[node])
 
-        built = spec.tasks[0]
+        built = spec.nodes[0]
         assert isinstance(built, TaskNode)
         assert built.good_until == good_until
 
     def test_a_node_that_is_not_a_root_is_checked(self) -> None:
-        root = TaskNode(fn=MockTaskWrapper(task_name='root'))
+        root = TaskNode(function=MockTaskWrapper(task_name='root'))
         child = TaskNode(
-            fn=MockTaskWrapper(task_name='child'), waits_for=[root], priority=0,
+            function=MockTaskWrapper(task_name='child'), waits_for=[root], priority=0,
         )
 
         with pytest.raises(WorkflowValidationError) as exc_info:
-            WorkflowSpec(name='child_priority', tasks=[root, child])
+            WorkflowSpec(name='child_priority', nodes=[root, child])
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
         assert "node 'child' sets priority=0" in exc_info.value.notes
 
     def test_both_rules_on_one_node_are_reported_together(self) -> None:
         node = TaskNode(
-            fn=MockTaskWrapper(task_name='both'),
+            function=MockTaskWrapper(task_name='both'),
             priority=101,
             good_until=datetime(2030, 1, 1),
         )
 
         with pytest.raises(MultipleValidationErrors) as exc_info:
-            WorkflowSpec(name='both_rules', tasks=[node])
+            WorkflowSpec(name='both_rules', nodes=[node])
 
-        codes = [error.code for error in exc_info.value.report.errors]
+        codes = [error.code for error in exc_info.value.report.refusals]
         assert codes == [
-            ErrorCode.WORKFLOW_INVALID_PRIORITY,
-            ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
+            HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY,
+            HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
         ]
 
     def test_app_workflow_refuses_a_node_priority_outside_the_range(self) -> None:
@@ -3870,24 +3792,24 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(WorkflowValidationError) as exc_info:
             _minimal_app().workflow(
                 name='app_bad_priority',
-                tasks=[fn.node(priority=0)()],
+                nodes=[fn.node(priority=0)()],
                 definition_key=_definition_key('app_bad_priority'),
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_PRIORITY
 
     def test_definition_build_refuses_a_naive_good_until(self) -> None:
         fn = MockTaskWrapper(task_name='expire')
 
-        class NaiveDeadlineWorkflow(WorkflowDefinition[None]):
+        class NaiveDeadlineWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'definition_naive_deadline'
             definition_key = _definition_key('definition_naive_deadline')
-            expire = TaskNode(fn=fn, good_until=datetime(2030, 1, 1))
+            expire = TaskNode(function=fn, good_until=datetime(2030, 1, 1))
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             NaiveDeadlineWorkflow.build(_minimal_app())
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
 
 
 # =============================================================================
@@ -3904,8 +3826,8 @@ class TestSuccessPolicyOptionalValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_external = MockTaskWrapper(task_name='external')
 
-        node_a = TaskNode(fn=fn_a)
-        node_external = TaskNode(fn=fn_external)
+        node_a = TaskNode(function=fn_a)
+        node_external = TaskNode(function=fn_external)
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[node_a])],
@@ -3914,45 +3836,45 @@ class TestSuccessPolicyOptionalValidation:
 
         with pytest.raises(WorkflowValidationError, match='not in workflow') as exc_info:
             WorkflowSpec(
-                name='bad_optional', tasks=[node_a], success_policy=policy,
+                name='bad_optional', nodes=[node_a], success_policy=policy,
             )
 
-        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert exc_info.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 # =============================================================================
-# Slugify Tests
+# node_id_from_text Tests
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestSlugify:
-    """Tests for slugify() function and workflow name handling."""
+class TestNodeIdFromText:
+    """Tests for node_id_from_text() function and workflow name handling."""
 
     def test_replaces_spaces_with_underscores(self) -> None:
-        assert slugify('Hello World') == 'Hello_World'
-        assert slugify('My Workflow Name') == 'My_Workflow_Name'
+        assert node_id_from_text('Hello World') == 'Hello_World'
+        assert node_id_from_text('My Workflow Name') == 'My_Workflow_Name'
 
     def test_preserves_valid_characters(self) -> None:
-        assert slugify('task:v2.0') == 'task:v2.0'
-        assert slugify('my-task-name') == 'my-task-name'
-        assert slugify('prefix.suffix') == 'prefix.suffix'
+        assert node_id_from_text('task:v2.0') == 'task:v2.0'
+        assert node_id_from_text('my-task-name') == 'my-task-name'
+        assert node_id_from_text('prefix.suffix') == 'prefix.suffix'
 
     def test_removes_invalid_characters(self) -> None:
-        assert slugify('Hello!World') == 'HelloWorld'
-        assert slugify('test@#$%chars') == 'testchars'
-        assert slugify('parentheses(removed)') == 'parenthesesremoved'
+        assert node_id_from_text('Hello!World') == 'HelloWorld'
+        assert node_id_from_text('test@#$%chars') == 'testchars'
+        assert node_id_from_text('parentheses(removed)') == 'parenthesesremoved'
 
     def test_handles_mixed_input(self) -> None:
-        assert slugify('My App: v2.0!') == 'My_App:_v2.0'
-        assert slugify('Company Name (Inc.)') == 'Company_Name_Inc.'
+        assert node_id_from_text('My App: v2.0!') == 'My_App:_v2.0'
+        assert node_id_from_text('Company Name (Inc.)') == 'Company_Name_Inc.'
 
     def test_returns_underscore_for_empty_result(self) -> None:
-        assert slugify('!@#$%') == '_'
-        assert slugify('') == '_'
+        assert node_id_from_text('!@#$%') == '_'
+        assert node_id_from_text('') == '_'
 
     def test_output_matches_node_id_pattern(self) -> None:
-        """Slugified output always matches NODE_ID_PATTERN."""
+        """The output of node_id_from_text always matches NODE_ID_PATTERN."""
         test_inputs = [
             'Hello World',
             'My Company Name GmbH',
@@ -3961,9 +3883,9 @@ class TestSlugify:
             'mixed Input-with_stuff.here',
         ]
         for input_str in test_inputs:
-            result = slugify(input_str)
+            result = node_id_from_text(input_str)
             assert NODE_ID_PATTERN.match(result) is not None, (
-                f'slugify({input_str!r}) = {result!r} does not match NODE_ID_PATTERN'
+                f'node_id_from_text({input_str!r}) = {result!r} does not match NODE_ID_PATTERN'
             )
 
 

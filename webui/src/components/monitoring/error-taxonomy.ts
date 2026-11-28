@@ -1,6 +1,6 @@
 // Maps horsies error-code families to tokens + human labels, so the monitor can
 // differentiate *why* a task failed: infra vs a code/contract bug vs a transient
-// retrieval state vs a terminal lifecycle outcome vs a business-domain error the
+// retrieval state vs a terminal lifecycle outcome vs a custom code that the
 // task itself returned. Categories come from the backend; this is display only.
 
 import type { ErrorCategory } from '@/types/tasks';
@@ -36,10 +36,10 @@ const META: Record<ErrorCategory, CategoryMeta> = {
     label: 'Lifecycle',
     blurb: 'Terminal lifecycle outcome — cancelled, expired, timed out, paused.',
   },
-  DOMAIN: {
+  CUSTOM: {
     colorVar: 'var(--muted-foreground)',
-    label: 'Domain',
-    blurb: 'A business error the task itself returned (user-defined code).',
+    label: 'Custom',
+    blurb: 'A code that the task itself returned (a custom code).',
   },
 };
 
@@ -49,7 +49,7 @@ export const ERROR_CATEGORIES: ErrorCategory[] = [
   'CONTRACT',
   'RETRIEVAL',
   'OUTCOME',
-  'DOMAIN',
+  'CUSTOM',
 ];
 
 export const errorCategoryColorVar = (category: ErrorCategory): string =>

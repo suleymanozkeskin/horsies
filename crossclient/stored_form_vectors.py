@@ -20,6 +20,7 @@ decimal text, so that a reader of the file never rounds one. The type names:
 - ``str``: a JSON string.
 - ``datetime_utc``, ``datetime_offset``, ``datetime_naive``: ISO 8601 text.
 - ``date``: ISO 8601 date text.
+- ``time``: ISO 8601 time of day text, with no offset.
 - ``uuid``: hyphenated UUID text.
 - ``decimal``: decimal text.
 - ``bytes``: the bytes as UTF-8 text.
@@ -39,6 +40,10 @@ A task error is written as ``{"error_code": {"built_in": <name>} | {"user":
 {"id": <UUID text>, "summary": <the summary's fields>}`` for a sub-workflow
 error.
 
+A row's marks for another client (``rust_cannot_express``, ``rust_drift``,
+``typescript_cannot_express``, ``typescript_drift``) are not read here: Python's
+text is the reference, so every row is a Python case.
+
 This module is pure. It does no I/O but in ``load_form``.
 """
 
@@ -57,8 +62,8 @@ from pydantic import BaseModel, ConfigDict
 from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
     BuiltInTaskCode,
-    FlattenedException,
-    SubWorkflowError,
+    ExceptionRecord,
+    SubWorkflowFailure,
     TaskError,
 )
 from horsies.core.models.workflow import SubWorkflowSummary, WorkflowStatus
@@ -154,6 +159,8 @@ def annotation_of(type_name: str) -> object:
             return dt.datetime
         case 'date':
             return dt.date
+        case 'time':
+            return dt.time
         case 'uuid':
             return UUID
         case 'decimal':
@@ -198,6 +205,8 @@ def value_of(type_name: str, notation: Notation) -> object:
             return _datetime(notation)
         case 'date':
             return dt.date.fromisoformat(_decimal_text(notation))
+        case 'time':
+            return dt.time.fromisoformat(_decimal_text(notation))
         case 'uuid':
             return UUID(_decimal_text(notation))
         case 'decimal':
@@ -251,11 +260,11 @@ def _error_code(notation: object) -> BuiltInTaskCode | str:
             raise AssertionError(f'unknown error code notation {other!r}')
 
 
-def _exception(notation: object) -> FlattenedException | None:
+def _exception(notation: object) -> ExceptionRecord | None:
     if notation is None:
         return None
     fields = _members(notation, 'exception')
-    return FlattenedException(
+    return ExceptionRecord(
         type=text_of(fields, 'type'),
         module=text_of(fields, 'module'),
         message=text_of(fields, 'message'),
@@ -281,16 +290,16 @@ def _summary(notation: object) -> SubWorkflowSummary[object]:
     return SubWorkflowSummary(
         status=WorkflowStatus(text_of(fields, 'status')),
         output=fields['output'],
-        total_tasks=_count(fields, 'total_tasks'),
-        completed_tasks=_count(fields, 'completed_tasks'),
-        failed_tasks=_count(fields, 'failed_tasks'),
-        skipped_tasks=_count(fields, 'skipped_tasks'),
+        total_nodes=_count(fields, 'total_nodes'),
+        completed_nodes=_count(fields, 'completed_nodes'),
+        failed_nodes=_count(fields, 'failed_nodes'),
+        skipped_nodes=_count(fields, 'skipped_nodes'),
         error_summary=_optional_text(fields, 'error_summary'),
     )
 
 
 def task_error_of(notation: object) -> TaskError:
-    """The ``TaskError`` (or ``SubWorkflowError``) of a task error notation."""
+    """The ``TaskError`` (or ``SubWorkflowFailure``) of a task error notation."""
     fields = _members(notation, 'error')
     code = _error_code(fields['error_code'])
     message = _optional_text(fields, 'message')
@@ -298,15 +307,15 @@ def task_error_of(notation: object) -> TaskError:
     match fields.get('sub_workflow'):
         case None:
             return TaskError(
-                error_code=code,
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,
             )
         case sub_workflow:
             sub = _members(sub_workflow, 'sub_workflow')
-            return SubWorkflowError(
-                error_code=code,
+            return SubWorkflowFailure(
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,

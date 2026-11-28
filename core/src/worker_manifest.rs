@@ -10,6 +10,8 @@
 //! start. The client resolves its
 //! user config (Pydantic in Python) into it; the core picks and checks the
 //! profile ([`select_worker_profile`]), so one resolver serves every client.
+//! A client that holds the core's `AppConfig` builds the sections that the
+//! config gives with [`config_sections`].
 //!
 //! As the producer manifest ([`crate::manifest`]), it holds values only: no
 //! field has a default, and an unknown field is refused. A manifest that the
@@ -31,7 +33,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
-    select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
+    input, select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
     ExecutorThreadsSetting, IsolatedChildCount, IsolatedChildren, IsolatedPool, IsolatedRecycle,
     IsolatedSetting, MemoryLimitSetting, MemoryMb, ParentCpu, ParentPool, PoolConnectionCount,
     PoolMinSize, PoolSize, PoolSizeSetting, ProfileRequest, ProfileSelectionRefused,
@@ -47,13 +49,16 @@ use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
-use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
+use crate::manifest_schema::{IntBound, ItemType, ManifestValue, ValueType};
 use crate::telemetry::labels::DeclaredSource;
 use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};
 
 /// The one worker manifest version this core reads.
 pub const WORKER_MANIFEST_VERSION: u32 = 1;
+
+/// The shortest drain timeout of the manifest, in milliseconds.
+pub const MIN_DRAIN_TIMEOUT_MS: u64 = 1;
 
 /// The longest drain timeout, in milliseconds: [`MAX_DRAIN_TIMEOUT`].
 pub const MAX_DRAIN_TIMEOUT_MS: u64 = MAX_DRAIN_TIMEOUT.as_millis() as u64;
@@ -73,7 +78,7 @@ macro_rules! bounded_count {
         pub struct $name(pub $inner);
 
         impl ManifestValue for $name {
-            const PYTHON: PythonValue = PythonValue::Int(IntBound {
+            const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
                 name: $bound,
                 min: <$inner>::SMALLEST.get() as u64,
                 max: <$inner>::LARGEST.get() as u64,
@@ -142,8 +147,13 @@ bounded_count!(
     Milliseconds(BoundedU32<1, { u32::MAX }>) as "MILLISECONDS"
 );
 
+mod config_sections;
 mod sections;
 
+pub use config_sections::{
+    config_sections, ConfigField, ConfigSections, CustomQueueField, FieldSegment,
+    ManifestBoundRefused, PayloadField, RecoveryField, ResilienceField, RetentionField,
+};
 pub use sections::{
     AuditIntervalMs, CheckIntervalMs, ClaimedStaleThresholdMs, DeleteBatchSize,
     HeartbeatIntervalMs, HeartbeatLeafHorizonHours, HistoryLeafHorizonDays,
@@ -191,7 +201,7 @@ impl From<WorkerManifestVersion> for u32 {
 }
 
 impl ManifestValue for WorkerManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: WORKER_MANIFEST_VERSION as u64,
         max: WORKER_MANIFEST_VERSION as u64,
@@ -199,7 +209,7 @@ impl ManifestValue for WorkerManifestVersion {
 }
 
 /// How long a stopping worker waits for running tasks, in milliseconds:
-/// 1 to [`MAX_DRAIN_TIMEOUT_MS`] (Python `WorkerProfile.drain_timeout`,
+/// [`MIN_DRAIN_TIMEOUT_MS`] to [`MAX_DRAIN_TIMEOUT_MS`] (Python `WorkerProfile.drain_timeout`,
 /// above 0 and at most 24 hours).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
@@ -227,9 +237,10 @@ impl TryFrom<u64> for DrainTimeoutMs {
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            1..=MAX_DRAIN_TIMEOUT_MS => Ok(Self(value)),
+            MIN_DRAIN_TIMEOUT_MS..=MAX_DRAIN_TIMEOUT_MS => Ok(Self(value)),
             _ => Err(format!(
-                "a drain timeout must be from 1 to {MAX_DRAIN_TIMEOUT_MS} milliseconds"
+                "a drain timeout must be from {MIN_DRAIN_TIMEOUT_MS} to {MAX_DRAIN_TIMEOUT_MS} \
+milliseconds"
             )),
         }
     }
@@ -242,9 +253,9 @@ impl From<DrainTimeoutMs> for u64 {
 }
 
 impl ManifestValue for DrainTimeoutMs {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "DRAIN_TIMEOUT_MS",
-        min: 1,
+        min: MIN_DRAIN_TIMEOUT_MS,
         max: MAX_DRAIN_TIMEOUT_MS,
     });
 }
@@ -324,7 +335,7 @@ impl From<HandlerNameText> for String {
 }
 
 impl ManifestValue for HandlerNameText {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// One event handler of the app.
@@ -334,8 +345,7 @@ impl ManifestValue for HandlerNameText {
 #[serde(deny_unknown_fields)]
 pub struct HandlerManifest {
     /// The name of the handler: the value of the `handler` label of
-    /// `horsies.telemetry.handler.errors` and
-    /// `horsies.telemetry.handler.dropped`. Each name is once in the
+    /// the handler errors and handler dropped metrics. Each name is once in the
     /// manifest.
     pub name: HandlerNameText,
     /// The one event type that the handler takes.
@@ -398,7 +408,7 @@ impl From<HandlerList> for Vec<HandlerManifest> {
 }
 
 impl ManifestValue for HandlerList {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Named("HandlerManifest"));
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Named("HandlerManifest"));
 }
 
 /// The event handlers that the app registered.
@@ -466,7 +476,7 @@ impl MetricsEndpoint {
 pub struct TaskManifest {
     /// How a worker runs the task.
     pub execution: Execution,
-    /// The user error codes that the task declares, each once: the values
+    /// The custom error codes that the task declares, each once: the values
     /// of its `error_code` metric label besides the built-in codes and
     /// `undeclared` (`error_code_label`). Empty when it declares none. The
     /// parser refuses a code that fails the code-text rule, the name of a
@@ -476,7 +486,7 @@ pub struct TaskManifest {
 
 /// The declared codes of a task are a tuple of code texts in Python.
 impl ManifestValue for DeclaredErrorCodes {
-    const PYTHON: PythonValue = PythonValue::List(PythonItem::Str);
+    const VALUE_TYPE: ValueType = ValueType::List(ItemType::Str);
 }
 
 /// The connection settings of a worker. The pool of the worker process
@@ -500,15 +510,13 @@ pub struct WorkerDatabaseManifest {
     /// (`PostgresConfig.worker_pool_pre_ping`).
     pub worker_pool_pre_ping: bool,
     /// The longest a checkout waits for a free connection; 0 does not wait.
-    pub pool_timeout: WholeSeconds,
+    pub pool_timeout_seconds: WholeSeconds,
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
-    /// its three values).
+    /// TCP keepalives of every core connection.
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python
-    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    /// TCP user timeout of every core connection.
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -595,7 +603,7 @@ pub struct IsolatedPoolManifest {
     /// The most connections of the pool.
     pub max_size: ChildPoolConnections,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The connection pool that each shared child opens. Its seats share it.
@@ -608,7 +616,7 @@ pub struct SharedPoolManifest {
     pub min_size: ChildPoolMinSize,
     pub max_size: PoolMaxSize,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The isolated children of a profile.
@@ -704,7 +712,7 @@ pub enum Preload {
     NoPreload,
 }
 
-/// The settings of one worker (Python `WorkerProfile`), every value given.
+/// The settings of one worker, every value given.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -734,7 +742,7 @@ pub enum QueueConcurrency {
     NoLimit,
 }
 
-/// One custom queue of the app (Python `CustomQueueConfig`).
+/// One custom queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -745,7 +753,7 @@ pub struct CustomQueueManifest {
     pub max_concurrency: QueueConcurrency,
 }
 
-/// The queues of the app (Python `AppConfig.queue_mode`). A worker serves
+/// The queues of the app. A worker serves
 /// every queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
@@ -758,7 +766,7 @@ pub enum Queues {
     Default,
 }
 
-/// The lease of a claim (Python `AppConfig.claim_lease_ms`).
+/// The lease of a claim.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -770,7 +778,7 @@ pub enum ClaimLease {
     Milliseconds { ms: Milliseconds },
 }
 
-/// The most RUNNING tasks of the cluster (Python `AppConfig.cluster_wide_cap`).
+/// The most RUNNING tasks of the cluster.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -845,11 +853,11 @@ pub enum ChildProgram {
         parent_sys_path: Vec<String>,
         parent_argv: Vec<String>,
     },
-    /// The worker binary in child mode; its tasks are compiled in.
-    Rust,
+    /// The app program started again in child mode; its tasks are compiled in.
+    Host,
 }
 
-/// The log level of the worker and its children (`horsies worker --loglevel`).
+/// The log level of the worker and its children (`horsies worker --log-level`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -913,6 +921,15 @@ impl WorkerManifest {
             .collect()
     }
 
+    /// Every profile of the manifest in the config form, by name: the form
+    /// that `AppConfig.worker_profiles` holds, with the same values. Pure.
+    pub fn config_profiles(&self) -> BTreeMap<String, input::WorkerProfile> {
+        self.profile_set()
+            .into_iter()
+            .map(|(name, profile)| (name, input::WorkerProfile::from(profile)))
+            .collect()
+    }
+
     /// The profile that the worker runs: the profile set is checked as
     /// AppConfig validation checks it, then the request picks one
     /// ([`select_worker_profile`]). Pure.
@@ -942,13 +959,15 @@ impl WorkerManifest {
     /// Pure.
     pub fn app_broker_config(&self, selected: &SelectedProfile) -> PostgresConfig {
         let database = &self.database;
-        let session_database_url = match &database.session_database {
-            SessionDatabase::SameAsDatabaseUrl => None,
-            SessionDatabase::Separate { url } => Some(url.expose().to_owned()),
+        let session_database = match &database.session_database {
+            SessionDatabase::SameAsDatabaseUrl => crate::core::SessionDatabase::SameAsDatabaseUrl,
+            SessionDatabase::Separate { url } => crate::core::SessionDatabase::Separate {
+                url: url.expose().to_owned(),
+            },
         };
         PostgresConfig {
             database_url: database.database_url.expose().to_owned(),
-            session_database_url,
+            session_database,
             pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
             pool_pre_ping: database.pool_pre_ping,
             worker_pool_pre_ping: database.worker_pool_pre_ping,
@@ -956,11 +975,11 @@ impl WorkerManifest {
             pool_size: selected.profile.resolved_parent_pool().get(),
             max_overflow: 0,
             retain_rerun_input_default: self.send.retain_rerun_input_default,
-            pool_timeout: database.pool_timeout.get(),
+            pool_timeout_seconds: database.pool_timeout_seconds.get(),
             pool_recycle: database.pool_recycle,
             echo: database.echo,
-            tcp_keepalives: database.tcp_keepalives,
-            tcp_user_timeout: database.tcp_user_timeout,
+            tcp_keepalives: database.tcp_keepalives.into(),
+            tcp_user_timeout: database.tcp_user_timeout.into(),
         }
     }
 }
@@ -1019,7 +1038,7 @@ impl SharedPoolManifest {
         SharedPool {
             min_size: self.min_size.0,
             max_size: self.max_size.setting(),
-            check: self.check,
+            pre_ping: self.pre_ping,
         }
     }
 }
@@ -1041,7 +1060,7 @@ impl Isolated {
                 pool: IsolatedPool {
                     min_size: pool.min_size.0,
                     max_size: PoolSize::new(pool.max_size.0),
-                    check: pool.check,
+                    pre_ping: pool.pre_ping,
                 },
                 task_send_pool: PoolSize::new(task_send_pool.0),
             }),

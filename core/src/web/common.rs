@@ -1,14 +1,16 @@
 //! Shared HTTP response and query parsing rules.
 
+use std::borrow::Cow;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-use crate::broker::BrokerOperationError;
+use crate::broker::DatabaseOperationError;
 use crate::db::Transience;
 use crate::monitoring::{
-    database_failure_status, ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection,
+    database_failure_status, ErrorCategory, MonitoringQueryError, PageRefused, SortDirection,
     TaskGroupBy, TaskSortField,
 };
 use crate::TaskStatus;
@@ -49,7 +51,7 @@ pub(crate) enum ApiError {
 pub(crate) struct ValidationIssue {
     #[serde(rename = "type")]
     error_type: &'static str,
-    loc: Vec<&'static str>,
+    loc: Vec<Cow<'static, str>>,
     msg: String,
     input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,7 +87,7 @@ impl ApiError {
     ) -> Self {
         Self::Validation(vec![ValidationIssue {
             error_type,
-            loc: vec!["query", field],
+            loc: vec!["query".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: None,
@@ -104,7 +106,7 @@ impl ApiError {
         context.insert(context_key.to_owned(), context_value.into());
         Self::Validation(vec![ValidationIssue {
             error_type,
-            loc: vec!["query", field],
+            loc: vec!["query".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: Some(serde_json::Value::Object(context)),
@@ -120,7 +122,7 @@ impl ApiError {
     ) -> ValidationIssue {
         ValidationIssue {
             error_type,
-            loc: vec!["path", field],
+            loc: vec!["path".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: None,
@@ -130,12 +132,87 @@ impl ApiError {
     pub(crate) fn body_validation(message: impl Into<String>, input: serde_json::Value) -> Self {
         Self::Validation(vec![ValidationIssue {
             error_type: "value_error",
-            loc: vec!["body"],
+            loc: vec!["body".into()],
             msg: message.into(),
             input,
             ctx: None,
         }])
     }
+
+    /// A key of the body object that the body type does not declare:
+    /// pydantic's `extra_forbidden` issue at `["body", key]`, with the value
+    /// of the key as `input`. The message and `ctx.known_keys` name the keys
+    /// that the body type declares, in declaration order; `[]` when it
+    /// declares none.
+    pub(crate) fn unknown_body_key(
+        key: String,
+        value: serde_json::Value,
+        known_keys: &'static [&'static str],
+    ) -> Self {
+        Self::unknown_key(UnknownKeyPlace::Body, key, value, known_keys)
+    }
+
+    /// A query parameter that the route does not declare: the same
+    /// `extra_forbidden` issue as [`Self::unknown_body_key`], at
+    /// `["query", name]`, with the value of the first occurrence of the
+    /// parameter as `input`. The message names the parameter and the
+    /// parameters that the route declares; `ctx.known_keys` lists them in
+    /// declaration order.
+    pub(crate) fn unknown_query_parameter(
+        name: String,
+        value: String,
+        known_parameters: &'static [&'static str],
+    ) -> Self {
+        Self::unknown_key(
+            UnknownKeyPlace::Query,
+            name,
+            serde_json::Value::String(value),
+            known_parameters,
+        )
+    }
+
+    fn unknown_key(
+        place: UnknownKeyPlace,
+        key: String,
+        value: serde_json::Value,
+        known_keys: &'static [&'static str],
+    ) -> Self {
+        let known = match known_keys {
+            [] => "none".to_owned(),
+            keys => keys
+                .iter()
+                .copied()
+                .map(json_quoted)
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        let (location, unknown_noun, known_noun) = match place {
+            UnknownKeyPlace::Body => ("body", "key", "keys"),
+            UnknownKeyPlace::Query => ("query", "parameter", "parameters"),
+        };
+        Self::Validation(vec![ValidationIssue {
+            error_type: "extra_forbidden",
+            msg: format!(
+                "Unknown {unknown_noun} {}. Known {known_noun}: {known}.",
+                json_quoted(&key)
+            ),
+            loc: vec![location.into(), key.into()],
+            input: value,
+            ctx: Some(serde_json::json!({ "known_keys": known_keys })),
+        }])
+    }
+}
+
+/// Where a refused unknown key was read.
+#[derive(Debug, Clone, Copy)]
+enum UnknownKeyPlace {
+    Body,
+    Query,
+}
+
+/// `text` as a JSON string, with its quotes.
+fn json_quoted(text: &str) -> String {
+    serde_json::Value::from(text).to_string()
 }
 
 impl IntoResponse for ApiError {
@@ -183,12 +260,38 @@ impl QueryValues {
             .collect()
     }
 
+    /// The first parameter, in query order, whose name is not in `known`,
+    /// with its value.
+    fn first_unknown(&self, known: &[&str]) -> Option<(&str, &str)> {
+        self.0
+            .iter()
+            .find(|(key, _)| !known.contains(&key.as_str()))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     pub(crate) fn last(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
             .rev()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Refuse the first query parameter, in query order, that the route does not
+/// declare with 422 `extra_forbidden` ([`ApiError::unknown_query_parameter`]).
+/// A route runs it before it reads any parameter.
+pub(crate) fn refuse_unknown_parameters(
+    values: &QueryValues,
+    known_parameters: &'static [&'static str],
+) -> Result<(), ApiError> {
+    match values.first_unknown(known_parameters) {
+        None => Ok(()),
+        Some((name, value)) => Err(ApiError::unknown_query_parameter(
+            name.to_owned(),
+            value.to_owned(),
+            known_parameters,
+        )),
     }
 }
 
@@ -335,7 +438,7 @@ pub(crate) fn parse_error_categories(values: Vec<String>) -> Result<Vec<ErrorCat
             "CONTRACT" => Ok(ErrorCategory::Contract),
             "RETRIEVAL" => Ok(ErrorCategory::Retrieval),
             "OUTCOME" => Ok(ErrorCategory::Outcome),
-            "DOMAIN" => Ok(ErrorCategory::Domain),
+            "CUSTOM" => Ok(ErrorCategory::Custom),
             _ => Err(ApiError::bad_request(format!(
                 "Unknown error category '{value}'."
             ))),
@@ -343,7 +446,7 @@ pub(crate) fn parse_error_categories(values: Vec<String>) -> Result<Vec<ErrorCat
         .collect()
 }
 
-pub(crate) fn parse_sort_by(value: &str) -> Result<TaskSortField, ApiError> {
+pub(crate) fn parse_sort_field(value: &str) -> Result<TaskSortField, ApiError> {
     match value {
         "enqueued_at" => Ok(TaskSortField::EnqueuedAt),
         "started_at" => Ok(TaskSortField::StartedAt),
@@ -351,26 +454,28 @@ pub(crate) fn parse_sort_by(value: &str) -> Result<TaskSortField, ApiError> {
         "failed_at" => Ok(TaskSortField::FailedAt),
         "status" => Ok(TaskSortField::Status),
         "task_name" => Ok(TaskSortField::TaskName),
-        "queue_name" => Ok(TaskSortField::QueueName),
+        "queue" => Ok(TaskSortField::Queue),
         "priority" => Ok(TaskSortField::Priority),
         "retry_count" => Ok(TaskSortField::RetryCount),
-        "queue_s" => Ok(TaskSortField::QueueSeconds),
-        "exec_s" => Ok(TaskSortField::ExecutionSeconds),
-        _ => Err(ApiError::bad_request(format!("Unknown sort_by '{value}'."))),
+        "queue_seconds" => Ok(TaskSortField::QueueSeconds),
+        "execution_seconds" => Ok(TaskSortField::ExecutionSeconds),
+        _ => Err(ApiError::bad_request(format!(
+            "Unknown sort_field '{value}'."
+        ))),
     }
 }
 
 pub(crate) fn parse_sort_direction(value: &str) -> Result<SortDirection, ApiError> {
     match value {
-        "asc" => Ok(SortDirection::Ascending),
-        "desc" => Ok(SortDirection::Descending),
+        "ASCENDING" => Ok(SortDirection::Ascending),
+        "DESCENDING" => Ok(SortDirection::Descending),
         _ => Err(ApiError::query_constraint(
-            "sort_dir",
+            "sort_direction",
             "literal_error",
-            "Input should be 'asc' or 'desc'",
+            "Input should be 'ASCENDING' or 'DESCENDING'",
             value,
             "expected",
-            "'asc' or 'desc'",
+            "'ASCENDING' or 'DESCENDING'",
         )),
     }
 }
@@ -394,7 +499,7 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
 pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiError {
     let detail = format!("{surface} query failed: {}", error.message());
     match error {
-        MonitoringQueryError::DbOperationFailed { retryable, .. } => {
+        MonitoringQueryError::DatabaseOperationFailed { retryable, .. } => {
             ApiError::database_failed(Transience::of_retryable(*retryable), detail)
         }
         MonitoringQueryError::HistoryContractViolation { .. } => {
@@ -405,10 +510,10 @@ pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiEr
 
 /// Map a failed worker read of the broker (`subject`, for example `Worker
 /// state query`) to its response: `<subject> failed: <message>`, with the
-/// status of the error's retry rule ([`BrokerOperationError::retryable`],
+/// status of the error's retry rule ([`DatabaseOperationError::retryable`],
 /// [`database_failure_status`]). A stored row that does not read, a refused
 /// argument and a broker with no listener stay, so they are 500.
-pub(crate) fn broker_read_failed(subject: &str, error: &BrokerOperationError) -> ApiError {
+pub(crate) fn broker_read_failed(subject: &str, error: &DatabaseOperationError) -> ApiError {
     ApiError::database_failed(
         Transience::of_retryable(error.retryable()),
         format!("{subject} failed: {}", error.message()),
@@ -416,7 +521,7 @@ pub(crate) fn broker_read_failed(subject: &str, error: &BrokerOperationError) ->
 }
 
 pub(crate) fn pagination_refused(
-    error: PaginationRefused,
+    error: PageRefused,
     values: &QueryValues,
     default_field: &'static str,
     default_input: i64,
@@ -602,25 +707,25 @@ mod tests {
             }
         };
         assert_eq!(
-            status(MonitoringQueryError::DbOperationFailed {
+            status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: true,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(MonitoringQueryError::DbOperationFailed {
+            status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: false,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
             status(MonitoringQueryError::HistoryContractViolation {
                 message: "read failed".to_owned(),
-                source: crate::monitoring::HistoryContractSource(read_source()),
+                cause: crate::monitoring::HistoryContractSource(read_source()),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
@@ -631,15 +736,17 @@ mod tests {
     /// is 500. The detail names the read.
     #[test]
     fn a_broker_read_failure_answers_by_the_retry_rule_of_its_error() {
-        let answer =
-            |error: BrokerOperationError| match broker_read_failed("Worker state query", &error) {
-                ApiError::Detail(status, detail) => (status, detail),
-                ApiError::InvalidInput(_) | ApiError::Validation(_) => {
-                    panic!("a broker read failure is always a detail body")
-                }
-            };
+        let answer = |error: DatabaseOperationError| match broker_read_failed(
+            "Worker state query",
+            &error,
+        ) {
+            ApiError::Detail(status, detail) => (status, detail),
+            ApiError::InvalidInput(_) | ApiError::Validation(_) => {
+                panic!("a broker read failure is always a detail body")
+            }
+        };
 
-        let (status, detail) = answer(BrokerOperationError::monitoring_query_failed(
+        let (status, detail) = answer(DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",
             crate::broker::BrokerOperationSource::Broker(crate::broker::BrokerError::Statement(
                 crate::db::StatementFailure::NotSent {
@@ -654,7 +761,7 @@ mod tests {
             "{detail}"
         );
 
-        let (status, _detail) = answer(BrokerOperationError::monitoring_query_failed(
+        let (status, _detail) = answer(DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",
             crate::broker::BrokerOperationSource::Broker(
                 crate::broker::BrokerError::ClaimContract("row".to_owned()),
@@ -662,7 +769,7 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
-        let (status, detail) = answer(BrokerOperationError::ListenerDisabled {
+        let (status, detail) = answer(DatabaseOperationError::ListenerDisabled {
             message: "ping_workers needs a listener".to_owned(),
         });
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);

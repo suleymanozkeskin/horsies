@@ -1,0 +1,17 @@
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+  --> tests/compile_fail/send_without_app.rs:11:19
+   |
+11 |     let _future = sum::send(1, 2);
+   |                   ^^^^^^^^^ - argument #1 of type `&Horsies` is missing
+   |
+note: function defined here
+  --> tests/compile_fail/send_without_app.rs:5:1
+   |
+ 5 | #[task("sum")]
+   | ^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `task` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: provide the argument
+   |
+11 -     let _future = sum::send(1, 2);
+11 +     let _future = sum::send(/* &Horsies */, 2, 1);
+   |

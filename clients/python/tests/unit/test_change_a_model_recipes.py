@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from pydantic import AliasChoices, BaseModel, Field
 
-from horsies import AppConfig, Horsies, PostgresConfig, TaskError, TaskResult
+from horsies import AppConfig, Horsies, Ok, PostgresConfig, Result, TaskError
 from horsies.core.codec.typed import decode_value, encode_value
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import TaskDefinitionError
@@ -52,17 +52,17 @@ class _AliasWithoutNewName(BaseModel):
 def _app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
+            database=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
         ),
     )
 
 
 def _register(annotation: Any) -> None:
-    def take(*, car: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def take(*, car: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
-    take.__annotations__ = {'car': annotation, 'return': TaskResult[int, TaskError]}
-    _app().task(task_name='recipe')(take)
+    take.__annotations__ = {'car': annotation, 'return': Result[int, TaskError]}
+    _app().task(name='recipe')(take)
 
 
 @pytest.mark.unit

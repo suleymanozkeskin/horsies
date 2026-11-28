@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, NodeKey, RetryPolicy, TaskError, TaskOutcome, UserErrorCode,
+    blocking_task, task, CustomErrorCode, NodeKey, RetryPolicy, TaskError, TaskOutcome,
     WorkflowContext,
 };
 
@@ -17,7 +17,7 @@ use crate::markers;
 const NODE_RUN: Duration = Duration::from_millis(50);
 
 /// The codes of the workflow tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum WfCode {
     /// `e2e_wf_fail`: the deliberate failure of a node.
     DeliberateFailure,
@@ -57,7 +57,7 @@ fn node_run() {
 
 /// The error of a node that fails with the code named `error_code`.
 fn failure(error_code: &str, message: String) -> TaskError<WfCode> {
-    TaskError::user(WfCode::of_text(error_code), message)
+    TaskError::custom(WfCode::of_text(error_code), message)
 }
 
 /// Python `e2e_wf_step`.
@@ -95,7 +95,7 @@ pub fn final_result() -> Result<serde_json::Value, TaskError<WfCode>> {
 #[blocking_task("e2e_wf_fail")]
 pub fn fail() -> Result<i64, TaskError<WfCode>> {
     node_run();
-    Err(TaskError::user(
+    Err(TaskError::custom(
         WfCode::DeliberateFailure,
         "Failed: DELIBERATE_FAILURE",
     ))
@@ -136,7 +136,7 @@ pub fn slow_mark(value: String, delay_ms: u64) -> Result<String, TaskError<WfCod
 #[blocking_task(
     "e2e_wf_retry_then_ok",
     retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
-    auto_retry_for = ["RETRY_NEEDED"]
+    retry_for = ["RETRY_NEEDED"]
 )]
 #[expect(
     clippy::needless_pass_by_value,
@@ -146,9 +146,9 @@ pub fn slow_mark(value: String, delay_ms: u64) -> Result<String, TaskError<WfCod
 pub fn retry_then_ok(token: String, succeed_on_attempt: u32) -> Result<String, TaskError<WfCode>> {
     node_run();
     let attempt = markers::next_attempt(&token)
-        .map_err(|cause| TaskError::user(WfCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(WfCode::MarkerFailed, cause.to_string()))?;
     match attempt < succeed_on_attempt {
-        true => Err(TaskError::user(
+        true => Err(TaskError::custom(
             WfCode::RetryNeeded,
             format!("attempt {attempt} of {succeed_on_attempt}"),
         )),
@@ -191,10 +191,10 @@ pub async fn check_upstream_skipped(
 ) -> Result<String, TaskError<WfCode>> {
     Ok(match input_result {
         TaskOutcome::Succeeded(value) => format!("received_value_{value}"),
-        TaskOutcome::Failed(error) if error.code().text() == "UPSTREAM_SKIPPED" => {
+        TaskOutcome::Failed(error) if error.code().as_str() == "UPSTREAM_SKIPPED" => {
             "received_upstream_skipped".to_owned()
         }
-        TaskOutcome::Failed(error) => format!("received_error_{}", error.code().text()),
+        TaskOutcome::Failed(error) => format!("received_error_{}", error.code().as_str()),
     })
 }
 
@@ -221,65 +221,65 @@ fn context_value(
     node_id: &str,
 ) -> Result<i64, TaskError<WfCode>> {
     let context =
-        context.ok_or_else(|| TaskError::user(WfCode::NoCtx, "WorkflowContext not provided"))?;
+        context.ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     match context.result_for::<i64, WfCode>(&NodeKey::new(node_id)) {
         Ok(TaskOutcome::Succeeded(value)) => Ok(value),
         Ok(TaskOutcome::Failed(error)) => Err(error),
-        Err(missing) => Err(TaskError::user(WfCode::NotInContext, missing.to_string())),
+        Err(missing) => Err(TaskError::custom(WfCode::NotInContext, missing.to_string())),
     }
 }
 
 /// Python `e2e_wf_ctx_reader`: the value of node `source` from the context.
-#[task("e2e_wf_ctx_reader", workflow_ctx)]
+#[task("e2e_wf_ctx_reader", workflow_context)]
 pub async fn ctx_reader(
     source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<i64, TaskError<WfCode>> {
-    context_value(workflow_ctx.as_ref(), &source)
+    context_value(workflow_context.as_ref(), &source)
 }
 
 /// Python `e2e_wf_ctx_reader_str`: the text value of node `source` from the
 /// context, or that node's error.
-#[task("e2e_wf_ctx_reader_str", workflow_ctx)]
+#[task("e2e_wf_ctx_reader_str", workflow_context)]
 pub async fn ctx_reader_str(
     source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<String, TaskError<WfCode>> {
-    let context = workflow_ctx
-        .ok_or_else(|| TaskError::user(WfCode::NoCtx, "WorkflowContext not provided"))?;
+    let context = workflow_context
+        .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     match context.result_for::<String, WfCode>(&NodeKey::new(source)) {
         Ok(TaskOutcome::Succeeded(value)) => Ok(value),
         Ok(TaskOutcome::Failed(error)) => Err(error),
-        Err(missing) => Err(TaskError::user(WfCode::NotInContext, missing.to_string())),
+        Err(missing) => Err(TaskError::custom(WfCode::NotInContext, missing.to_string())),
     }
 }
 
 /// Python `e2e_wf_ctx_sum`: the sum of nodes `first` and `second` from the
 /// context.
-#[task("e2e_wf_ctx_sum", workflow_ctx)]
+#[task("e2e_wf_ctx_sum", workflow_context)]
 pub async fn ctx_sum(
     first: String,
     second: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<i64, TaskError<WfCode>> {
-    let first = context_value(workflow_ctx.as_ref(), &first)?;
-    let second = context_value(workflow_ctx.as_ref(), &second)?;
+    let first = context_value(workflow_context.as_ref(), &first)?;
+    let second = context_value(workflow_context.as_ref(), &second)?;
     Ok(first + second)
 }
 
 /// Python `e2e_wf_mixed_reader` and `e2e_wf_dual_reader`: one value from
 /// `args_from`, one from the context node `ctx_source`.
-#[task("e2e_wf_mixed_reader", workflow_ctx)]
+#[task("e2e_wf_mixed_reader", workflow_context)]
 pub async fn mixed_reader(
     from_args: TaskOutcome<i64, WfCode>,
     ctx_source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<BTreeMap<String, i64>, TaskError<WfCode>> {
     let from_args = match from_args {
         TaskOutcome::Succeeded(value) => value,
         TaskOutcome::Failed(error) => return Err(error),
     };
-    let from_ctx = context_value(workflow_ctx.as_ref(), &ctx_source)?;
+    let from_ctx = context_value(workflow_context.as_ref(), &ctx_source)?;
     Ok(BTreeMap::from([
         ("from_args".to_owned(), from_args),
         ("from_ctx".to_owned(), from_ctx),

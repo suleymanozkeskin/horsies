@@ -30,4 +30,4 @@ DEFAULT_POOL_RECYCLE_S: Final = 1800
 # ``RecoveryConfig.worker_state_snapshot_interval_ms`` (30 s by default), so
 # a live worker at the default interval misses three snapshots before it
 # reads as not live. RecoveryConfig caps that interval at half this window.
-WORKER_STATE_LIVE_WINDOW_S: Final = 120
+WORKER_STATE_LIVE_WINDOW_SECONDS: Final = 120

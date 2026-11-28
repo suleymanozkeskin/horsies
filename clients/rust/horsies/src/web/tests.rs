@@ -19,8 +19,8 @@ const UNREACHABLE_URL: &str = "postgresql://user:secret@127.0.0.1:1/none";
 const TASK_ID: &str = "0195c1b4-7a2e-7d2f-9d4e-3b1a2c4d5e6f";
 
 fn config() -> AppConfig {
-    let mut config = AppConfig::for_database_url(UNREACHABLE_URL);
-    config.broker.pool_timeout = 1;
+    let mut config = AppConfig::from_database_url(UNREACHABLE_URL);
+    config.database.pool_timeout_seconds = 1;
     config
 }
 
@@ -60,7 +60,7 @@ fn json(body: &Bytes) -> serde_json::Value {
 }
 
 fn trusted() -> TrustedHeader {
-    TrustedHeader::new("x-user", true).unwrap()
+    TrustedHeader::new("x-user", Actions::Enabled).unwrap()
 }
 
 /// The postures of the three policies: `AllowAll` allows reads and actions;
@@ -76,7 +76,7 @@ async fn the_three_policies_answer_their_postures() {
     assert!(ViewOnly.can_view(facts).await);
     assert!(!ViewOnly.can_act(facts).await);
 
-    let acting = TrustedHeader::new("X-Forwarded-User", true).unwrap();
+    let acting = TrustedHeader::new("X-Forwarded-User", Actions::Enabled).unwrap();
     assert!(!acting.can_view(facts).await);
     let (blank, _body) = Request::builder()
         .uri("/api/meta")
@@ -94,9 +94,45 @@ async fn the_three_policies_answer_their_postures() {
     let facts = MonitoringRequest::of(&identified);
     assert!(acting.can_view(facts).await);
     assert!(acting.can_act(facts).await);
-    let viewing = TrustedHeader::new("X-Forwarded-User", false).unwrap();
+    let viewing = TrustedHeader::new("X-Forwarded-User", Actions::Disabled).unwrap();
     assert!(viewing.can_view(facts).await);
     assert!(!viewing.can_act(facts).await);
+}
+
+/// A blank comma-separated member, or a blank copy of a repeated header,
+/// makes the identity ambiguous: `TrustedHeader` refuses it. Members that
+/// are all present are allowed.
+#[tokio::test]
+async fn a_trusted_header_with_a_blank_member_is_refused() {
+    let policy = TrustedHeader::new("X-Forwarded-User", Actions::Enabled).unwrap();
+    for value in ["alice, ", ", alice", "alice,,bob", ","] {
+        let (head, _body) = Request::builder()
+            .uri("/api/meta")
+            .header("x-forwarded-user", value)
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let facts = MonitoringRequest::of(&head);
+        assert!(!policy.can_view(facts).await, "{value:?}");
+        assert!(!policy.can_act(facts).await, "{value:?}");
+    }
+
+    let (repeated, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", "alice")
+        .header("x-forwarded-user", "")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    assert!(!policy.can_view(MonitoringRequest::of(&repeated)).await);
+
+    let (members, _body) = Request::builder()
+        .uri("/api/meta")
+        .header("x-forwarded-user", "alice, bob")
+        .body(Body::empty())
+        .unwrap()
+        .into_parts();
+    assert!(policy.can_view(MonitoringRequest::of(&members)).await);
 }
 
 /// The page and its assets are public: a policy that refuses every view
@@ -216,6 +252,23 @@ async fn the_event_stream_without_a_listener_is_the_degraded_frame() {
     assert_eq!(&body[..], b"data: {\"topic\": \"degraded\"}\n\n");
 }
 
+/// A subscription that the handler refused (its bound of open streams) is
+/// the degraded frame, then the end, with the headers of a stream.
+#[tokio::test]
+async fn a_refused_event_stream_is_the_degraded_frame_with_the_stream_headers() {
+    let response = degraded_event_stream();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/event-stream; charset=utf-8"
+    );
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"data: {\"topic\": \"degraded\"}\n\n");
+}
+
 /// A refused view of the event stream is the handler's 403; no stream
 /// starts.
 #[tokio::test]
@@ -241,7 +294,7 @@ impl CountingPolicy {
     }
 }
 
-impl MonitoringAuthPolicy for CountingPolicy {
+impl MonitoringAuthorizationPolicy for CountingPolicy {
     async fn can_view(&self, _request: MonitoringRequest<'_>) -> bool {
         let _previous = self.views.fetch_add(1, Ordering::SeqCst);
         true
@@ -316,4 +369,35 @@ async fn a_handler_build_failure_answers_by_the_retry_rule_of_its_error() {
         }),
         "{body:?}"
     );
+}
+
+/// A caller that the policy refuses gets the 403 without a build of the
+/// core handler: its answer shows nothing of the broker.
+#[tokio::test]
+async fn a_refused_caller_does_not_build_the_handler() {
+    let mount = mount_of(&app(), MonitoringConfig::default(), trusted());
+    let response = serve(
+        State(Arc::clone(&mount)),
+        request(Method::GET, "/api/tasks"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(json(&body)["detail"], "Not authorized.");
+    assert!(mount.handler.get().is_none());
+}
+
+/// A caller that the policy allows reaches the build of the core handler.
+#[tokio::test]
+async fn an_allowed_caller_builds_the_handler() {
+    let mount = mount_of(&app(), MonitoringConfig::default(), AllowAll);
+    let response = serve(
+        State(Arc::clone(&mount)),
+        request(Method::GET, "/api/tasks/not-a-uuid"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(mount.handler.get().is_some());
 }

@@ -4,10 +4,11 @@
 //!
 //! A definition has params or has none. One without params has one spec,
 //! built and checked when it registers. One with params has a build: decode
-//! the params text with the params type, run `build_with`, check the output
-//! type. The core calls the build for each sub-workflow node of the
-//! definition (with the node's params, its `args_from` members merged), and
-//! a start with params calls it.
+//! the params text with the params type, run `build_with` on a builder of
+//! the app that registered it, check the output type. The core calls the
+//! build for each sub-workflow node of the definition (with the node's
+//! params, its `args_from` members merged), and a start with params calls
+//! it.
 //!
 //! The registry is the child spec source of the core's workflow steps
 //! ([`ChildSpecSource`]): for a sub-workflow node, it loads the definition
@@ -27,26 +28,23 @@ use horsies_core::{
     build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
     params_refused_error, subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture,
     ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec,
-    NodeInput, RefusedMember, TaskError,
+    NodeInput, RefusedMember, TaskError, MAX_CHECK_SUBWORKFLOW_BUILDS, MAX_SUBWORKFLOW_DEPTH,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::definition::WorkflowDefinition;
 use super::node::unread_node_member;
-use super::spec::{SpecBody, SpecNode, WorkflowSpec};
+use super::spec::{SpecBody, SpecNode, WorkflowSpec, WorkflowSpecBuilder};
 use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
+use crate::send::TaskFunctions;
 use crate::task::body::{decode_checked, raw_value_of, value_parts, DecodeFailure, ValueParts};
-use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
 /// start name it: the definition's `build_with`.
 const BUILD_WITH: &str = "build_with";
-
-/// The deepest child workflow (Python `MAX_SUBWORKFLOW_DEPTH`); the core
-/// fails a node whose child would be deeper.
-const MAX_SUBWORKFLOW_DEPTH: usize = 32;
 
 /// The params text of a sub-workflow node that gives no params.
 const NO_PARAMS_TEXT: &str = "{}";
@@ -87,7 +85,7 @@ pub(crate) enum ParamsBuildRefused {
 pub(crate) enum DefinitionKind {
     /// No params: the one spec.
     WithoutParams(Arc<WorkflowSpec>),
-    /// Params: the build.
+    /// Parameters: the build.
     WithParams(ParamsBuild),
 }
 
@@ -96,29 +94,43 @@ pub(crate) enum DefinitionKind {
 pub(crate) struct Definition {
     pub(crate) name: String,
     pub(crate) definition_key: String,
+    /// The type that implements the definition: a start by type finds the
+    /// definition only when its type is the asked one.
+    pub(crate) definition_type: TypeId,
     pub(crate) kind: DefinitionKind,
 }
 
 impl Definition {
-    /// The definition `D` without params: its spec, built and checked now.
+    /// The definition `D` without params: its spec, built and checked now
+    /// on a builder whose task nodes resolve against `tasks`, the typed
+    /// functions of the registering app.
     ///
     /// Errors: the refusals of `D::build`.
-    pub(crate) fn without_params<D: WorkflowDefinition>() -> Result<Self, HorsiesError> {
+    pub(crate) fn without_params<D: WorkflowDefinition>(
+        tasks: &Arc<TaskFunctions>,
+    ) -> Result<Self, HorsiesError> {
+        let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(tasks));
         Ok(Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
-            kind: DefinitionKind::WithoutParams(Arc::new(D::build()?)),
+            definition_type: TypeId::of::<D>(),
+            kind: DefinitionKind::WithoutParams(Arc::new(D::build(builder)?)),
         })
     }
 
     /// The definition `D` with params: `D::build_with` over the params
-    /// text, with the output type checked.
-    pub(crate) fn with_params<D: WorkflowDefinition>() -> Self {
+    /// text, on a new builder of `tasks` (the typed functions of the
+    /// registering app) for each build, with the output type checked.
+    pub(crate) fn with_params<D: WorkflowDefinition>(tasks: &Arc<TaskFunctions>) -> Self {
+        let tasks = Arc::clone(tasks);
         let build: ParamsBuild = Arc::new(
-            |text: &str, result_members: &[String]| -> Result<WorkflowSpec, ParamsBuildRefused> {
-                let params = decode_params::<D::Params>(text, result_members)?;
-                let spec =
-                    run_user_build(|| D::build_with(params)).map_err(ParamsBuildRefused::Failed)?;
+            move |text: &str,
+                  result_members: &[String]|
+                  -> Result<WorkflowSpec, ParamsBuildRefused> {
+                let params = decode_params::<D::Parameters>(text, result_members)?;
+                let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(&tasks));
+                let spec = run_user_build(|| D::build_with(builder, params))
+                    .map_err(ParamsBuildRefused::Failed)?;
                 spec.check_output_type::<D::Output>()
                     .map_err(ParamsBuildRefused::Failed)?;
                 Ok(spec)
@@ -127,6 +139,7 @@ impl Definition {
         Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
+            definition_type: TypeId::of::<D>(),
             kind: DefinitionKind::WithParams(build),
         }
     }
@@ -190,7 +203,7 @@ impl WorkflowRegistry {
         if definition.name.trim().is_empty() {
             return Err(
                 HorsiesError::new("workflow definition name must not be empty")
-                    .with_code(ErrorCode::WorkflowNoName),
+                    .with_code(HorsiesErrorCode::WorkflowNoName),
             );
         }
         if definition.definition_key.trim().is_empty() {
@@ -198,7 +211,7 @@ impl WorkflowRegistry {
                 "workflow definition '{}' has an empty definition key",
                 definition.name
             ))
-            .with_code(ErrorCode::WorkflowNoDefinitionKey));
+            .with_code(HorsiesErrorCode::WorkflowNoDefinitionKey));
         }
         // A spec without params converts now, so a task queue that the app
         // does not admit is refused at its registration.
@@ -240,6 +253,17 @@ impl WorkflowRegistry {
         self.write().check_cases.extend(cases);
     }
 
+    /// The definition of type `D` that this registry holds: the definition
+    /// under the key of `D` when its type is `D`. `None` when no definition
+    /// of type `D` is registered here, also when another type holds the key.
+    pub(crate) fn definition_of<D: WorkflowDefinition>(&self) -> Option<Definition> {
+        self.read()
+            .definitions
+            .get(D::definition_key())
+            .filter(|definition| definition.definition_type == TypeId::of::<D>())
+            .cloned()
+    }
+
     /// The definition registered under `definition_key`.
     pub(crate) fn definition(&self, definition_key: &str) -> Option<Definition> {
         self.read().definitions.get(definition_key).cloned()
@@ -266,6 +290,13 @@ impl WorkflowRegistry {
     /// of a check case without a definition key is reported (`HRS-016`) and
     /// not checked further.
     pub(crate) fn check_findings(&self) -> Vec<HorsiesError> {
+        self.check_findings_within(MAX_CHECK_SUBWORKFLOW_BUILDS)
+    }
+
+    /// [`Self::check_findings`] with a walk of at most `build_bound` child
+    /// builds for each root. `check_findings` gives
+    /// [`MAX_CHECK_SUBWORKFLOW_BUILDS`].
+    fn check_findings_within(&self, build_bound: usize) -> Vec<HorsiesError> {
         let registered = self.read();
         let mut findings = Vec::new();
         let roots = registered
@@ -280,14 +311,14 @@ impl WorkflowRegistry {
             match std::panic::catch_unwind(AssertUnwindSafe(|| (case.build)())) {
                 Ok(Ok(spec)) => match keyless_spec(&spec) {
                     Some(refused) => findings.push(refused),
-                    None => self.check_root(&registered, &spec, &mut findings),
+                    None => self.check_root(&registered, &spec, build_bound, &mut findings),
                 },
                 Ok(Err(refused)) => findings.push(
                     HorsiesError::new(format!(
                         "workflow builder '{}' refused a check case",
                         case.builder_name
                     ))
-                    .with_code(ErrorCode::WorkflowCheckCaseInvalid)
+                    .with_code(HorsiesErrorCode::WorkflowCheckCaseInvalid)
                     .with_note(refused.to_string()),
                 ),
                 Err(panic) => findings.push(
@@ -295,14 +326,14 @@ impl WorkflowRegistry {
                         "workflow builder '{}' panicked on a check case",
                         case.builder_name
                     ))
-                    .with_code(ErrorCode::WorkflowCheckBuilderException)
+                    .with_code(HorsiesErrorCode::WorkflowCheckBuilderException)
                     .with_note(panic_text(panic.as_ref()))
                     .with_help("workflow builders must return a spec or a HorsiesError"),
                 ),
             }
         }
         for spec in &roots {
-            self.check_root(&registered, spec, &mut findings);
+            self.check_root(&registered, spec, build_bound, &mut findings);
         }
         findings
     }
@@ -311,13 +342,20 @@ impl WorkflowRegistry {
         &self,
         registered: &Registered,
         spec: &WorkflowSpec,
+        build_bound: usize,
         findings: &mut Vec<HorsiesError>,
     ) {
         findings.extend(self.spec_findings(registered, spec));
         if let Err(refused) = client_spec(spec, &self.config) {
             findings.push(refused);
         }
-        self.walk(registered, spec, &[], findings);
+        self.walk(
+            registered,
+            spec,
+            &[],
+            &mut ChildBuildBudget::new(build_bound),
+            findings,
+        );
     }
 
     /// The refusals of the sub-workflow nodes of `spec`: a child definition
@@ -345,12 +383,16 @@ impl WorkflowRegistry {
     /// Walk the sub-workflow nodes of `spec`, reached by `path`, into the
     /// children that the check can build (Python `_check_subworkflow_node`).
     /// The walk is at most [`MAX_SUBWORKFLOW_DEPTH`] levels deep: the
-    /// decision stops it at the limit.
+    /// decision stops it at the limit. It builds at most
+    /// [`MAX_CHECK_SUBWORKFLOW_BUILDS`] children for one root: `budget`
+    /// counts them, and the first build past the bound is the finding
+    /// `HRS-039`.
     fn walk(
         &self,
         registered: &Registered,
         spec: &WorkflowSpec,
         path: &[NestingStep],
+        budget: &mut ChildBuildBudget,
         findings: &mut Vec<HorsiesError>,
     ) {
         for node in &spec.nodes {
@@ -384,15 +426,21 @@ impl WorkflowRegistry {
             match decide_nesting(path, &node.node_id, step) {
                 NestingDecision::StopWithoutFinding => {}
                 NestingDecision::StopWithFinding(finding) => findings.push(finding),
-                NestingDecision::WalkChild(child_path) => {
-                    if let Some(child) = child_for_check(node, definition, &params_text, findings) {
-                        findings.extend(self.spec_findings(registered, &child));
-                        if let Err(refused) = client_spec(&child, &self.config) {
-                            findings.push(refused);
+                NestingDecision::WalkChild(child_path) => match budget.take(&node.node_id) {
+                    BuildDecision::Granted => {
+                        if let Some(child) =
+                            child_for_check(node, definition, &params_text, findings)
+                        {
+                            findings.extend(self.spec_findings(registered, &child));
+                            if let Err(refused) = client_spec(&child, &self.config) {
+                                findings.push(refused);
+                            }
+                            self.walk(registered, &child, &child_path, budget, findings);
                         }
-                        self.walk(registered, &child, &child_path, findings);
                     }
-                }
+                    BuildDecision::RefusedFirst(finding) => findings.push(finding),
+                    BuildDecision::RefusedAgain => {}
+                },
             }
         }
     }
@@ -689,7 +737,7 @@ fn child_for_check(
             Err(ParamsBuildRefused::Member { key, cause }) => {
                 findings.push(
                     HorsiesError::new("subworkflow params do not fit build_with")
-                        .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+                        .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable)
                         .with_note(format!("node '{}': param '{key}': {cause}", node.node_id))
                         .with_help("fix the param, or the params type of the definition"),
                 );
@@ -697,7 +745,8 @@ fn child_for_check(
             }
             Err(ParamsBuildRefused::Undecodable { text }) => {
                 findings.push(
-                    HorsiesError::new(text).with_code(ErrorCode::WorkflowKwargsNotSerializable),
+                    HorsiesError::new(text)
+                        .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable),
                 );
                 None
             }
@@ -714,7 +763,7 @@ fn duplicate(definition: &Definition, cause: &str) -> HorsiesError {
         "workflow definition '{}' ({}) is registered twice: {cause}",
         definition.name, definition.definition_key
     ))
-    .with_code(ErrorCode::WorkflowDuplicateDefinitionKey)
+    .with_code(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
     .with_help("give each workflow definition its own name and definition key")
 }
 
@@ -726,7 +775,7 @@ fn keyless_spec(spec: &WorkflowSpec) -> Option<HorsiesError> {
         Some(key) if !key.is_empty() => None,
         Some(_) | None => Some(
             HorsiesError::new("WorkflowSpec is missing definition_key")
-                .with_code(ErrorCode::WorkflowNoDefinitionKey)
+                .with_code(HorsiesErrorCode::WorkflowNoDefinitionKey)
                 .with_note(format!(
                     "workflow '{}' has no stable definition_key",
                     spec.name()
@@ -742,10 +791,10 @@ fn unregistered_child(spec: &WorkflowSpec, node: &SpecNode, definition_key: &str
          registered",
         spec.name, node.node_id, node.name
     ))
-    .with_code(ErrorCode::WorkflowMissingRequiredParams)
+    .with_code(HorsiesErrorCode::WorkflowMissingRequiredParams)
     .with_help(
         "register the child definition on the app: register_workflow_definition or \
-         workflow_template",
+         register_workflow_definition_with",
     )
 }
 
@@ -765,7 +814,7 @@ fn params_without_build_with(
     match (kind, gives_params) {
         (DefinitionKind::WithoutParams(_), true) => Some(
             HorsiesError::new("subworkflow params require overriding build_with")
-                .with_code(ErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
+                .with_code(HorsiesErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
                 .with_note(format!(
                     "workflow '{}' node '{}': subworkflow '{}' gets params but its definition \
                      takes none",
@@ -776,8 +825,8 @@ fn params_without_build_with(
                     node.args_from.keys().collect::<Vec<_>>()
                 ))
                 .with_help(
-                    "give the definition a Params type and implement build_with, and register \
-                     it with workflow_template",
+                    "give the definition a Parameters type and implement build_with, and register \
+                     it with register_workflow_definition_with",
                 ),
         ),
         (DefinitionKind::WithoutParams(_), false) | (DefinitionKind::WithParams(_), _) => None,
@@ -842,7 +891,7 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
         return match starts_for_certain(&walked[index + 1..]) {
             true => NestingDecision::StopWithFinding(
                 HorsiesError::new("a subworkflow includes itself with the same params")
-                    .with_code(ErrorCode::WorkflowSubworkflowSelfNesting)
+                    .with_code(HorsiesErrorCode::WorkflowSubworkflowSelfNesting)
                     .with_note(format!(
                         "node '{node_id}': definition '{}' with these params is already on the \
                          path from the root, and no node between the two waits for other nodes",
@@ -853,11 +902,11 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
             false => NestingDecision::StopWithoutFinding,
         };
     }
-    if path.len() >= MAX_SUBWORKFLOW_DEPTH {
+    if path.len() >= MAX_SUBWORKFLOW_DEPTH as usize {
         return match starts_for_certain(&walked) {
             true => NestingDecision::StopWithFinding(
                 HorsiesError::new("subworkflow nesting passes the depth limit")
-                    .with_code(ErrorCode::WorkflowSubworkflowDepthLimit)
+                    .with_code(HorsiesErrorCode::WorkflowSubworkflowDepthLimit)
                     .with_note(format!(
                         "node '{node_id}': its child workflow would have depth {}; the limit is \
                          {MAX_SUBWORKFLOW_DEPTH}, and no node on the path waits for other nodes",
@@ -872,6 +921,63 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
         };
     }
     NestingDecision::WalkChild(walked)
+}
+
+/// Whether the walk of one root may build one more child.
+#[derive(Debug)]
+enum BuildDecision {
+    Granted,
+    /// The bound is reached and this is the first refusal: the walk reports
+    /// the finding.
+    RefusedFirst(HorsiesError),
+    /// The bound is reached and the walk reported it already.
+    RefusedAgain,
+}
+
+/// The builds of child specs in the nesting walk of one root spec, at most
+/// `bound` (Python `ChildBuildBudget`). The check gives
+/// [`MAX_CHECK_SUBWORKFLOW_BUILDS`].
+#[derive(Debug)]
+struct ChildBuildBudget {
+    bound: usize,
+    builds: usize,
+    reported: bool,
+}
+
+impl ChildBuildBudget {
+    fn new(bound: usize) -> Self {
+        Self {
+            bound,
+            builds: 0,
+            reported: false,
+        }
+    }
+
+    /// Count one build of the child of node `node_id` and say whether it
+    /// may go on. Changes only the counts of this budget.
+    fn take(&mut self, node_id: &str) -> BuildDecision {
+        match (self.builds < self.bound, self.reported) {
+            (true, _) => {
+                self.builds += 1;
+                BuildDecision::Granted
+            }
+            (false, true) => BuildDecision::RefusedAgain,
+            (false, false) => {
+                self.reported = true;
+                BuildDecision::RefusedFirst(
+                    HorsiesError::new("the subworkflow nesting walk reached its bound of builds")
+                        .with_code(HorsiesErrorCode::WorkflowCheckBuildLimit)
+                        .with_note(format!(
+                            "node '{node_id}': the walk of this workflow built \
+                             {} child workflows and stopped; the \
+                             rest of its nesting is not checked",
+                            self.bound
+                        ))
+                        .with_help("nest fewer child workflows in this workflow"),
+                )
+            }
+        }
+    }
 }
 
 /// Whether the engine starts the child of each step with no wait.

@@ -190,6 +190,7 @@ fn the_child_decoder_refuses_a_parent_frame() {
         task_name: "t".to_owned(),
         queue_name: default_queue(),
         attempt: AttemptNumber::SMALLEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at: claim_time(),
         orphan_self_heal: OrphanSelfHeal::Off,

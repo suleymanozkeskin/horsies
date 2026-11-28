@@ -85,13 +85,13 @@ pub(super) fn as_blocking_body<R>(body: impl FnOnce() -> R) -> R {
 }
 
 /// The message of a result wait that a process running task bodies refuses
-/// (Python `wait_inside_task_message`). `operation` names the call.
+/// `operation` names the call.
 pub fn wait_inside_task_message(operation: &str) -> String {
     format!(
         "{operation} was called where task bodies run. A task does not wait for the result of \
          another task: the wait keeps this task's capacity, and when enough tasks wait, nothing \
-         is left for the tasks that they wait for. Compose the steps as a workflow: TaskNode \
-         waits_for and args_from, or a SubWorkflowNode."
+         is left for the tasks that they wait for. Compose the steps as a workflow: a \
+         workflow node that waits for another node and takes its result."
     )
 }
 
@@ -128,17 +128,16 @@ mod tests {
         assert_eq!(thread_role(), ThreadRole::Other);
     }
 
-    /// Python `wait_inside_task_message` (`clients/python/tests/unit/test_wait_inside_task.py`):
-    /// the message names the call and the workflow alternative, word for
-    /// word.
+    /// The message names the call and the workflow alternative, word for
+    /// word, and no client API.
     #[test]
-    fn the_wait_message_is_python_s() {
+    fn the_wait_message_names_the_idea_of_the_workflow_alternative() {
         assert_eq!(
             wait_inside_task_message("TaskHandle.get"),
             "TaskHandle.get was called where task bodies run. A task does not wait for the result \
              of another task: the wait keeps this task's capacity, and when enough tasks wait, \
-             nothing is left for the tasks that they wait for. Compose the steps as a workflow: \
-             TaskNode waits_for and args_from, or a SubWorkflowNode."
+             nothing is left for the tasks that they wait for. Compose the steps as a workflow: a \
+             workflow node that waits for another node and takes its result."
         );
     }
 }

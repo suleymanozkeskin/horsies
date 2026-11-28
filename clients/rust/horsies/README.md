@@ -32,8 +32,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
-    IsolatedSetting, TaskError, TaskOutcome, WaitLimit, WorkerProfile,
+    task, AppConfig, Horsies, IsolatedChildren, TaskError, TaskOutcome, WaitLimit,
+    WorkerProfile,
 };
 
 const DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/horsies";
@@ -46,31 +46,28 @@ async fn greet(name: String) -> Result<String, TaskError<Infallible>> {
 /// Every process builds the same app: the producer, the worker and each child.
 fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     let profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-            IsolatedChildCount::try_from(2)?,
-        )),
+        isolated: IsolatedChildren::new(2).into(),
         ..WorkerProfile::default()
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url(DATABASE_URL)
+        ..AppConfig::from_database_url(DATABASE_URL)
     };
     let mut app = Horsies::new(config)?;
     let _greet = greet::register(&mut app)?;
     Ok(app)
 }
 
-async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
-    let handle = greet::send("world".to_owned()).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
-    match handle.get(limit).await? {
+async fn send_greeting(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
+    let handle = greet::send(app, "world".to_owned()).await?;
+    match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
-        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().as_str()),
     }
     Ok(())
 }
 
-fn run_send(_app: Horsies) -> ExitCode {
+fn run_send(app: Horsies) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -78,7 +75,7 @@ fn run_send(_app: Horsies) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(send_greeting()) {
+    match runtime.block_on(send_greeting(&app)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -119,7 +116,7 @@ cargo run -- check                      # checks the app without a database
 | `tokio-postgres` | off | Rerun of a task in the caller's `tokio_postgres::Transaction`. |
 | `sqlx` | off | Rerun of a task in the caller's `sqlx::Transaction<'_, Postgres>`. |
 
-Minimum Rust version: 1.91.
+Minimum Rust version: 1.95.
 
 ## Documentation
 

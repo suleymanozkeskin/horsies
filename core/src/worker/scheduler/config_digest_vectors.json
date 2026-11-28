@@ -1,80 +1,122 @@
 {
-  "about": "The schedule config digest: the text that Python's _compute_config_hash (tests/parity/snapshot/reference/scheduler_loop_caller.py) hashes, dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone}), and its SHA-256 in lowercase hex, written by Python 3.13 with pydantic 2.13. The config_digest.rs tests and clients/python/tests/unit/test_schedule_config_digest_vectors.py pin this one table. config_check is what the schedule config of each client does with the pattern: ACCEPTED, or REFUSED_TIME_WITH_FRACTION for a time of day with a fraction of a second; the text of such a row stays a contract vector of the digest text.",
+  "about": "The schedule config digest: per row, the pattern text of the scheduler manifest (pattern_json, the text that Python's pattern.model_dump(mode='json') writes) and its timezone, the digest text that the core hashes, and its SHA-256 in lowercase hex. The digest text keeps the form that Python 0.8 hashed, dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone}) with the tag type, the days of a weekly pattern, the day of a monthly pattern and the four parts of an interval, so a stored digest stays valid; the interval length is written largest unit first, with null for a zero part. The config_digest.rs tests and clients/python/tests/unit/test_schedule_config_digest_vectors.py pin this one table. config_check is what the schedule config of each client does with the pattern: ACCEPTED, or REFUSED_TIME_WITH_FRACTION for a time of day with a fraction of a second; the digest text of such a row stays a contract vector.",
   "vectors": [
     {
       "name": "interval of 60 seconds",
-      "text": "{\"pattern\":{\"type\":\"interval\",\"seconds\":60,\"minutes\":null,\"hours\":null,\"days\":null},\"timezone\":\"UTC\"}",
-      "digest_hex": "a7bba31d521252fd1fb6e910224d2c9a13daa9d45b4c3a1c4569f7b76a2e92e1",
+      "pattern_json": "{\"kind\":\"interval\",\"every\":\"PT1M\"}",
+      "timezone": "UTC",
+      "text": "{\"pattern\":{\"type\":\"interval\",\"seconds\":null,\"minutes\":1,\"hours\":null,\"days\":null},\"timezone\":\"UTC\"}",
+      "digest_hex": "1f162e96bb6355c05fd230c95c9fbf49456d0e4bcf213efffffb792be5cb0180",
       "config_check": "ACCEPTED"
     },
     {
       "name": "interval of 1 hour and 30 minutes",
+      "pattern_json": "{\"kind\":\"interval\",\"every\":\"PT1H30M\"}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"interval\",\"seconds\":null,\"minutes\":30,\"hours\":1,\"days\":null},\"timezone\":\"UTC\"}",
       "digest_hex": "9638bca267258dd8f236c17002ff36fa5d1aa1f00290aed2f171ad2e3539f514",
       "config_check": "ACCEPTED"
     },
     {
+      "name": "interval of 90 seconds",
+      "pattern_json": "{\"kind\":\"interval\",\"every\":\"PT1M30S\"}",
+      "timezone": "UTC",
+      "text": "{\"pattern\":{\"type\":\"interval\",\"seconds\":30,\"minutes\":1,\"hours\":null,\"days\":null},\"timezone\":\"UTC\"}",
+      "digest_hex": "5a4049c8df307d9ea59546951de516a23ccab1b76cbf352c1435e8176c0b277b",
+      "config_check": "ACCEPTED"
+    },
+    {
+      "name": "interval of 365 days",
+      "pattern_json": "{\"kind\":\"interval\",\"every\":\"P365D\"}",
+      "timezone": "UTC",
+      "text": "{\"pattern\":{\"type\":\"interval\",\"seconds\":null,\"minutes\":null,\"hours\":null,\"days\":365},\"timezone\":\"UTC\"}",
+      "digest_hex": "d5c7dcfa7213bbcf9a1b3d505fe0cafa3839f8ea9280866354b1941a4abb7ae0",
+      "config_check": "ACCEPTED"
+    },
+    {
       "name": "hourly at minute 15 and second 30",
+      "pattern_json": "{\"kind\":\"hourly\",\"minute\":15,\"second\":30}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"hourly\",\"minute\":15,\"second\":30},\"timezone\":\"UTC\"}",
       "digest_hex": "25b79bc9f85f234b97768a4bff5ee3e758a876a30a30111024cc6da579540b12",
       "config_check": "ACCEPTED"
     },
     {
       "name": "daily at 03:00 in Europe/Berlin",
+      "pattern_json": "{\"kind\":\"daily\",\"time\":\"03:00:00\"}",
+      "timezone": "Europe/Berlin",
       "text": "{\"pattern\":{\"type\":\"daily\",\"time\":\"03:00:00\"},\"timezone\":\"Europe/Berlin\"}",
       "digest_hex": "f004ec628b9dbf160eb0b7028450f3b5c2dfe712f06df24c08a880565a56d628",
       "config_check": "ACCEPTED"
     },
     {
       "name": "daily at 03:00 and half a second",
+      "pattern_json": "{\"kind\":\"daily\",\"time\":\"03:00:00.500000\"}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"daily\",\"time\":\"03:00:00.500000\"},\"timezone\":\"UTC\"}",
       "digest_hex": "d51e89e9e42670c3bb9ba17f04413df4f87874ba7c41a878608cfa413a5a663b",
       "config_check": "REFUSED_TIME_WITH_FRACTION"
     },
     {
       "name": "daily at 03:00 and 5 microseconds",
+      "pattern_json": "{\"kind\":\"daily\",\"time\":\"03:00:00.000005\"}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"daily\",\"time\":\"03:00:00.000005\"},\"timezone\":\"UTC\"}",
       "digest_hex": "c47b59160294148a52abf1d2475efc967ea22695eba6d3eba419dede43563d3b",
       "config_check": "REFUSED_TIME_WITH_FRACTION"
     },
     {
       "name": "weekly on Friday and Monday at 09:00",
+      "pattern_json": "{\"kind\":\"weekly\",\"weekdays\":[\"friday\",\"monday\"],\"time\":\"09:00:00\"}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"weekly\",\"days\":[\"friday\",\"monday\"],\"time\":\"09:00:00\"},\"timezone\":\"UTC\"}",
       "digest_hex": "e4c724242468a3a913a7db5dae23ec3492be34a96d15ac5c6ca628ec82765e1c",
       "config_check": "ACCEPTED"
     },
     {
       "name": "monthly on day 31 at 23:59:59 in America/New_York",
+      "pattern_json": "{\"kind\":\"monthly\",\"day_of_month\":31,\"time\":\"23:59:59\"}",
+      "timezone": "America/New_York",
       "text": "{\"pattern\":{\"type\":\"monthly\",\"day\":31,\"time\":\"23:59:59\"},\"timezone\":\"America/New_York\"}",
       "digest_hex": "82a41dbc0651b5d208e9d5ff2d0237442f22729f7e4c4695012f31fd83a630fa",
       "config_check": "ACCEPTED"
     },
     {
       "name": "cron: every minute of every sixth hour",
+      "pattern_json": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"every\"}],\"hour\":[{\"kind\":\"step\",\"step\":6}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"every_day\"}}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"cron\",\"minute\":[{\"kind\":\"every\"}],\"hour\":[{\"kind\":\"step\",\"step\":6}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"every_day\"}},\"timezone\":\"UTC\"}",
       "digest_hex": "d0b8bae8f2ccfdac8b4f2df7f494643dad14fe4303bfa5808efa54078b9b4ff9",
       "config_check": "ACCEPTED"
     },
     {
       "name": "cron: values, a range, every enum term and either day",
+      "pattern_json": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[30,0]}],\"hour\":[{\"kind\":\"range\",\"start\":9,\"end\":17,\"step\":1}],\"month\":[{\"kind\":\"enum_values\",\"values\":[\"january\"]},{\"kind\":\"enum_range\",\"start\":\"march\",\"end\":\"june\",\"step\":2},{\"kind\":\"enum_step\",\"step\":3}],\"day\":{\"kind\":\"either_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"enum_values\",\"values\":[\"friday\"]},{\"kind\":\"enum_range\",\"start\":\"monday\",\"end\":\"wednesday\",\"step\":1}]}}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[30,0]}],\"hour\":[{\"kind\":\"range\",\"start\":9,\"end\":17,\"step\":1}],\"month\":[{\"kind\":\"enum_values\",\"values\":[\"january\"]},{\"kind\":\"enum_range\",\"start\":\"march\",\"end\":\"june\",\"step\":2},{\"kind\":\"enum_step\",\"step\":3}],\"day\":{\"kind\":\"either_day\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"enum_values\",\"values\":[\"friday\"]},{\"kind\":\"enum_range\",\"start\":\"monday\",\"end\":\"wednesday\",\"step\":1}]}},\"timezone\":\"UTC\"}",
       "digest_hex": "892071fd113171a0ee43fd6ad1e517f4d6f06ffded63fe3540ce933aa9864ec4",
       "config_check": "ACCEPTED"
     },
     {
       "name": "cron: by a day-of-month range with a step",
+      "pattern_json": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"by_month_day\",\"day_of_month\":[{\"kind\":\"range\",\"start\":1,\"end\":7,\"step\":2}]}}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"by_month_day\",\"day_of_month\":[{\"kind\":\"range\",\"start\":1,\"end\":7,\"step\":2}]}},\"timezone\":\"UTC\"}",
       "digest_hex": "e61837648d9fd5122c1de3c4b3037633104952df1152a796886d28eac2277581",
       "config_check": "ACCEPTED"
     },
     {
       "name": "cron: by weekday with an enum step",
+      "pattern_json": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"by_weekday\",\"day_of_week\":[{\"kind\":\"enum_step\",\"step\":2}]}}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"by_weekday\",\"day_of_week\":[{\"kind\":\"enum_step\",\"step\":2}]}},\"timezone\":\"UTC\"}",
       "digest_hex": "41cd9d21ab96b2891acc8722a086a457d22b2a46f283b285e28e14dbbd6a74b3",
       "config_check": "ACCEPTED"
     },
     {
       "name": "cron: both days",
+      "pattern_json": "{\"kind\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"both_days\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"every\"}]}}",
+      "timezone": "UTC",
       "text": "{\"pattern\":{\"type\":\"cron\",\"minute\":[{\"kind\":\"values\",\"values\":[0]}],\"hour\":[{\"kind\":\"values\",\"values\":[0]}],\"month\":[{\"kind\":\"every\"}],\"day\":{\"kind\":\"both_days\",\"day_of_month\":[{\"kind\":\"values\",\"values\":[13]}],\"day_of_week\":[{\"kind\":\"every\"}]}},\"timezone\":\"UTC\"}",
       "digest_hex": "9896ec7bd8eb1583fbd1ecdd935eec8a1a1b2f5ac13feb12aab71a0d68a00f20",
       "config_check": "ACCEPTED"

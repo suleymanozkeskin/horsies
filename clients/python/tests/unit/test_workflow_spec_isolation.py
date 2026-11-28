@@ -16,15 +16,17 @@ import pytest
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
-from horsies.core.types.result import Ok
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions
+from horsies.core.types.result import Ok, Result
 from horsies.core.errors import MultipleValidationErrors
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
     WorkflowContext,
+    NoWorkflowOutput,
     WorkflowDefinition,
     WorkflowValidationError,
     SuccessPolicy,
@@ -37,12 +39,12 @@ class MockFn(TaskFunction[Any, Any]):
     """Minimal TaskFunction mock for unit tests."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -50,47 +52,35 @@ class MockFn(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
-        return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
+        return NodeFactory(function=self, **kwargs)  # type: ignore[arg-type]
 
 
 @dataclass
 class MockFnWithCtx(TaskFunction[Any, Any]):
-    """MockFn that accepts workflow_ctx (passes HRS-010 validator)."""
+    """MockFn that accepts workflow_context (passes HRS-010 validator)."""
 
     task_name: str
-    task_queue_name: str | None = None
+    queue: str | None = None
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
         self,
         *args: Any,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         **kwargs: Any,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -98,45 +88,33 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
-        return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
+        return NodeFactory(function=self, **kwargs)  # type: ignore[arg-type]
 
 
 def _target(
     *,
     url: str = '',
-    data: TaskResult[Any, TaskError] | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+    data: TaskOutcome[Any, TaskError] | None = None,
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 fn_a = MockFn(task_name='task_a')
-fn_a._original_fn = _target  # type: ignore[attr-defined]
+fn_a._original_function = _target  # type: ignore[attr-defined]
 fn_b = MockFn(task_name='task_b')
-fn_b._original_fn = _target  # type: ignore[attr-defined]
+fn_b._original_function = _target  # type: ignore[attr-defined]
 fn_c = MockFn(task_name='task_c')
-fn_c._original_fn = _target  # type: ignore[attr-defined]
+fn_c._original_function = _target  # type: ignore[attr-defined]
 fn_ctx = MockFnWithCtx(task_name='task_ctx')
 
 
@@ -150,13 +128,13 @@ class TestSpecIsolation:
 
     def test_spec_tasks_are_independent_copies(self) -> None:
         """Spec's task list contains copies, not the original node objects."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b, waits_for=[a])
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b, waits_for=[a])
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
-        assert spec.tasks[0] is not a
-        assert spec.tasks[1] is not b
+        assert spec.nodes[0] is not a
+        assert spec.nodes[1] is not b
 
     # ------------------------------------------------------------------
     # Cross-reference remapping
@@ -164,60 +142,60 @@ class TestSpecIsolation:
 
     def test_waits_for_remapped_to_copies(self) -> None:
         """waits_for refs point at the spec's own copies, not the originals."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b, waits_for=[a])
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b, waits_for=[a])
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
-        assert spec.tasks[1].waits_for[0] is spec.tasks[0]
-        assert spec.tasks[1].waits_for[0] is not a
+        assert spec.nodes[1].waits_for[0] is spec.nodes[0]
+        assert spec.nodes[1].waits_for[0] is not a
 
     def test_args_from_remapped_to_copies(self) -> None:
         """args_from values point at the spec's own copies."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b, waits_for=[a], args_from={'data': a})
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b, waits_for=[a], args_from={'data': a})
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
-        assert spec.tasks[1].args_from['data'] is spec.tasks[0]
-        assert spec.tasks[1].args_from['data'] is not a
+        assert spec.nodes[1].args_from['data'] is spec.nodes[0]
+        assert spec.nodes[1].args_from['data'] is not a
 
-    def test_workflow_ctx_from_remapped_to_copies(self) -> None:
-        """workflow_ctx_from refs point at the spec's own copies."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_ctx_from=[a])
+    def test_workflow_context_from_remapped_to_copies(self) -> None:
+        """workflow_context_from refs point at the spec's own copies."""
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_ctx, waits_for=[a], workflow_context_from=[a])
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
-        assert spec.tasks[1].workflow_ctx_from is not None
-        assert spec.tasks[1].workflow_ctx_from[0] is spec.tasks[0]
-        assert spec.tasks[1].workflow_ctx_from[0] is not a
+        assert spec.nodes[1].workflow_context_from is not None
+        assert spec.nodes[1].workflow_context_from[0] is spec.nodes[0]
+        assert spec.nodes[1].workflow_context_from[0] is not a
 
     def test_output_remapped_to_copy(self) -> None:
         """output ref points at the spec's own copy."""
-        a = TaskNode(fn=fn_a)
+        a = TaskNode(function=fn_a)
 
-        spec = WorkflowSpec(name='wf', tasks=[a], output=a)
+        spec = WorkflowSpec(name='wf', nodes=[a], output=a)
 
-        assert spec.output is spec.tasks[0]
+        assert spec.output is spec.nodes[0]
         assert spec.output is not a
 
     def test_success_policy_remapped_to_copies(self) -> None:
         """SuccessPolicy required and optional refs point at spec's own copies."""
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_b, waits_for=[a])
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_b, waits_for=[a])
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[a])],
             optional=[b],
         )
-        spec = WorkflowSpec(name='wf', tasks=[a, b], success_policy=policy)
+        spec = WorkflowSpec(name='wf', nodes=[a, b], success_policy=policy)
 
         assert spec.success_policy is not None
-        assert spec.success_policy.cases[0].required[0] is spec.tasks[0]
+        assert spec.success_policy.cases[0].required[0] is spec.nodes[0]
         assert spec.success_policy.cases[0].required[0] is not a
         assert spec.success_policy.optional is not None
-        assert spec.success_policy.optional[0] is spec.tasks[1]
+        assert spec.success_policy.optional[0] is spec.nodes[1]
         assert spec.success_policy.optional[0] is not b
 
     # ------------------------------------------------------------------
@@ -227,16 +205,16 @@ class TestSpecIsolation:
     def test_kwargs_isolated_from_original(self) -> None:
         """Mutating original kwargs after spec construction does not affect the spec."""
         original_kwargs = {'url': 'https://example.com'}
-        a = TaskNode(fn=fn_a, kwargs=original_kwargs)
+        a = TaskNode(function=fn_a, kwargs=original_kwargs)
 
-        spec = WorkflowSpec(name='wf', tasks=[a])
+        spec = WorkflowSpec(name='wf', nodes=[a])
 
-        assert spec.tasks[0].kwargs is not original_kwargs
-        assert spec.tasks[0].kwargs == {'url': 'https://example.com'}
+        assert spec.nodes[0].kwargs is not original_kwargs
+        assert spec.nodes[0].kwargs == {'url': 'https://example.com'}
 
         # Mutate original — spec must be unaffected
         original_kwargs['url'] = 'https://mutated.com'
-        assert spec.tasks[0].kwargs['url'] == 'https://example.com'
+        assert spec.nodes[0].kwargs['url'] == 'https://example.com'
 
     # ------------------------------------------------------------------
     # Node reuse across specs
@@ -248,26 +226,26 @@ class TestSpecIsolation:
         BUG 2 core fix: each spec has its own copy with the correct node_id,
         regardless of how many specs the same node is passed to.
         """
-        node = TaskNode(fn=fn_a)
+        node = TaskNode(function=fn_a)
 
-        spec1 = WorkflowSpec(name='alpha', tasks=[node])
-        spec2 = WorkflowSpec(name='beta', tasks=[node])
+        spec1 = WorkflowSpec(name='alpha', nodes=[node])
+        spec2 = WorkflowSpec(name='beta', nodes=[node])
 
         # Each spec has independent, correct node_id
-        assert spec1.tasks[0].node_id == 'alpha:0'
-        assert spec2.tasks[0].node_id == 'beta:0'
-        assert spec1.tasks[0] is not spec2.tasks[0]
+        assert spec1.nodes[0].node_id == 'alpha:0'
+        assert spec2.nodes[0].node_id == 'beta:0'
+        assert spec1.nodes[0] is not spec2.nodes[0]
 
     def test_explicit_node_id_preserved_on_reuse(self) -> None:
         """User-provided explicit node_id survives reuse across multiple specs."""
-        node = TaskNode(fn=fn_a, node_id='custom-stable-id')
+        node = TaskNode(function=fn_a, node_id='custom-stable-id')
 
-        spec1 = WorkflowSpec(name='alpha', tasks=[node])
-        spec2 = WorkflowSpec(name='beta', tasks=[node])
+        spec1 = WorkflowSpec(name='alpha', nodes=[node])
+        spec2 = WorkflowSpec(name='beta', nodes=[node])
 
-        assert spec1.tasks[0].node_id == 'custom-stable-id'
-        assert spec2.tasks[0].node_id == 'custom-stable-id'
-        assert spec1.tasks[0] is not spec2.tasks[0]
+        assert spec1.nodes[0].node_id == 'custom-stable-id'
+        assert spec2.nodes[0].node_id == 'custom-stable-id'
+        assert spec1.nodes[0] is not spec2.nodes[0]
 
     def test_manual_node_id_override_after_auto_derive(self) -> None:
         """Manual node_id set after auto-derive is preserved by the next spec.
@@ -276,16 +254,16 @@ class TestSpecIsolation:
         auto-derive, a manual override between specs was still treated as
         stale and reset.
         """
-        node = TaskNode(fn=fn_a)
+        node = TaskNode(function=fn_a)
 
-        spec1 = WorkflowSpec(name='alpha', tasks=[node])
-        assert spec1.tasks[0].node_id == 'alpha:0'
+        spec1 = WorkflowSpec(name='alpha', nodes=[node])
+        assert spec1.nodes[0].node_id == 'alpha:0'
 
         # User manually overrides node_id between spec constructions
         node.node_id = 'manual-after-first-spec'
 
-        spec2 = WorkflowSpec(name='beta', tasks=[node])
-        assert spec2.tasks[0].node_id == 'manual-after-first-spec'
+        spec2 = WorkflowSpec(name='beta', nodes=[node])
+        assert spec2.nodes[0].node_id == 'manual-after-first-spec'
 
     # ------------------------------------------------------------------
     # Condition lambda runtime coupling
@@ -299,26 +277,25 @@ class TestSpecIsolation:
         to look up the result. The spec must ensure original.node_id is available
         for this lookup to succeed.
         """
-        a = TaskNode(fn=fn_a)
-        b = TaskNode(fn=fn_ctx, waits_for=[a], workflow_ctx_from=[a])
+        a = TaskNode(function=fn_a)
+        b = TaskNode(function=fn_ctx, waits_for=[a], workflow_context_from=[a])
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
         # Build a WorkflowContext the way the engine would: keyed by
         # the spec copy's node_id.
-        expected_result = TaskResult[int, TaskError](ok=42)
+        expected_result = Succeeded(42)
         ctx = WorkflowContext(
             workflow_id='test-wf-id',
-            task_index=1,
+            node_index=1,
             task_name='task_ctx',
-            results_by_id={spec.tasks[0].node_id: expected_result},
+            results_by_node_id={spec.nodes[0].node_id: expected_result},
         )
 
         # The closure captures `a` (original), not spec.tasks[0] (copy).
         # This must resolve successfully — proves the runtime coupling works.
         resolved = ctx.result_for(a)
-        assert resolved.is_ok()
-        assert resolved.unwrap() == 42
+        assert resolved == Succeeded(42)
 
     # ------------------------------------------------------------------
     # Invalid refs preserved for validators
@@ -326,22 +303,22 @@ class TestSpecIsolation:
 
     def test_invalid_output_ref_preserved_for_validator(self) -> None:
         """Output pointing outside tasks still raises validation error after copy."""
-        a = TaskNode(fn=fn_a)
-        orphan = TaskNode(fn=fn_b)
+        a = TaskNode(function=fn_a)
+        orphan = TaskNode(function=fn_b)
 
         with pytest.raises((WorkflowValidationError, MultipleValidationErrors)):
-            WorkflowSpec(name='wf', tasks=[a], output=orphan)
+            WorkflowSpec(name='wf', nodes=[a], output=orphan)
 
     def test_invalid_success_policy_ref_preserved_for_validator(self) -> None:
         """SuccessPolicy with ref outside tasks still raises validation error after copy."""
-        a = TaskNode(fn=fn_a)
-        orphan = TaskNode(fn=fn_b)
+        a = TaskNode(function=fn_a)
+        orphan = TaskNode(function=fn_b)
 
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[orphan])],
         )
         with pytest.raises((WorkflowValidationError, MultipleValidationErrors)):
-            WorkflowSpec(name='wf', tasks=[a], success_policy=policy)
+            WorkflowSpec(name='wf', nodes=[a], success_policy=policy)
 
     # ------------------------------------------------------------------
     # Callables shared, not copied
@@ -349,17 +326,17 @@ class TestSpecIsolation:
 
     def test_fn_callable_shared_not_copied(self) -> None:
         """fn callable is shared by reference (not deep-copied)."""
-        a = TaskNode(fn=fn_a)
+        a = TaskNode(function=fn_a)
         b = TaskNode(
-            fn=fn_ctx,
+            function=fn_ctx,
             waits_for=[a],
-            workflow_ctx_from=[a],
+            workflow_context_from=[a],
         )
 
-        spec = WorkflowSpec(name='wf', tasks=[a, b])
+        spec = WorkflowSpec(name='wf', nodes=[a, b])
 
-        assert spec.tasks[0].fn is fn_a
-        assert spec.tasks[1].fn is fn_ctx
+        assert spec.nodes[0].function is fn_a
+        assert spec.nodes[1].function is fn_ctx
 
     # ------------------------------------------------------------------
     # Failed spec does not mutate originals
@@ -371,14 +348,14 @@ class TestSpecIsolation:
         Regression: back-propagation ran before validation, so even invalid
         specs mutated the caller's node objects with index/node_id values.
         """
-        a = TaskNode(fn=fn_a)
-        orphan = TaskNode(fn=fn_b)
+        a = TaskNode(function=fn_a)
+        orphan = TaskNode(function=fn_b)
 
         assert a.node_id is None
         assert a.index is None
 
         with pytest.raises((WorkflowValidationError, MultipleValidationErrors)):
-            WorkflowSpec(name='wf', tasks=[a], output=orphan)
+            WorkflowSpec(name='wf', nodes=[a], output=orphan)
 
         # Originals must be untouched after a failed spec
         assert a.node_id is None
@@ -390,9 +367,9 @@ class TestSpecIsolation:
 # =============================================================================
 
 
-_meta_node_a: TaskNode[int] = TaskNode(fn=fn_a)
-_meta_node_b: TaskNode[int] = TaskNode(fn=fn_ctx, waits_for=[_meta_node_a])
-_meta_node_explicit: TaskNode[int] = TaskNode(fn=fn_a, node_id='custom-id')
+_meta_node_a: TaskNode[int] = TaskNode(function=fn_a)
+_meta_node_b: TaskNode[int] = TaskNode(function=fn_ctx, waits_for=[_meta_node_a])
+_meta_node_explicit: TaskNode[int] = TaskNode(function=fn_a, node_id='custom-id')
 
 
 class _MetaStampWorkflow(WorkflowDefinition[int]):
@@ -409,7 +386,7 @@ class _MetaStampWorkflow(WorkflowDefinition[int]):
 # Closure captures the module-level node — the fresh-worker scenario
 def _meta_closure_condition(ctx: WorkflowContext) -> bool:
     result = ctx.result_for(_meta_node_a)
-    return result.is_ok()
+    return isinstance(result, Succeeded)
 
 
 @pytest.mark.unit
@@ -441,18 +418,16 @@ class TestMetaclassStamping:
         the metaclass stamps node_id at import time, so closures captured
         at module level always have a valid node_id for lookup.
         """
-        from horsies.core.models.tasks import TaskResult, TaskError
-
         # Build a WorkflowContext keyed by the metaclass-stamped node_id
         node_id = _meta_node_a.node_id
         assert node_id is not None
 
-        expected_result = TaskResult[int, TaskError](ok=42)
+        expected_result = Succeeded(42)
         ctx = WorkflowContext(
             workflow_id='test-wf-id',
-            task_index=1,
+            node_index=1,
             task_name='task_ctx',
-            results_by_id={node_id: expected_result},
+            results_by_node_id={node_id: expected_result},
         )
 
         # The closure captures _meta_node_a (module-level original).
@@ -471,17 +446,17 @@ class _MockApp:
     def workflow(
         self,
         name: str,
-        tasks: list[Any],
+        nodes: list[Any],
         **kwargs: Any,
     ) -> WorkflowSpec[Any]:
         # Simulate the enrichment app.workflow() does (app.py:939,943)
-        for node in tasks:
+        for node in nodes:
             if isinstance(node, TaskNode):
                 if node.queue is None:
                     node.queue = 'default'
                 if node.priority is None:
                     node.priority = 5
-        return WorkflowSpec(name=name, tasks=tasks, **kwargs)
+        return WorkflowSpec(name=name, nodes=nodes, **kwargs)
 
     def get_broker(self) -> None:
         return None
@@ -494,11 +469,11 @@ class TestCopyOnBuild:
     def test_class_level_nodes_not_enriched_by_build(self) -> None:
         """Queue/priority enrichment in app.workflow() must not reach class-level nodes."""
 
-        class MyWorkflow(WorkflowDefinition[Any]):
+        class MyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'copy_on_build_test'
             definition_key = 'tests.unit.copy_on_build.v1'
-            fetch = TaskNode(fn=fn_a)
-            process = TaskNode(fn=fn_b, waits_for=[fetch])
+            fetch = TaskNode(function=fn_a)
+            process = TaskNode(function=fn_b, waits_for=[fetch])
 
         # Snapshot pre-build state
         assert MyWorkflow.fetch.queue is None
@@ -518,20 +493,20 @@ class TestCopyOnBuild:
     def test_build_twice_produces_independent_specs(self) -> None:
         """Two build() calls must not share node identity."""
 
-        class MyWorkflow(WorkflowDefinition[Any]):
+        class MyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'double_build_test'
             definition_key = 'tests.unit.double_build.v1'
-            step = TaskNode(fn=fn_a)
+            step = TaskNode(function=fn_a)
 
         mock_app = _MockApp()
         spec_1 = MyWorkflow.build_with(mock_app)  # type: ignore[arg-type]
         spec_2 = MyWorkflow.build_with(mock_app)  # type: ignore[arg-type]
 
         # Spec nodes are independent copies
-        assert spec_1.tasks[0] is not spec_2.tasks[0]
+        assert spec_1.nodes[0] is not spec_2.nodes[0]
         # Neither is the class-level original
-        assert spec_1.tasks[0] is not MyWorkflow.step
-        assert spec_2.tasks[0] is not MyWorkflow.step
+        assert spec_1.nodes[0] is not MyWorkflow.step
+        assert spec_2.nodes[0] is not MyWorkflow.step
 
 
 _REAL_BROKER = PostgresConfig(
@@ -540,7 +515,7 @@ _REAL_BROKER = PostgresConfig(
 
 
 def _real_app() -> Horsies:
-    return Horsies(config=AppConfig(broker=_REAL_BROKER))
+    return Horsies(config=AppConfig(database=_REAL_BROKER))
 
 
 @pytest.mark.unit
@@ -551,7 +526,7 @@ class TestAppWorkflowDoesNotMutateCaller:
 
     def test_caller_node_queue_priority_unchanged(self) -> None:
         app = _real_app()
-        node = TaskNode(fn=fn_a)
+        node = TaskNode(function=fn_a)
         assert node.queue is None
         assert node.priority is None
 
@@ -561,15 +536,15 @@ class TestAppWorkflowDoesNotMutateCaller:
         assert node.queue is None
         assert node.priority is None
         # ...while the spec's own copy carries the resolved values.
-        assert spec.tasks[0] is not node
-        assert spec.tasks[0].queue == 'default'
-        assert spec.tasks[0].priority is not None
+        assert spec.nodes[0] is not node
+        assert spec.nodes[0].queue == 'default'
+        assert spec.nodes[0].priority is not None
 
     def test_node_id_still_back_propagates(self) -> None:
         """The intended node_id/index back-propagation to the original is
         preserved (task-body ctx.result_for(original_node) relies on it)."""
         app = _real_app()
-        node = TaskNode(fn=fn_a)
+        node = TaskNode(function=fn_a)
 
         app.workflow('wf', [node], definition_key='tests.unit.backprop.v1')
 
@@ -578,7 +553,7 @@ class TestAppWorkflowDoesNotMutateCaller:
 
     def test_reuse_across_workflows_is_order_independent(self) -> None:
         app = _real_app()
-        node = TaskNode(fn=fn_a)
+        node = TaskNode(function=fn_a)
 
         app.workflow('wf1', [node], definition_key='tests.unit.reuse1.v1')
         # Second use must see the pristine node, not stale resolved state.

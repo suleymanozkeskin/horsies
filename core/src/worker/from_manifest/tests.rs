@@ -35,7 +35,10 @@ fn the_plan_takes_the_queues_and_claim_settings_of_the_claim_section() {
             .collect::<Vec<_>>(),
         vec![("high", 1, Some(0)), ("low", 100, None)]
     );
-    assert_eq!(app.cluster_wide_cap, Some(20));
+    assert_eq!(
+        app.cluster_wide_cap,
+        crate::core::config::ClusterCapSetting::ClusterCap { tasks: 20 }
+    );
     assert_eq!(app.prefetch_buffer, 0);
     assert_eq!(app.claim_lease_ms, None);
     assert_eq!(app.max_claim_renew_age_ms, 180_000);
@@ -77,7 +80,7 @@ fn the_plan_takes_the_child_launch_and_the_registered_classes() {
             assert_eq!(program.app_locator, "app.main:app");
             assert_eq!(program.imports, vec!["app.tasks"]);
         }
-        ChildProgram::Rust => panic!("the manifest names a Python child"),
+        ChildProgram::Host => panic!("the manifest names a Python child"),
     }
     assert_eq!(launch.log_level, ChildLogLevel::Info);
     let mut names: Vec<&str> = plan.registered.task_names().collect();
@@ -95,11 +98,11 @@ fn the_plan_takes_the_child_launch_and_the_registered_classes() {
 fn the_worker_process_and_the_app_broker_configs_differ_only_where_python_does() {
     let plan = batch_plan();
     assert!(!plan.broker_config.pool_pre_ping);
-    assert!(plan.app_config.broker.pool_pre_ping);
+    assert!(plan.app_config.database.pool_pre_ping);
     assert_eq!(plan.broker_config.max_overflow, 0);
     assert_eq!(
         plan.broker_config.database_url,
-        plan.app_config.broker.database_url
+        plan.app_config.database.database_url
     );
 }
 
@@ -161,10 +164,11 @@ async fn the_worker_broker_is_of_the_family_of_its_caller() {
 async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
     for family in [ClientFamily::Python, ClientFamily::Rust] {
         let database = TestDatabase::create_empty().await;
-        let broker = match worker_broker(&PostgresConfig::from_url(database.url()), family).await {
-            Ok(broker) => broker,
-            Err(refused) => panic!("the config of a test database is valid: {refused}"),
-        };
+        let broker =
+            match worker_broker(&PostgresConfig::from_database_url(database.url()), family).await {
+                Ok(broker) => broker,
+                Err(refused) => panic!("the config of a test database is valid: {refused}"),
+            };
         if let Err(error) = broker.migrate().await {
             panic!("the install on an empty database: {error}");
         }
@@ -273,6 +277,30 @@ fn the_label_names_are_the_tasks_the_queues_and_the_declared_codes() {
     assert_eq!(fetch, ["NOT_FOUND", "RATE_LIMITED"]);
 }
 
+/// The worker keeps the exit that its client gives: the Python bridge and
+/// the Rust client give `Standard`; a host whose runtime must not run its
+/// exit handlers gives `Immediate`.
+#[tokio::test]
+async fn the_worker_of_a_plan_keeps_the_exit_of_its_client() {
+    let immediate = ProcessExit::Immediate(crate::process_exit::ExitDrain::OutputOnly);
+    for (exit, is_immediate) in [(ProcessExit::Standard, false), (immediate, true)] {
+        let worker = Worker::from_plan(
+            batch_plan(),
+            crate::test_support::child_specs::no_child_specs(),
+            ClientFamily::Rust,
+            exit,
+        )
+        .await
+        .expect("the batch plan gives a worker");
+        assert_eq!(
+            matches!(worker.process_exit(), ProcessExit::Immediate(_)),
+            is_immediate,
+            "{:?}",
+            worker.process_exit()
+        );
+    }
+}
+
 /// Telemetry off: with no handler and no worker-ended span, the worker
 /// has no telemetry value, so no event queue, and no handler child.
 #[tokio::test]
@@ -281,6 +309,7 @@ async fn with_no_handler_and_no_span_the_worker_has_no_queue_and_no_child() {
         batch_plan(),
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
+        ProcessExit::Standard,
     )
     .await
     .expect("the batch plan gives a worker");
@@ -311,6 +340,7 @@ async fn a_handler_gives_the_worker_a_queue_a_child_and_its_label() {
         plan,
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
+        ProcessExit::Standard,
     )
     .await
     .expect("the plan gives a worker");
@@ -389,6 +419,7 @@ async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_one_
         plan,
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
+        ProcessExit::Standard,
     )
     .await;
     assert!(built.is_ok(), "{:?}", built.err());
@@ -404,6 +435,7 @@ async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_one_
         plan,
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
+        ProcessExit::Standard,
     )
     .await;
     assert!(built.is_ok(), "{:?}", built.err());
@@ -435,6 +467,7 @@ async fn a_handler_and_an_endpoint_share_one_telemetry_value() {
         plan,
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
+        ProcessExit::Standard,
     )
     .await
     .expect("the plan gives a worker");

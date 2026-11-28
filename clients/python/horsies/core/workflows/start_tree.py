@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode
+from horsies.core.models.workflow.nodes import node_target_name
 from horsies.core.workflows.child_build import (
     NodeOwner,
     NodeRow,
@@ -35,9 +36,9 @@ def top_node_rows(
     from horsies.core.task_decorator import resolve_node_queue
 
     rows: list[NodeRow] = []
-    for node in spec.tasks:
+    for node in spec.nodes:
         assert not node.args, (
-            f"{type(node).__name__} '{node.name}' reached the start with "
+            f"{type(node).__name__} '{node_target_name(node)}' reached the start with "
             f'{len(node.args)} positional args; spec construction refuses them'
         )
         match node:
@@ -45,7 +46,7 @@ def top_node_rows(
                 rows.append(subworkflow_node_row(node, NodeOwner.START))
             case TaskNode():
                 assert node.priority is not None, (
-                    f"TaskNode '{node.name}' reached the start with priority=None; "
+                    f"TaskNode '{node.task_name}' reached the start with priority=None; "
                     'start prevalidation refuses it'
                 )
                 rows.append(

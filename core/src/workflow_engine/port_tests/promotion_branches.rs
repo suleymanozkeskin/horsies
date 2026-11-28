@@ -258,8 +258,8 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
             seed_node(&pool, &source).await;
             let mut dependent = NodeSeed::task(workflow_id, 1, "PENDING")
                 .deps(&[0])
-                .allow_failed_deps();
-            dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+                .allow_failed_dependencies();
+            dependent.workflow_context_from = Some(vec!["node_0".to_owned()]);
             seed_node(&pool, &dependent).await;
 
             recover(&pool, workflow_id, &child_specs_of(&[])).await;
@@ -297,7 +297,7 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
 async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
-    let summary = r#"{"status":"COMPLETED","output":7,"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}"#;
+    let summary = r#"{"status":"COMPLETED","output":7,"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}"#;
     let mut source = NodeSeed::sub_workflow(
         workflow_id,
         0,
@@ -312,7 +312,7 @@ async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
     source.sub_workflow_summary = Some(summary.to_owned());
     seed_node(&pool, &source).await;
     let mut dependent = NodeSeed::task(workflow_id, 1, "PENDING").deps(&[0]);
-    dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    dependent.workflow_context_from = Some(vec!["node_0".to_owned()]);
     seed_node(&pool, &dependent).await;
 
     recover(&pool, workflow_id, &child_specs_of(&[])).await;

@@ -1,0 +1,81 @@
+{
+  "name": "horsies",
+  "private": true,
+  "version": "0.8.1",
+  "description": "TypeScript client of the horsies task queue and workflow engine, for Node and Bun",
+  "license": "MIT",
+  "homepage": "https://suleymanozkeskin.github.io/horsies/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suleymanozkeskin/horsies.git",
+    "directory": "clients/typescript/horsies"
+  },
+  "bugs": {
+    "url": "https://github.com/suleymanozkeskin/horsies/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./zod": {
+      "types": "./dist/zod.d.ts",
+      "default": "./dist/zod.js"
+    },
+    "./rerun/pg": {
+      "types": "./dist/rerun/pg.d.ts",
+      "default": "./dist/rerun/pg.js"
+    },
+    "./rerun/postgres": {
+      "types": "./dist/rerun/postgres.d.ts",
+      "default": "./dist/rerun/postgres.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "imports": {
+    "#native/platform-open": {
+      "bun": "./src/native/platform-open/bun.ts",
+      "default": "./src/native/platform-open/node.ts"
+    }
+  },
+  "bin": {
+    "horsies": "./dist/tools/bin.js"
+  },
+  "files": [
+    "dist",
+    ".agents/skills/horsies",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=26"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.7.0 <2",
+    "zod": ">=4.1.13 <4.7.0",
+    "pg": ">=8.23.1 <8.24.0",
+    "postgres": ">=3.4.9 <3.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "postgres": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "zod": "4.1.13"
+  }
+}

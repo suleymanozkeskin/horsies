@@ -280,10 +280,10 @@ BEGIN
                       'start, child that ends at once: child FAILED');
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' ->> 'sub_workflow_id') = v_child::text
-                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_tasks') = '1',
-                      'start, child that ends at once: parent node FAILED with SUBWORKFLOW_FAILED and summary');
+                      AND ((wft_node(v_wf, 0)).sub_workflow_summary::json ->> 'failed_nodes') = '1',
+                      'start, child that ends at once: parent node FAILED with SUB_WORKFLOW_FAILED and summary');
     PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND wft_task_of(v_wf, 1) IS NOT NULL,
                       'start, child that ends at once: parent dependent promoted in the same statement');
 END $$;
@@ -527,7 +527,7 @@ BEGIN
                       'start, root order: root 1 stays READY and its child is not written');
     PERFORM wft_check(((wft_workflow(v_wf)).error::json ->> 'message') = format('Subworkflow %s failed', v_failing)
                       AND ((wft_workflow(v_wf)).error::json -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_workflow(v_wf)).error::json ->> 'sub_workflow_id') = v_failing::text,
                       'paused parent of a failed child: the workflow error is "Subworkflow <id> failed", as Python');
     PERFORM wft_check(((wft_node(v_wf, 0)).result::json -> 'err' ->> 'message')
@@ -1257,12 +1257,9 @@ BEGIN
     v_result := (wft_workflow(v_wf)).result::json;
     PERFORM wft_check((wft_workflow(v_wf)).status = 'COMPLETED' AND (wft_workflow(v_wf)).completed_at IS NOT NULL,
                       'completion: COMPLETED');
-    PERFORM wft_check((v_result ->> '__h_outputless_terminals__') = 'true'
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n1')::jsonb = (wft_ok('2'))::jsonb
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n2')::jsonb = (wft_ok('{"z":3}'))::jsonb
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n0') IS NULL
-                      AND (v_result -> 'ok' -> 'task_name_by_id' ->> 'n1') = 't1',
-                      'completion: the outputless map holds the terminal nodes only');
+    PERFORM wft_check((wft_workflow(v_wf)).result = '{"__h_task_result__":true,"ok":null,"err":null}'
+                      AND horsies_workflow_result_kind((wft_workflow(v_wf)).result) = 'VALUE',
+                      'completion: a workflow with no output node stores the plain envelope');
 END $$;
 
 DO $$
@@ -1382,7 +1379,7 @@ DECLARE
     v_form record;
     v_row horsies_workflows;
 BEGIN
-    -- Node 0 COMPLETED, node 1 FAILED with the user code SECOND. Each accepted form reads as no policy or as its
+    -- Node 0 COMPLETED, node 1 FAILED with the custom code SECOND. Each accepted form reads as no policy or as its
     -- cases; the completion writes the expected status and error code.
     PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
     UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
@@ -1549,10 +1546,10 @@ BEGIN
     PERFORM * FROM horsies_workflow_child_finish(v_child);
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED'
+                          = 'SUB_WORKFLOW_FAILED'
                       AND ((wft_node(v_wf, 0)).result::json -> 'err' -> 'sub_workflow_summary' ->> 'error_summary')
                           = 'boom',
-                      'child finish: a FAILED child gives SUBWORKFLOW_FAILED with the summary');
+                      'child finish: a FAILED child gives SUB_WORKFLOW_FAILED with the summary');
     PERFORM wft_check((wft_workflow(v_wf)).status = 'FAILED', 'child finish: the parent completes FAILED');
 END $$;
 
@@ -2105,7 +2102,7 @@ BEGIN
                       'child start TREE: a child whose root failed ends at once');
     PERFORM wft_check((wft_node(v_parent, 0)).status = 'FAILED' AND (wft_node(v_parent, 0)).sub_workflow_id = v_child
                       AND ((wft_node(v_parent, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
-                          = 'SUBWORKFLOW_FAILED',
+                          = 'SUB_WORKFLOW_FAILED',
                       'child start TREE: the child that ended advances the node in the same statement');
     PERFORM wft_check(v_row.disposition = 'STARTED' AND v_row.workflow_status = 'FAILED'
                       AND v_row.advance_child_workflow_id = v_parent AND (wft_node(v_top, 0)).status = 'RUNNING',
@@ -2748,7 +2745,7 @@ BEGIN
     SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_done, v_token, 300000);
     PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.workflow_status = 'COMPLETED'
                       AND v_row.advance_child_workflow_id IS NULL
-                      AND ((wft_workflow(v_done)).result::json ->> '__h_outputless_terminals__') = 'true',
+                      AND (wft_workflow(v_done)).result = '{"__h_task_result__":true,"ok":null,"err":null}',
                       'recover completion: an all-terminal workflow completes with its output');
     SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_child, v_token, 300000);
     PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.advance_child_workflow_id = v_child,
@@ -2956,17 +2953,27 @@ END $$;
 DO $$
 DECLARE
     v_wf uuid := '00000000-0000-7000-8000-000000000e02';
-    v_result json;
 BEGIN
     PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1},{"idx":2}]');
     UPDATE horsies_workflow_tasks
     SET status = 'COMPLETED', result = CASE task_index WHEN 0 THEN '' WHEN 1 THEN wft_ok('1') END
     WHERE workflow_id = v_wf;
-    v_result := horsies_workflow_outputless_result(v_wf)::json;
-    PERFORM wft_check(json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n0') = 'null'
-                      AND (v_result -> 'ok' -> 'results_by_id' -> 'n1')::jsonb = (wft_ok('1'))::jsonb
-                      AND json_typeof(v_result -> 'ok' -> 'results_by_id' -> 'n2') = 'null',
-                      'empty text: an empty terminal result is the entry null of a result that is not an envelope');
+    PERFORM wft_check(horsies_workflow_try_complete(v_wf) = 'COMPLETED'
+                      AND (wft_workflow(v_wf)).result = '{"__h_task_result__":true,"ok":null,"err":null}',
+                      'empty text: an empty terminal result does not change the plain envelope');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_check(horsies_workflow_result_kind(
+                          '{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":{},"task_name_by_id":{},"definition_key_by_id":{}},"err":null}'
+                      ) = 'UNREADABLE'
+                      AND horsies_workflow_result_kind('{"__h_task_result__":true,"ok":null,"err":null}') = 'VALUE',
+                      'old outputless envelope: the result written before migration 1009 does not read; the plain envelope is a value');
+    PERFORM wft_check((horsies_workflow_err_slot(
+                          '{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{"results_by_id":{},"task_name_by_id":{},"definition_key_by_id":{}},"err":null}'
+                      )::json -> 'error_code')::text LIKE '%RESULT_DESERIALIZATION_ERROR%',
+                      'old outputless envelope: the err slot read gives RESULT_DESERIALIZATION_ERROR');
 END $$;
 
 DO $$

@@ -27,6 +27,7 @@ from typing import (
     Literal,
     TypeVar,
     Union,
+    Unpack,
     assert_never,
     cast,
     get_args,
@@ -50,14 +51,22 @@ from horsies.core.codec.wire_shape import (
     parameter_default_refusal,
     shape_refusals,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import NotATaskErrorType, TaskError, custom_code_type_of
 from horsies.core.task_runtime import TaskRuntime
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import (
+    Err,
+    NotAResultAnnotation,
+    Ok,
+    ResultTypeArguments,
+    result_type_arguments,
+)
 
 
 __all__ = [
@@ -74,9 +83,10 @@ _DOCS_URL = 'https://suleymanozkeskin.github.io/horsies/internals/serialization/
 _SCHEMA_HOOK = '__get_pydantic_core_schema__'
 
 INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
+    NoWorkflowOutput,
     TaskError,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
     SubWorkflowSummary,
 })
 
@@ -143,14 +153,14 @@ class _RejectedError(Exception):
 
 
 def check_task_signature(
-    fn: Callable[..., Any],
+    function: Callable[..., Any],
     *,
     task_name: str,
 ) -> None:
-    """Validate that `fn`'s signature uses only allow-list types.
+    """Validate that `function`'s signature uses only allow-list types.
 
     Args:
-        fn: Task function being registered. Pre-decoration is not handled
+        function: Task function being registered. Pre-decoration is not handled
             here — `create_task_wrapper` already rejects pre-decorated fns.
         task_name: Registered name; used in error messages.
 
@@ -164,8 +174,8 @@ def check_task_signature(
             docs URL. Fails fast — one error per call; further positions
             are not inspected after the first rejection.
     """
-    hints = get_type_hints(fn, include_extras=True)
-    sig = inspect.signature(fn)
+    hints = get_type_hints(function, include_extras=True)
+    sig = inspect.signature(function)
     runtime = runtime_parameter_of(sig, hints)
 
     for param_name, param in sig.parameters.items():
@@ -398,9 +408,9 @@ def _runtime_place_refusal(
 
 def _check_parameter(name: str, annot: object, default: object) -> None:
     """Apply the allow-list, the wire shape and the default rule to one parameter."""
-    slot = _taskresult_slot(annot)
+    slot = _outcome_slot(annot)
     if slot is not None:
-        _check_taskresult_args(slot)
+        _check_outcome_args(slot)
         ok_type = get_args(slot)[0]
         _classify(ok_type, json_value_allowed_position=True)
         _reject_wire_shape(ok_type)
@@ -426,36 +436,40 @@ def _check_parameter(name: str, annot: object, default: object) -> None:
         ))
 
 
-def _taskresult_slot(annot: object) -> object | None:
-    """Return the `TaskResult[T, E]` of an `args_from` slot, or None.
+def _outcome_slot(annot: object) -> object | None:
+    """Return the `TaskOutcome[T, E]` of an `args_from` slot, or None.
 
-    A slot is `TaskResult[T, E]` or `TaskResult[T, E] | None`, also in `Annotated`.
-    Pydantic has no schema for `TaskResult`, so it fits nowhere else.
+    A slot is `TaskOutcome[T, E]` or `TaskOutcome[T, E] | None`, also in
+    `Annotated`. The engine fills it with the outcome of the source, so it
+    fits nowhere else.
     """
     if get_origin(annot) is Annotated:
         annot = get_args(annot)[0]
-    if get_origin(annot) is TaskResult:
+    if get_origin(annot) is TaskOutcome:
         return annot
     if get_origin(annot) is Union or get_origin(annot) is types.UnionType:
         members = [item for item in get_args(annot) if item is not type(None)]
-        if len(members) == 1 and get_origin(members[0]) is TaskResult:
+        if len(members) == 1 and get_origin(members[0]) is TaskOutcome:
             return cast(object, members[0])
     return None
 
 
-def _check_taskresult_args(slot: object) -> None:
+def _check_outcome_args(slot: object) -> None:
     args = get_args(slot)
     if len(args) != 2:
         raise _RejectedError(_Rejection(
             banned=repr(slot),
-            reason='TaskResult must have exactly 2 type parameters',
-            fix='use TaskResult[YourType, TaskError]',
+            reason='TaskOutcome must have exactly 2 type parameters',
+            fix='use TaskOutcome[YourType, TaskError]',
         ))
-    if args[1] is not TaskError:
+    if isinstance(custom_code_type_of(args[1]), NotATaskErrorType):
         raise _RejectedError(_Rejection(
-            banned=f'TaskResult[..., {args[1]!r}]',
-            reason=f'TaskResult error parameter must be TaskError, got {args[1]!r}',
-            fix='use TaskResult[YourType, TaskError]',
+            banned=f'TaskOutcome[..., {args[1]!r}]',
+            reason=(
+                'TaskOutcome error parameter must be TaskError or '
+                f'TaskError[YourCodeEnum], got {args[1]!r}'
+            ),
+            fix='use TaskOutcome[YourType, TaskError]',
         ))
 
 
@@ -476,8 +490,11 @@ def _reject_schema_hook(item: object) -> None:
 
     A hook replaces the node of the type, so no schema rule can see what it does:
     it could accept a str as an int. This reads the hook as pydantic reads it, on
-    the object, and judges the owner. A hook from pydantic is a known form.
+    the object, and judges the owner. A hook from pydantic is a known form, and a
+    library type in `INTERNAL_CODEC_TYPES` keeps its own.
     """
+    if isinstance(item, type) and item in INTERNAL_CODEC_TYPES:
+        return
     hook = getattr(item, _SCHEMA_HOOK, None)
     if hook is None:
         return
@@ -498,33 +515,30 @@ def _validate_return_annotation(
     *,
     task_name: str,
 ) -> None:
-    """Return must be `TaskResult[OkT, TaskError]`. ErrT enforced; OkT walked."""
-    origin = get_origin(annot)
-    if origin is not TaskResult:
+    """Return must be `Result[OkT, TaskError]`. ErrT enforced; OkT walked."""
+    match result_type_arguments(annot):
+        case NotAResultAnnotation():
+            raise SignatureValidationError(_refusal(
+                task_name=task_name,
+                position='return type',
+                banned=repr(annot),
+                reason='task return type must be Result[OkT, TaskError]',
+                fix='change return type to `-> Result[YourType, TaskError]`',
+            ))
+        case ResultTypeArguments(ok_type=ok_type, err_type=err_type):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    if isinstance(custom_code_type_of(err_type), NotATaskErrorType):
         raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return type',
-            banned=repr(annot),
-            reason='task return type must be TaskResult[OkT, TaskError]',
-            fix='change return type to `-> TaskResult[YourType, TaskError]`',
-        ))
-    args = get_args(annot)
-    if len(args) != 2:
-        raise SignatureValidationError(_refusal(
-            task_name=task_name,
-            position='return type',
-            banned=repr(annot),
-            reason='TaskResult must have exactly 2 type parameters',
-            fix='use `-> TaskResult[YourType, TaskError]`',
-        ))
-    ok_type, err_type = args
-    if err_type is not TaskError:
-        raise SignatureValidationError(_refusal(
-            task_name=task_name,
-            position='return type',
-            banned=f'TaskResult[..., {err_type!r}]',
-            reason=f'TaskResult error parameter must be TaskError, got {err_type!r}',
-            fix='change return type to `-> TaskResult[YourType, TaskError]`',
+            banned=f'Result[..., {err_type!r}]',
+            reason=(
+                'Result error parameter must be TaskError or '
+                f'TaskError[YourCodeEnum], got {err_type!r}'
+            ),
+            fix='change return type to `-> Result[YourType, TaskError]`',
         ))
     try:
         _classify(ok_type, json_value_allowed_position=True)
@@ -532,7 +546,7 @@ def _validate_return_annotation(
     except _RejectedError as err:
         raise SignatureValidationError(_refusal(
             task_name=task_name,
-            position='return TaskResult ok slot',
+            position='return Result ok slot',
             banned=err.rejection.banned,
             reason=err.rejection.reason,
             fix=err.rejection.fix,
@@ -736,13 +750,13 @@ def _classify(
     origin = get_origin(annot)
     args = get_args(annot)
 
-    # `_check_parameter` and `_validate_return_annotation` take a whole
-    # TaskResult. Below that, pydantic has no schema for it.
-    if origin is TaskResult:
+    # `_check_parameter` takes a whole TaskOutcome. Below that, only the
+    # engine could fill it, and it does not.
+    if origin is TaskOutcome:
         raise _RejectedError(_Rejection(
             banned=repr(cast(object, annot)),
-            reason='TaskResult fits only as a whole parameter, or with `| None`',
-            fix='declare the parameter as TaskResult[YourType, TaskError]',
+            reason='TaskOutcome fits only as a whole parameter, or with `| None`',
+            fix='declare the parameter as TaskOutcome[YourType, TaskError]',
         ))
 
     # Annotated[T, meta...]
@@ -836,6 +850,20 @@ def _classify(
         for arg in args:
             if arg is Ellipsis:
                 continue
+            if _is_unpacked_tuple_item(arg):
+                raise _RejectedError(_Rejection(
+                    banned=f'unpacked item {arg!r} inside a tuple',
+                    reason=(
+                        'pydantic stores an unpacked `*tuple[...]` item as a '
+                        'nested array (`[1, [true, false]]`), not as the flat '
+                        'array of a tuple with a rest item'
+                    ),
+                    fix=(
+                        'use tuple[T, ...] or tuple[T1, T2, ...]; '
+                        'for a fixed head and a variable tail, use a '
+                        'dataclass or BaseModel with a tuple[T, ...] field'
+                    ),
+                ))
             _classify(
                 arg,
                 json_value_allowed_position=json_value_allowed_position,
@@ -1033,6 +1061,13 @@ def _walk_dataclass_fields(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_unpacked_tuple_item(arg: object) -> bool:
+    """True when `arg` is `*tuple[...]` or `Unpack[...]` inside a tuple."""
+    if get_origin(arg) is Unpack:
+        return True
+    return getattr(arg, '__unpacked__', False) is True
 
 
 def _find_discriminator(metadata: tuple[object, ...]) -> str | None:

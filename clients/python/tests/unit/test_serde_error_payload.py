@@ -27,11 +27,10 @@ import pytest
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.models.tasks import (
-    FlattenedException,
-    OperationalErrorCode,
-    SubWorkflowError,
+    ExceptionRecord,
+    OperationalCode,
+    SubWorkflowFailure,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -45,18 +44,16 @@ def _decode_envelope(wire: str) -> dict[str, Any]:
 @pytest.mark.unit
 class TestSerializeErrorPayloadFlattensException:
     def test_exception_none_round_trips_unchanged(self) -> None:
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR,
-                message='nothing to flatten',
-            ),
+        error: TaskError = TaskError(
+            code=OperationalCode.DATABASE_ERROR,
+            message='nothing to flatten',
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         assert envelope['__h_task_result__'] is True
         assert envelope['ok'] is None
         err = envelope['err']
-        assert err['error_code'] == {'__builtin_task_code__': 'BROKER_ERROR'}
+        assert err['error_code'] == {'__builtin_task_code__': 'DATABASE_ERROR'}
         assert err['exception'] is None
 
     def test_live_exception_flattened_to_dict(self) -> None:
@@ -79,14 +76,12 @@ class TestSerializeErrorPayloadFlattensException:
         except ValueError as caught:
             original = caught
 
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message=f'{type(original).__name__}: {original}',
-                exception=original,
-            ),
+        error: TaskError = TaskError(
+            code=OperationalCode.TASK_EXCEPTION,
+            message=f'{type(original).__name__}: {original}',
+            exception=original,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
 
         # Critical: error_code stays TASK_EXCEPTION — no silent
@@ -116,14 +111,12 @@ class TestSerializeErrorPayloadFlattensException:
             pass
 
         original = MyDomainError('domain problem')
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message='custom failure',
-                exception=original,
-            ),
+        error: TaskError = TaskError(
+            code=OperationalCode.TASK_EXCEPTION,
+            message='custom failure',
+            exception=original,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         flattened = envelope['err']['exception']
         assert flattened['type'] == 'MyDomainError'
@@ -136,28 +129,26 @@ class TestSerializeErrorPayloadFlattensException:
         """A pre-flattened ``exception`` dict is encoded as-is.
 
         Strict-serde phase 7 promoted ``TaskError.exception`` to
-        ``BaseException | FlattenedException | None``. The dict variant
-        must carry the full ``FlattenedException`` shape — all five
+        ``BaseException | ExceptionRecord | None``. The dict variant
+        must carry the full ``ExceptionRecord`` shape — all five
         keys (``type``, ``module``, ``message``, ``repr``, ``traceback``)
         — or model validation rejects it. This is the intentional
         tightening: callers building the dict by hand must produce the
         same shape ``flatten_exception`` would produce.
         """
-        pre_flattened: FlattenedException = {
+        pre_flattened: ExceptionRecord = {
             'type': 'ConnectionError',
             'module': 'builtins',
             'message': 'db down',
             'repr': "ConnectionError('db down')",
             'traceback': 'Traceback (most recent call last):\n  ConnectionError: db down\n',
         }
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR,
-                message='db down',
-                exception=pre_flattened,
-            ),
+        error: TaskError = TaskError(
+            code=OperationalCode.DATABASE_ERROR,
+            message='db down',
+            exception=pre_flattened,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         # The pre-flattened dict round-trips unchanged.
         assert envelope['err']['exception'] == pre_flattened
@@ -166,7 +157,7 @@ class TestSerializeErrorPayloadFlattensException:
         self,
     ) -> None:
         """``serialize_error_payload`` routes through ``encode_task_result``
-        which routes through ``encode_task_error``, so ``SubWorkflowError``
+        which routes through ``encode_task_error``, so ``SubWorkflowFailure``
         subclass fields (``sub_workflow_id`` / ``sub_workflow_summary``)
         now survive the encode.
 
@@ -181,21 +172,19 @@ class TestSerializeErrorPayloadFlattensException:
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=1,
-            completed_tasks=0,
-            failed_tasks=1,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=0,
+            failed_nodes=1,
+            skipped_nodes=0,
             error_summary='downstream',
         )
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=SubWorkflowError(
-                error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
-                message='subworkflow failed',
-                sub_workflow_id='wf-child',
-                sub_workflow_summary=summary,
-            ),
+        error: TaskError = SubWorkflowFailure(
+            code=OperationalCode.UNHANDLED_EXCEPTION,
+            message='subworkflow failed',
+            sub_workflow_id='wf-child',
+            sub_workflow_summary=summary,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         err = envelope['err']
         # Base-class fields survive.
@@ -205,7 +194,7 @@ class TestSerializeErrorPayloadFlattensException:
         # Subclass fields are now preserved through the encode helper.
         assert err['sub_workflow_id'] == 'wf-child'
         assert isinstance(err['sub_workflow_summary'], dict)
-        assert err['sub_workflow_summary']['failed_tasks'] == 1
+        assert err['sub_workflow_summary']['failed_nodes'] == 1
         assert err['sub_workflow_summary']['error_summary'] == 'downstream'
 
 
@@ -223,7 +212,7 @@ class TestTaskErrorModelDumpException:
             raise ValueError('boom')
         except ValueError as caught:
             te = TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                code=OperationalCode.TASK_EXCEPTION,
                 message='m',
                 exception=caught,
             )
@@ -238,7 +227,7 @@ class TestTaskErrorModelDumpException:
         assert 'ValueError: boom' in flattened['traceback']
 
     def test_model_dump_json_string_does_not_raise(self) -> None:
-        te = TaskError(error_code='MY_CODE', message='m', exception=ValueError('boom'))
+        te = TaskError(code='MY_CODE', message='m', exception=ValueError('boom'))
         wire = te.model_dump_json()
         parsed: dict[str, Any] = json.loads(wire)
         assert parsed['exception']['type'] == 'ValueError'
@@ -246,18 +235,18 @@ class TestTaskErrorModelDumpException:
     def test_python_mode_keeps_live_exception_object(self) -> None:
         """when_used='json' must not touch python-mode dumps."""
         original = ValueError('boom')
-        te = TaskError(error_code='MY_CODE', message='m', exception=original)
+        te = TaskError(code='MY_CODE', message='m', exception=original)
         dumped = te.model_dump()
         assert dumped['exception'] is original
 
     def test_none_exception_json_mode_is_none(self) -> None:
-        te = TaskError(error_code='MY_CODE', message='m')
+        te = TaskError(code='MY_CODE', message='m')
         assert te.model_dump(mode='json')['exception'] is None
 
     def test_already_flattened_dict_passes_through(self) -> None:
-        flat: FlattenedException = {
+        flat: ExceptionRecord = {
             'type': 'ValueError', 'module': 'builtins', 'message': 'boom',
             'repr': "ValueError('boom')", 'traceback': 'tb',
         }
-        te = TaskError(error_code='MY_CODE', message='m', exception=flat)
+        te = TaskError(code='MY_CODE', message='m', exception=flat)
         assert te.model_dump(mode='json')['exception'] == flat

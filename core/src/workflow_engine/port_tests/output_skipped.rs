@@ -4,7 +4,7 @@
 //! COMPLETED while that node is SKIPPED or FAILED. A sub-workflow node is
 //! COMPLETED only when its child's output is ok: an err output, or a stored
 //! child result that does not parse, makes a FAILED node, so
-//! `allow_failed_deps = false`, `join` and a success case hold by status.
+//! `allow_failed_dependencies = false`, `join` and a success case hold by status.
 //!
 //! A test that leaves a live task row runs in a database of its own
 //! (`IsolatedDatabase`).
@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use super::subworkflow_matrix::{assert_no_workflow_output, node_entry};
 use super::support::{
     advance_parent_of, args_from_inner, child_of, child_specs_of, code, ctx_result, err, error_of,
     finish_node, handle, node, node_status, node_task_input, ok, required, seed_node,
@@ -258,7 +259,7 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
 
 /// `test_allow_failed_deps_dependent_receives_the_err` (skipped output, failed output)
 #[tokio::test]
-async fn an_allow_failed_deps_dependent_receives_the_err() {
+async fn an_allow_failed_dependencies_dependent_receives_the_err() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
     let child_specs = output_children();
@@ -266,7 +267,7 @@ async fn an_allow_failed_deps_dependent_receives_the_err() {
         let mut dependent = task_node(1, "output_skipped_recover");
         dependent.dependencies = vec![0];
         dependent.args_from.insert("upstream".to_owned(), 0);
-        dependent.allow_failed_deps = true;
+        dependent.allow_failed_dependencies = true;
         let mut parent = spec(
             "output_skipped_recover_parent",
             vec![sub_workflow_node(0, &child.spec()), dependent],
@@ -297,8 +298,8 @@ async fn the_workflow_context_holds_the_named_outcome() {
     let child_specs = output_children();
     let mut dependent = task_node(1, "output_skipped_ctx_consume");
     dependent.dependencies = vec![0];
-    dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    dependent.allow_failed_deps = true;
+    dependent.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    dependent.allow_failed_dependencies = true;
     let mut parent = spec(
         "output_skipped_ctx_parent",
         vec![sub_workflow_node(0, &skipped_output_child()), dependent],
@@ -516,7 +517,7 @@ async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
     assert_eq!(
         get_code(&pool, workflow_id).await.as_deref(),
-        Some("SUBWORKFLOW_FAILED")
+        Some("SUB_WORKFLOW_FAILED")
     );
 }
 
@@ -555,21 +556,11 @@ async fn two_levels_with_a_mid_case_keep_the_named_outcome() {
     );
 }
 
-/// The entry of `node_id` in the ok map of an outputless workflow's `get()`.
-fn outputless_entry(
-    got: &TaskResult<serde_json::Value>,
-    node_id: &str,
-) -> TaskResult<serde_json::Value> {
-    match got {
-        TaskResult::Ok(map) => serde_json::from_value(map[node_id].clone())
-            .unwrap_or_else(|error| panic!("entry '{node_id}' is not an envelope: {error}: {map}")),
-        TaskResult::Err(error) => panic!("get() of a COMPLETED outputless workflow: {error:?}"),
-    }
-}
-
-/// `test_outputless_parent_entry_holds_the_named_outcome`
+/// `test_outputless_parent_entry_holds_the_named_outcome`: the node of the
+/// skipped-output child keeps the named error, and the outputless parent
+/// stores the plain envelope.
 #[tokio::test]
-async fn an_outputless_parent_entry_holds_the_named_outcome() {
+async fn an_outputless_parent_node_holds_the_named_outcome() {
     let pool = shared_pool().await;
     let child_specs = output_children();
     let mut parent = spec(
@@ -594,17 +585,14 @@ async fn an_outputless_parent_entry_holds_the_named_outcome() {
         .run(&pool, child_of(&pool, workflow_id, 0).await, &child_specs)
         .await;
 
-    let got = handle(&pool, workflow_id)
-        .get(Some(GET_WAIT))
-        .await
-        .expect("the result read");
+    assert_no_workflow_output(&pool, workflow_id).await;
     assert_eq!(
-        code(error_of(&outputless_entry(&got, "node_0"))).as_deref(),
+        code(error_of(&node_entry(&pool, workflow_id, "node_0").await)).as_deref(),
         Some("WORKFLOW_OUTPUT_SKIPPED")
     );
-    match outputless_entry(&got, "node_1") {
+    match node_entry(&pool, workflow_id, "node_1").await {
         TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(7)),
-        TaskResult::Err(error) => panic!("entry node_1: {error:?}"),
+        TaskResult::Err(error) => panic!("node_1: {error:?}"),
     }
 }
 
@@ -655,7 +643,7 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
         let mut dependent = NodeSeed::task(parent_id, 1, "PENDING")
             .deps(&[0])
             .args_from("upstream", 0)
-            .allow_failed_deps();
+            .allow_failed_dependencies();
         dependent.task_name = "output_skipped_stored_data_recover".to_owned();
         seed_node(&pool, &dependent).await;
 
@@ -719,9 +707,13 @@ async fn a_required_unreadable_node_reports_the_cause_at_get() {
     }
 }
 
-/// `test_outputless_skipped_terminal_holds_the_named_outcome`
+/// `test_outputless_skipped_terminal_holds_the_named_outcome`: a SKIPPED
+/// terminal node of a workflow with no output node produces no
+/// `WORKFLOW_OUTPUT_SKIPPED`: the workflow stores the plain envelope, the
+/// node stays SKIPPED with no result, and the other terminal node keeps its
+/// result.
 #[tokio::test]
-async fn an_outputless_skipped_terminal_holds_the_named_outcome() {
+async fn an_outputless_skipped_terminal_stores_the_plain_envelope() {
     let pool = shared_pool().await;
     let child_specs = output_children();
     let mut outputless = skipped_output_child();
@@ -734,16 +726,11 @@ async fn an_outputless_skipped_terminal_holds_the_named_outcome() {
         .run(&pool, workflow_id, &child_specs)
         .await;
 
-    let got = handle(&pool, workflow_id)
-        .get(Some(GET_WAIT))
-        .await
-        .expect("the result read");
-    assert_eq!(
-        code(error_of(&outputless_entry(&got, "node_1"))).as_deref(),
-        Some("WORKFLOW_OUTPUT_SKIPPED")
-    );
-    match outputless_entry(&got, "node_2") {
+    assert_no_workflow_output(&pool, workflow_id).await;
+    assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
+    assert_eq!(node(&pool, workflow_id, 1).await.result, None);
+    match node_entry(&pool, workflow_id, "node_2").await {
         TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(7)),
-        TaskResult::Err(error) => panic!("entry node_2: {error:?}"),
+        TaskResult::Err(error) => panic!("node_2: {error:?}"),
     }
 }

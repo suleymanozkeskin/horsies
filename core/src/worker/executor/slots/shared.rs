@@ -48,7 +48,7 @@ pub struct SharedPoolConfig {
     pub init: InitFrame,
     pub worker_id: String,
     /// The orphan self-heal that each run frame carries (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     /// Tasks that wait for a seat, at most.
     pub pending_limit: NonZeroUsize,
@@ -367,6 +367,7 @@ impl SharedPool {
                     task_name: task.task_name.clone(),
                     queue_name: QueueName::cut(&task.queue_name),
                     attempt: task.retry.attempt(),
+                    max_retries: task.retry.max_retries_allowed(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,

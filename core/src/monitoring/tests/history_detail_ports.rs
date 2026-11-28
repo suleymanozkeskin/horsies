@@ -38,18 +38,18 @@ async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
             .await
             .expect("completed detail"),
     );
-    assert_eq!(completed_detail.leaf.status, "COMPLETED");
-    assert!(completed_detail.leaf.completed_at.is_some());
-    assert_eq!(completed_detail.leaf.failed_at, None);
+    assert_eq!(completed_detail.task_row.status, "COMPLETED");
+    assert!(completed_detail.task_row.completed_at.is_some());
+    assert_eq!(completed_detail.task_row.failed_at, None);
 
     let cancelled_detail = found_detail(
         get_task_detail(&broker, cancelled.id)
             .await
             .expect("cancelled detail"),
     );
-    assert_eq!(cancelled_detail.leaf.status, "CANCELLED");
-    assert!(cancelled_detail.leaf.failed_at.is_some());
-    assert_eq!(cancelled_detail.leaf.completed_at, None);
+    assert_eq!(cancelled_detail.task_row.status, "CANCELLED");
+    assert!(cancelled_detail.task_row.failed_at.is_some());
+    assert_eq!(cancelled_detail.task_row.completed_at, None);
 
     let unknown = Uuid::new_v4();
     assert_eq!(

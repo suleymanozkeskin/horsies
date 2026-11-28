@@ -23,7 +23,7 @@ from horsies._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     DatabasePingRecord,
     Enqueued,
     EnqueueRequest,
@@ -40,6 +40,9 @@ from horsies._core import (
     TaskAttemptRecord,
     TaskInfoNotFound,
     TaskInfoRecord,
+    TaskInfoResultNotRequested,
+    TaskInfoResultNotStored,
+    TaskInfoResultStored,
     StaleClaimsBoundReached,
     StaleClaimsDrained,
     StaleClaimsRequeueFailed,
@@ -56,23 +59,24 @@ from horsies._core import (
 )
 from horsies.core.brokers.postgres import SIGNED_64_BIT_MAX, SIGNED_64_BIT_MIN
 from horsies.core.brokers.result_types import (
-    BrokerAsyncContext,
-    BrokerEnqueueFailed,
-    BrokerErrorCode,
-    BrokerIdempotencyKeyConflict,
-    BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
-    BrokerInvalidTaskOptions,
-    BrokerListenerDisabled,
-    BrokerOperationFailed,
-    BrokerPayloadMismatch,
-    RawResultRecord,
+    DatabaseAsyncContext,
+    DatabaseEnqueueFailed,
+    DatabaseErrorCode,
+    DatabaseIdempotencyKeyConflict,
+    DatabaseInvalidInput,
+    DatabaseInvalidJsonPayload,
+    DatabaseInvalidTaskOptions,
+    DatabaseListenerDisabled,
+    DatabaseOperationFailed,
+    DatabasePayloadMismatch,
+    StoredResult,
 )
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.health import (
     DatabasePing,
 )
 from horsies.core.models.payload import PayloadPolicy
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendValidationFailed,
@@ -81,11 +85,13 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     Execution,
+    ResultSlotNotRequested,
+    ResultSlotNotStored,
+    ResultSlotStored,
     TaskError,
     TaskInfo,
-    TaskResult,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 
 
@@ -95,25 +101,25 @@ from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 
 
 _CONNECTION_LOST = CoreConnectionError('task_info', 'connection lost', True)
-"""The exception of a failure record whose connection was lost."""
+"""The cause of a failure record whose connection was lost."""
 
 _DIGEST_MISMATCH = CoreContractViolation('task_info', 'stored result digest mismatch')
-"""The exception of a failure record whose stored data does not read."""
+"""The cause of a failure record whose stored data does not read."""
 
 _LOCK_NOT_AVAILABLE = CoreServerError(
     'audit_orphaned_workflow_tasks', '55P03', 'could not obtain lock', True,
 )
-"""The exception of an orphan page whose cursor another sweep holds."""
+"""The cause of an orphan page whose cursor another sweep holds."""
 
 _COUNT_DIFFERS = CoreContractViolation(
     'audit_orphaned_workflow_tasks', 'the cursor candidate count 2 differs',
 )
-"""The exception of an orphan page outside the function's contract."""
+"""The cause of an orphan page outside the function's contract."""
 
 _FAMILY_MISMATCH = CorePreconditionFailed(
     'install_schema', 'the database was installed by the RUST client', False,
 )
-"""The exception of a schema install into a database of the other family."""
+"""The cause of a schema install into a database of the other family."""
 
 
 def _make_broker(database_url: str = 'postgresql://u:p@localhost/db') -> Any:
@@ -185,7 +191,7 @@ class TestEnqueueAsync:
 
         assert is_err(result)
         match result.err_value:
-            case BrokerInvalidTaskOptions(message=message, exception=cause):
+            case DatabaseInvalidTaskOptions(message=message, cause=cause):
                 assert 'JSON' in message
                 assert isinstance(cause, SerializationError)
             case other:
@@ -204,7 +210,7 @@ class TestEnqueueAsync:
 
         assert is_err(result)
         match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
+            case DatabaseInvalidInput(message=message, cause=cause):
                 assert message == (
                     'kwargs JSON corrupt for my_task: '
                     'JSON parse failed: JSON object repeats a key'
@@ -226,7 +232,7 @@ class TestEnqueueAsync:
 
         assert is_err(result)
         match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
+            case DatabaseInvalidInput(message=message, cause=cause):
                 assert message == (
                     'kwargs JSON corrupt for my_task: '
                     'JSON parse failed: the text is empty'
@@ -237,20 +243,20 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_both_scheduling_parameters_are_refused_as_invalid_input(self) -> None:
-        """enqueued_at and enqueue_delay_seconds together → INVALID_INPUT; nothing is written."""
+        """enqueued_at and delay_seconds together → INVALID_INPUT; nothing is written."""
         result = await _refusing_broker().enqueue_async(
             'my_task',
             task_id=SEND_TASK_ID,
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             enqueued_at=datetime.now(timezone.utc),
-            enqueue_delay_seconds=30,
+            delay_seconds=30,
         )
 
         assert is_err(result)
         match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
-                assert 'enqueued_at and enqueue_delay_seconds' in message
+            case DatabaseInvalidInput(message=message, cause=cause):
+                assert 'enqueued_at and delay_seconds' in message
                 assert cause == NoCause()
             case other:
                 raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
@@ -267,12 +273,12 @@ class TestEnqueueAsync:
         )
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.INVALID_TASK_OPTIONS
+        assert result.err_value.code == DatabaseErrorCode.INVALID_TASK_OPTIONS
         assert 'retry_policy is not an object: str' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_future_sent_at_without_scheduling_params_rejected(self) -> None:
-        """Future sent_at without enqueued_at or enqueue_delay_seconds must error.
+        """Future sent_at without enqueued_at or delay_seconds must error.
 
         sent_at is an immutable call-site timestamp, not a scheduling mechanism.
         Passing a future value without explicit scheduling params is ambiguous
@@ -288,7 +294,7 @@ class TestEnqueueAsync:
 
         assert is_err(result)
         match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
+            case DatabaseInvalidInput(message=message, cause=cause):
                 assert 'sent_at' in message
                 assert cause == NoCause()
             case other:
@@ -317,7 +323,7 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_future_sent_at_with_enqueue_delay_accepted(self) -> None:
-        """Future sent_at is allowed when enqueue_delay_seconds is provided."""
+        """Future sent_at is allowed when delay_seconds is provided."""
         broker = self._broker_answering_enqueued()
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
 
@@ -327,7 +333,7 @@ class TestEnqueueAsync:
                 task_id=SEND_TASK_ID,
                 send_kind=SendKind.FIRST,
                 sent_at=future,
-                enqueue_delay_seconds=600,
+                delay_seconds=600,
             )
 
         assert result == Ok(SEND_TASK_ID)
@@ -402,7 +408,7 @@ class TestEnqueueThroughCore:
             result = await self._send(
                 broker,
                 send_kind=SendKind.REPEAT,
-                enqueue_delay_seconds=30,
+                delay_seconds=30,
                 idempotency_key='order-17',
                 retain_rerun_input=False,
                 priority=50,
@@ -482,7 +488,7 @@ class TestEnqueueThroughCore:
             pytest.param(
                 {
                     'enqueued_at': datetime.now(timezone.utc),
-                    'enqueue_delay_seconds': 5,
+                    'delay_seconds': 5,
                 },
                 'Cannot specify both',
                 id='both-starts',
@@ -499,7 +505,7 @@ class TestEnqueueThroughCore:
                 {'priority': 2**31}, 'priority must be between 1 and 100', id='priority-range',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
+                {'delay_seconds': 2**63}, 'not a 64-bit integer', id='delay-range',
             ),
         ],
     )
@@ -511,7 +517,7 @@ class TestEnqueueThroughCore:
         result = await self._send(broker, **keywords)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert isinstance(result.err_value, DatabaseInvalidInput)
         assert message in result.err_value.message
         broker._core_handle.enqueue_async.assert_not_awaited()
 
@@ -521,36 +527,36 @@ class TestEnqueueThroughCore:
         [
             pytest.param(
                 {'input_json': '{bad'},
-                BrokerErrorCode.INVALID_INPUT,
-                BrokerInvalidInput,
+                DatabaseErrorCode.INVALID_INPUT,
+                DatabaseInvalidInput,
                 SerializationError,
                 id='INVALID_INPUT-unreadable-json',
             ),
             pytest.param(
                 {'sent_at': datetime.now(timezone.utc) + timedelta(minutes=10)},
-                BrokerErrorCode.INVALID_INPUT,
-                BrokerInvalidInput,
+                DatabaseErrorCode.INVALID_INPUT,
+                DatabaseInvalidInput,
                 NoCause,
                 id='INVALID_INPUT-by-rule',
             ),
             pytest.param(
                 {'priority': 0},
-                BrokerErrorCode.INVALID_INPUT,
-                BrokerInvalidInput,
+                DatabaseErrorCode.INVALID_INPUT,
+                DatabaseInvalidInput,
                 ValueError,
                 id='INVALID_INPUT-by-value-rule',
             ),
             pytest.param(
                 {'task_options_json': '{bad'},
-                BrokerErrorCode.INVALID_TASK_OPTIONS,
-                BrokerInvalidTaskOptions,
+                DatabaseErrorCode.INVALID_TASK_OPTIONS,
+                DatabaseInvalidTaskOptions,
                 SerializationError,
                 id='INVALID_TASK_OPTIONS-unreadable-json',
             ),
             pytest.param(
                 {'task_options_json': '{"retry_policy": "not_a_dict"}'},
-                BrokerErrorCode.INVALID_TASK_OPTIONS,
-                BrokerInvalidTaskOptions,
+                DatabaseErrorCode.INVALID_TASK_OPTIONS,
+                DatabaseInvalidTaskOptions,
                 NoCause,
                 id='INVALID_TASK_OPTIONS-by-rule',
             ),
@@ -559,7 +565,7 @@ class TestEnqueueThroughCore:
     async def test_a_core_refusal_keeps_its_code_and_cause(
         self,
         values: dict[str, Any],
-        code: BrokerErrorCode,
+        code: DatabaseErrorCode,
         error_class: type,
         cause_class: type,
     ) -> None:
@@ -586,9 +592,9 @@ class TestEnqueueThroughCore:
         assert type(refused) is error_class
         assert refused.code is code
         assert refused.retryable is False
-        assert isinstance(refused.exception, cause_class)
-        assert type(refused.exception) is cause_class
-        match refused.exception:
+        assert isinstance(refused.cause, cause_class)
+        assert type(refused.cause) is cause_class
+        match refused.cause:
             case SerializationError() as unreadable:
                 reader_error = str(unreadable)
                 assert reader_error != ''
@@ -608,38 +614,38 @@ class TestEnqueueThroughCore:
         'outcome',
         [
             pytest.param(
-                BrokerInvalidInput(
+                DatabaseInvalidInput(
                     message='enqueue input refused for my_task: priority must be between 1 and 100',
-                    exception=ValueError('priority must be between 1 and 100'),
+                    cause=ValueError('priority must be between 1 and 100'),
                 ),
                 id='invalid-input',
             ),
             pytest.param(
-                BrokerInvalidTaskOptions(
+                DatabaseInvalidTaskOptions(
                     message='enqueue contract violation: task_options JSON is refused: x',
-                    exception=SerializationError('x'),
+                    cause=SerializationError('x'),
                 ),
                 id='invalid-task-options',
             ),
             pytest.param(
-                BrokerEnqueueFailed(
+                DatabaseEnqueueFailed(
                     message='Failed to enqueue task my_task: connection lost',
                     retryable=True,
-                    exception=CoreConnectionError('enqueue', 'connection lost', True),
+                    cause=CoreConnectionError('enqueue', 'connection lost', True),
                 ),
                 id='enqueue-failed-retryable',
             ),
             pytest.param(
-                BrokerEnqueueFailed(
+                DatabaseEnqueueFailed(
                     message='task_id conflict detected but row disappeared',
                     retryable=False,
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ),
                 id='enqueue-failed-not-retryable',
             ),
-            pytest.param(BrokerPayloadMismatch(message='mismatch'), id='payload-mismatch'),
+            pytest.param(DatabasePayloadMismatch(message='mismatch'), id='payload-mismatch'),
             pytest.param(
-                BrokerIdempotencyKeyConflict(
+                DatabaseIdempotencyKeyConflict(
                     message='conflict',
                     owner_task_id=UUID('0198c0de-0000-7000-8000-0000000000ff'),
                 ),
@@ -651,7 +657,7 @@ class TestEnqueueThroughCore:
         self, outcome: object,
     ) -> None:
         """The core decides the code, the message and the cause of a failed
-        send (``BrokerOperationError::enqueue_error``); the facade adds
+        send (``DatabaseOperationError::enqueue_error``); the facade adds
         nothing."""
         broker = self._broker_answering(outcome)
 
@@ -664,8 +670,8 @@ class TestEnqueueThroughCore:
     @pytest.mark.parametrize(
         'outcome',
         [
-            pytest.param(BrokerAsyncContext(message='loop'), id='async-context'),
-            pytest.param(BrokerListenerDisabled(message='no listener'), id='listener-disabled'),
+            pytest.param(DatabaseAsyncContext(message='loop'), id='async-context'),
+            pytest.param(DatabaseListenerDisabled(message='no listener'), id='listener-disabled'),
         ],
     )
     async def test_a_class_that_the_core_send_never_answers_is_a_defect(
@@ -687,9 +693,9 @@ class TestEnqueueThroughCore:
         result = await self._send(broker)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerEnqueueFailed)
+        assert isinstance(result.err_value, DatabaseEnqueueFailed)
         assert result.err_value.retryable is True
-        assert result.err_value.exception is error
+        assert result.err_value.cause is error
 
     def test_the_blocking_form_sends_on_the_calling_thread(self) -> None:
         broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
@@ -762,13 +768,13 @@ class TestGetRawResultRecordAsync:
         envelope = '{"__h_task_result__":true,"ok":7,"err":null}'
         broker = self._broker_answering(self._record('COMPLETED', envelope))
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=5_000)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=5_000)
 
-        assert result == Ok(RawResultRecord(
+        assert result == Ok(StoredResult(
             task_id=RESULT_TASK_ID,
             task_name='my_task',
             status=TaskStatus.COMPLETED,
-            raw_result={'__h_task_result__': True, 'ok': 7, 'err': None},
+            envelope={'__h_task_result__': True, 'ok': 7, 'err': None},
         ))
         broker._core_handle.raw_result_record_async.assert_awaited_once_with(
             RESULT_TASK_ID, timeout_ms=5_000,
@@ -779,13 +785,13 @@ class TestGetRawResultRecordAsync:
     async def test_a_record_without_a_result_has_no_payload(self, status: str) -> None:
         broker = self._broker_answering(self._record(status, None))
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=10)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=10)
 
         assert is_ok(result)
         record = result.ok_value
         assert record is not None
         assert record.status is TaskStatus(status)
-        assert record.raw_result is None
+        assert record.envelope is None
 
     @pytest.mark.asyncio
     async def test_a_stored_result_that_is_not_an_object_is_invalid_json_payload(
@@ -796,8 +802,8 @@ class TestGetRawResultRecordAsync:
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert isinstance(result.err_value.exception, NoCause)
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
+        assert isinstance(result.err_value.cause, NoCause)
 
     @pytest.mark.asyncio
     async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
@@ -806,8 +812,8 @@ class TestGetRawResultRecordAsync:
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
+        assert isinstance(result.err_value.cause, EmptyJsonTextError)
         assert result.err_value.message == (
             f'Result JSON parse failed for task {RESULT_TASK_ID}: '
             'JSON parse failed: the text is empty'
@@ -818,23 +824,23 @@ class TestGetRawResultRecordAsync:
         self,
     ) -> None:
         broker = self._broker_answering(
-            BrokerInvalidJsonPayload(message='Result archive digest mismatch', exception=_DIGEST_MISMATCH),
+            DatabaseInvalidJsonPayload(message='Result archive digest mismatch', cause=_DIGEST_MISMATCH),
         )
 
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, BrokerInvalidJsonPayload)
+        assert isinstance(failed, DatabaseInvalidJsonPayload)
         assert 'digest mismatch' in failed.message
-        assert failed.exception is _DIGEST_MISMATCH
+        assert failed.cause is _DIGEST_MISMATCH
 
     @pytest.mark.asyncio
     async def test_a_failed_read_is_task_info_query_failed_and_logged(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
         broker = self._broker_answering(
-            BrokerOperationFailed(code=BrokerErrorCode.TASK_INFO_QUERY_FAILED, message='connection lost', retryable=True, exception=_CONNECTION_LOST),
+            DatabaseOperationFailed(code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED, message='connection lost', retryable=True, cause=_CONNECTION_LOST),
         )
 
         with caplog.at_level('ERROR', logger='horsies.broker'):
@@ -842,10 +848,10 @@ class TestGetRawResultRecordAsync:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, BrokerOperationFailed)
-        assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert isinstance(failed, DatabaseOperationFailed)
+        assert failed.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert failed.retryable is True
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
         assert 'connection lost' in caplog.text
 
     @pytest.mark.asyncio
@@ -859,24 +865,24 @@ class TestGetRawResultRecordAsync:
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID)
 
         assert is_err(result)
-        assert result.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert result.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert result.err_value.retryable is True
-        assert result.err_value.exception is error
+        assert result.err_value.cause is error
 
     @pytest.mark.asyncio
     async def test_a_refused_limit_is_invalid_input_before_the_core(self) -> None:
         broker = self._broker_answering(None)
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=-1)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=-1)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert isinstance(result.err_value, DatabaseInvalidInput)
         broker._core_handle.raw_result_record_async.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._broker_answering(
-            BrokerInvalidInput(message='x', exception=NoCause()),
+            DatabaseInvalidInput(message='x', cause=NoCause()),
         )
 
         with pytest.raises(AssertionError, match='INVALID_INPUT'):
@@ -901,7 +907,7 @@ class TestGetRawResultRecordAsync:
         )
         broker._core_handle = handle
 
-        result = broker.get_raw_result_record(RESULT_TASK_ID, timeout_ms=5_000)
+        result = broker.get_raw_result_record(RESULT_TASK_ID, wait_ms=5_000)
 
         assert result == Ok(None)
         handle.raw_result_record.assert_called_once_with(RESULT_TASK_ID, timeout_ms=5_000)
@@ -939,11 +945,11 @@ class TestPingDatabase:
     async def test_a_failed_ping_is_db_ping_failed_with_the_core_classification(self) -> None:
         """The core's class is returned as it is: the core builds Python's
         message (``ping_database failed: {error}``)."""
-        core_failure = BrokerOperationFailed(
-            code=BrokerErrorCode.DB_PING_FAILED,
+        core_failure = DatabaseOperationFailed(
+            code=DatabaseErrorCode.DATABASE_PING_FAILED,
             message='ping_database failed: connection failed: refused',
             retryable=True,
-            exception=_CONNECTION_LOST,
+            cause=_CONNECTION_LOST,
         )
         broker = _make_broker()
         broker._core_handle = self._handle(core_failure)
@@ -953,10 +959,10 @@ class TestPingDatabase:
         assert is_err(result)
         failed = result.err_value
         assert failed is core_failure
-        assert failed.code is BrokerErrorCode.DB_PING_FAILED
+        assert failed.code is DatabaseErrorCode.DATABASE_PING_FAILED
         assert failed.retryable is True
         assert failed.message == 'ping_database failed: connection failed: refused'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_ping_is_db_ping_failed(self) -> None:
@@ -970,15 +976,15 @@ class TestPingDatabase:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.DB_PING_FAILED
+        assert failed.code is DatabaseErrorCode.DATABASE_PING_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = _make_broker()
         broker._core_handle = self._handle(
-            BrokerOperationFailed(code=BrokerErrorCode.CLEANUP_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            DatabaseOperationFailed(code=DatabaseErrorCode.CLEANUP_FAILED, message='x', retryable=False, cause=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
@@ -998,13 +1004,13 @@ class TestPingWorkers:
         config = PostgresConfig(
             database_url='postgresql://u:p@localhost/db'
         )
-        broker = PostgresBroker(config, assume_initialized=True)
+        broker = PostgresBroker(config, schema_mode=SchemaMode.ASSUME_INITIALIZED)
 
-        result = await broker.ping_workers_async(timeout_seconds=1.0)
+        result = await broker.ping_workers_async(wait_ms=1_000)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerListenerDisabled)
-        assert result.err_value.code is BrokerErrorCode.LISTENER_DISABLED
+        assert isinstance(result.err_value, DatabaseListenerDisabled)
+        assert result.err_value.code is DatabaseErrorCode.LISTENER_DISABLED
 
 
 # ---------------------------------------------------------------------------
@@ -1077,10 +1083,10 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'mark_stale_tasks_as_failed failed: stale scan: connection lost'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1092,9 +1098,9 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.parametrize(
         ('stale_ms', 'finalizing_ms'),
@@ -1115,9 +1121,9 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
-        assert isinstance(failed.exception, OverflowError)
+        assert isinstance(failed.cause, OverflowError)
         broker._core_handle.mark_stale_running_async.assert_not_awaited()
 
 
@@ -1181,10 +1187,10 @@ class TestExpirePendingTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == 'expire_pending_tasks failed: pending expiry: connection lost'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1196,9 +1202,9 @@ class TestExpirePendingTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
 
 # ---------------------------------------------------------------------------
@@ -1276,11 +1282,11 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is _LOCK_NOT_AVAILABLE
-        assert isinstance(failed.exception, CoreServerError)
-        assert failed.exception.sqlstate == '55P03'
+        assert failed.cause is _LOCK_NOT_AVAILABLE
+        assert isinstance(failed.cause, CoreServerError)
+        assert failed.cause.sqlstate == '55P03'
 
     @pytest.mark.asyncio
     async def test_a_failed_page_is_cleanup_failed(self) -> None:
@@ -1298,11 +1304,11 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
         assert failed.message.startswith('audit_orphaned_workflow_tasks failed: ')
-        assert failed.exception is _COUNT_DIFFERS
-        assert not isinstance(failed.exception, CoreServerError)
+        assert failed.cause is _COUNT_DIFFERS
+        assert not isinstance(failed.cause, CoreServerError)
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_page_is_cleanup_failed(self) -> None:
@@ -1314,9 +1320,9 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_terminate_a_held_cursor_is_a_refusal_with_its_sqlstate(self) -> None:
@@ -1334,14 +1340,14 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == (
             'terminate_orphaned_workflow_tasks failed: orphan page: lock not available'
         )
-        assert failed.exception is _LOCK_NOT_AVAILABLE
-        assert isinstance(failed.exception, CoreServerError)
-        assert failed.exception.sqlstate == '55P03'
+        assert failed.cause is _LOCK_NOT_AVAILABLE
+        assert isinstance(failed.cause, CoreServerError)
+        assert failed.cause.sqlstate == '55P03'
 
     @pytest.mark.asyncio
     async def test_terminate_a_failed_page_is_cleanup_failed(self) -> None:
@@ -1359,13 +1365,13 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
         assert failed.message == (
             'terminate_orphaned_workflow_tasks failed: '
             'horsies_cancel_orphaned_tasks: the cursor candidate count 2 differs'
         )
-        assert failed.exception is _COUNT_DIFFERS
+        assert failed.cause is _COUNT_DIFFERS
 
     @pytest.mark.asyncio
     async def test_terminate_a_core_that_cannot_run_the_page_is_cleanup_failed(self) -> None:
@@ -1377,9 +1383,9 @@ class TestTerminateOrphanedWorkflowTasks:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
 
 # ---------------------------------------------------------------------------
@@ -1443,13 +1449,13 @@ class TestRequeueStaleClaimed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
         assert failed.message == (
             'requeue_stale_claimed failed after requeueing 7 task(s): '
             'requeue batch: connection lost'
         )
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_pass_is_cleanup_failed(self) -> None:
@@ -1463,9 +1469,9 @@ class TestRequeueStaleClaimed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_a_threshold_past_64_bits_is_refused_before_the_core(self) -> None:
@@ -1478,9 +1484,9 @@ class TestRequeueStaleClaimed:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.CLEANUP_FAILED
+        assert failed.code is DatabaseErrorCode.CLEANUP_FAILED
         assert failed.retryable is False
-        assert isinstance(failed.exception, OverflowError)
+        assert isinstance(failed.cause, OverflowError)
         broker._core_handle.requeue_stale_claimed_async.assert_not_awaited()
 
 
@@ -1533,13 +1539,13 @@ def _task_info_record(**changes: Any) -> MagicMock:
         'task_id': TASK_INFO_ID,
         'task_name': 'compute',
         'status': 'RUNNING',
-        'queue_name': 'default',
+        'queue': 'default',
         'priority': 100,
         'retry_count': 1,
         'max_retries': 3,
         'next_retry_at': None,
         'sent_at': now,
-        'enqueued_at': now,
+        'due_at': now,
         'claimed_at': now,
         'started_at': now,
         'completed_at': None,
@@ -1549,12 +1555,17 @@ def _task_info_record(**changes: Any) -> MagicMock:
         'worker_process_name': 'worker-0',
         'error_code': None,
         'failed_reason': None,
-        'result_json': None,
+        'result': MagicMock(spec=TaskInfoResultNotRequested),
         'attempts': None,
         'execution': 'ISOLATED',
     }
     fields.update(changes)
     return MagicMock(spec=TaskInfoRecord, **fields)
+
+
+def _stored_result(envelope_json: str) -> MagicMock:
+    """A core stored result slot holding ``envelope_json``."""
+    return MagicMock(spec=TaskInfoResultStored, envelope_json=envelope_json)
 
 
 def _core_attempt_record(attempt: int, outcome: str, will_retry: bool) -> MagicMock:
@@ -1618,9 +1629,7 @@ class TestGetTaskInfoAsync:
         assert (info.priority, info.retry_count, info.max_retries) == (100, 1, 3)
         assert (info.worker_hostname, info.worker_pid) == ('host-1', 9999)
         assert info.worker_process_name == 'worker-0'
-        assert info.raw_result is None
-        assert info.decoded_result is None
-        assert info.result_decoded is False
+        assert info.result == ResultSlotNotRequested()
         assert info.failed_reason is None
         assert info.attempts is None
         assert info.execution is Execution.ISOLATED
@@ -1641,10 +1650,10 @@ class TestGetTaskInfoAsync:
         assert info.failed_reason == 'boom'
 
     @pytest.mark.asyncio
-    async def test_the_stored_envelope_is_the_raw_result(self) -> None:
+    async def test_the_stored_envelope_is_the_stored_result(self) -> None:
         envelope = '{"__h_task_result__":true,"ok":"hello","err":null}'
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=envelope),
+            _task_info_record(status='COMPLETED', result=_stored_result(envelope)),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
@@ -1652,9 +1661,25 @@ class TestGetTaskInfoAsync:
         assert is_ok(result)
         info = result.ok_value
         assert info is not None
-        assert info.raw_result == {'__h_task_result__': True, 'ok': 'hello', 'err': None}
-        assert info.decoded_result is None
-        assert info.result_decoded is False
+        assert info.result == ResultSlotStored(
+            {'__h_task_result__': True, 'ok': 'hello', 'err': None},
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_result_that_is_not_stored_is_not_stored(self) -> None:
+        broker = self._broker_answering(
+            _task_info_record(
+                status='COMPLETED',
+                result=MagicMock(spec=TaskInfoResultNotStored),
+            ),
+        )
+
+        result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
+
+        assert is_ok(result)
+        info = result.ok_value
+        assert info is not None
+        assert info.result == ResultSlotNotStored()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1668,26 +1693,26 @@ class TestGetTaskInfoAsync:
         self, result_json: str, exception_class: type,
     ) -> None:
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=result_json),
+            _task_info_record(status='COMPLETED', result=_stored_result(result_json)),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert isinstance(result.err_value.exception, exception_class)
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
+        assert isinstance(result.err_value.cause, exception_class)
 
     @pytest.mark.asyncio
     async def test_an_empty_stored_result_is_invalid_json_payload(self) -> None:
         broker = self._broker_answering(
-            _task_info_record(status='COMPLETED', result_json=''),
+            _task_info_record(status='COMPLETED', result=_stored_result('')),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert isinstance(result.err_value.exception, EmptyJsonTextError)
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
+        assert isinstance(result.err_value.cause, EmptyJsonTextError)
         assert result.err_value.message == (
             f'Result JSON parse failed for task {TASK_INFO_ID}: '
             'JSON parse failed: the text is empty'
@@ -1721,11 +1746,11 @@ class TestGetTaskInfoAsync:
     async def test_a_failed_read_is_task_info_query_failed(self) -> None:
         """The core's class is returned as it is: the core builds Python's
         message (``get_task_info failed for {task_id}: {error}``)."""
-        core_failure = BrokerOperationFailed(
-            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+        core_failure = DatabaseOperationFailed(
+            code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message=f'get_task_info failed for {TASK_INFO_ID}: pool timed out',
             retryable=True,
-            exception=_CONNECTION_LOST,
+            cause=_CONNECTION_LOST,
         )
         broker = self._broker_answering(core_failure)
 
@@ -1734,25 +1759,25 @@ class TestGetTaskInfoAsync:
         assert is_err(result)
         failed = result.err_value
         assert failed is core_failure
-        assert isinstance(failed, BrokerOperationFailed)
-        assert failed.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert isinstance(failed, DatabaseOperationFailed)
+        assert failed.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert failed.retryable is True
         assert failed.message == f'get_task_info failed for {TASK_INFO_ID}: pool timed out'
-        assert failed.exception is _CONNECTION_LOST
+        assert failed.cause is _CONNECTION_LOST
 
     @pytest.mark.asyncio
     async def test_corrupt_stored_data_found_by_the_core_is_invalid_json_payload(
         self,
     ) -> None:
         broker = self._broker_answering(
-            BrokerInvalidJsonPayload(message='stored result digest mismatch', exception=_DIGEST_MISMATCH),
+            DatabaseInvalidJsonPayload(message='stored result digest mismatch', cause=_DIGEST_MISMATCH),
         )
 
         result = await broker.get_task_info_async(TASK_INFO_ID, include_result=True)
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert result.err_value.exception is _DIGEST_MISMATCH
+        assert isinstance(result.err_value, DatabaseInvalidJsonPayload)
+        assert result.err_value.cause is _DIGEST_MISMATCH
 
     @pytest.mark.asyncio
     async def test_a_core_that_cannot_run_the_read_is_task_info_query_failed(self) -> None:
@@ -1765,14 +1790,14 @@ class TestGetTaskInfoAsync:
         result = await broker.get_task_info_async(TASK_INFO_ID)
 
         assert is_err(result)
-        assert result.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+        assert result.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
         assert result.err_value.retryable is True
-        assert result.err_value.exception is error
+        assert result.err_value.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._broker_answering(
-            BrokerOperationFailed(code=BrokerErrorCode.CLEANUP_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            DatabaseOperationFailed(code=DatabaseErrorCode.CLEANUP_FAILED, message='x', retryable=False, cause=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='CLEANUP_FAILED'):
@@ -1814,14 +1839,14 @@ class TestClose:
 
     def test_a_core_that_cannot_run_the_close_is_close_failed(self) -> None:
         """A core boundary error of the blocking close is CLOSE_FAILED with the error."""
-        refused = CoreStartFailed('the core runtime could not start')
+        refused = RuntimeStartFailed('the core runtime could not start')
         broker = self._broker_closing(MagicMock(side_effect=refused))
 
         result = broker.close()
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.CLOSE_FAILED
-        assert result.err_value.exception is refused
+        assert result.err_value.code == DatabaseErrorCode.CLOSE_FAILED
+        assert result.err_value.cause is refused
 
     def test_an_exception_that_is_not_a_core_error_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""
@@ -1880,7 +1905,7 @@ class TestEnsureSchemaInitialized:
     @pytest.mark.asyncio
     async def test_a_failed_install_is_schema_init_failed_and_runs_again(self) -> None:
         broker = self._uninitialized(
-            BrokerOperationFailed(code=BrokerErrorCode.SCHEMA_INIT_FAILED, message='the database was installed by the RUST client', retryable=False, exception=_FAMILY_MISMATCH),
+            DatabaseOperationFailed(code=DatabaseErrorCode.SCHEMA_INIT_FAILED, message='the database was installed by the RUST client', retryable=False, cause=_FAMILY_MISMATCH),
         )
 
         first = await broker.ensure_schema_initialized()
@@ -1888,10 +1913,10 @@ class TestEnsureSchemaInitialized:
 
         assert is_err(first)
         failed = first.err_value
-        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.code is DatabaseErrorCode.SCHEMA_INIT_FAILED
         assert failed.retryable is False
         assert 'installed by the RUST client' in failed.message
-        assert failed.exception is _FAMILY_MISMATCH
+        assert failed.cause is _FAMILY_MISMATCH
         assert is_err(second)
         assert broker._core_handle.install_schema_async.await_count == 2
         assert broker._initialized is False
@@ -1906,17 +1931,17 @@ class TestEnsureSchemaInitialized:
 
         assert is_err(result)
         failed = result.err_value
-        assert failed.code is BrokerErrorCode.SCHEMA_INIT_FAILED
+        assert failed.code is DatabaseErrorCode.SCHEMA_INIT_FAILED
         assert failed.retryable is True
-        assert failed.exception is error
+        assert failed.cause is error
 
     @pytest.mark.asyncio
     async def test_another_failure_code_is_a_defect(self) -> None:
         broker = self._uninitialized(
-            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
+            DatabaseOperationFailed(code=DatabaseErrorCode.DATABASE_PING_FAILED, message='x', retryable=False, cause=CoreConnectionError('test_operation', 'x', True)),
         )
 
-        with pytest.raises(AssertionError, match='DB_PING_FAILED'):
+        with pytest.raises(AssertionError, match='DATABASE_PING_FAILED'):
             await broker.ensure_schema_initialized()
 
 
@@ -1927,8 +1952,8 @@ def _assert_refused_with_cause(
     INVALID_INPUT, not retryable, with ``message`` and a cause of exactly
     ``cause_type`` whose text is ``cause_text``."""
     match result:
-        case Err(BrokerInvalidInput(message=refused_message, exception=cause) as refused):
-            assert refused.code is BrokerErrorCode.INVALID_INPUT
+        case Err(DatabaseInvalidInput(message=refused_message, cause=cause) as refused):
+            assert refused.code is DatabaseErrorCode.INVALID_INPUT
             assert refused.retryable is False
             assert refused_message == message
             assert type(cause) is cause_type, repr(cause)
@@ -1956,7 +1981,7 @@ class TestEnqueueInputRefusal:
         )
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert isinstance(result.err_value, DatabaseInvalidInput)
         assert 'kwargs JSON' in result.err_value.message
 
     @pytest.mark.asyncio
@@ -2009,15 +2034,15 @@ class TestEnqueueInputRefusal:
                 id='naive-good-until',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': -1},
+                {'delay_seconds': -1},
                 'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
                 'enqueue_delay_seconds must be non-negative',
                 id='negative-delay',
             ),
             pytest.param(
-                {'enqueue_delay_seconds': SIGNED_64_BIT_MIN - 1},
-                'enqueue input refused for my_task: enqueue_delay_seconds must be non-negative',
-                'enqueue_delay_seconds must be non-negative',
+                {'delay_seconds': SIGNED_64_BIT_MIN - 1},
+                'enqueue input refused for my_task: delay_seconds must be non-negative',
+                'delay_seconds must be non-negative',
                 id='delay-below-64-bits',
             ),
             pytest.param(
@@ -2126,7 +2151,7 @@ class TestEnqueueInputRefusal:
         )
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert isinstance(result.err_value, DatabaseInvalidInput)
         assert f'{field} must be timezone-aware' in result.err_value.message
 
     @pytest.mark.asyncio
@@ -2135,15 +2160,15 @@ class TestEnqueueInputRefusal:
         broker = _refusing_broker()
         app = MagicMock()
         app.config.queue_mode.name = 'DEFAULT'
-        app.config.resend_on_transient_err = False
+        app.config.resend_on_transient_error = False
         app.config.payload = PayloadPolicy()
         app.are_sends_suppressed.return_value = False
         app.send_telemetry.return_value = NO_SEND_TELEMETRY
-        app.validate_queue_name.return_value = 'default'
+        app.validate_queue.return_value = 'default'
         app.get_broker.return_value = broker
 
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -2152,10 +2177,10 @@ class TestEnqueueInputRefusal:
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        # TaskSendRetryable excludes this variant, so a retry is a type error,
+        # TaskSendResendable excludes this variant, so a resend is a type error,
         # and at run time it is a defect that crashes loud.
         with pytest.raises(AssertionError, match='unreachable'):
-            await wrapper.retry_send_async(result.err_value)  # pyright: ignore[reportArgumentType]
+            await wrapper.resend_async(result.err_value)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.asyncio
     async def test_refused_input_needs_no_schema_init(self) -> None:
@@ -2168,7 +2193,7 @@ class TestEnqueueInputRefusal:
         )
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert isinstance(result.err_value, DatabaseInvalidInput)
 
     @pytest.mark.asyncio
     async def test_refused_task_options_need_no_schema_init(self) -> None:
@@ -2180,4 +2205,4 @@ class TestEnqueueInputRefusal:
         )
 
         assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidTaskOptions)
+        assert isinstance(result.err_value, DatabaseInvalidTaskOptions)

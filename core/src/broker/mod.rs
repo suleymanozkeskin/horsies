@@ -60,19 +60,21 @@ mod workflow_reads;
 pub mod workflow_start;
 pub(crate) mod workflow_stop_before_start;
 
-pub use class_budgets::{ClassBudget, ClassBudgets};
+pub use class_budgets::{ExecutionClassBudget, ExecutionClassBudgets};
 pub use class_coverage::{
-    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad,
+    BudgetLoad, ExecutionClassCoverage, ExecutionClassReport, PendingStream, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerExecutionClassLoad,
 };
 pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
 pub use core_rows::RowDecodeError;
 pub use enqueue_task::SendKind;
 pub use error::{is_retryable_statement_failure, BrokerError, EnqueueRefusal, EnqueueRefusalCause};
 pub use health::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
-    ping_timeout_refused, worker_history_limit_refused, DatabasePing, SnapshotProfile,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_listener_disabled, ping_min_responses_refused, ping_wait_over_bound, ping_wait_refused,
+    worker_history_limit_over_bound, worker_history_limit_refused, worker_history_over_bound,
+    DatabasePing, SnapshotProfile, WorkerPingRequest, WorkerPong, WorkerPongPayload,
+    WorkerStateSnapshot, WORKER_HISTORY_ROW_BOUND, WORKER_PING_CHANNEL, WORKER_PING_WAIT_BOUND,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};
@@ -86,9 +88,9 @@ pub use process_listener::{
     CheckInterruption, ListenError, ListenerPlanError, SessionCheckFailure,
 };
 pub use result_types::{
-    BrokerCheckCause, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
-    BrokerOperationSource, BrokerRefusalCause, BrokerResult, RawResultRead, RawResultRecord,
-    StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
+    BrokerCheckCause, BrokerOperationSource, BrokerRefusalCause, DatabaseErrorCode,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabaseResult, RawResultRead,
+    RawResultRecord, StoredEnvelopeRefused, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow};

@@ -16,7 +16,8 @@ import time
 from typing import Any
 
 from horsies.core.app import Horsies
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -28,31 +29,31 @@ from horsies.core.models.workflow import (
 from tests.e2e.tasks.instance_priority_binding import app
 
 
-@app.task(task_name='pb_ready', queue_name='ctrl')
-def ready_task() -> TaskResult[str, TaskError]:
+@app.task(name='pb_ready', queue='ctrl')
+def ready_task() -> Result[str, TaskError]:
     """Readiness probe on the control queue (never holds the serial slot)."""
-    return TaskResult(ok='ready')
+    return Ok('ready')
 
 
-@app.task(task_name='pb_blocker', queue_name='serial')
-def blocker_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+@app.task(name='pb_blocker', queue='serial')
+def blocker_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Occupies the single serial slot so scrape + direct queue behind it."""
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'blocked_{duration_ms}')
+    return Ok(f'blocked_{duration_ms}')
 
 
-@app.task(task_name='pb_scrape', queue_name='serial')
-def scrape_task() -> TaskResult[int, TaskError]:
+@app.task(name='pb_scrape', queue='serial')
+def scrape_task() -> Result[int, TaskError]:
     """Subworkflow child task on the serial queue (priority 30 when bound)."""
     time.sleep(0.05)
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-@app.task(task_name='pb_direct', queue_name='serial')
-def direct_task() -> TaskResult[int, TaskError]:
+@app.task(name='pb_direct', queue='serial')
+def direct_task() -> Result[int, TaskError]:
     """Direct-send task on the serial queue; .send() resolves priority to 30."""
     time.sleep(0.05)
-    return TaskResult(ok=2)
+    return Ok(2)
 
 
 class PriorityChildWorkflow(WorkflowDefinition[int]):
@@ -66,10 +67,10 @@ class PriorityChildWorkflow(WorkflowDefinition[int]):
         # Direct WorkflowSpec(...) — bypasses app.workflow() binding, exactly
         # like the documented parameterized-subworkflow pattern. The scrape node
         # carries queue=None, priority=None until the engine binds it.
-        scrape = TaskNode(fn=scrape_task, node_id='scrape')
+        scrape = TaskNode(function=scrape_task, node_id='scrape')
         return WorkflowSpec(
             name=cls.name,
-            tasks=[scrape],
+            nodes=[scrape],
             output=scrape,
             on_error=OnError.FAIL,
         )
@@ -77,12 +78,12 @@ class PriorityChildWorkflow(WorkflowDefinition[int]):
 
 # Module-scope parent spec: a single SubWorkflowNode expanding the child above.
 _parent_child_node = SubWorkflowNode(
-    workflow_def=PriorityChildWorkflow,
+    workflow_definition=PriorityChildWorkflow,
     node_id='pb_parent_child',
 )
 spec_priority_parent = app.workflow(
     name='pb_priority_parent',
-    tasks=[_parent_child_node],
+    nodes=[_parent_child_node],
     output=_parent_child_node,
     on_error=OnError.FAIL,
     definition_key='tests.e2e.pb.priority_parent.v1',

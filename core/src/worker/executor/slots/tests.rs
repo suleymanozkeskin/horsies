@@ -15,7 +15,7 @@ use super::pool::Answer;
 use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount, Shown};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
-use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::task::error::{OperationalCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, BodyEnd, CancelGraceMs, ChildAfterFrame,
@@ -57,8 +57,8 @@ mod deadline_tests;
 mod settle_tests;
 
 const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "retry_policy": {"max_retries": 2,
-    "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "intervals_seconds": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 // ---------------------------------------------------------------------------
 // Claim plan and routes
@@ -532,8 +532,8 @@ fn a_timeout_retries_when_the_policy_names_it() {
 
 /// One retry of `TASK_TIMEOUT` after 30 s.
 const ONE_TIMEOUT_RETRY_AFTER_30_S: &str = r#"{"retry_policy": {"max_retries": 1,
-    "intervals": [30], "backoff_strategy": "fixed", "jitter": false,
-    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+    "intervals_seconds": [30], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "retry_for": ["TASK_TIMEOUT"]}}"#;
 
 /// The command of a retry after a timeout (the order is
 /// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
@@ -609,7 +609,7 @@ fn a_killed_child_write_stores_the_task_and_the_worker() {
     let claimed = task(ExecutionClass::SharedAsync, RETRY_ON_TIMEOUT);
     let expected = serde_json::json!({"task_id": TASK, "worker_id": "worker-1"});
     for code in [
-        OperationalErrorCode::WorkerCrashed,
+        OperationalCode::WorkerCrashed,
         LoopKillCode::TaskBlockedLoop.code(),
         LoopKillCode::NeighbourBlockedLoop.code(),
     ] {
@@ -789,7 +789,7 @@ fn a_crash_recovery_write_sent_again_names_the_retry() {
     let crash = crash_recovery_writes(
         &claimed,
         "worker-1",
-        OperationalErrorCode::WorkerCrashed.into(),
+        OperationalCode::WorkerCrashed.into(),
         lost.to_owned(),
         RetryPlacement::SameClass,
         crate::core::lifecycle::AttemptPlacement::NotObserved,
@@ -856,7 +856,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
         "",
         crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
-    assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
+    assert_eq!(write.error_code.as_deref(), Some("DATABASE_ERROR"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
     assert_eq!(write.attempt.kind, AttemptFailureKind::WorkerFailure);
     assert_eq!(write.failed_reason.as_deref(), Some("Worker failure"));
@@ -865,7 +865,7 @@ fn a_worker_failure_is_a_broker_error_that_never_retries() {
 #[test]
 fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
+    let error = TaskError::built_in(OperationalCode::TaskException, "boom");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(
             &crate::core::task::result::TaskResult::<serde_json::Value>::Err(error.clone()),
@@ -916,7 +916,7 @@ fn every_task_gets_exactly_one_answer() {
 
 fn init_frame() -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),
@@ -943,6 +943,7 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_name: claimed.task_name.clone(),
         queue_name: crate::events::QueueName::cut(&claimed.queue_name),
         attempt: claimed.retry.attempt(),
+        max_retries: claimed.retry.max_retries_allowed(),
         worker_id: "worker-1".to_owned(),
         claimed_at: claimed.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,

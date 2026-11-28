@@ -1,7 +1,7 @@
 //! The daily report: the sales rollup, then the abandoned-cart sweep, then
 //! the win-back send to the swept carts.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::AbandonedCartSweep;
 use crate::tasks::analytics::{abandoned_cart_sweep, sales_rollup};
@@ -16,7 +16,7 @@ pub struct DailyReport;
 
 impl WorkflowDefinition for DailyReport {
     type Output = AbandonedCartSweep;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily_report"
@@ -26,30 +26,30 @@ impl WorkflowDefinition for DailyReport {
         "acme.daily_report.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let rollup = builder.task(
-            sales_rollup::node()?
+            sales_rollup::node()
                 .node_id("sales_rollup")
-                .set(sales_rollup::params::window(), WINDOW.to_owned())?,
-        );
+                .set(sales_rollup::fields::window(), WINDOW.to_owned())?,
+        )?;
         let sweep = builder.task(
-            abandoned_cart_sweep::node()?
+            abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
-                    abandoned_cart_sweep::params::older_than_minutes(),
+                    abandoned_cart_sweep::fields::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?
                 .waits_for(rollup),
-        );
+        )?;
         let _blast = builder.task(
-            winback_blast::node()?
+            winback_blast::node()
                 .node_id("winback_blast")
                 .set(
-                    winback_blast::params::segment(),
+                    winback_blast::fields::segment(),
                     format!("winback-{WINDOW}"),
                 )?
-                .arg_from(winback_blast::params::sweep(), sweep),
-        );
-        Ok(WorkflowDefConfig::new().output(sweep))
+                .arg_from(winback_blast::fields::sweep(), sweep),
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(sweep))
     }
 }

@@ -1,17 +1,17 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 
 /// Largest `worker_state_snapshot_interval_ms`: half the live window.
 ///
 /// A worker reads as live only while its latest snapshot is inside the live
 /// window. At half the window, the other half is room for a late snapshot
 /// write. Mirrors Python's `WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`.
-pub const WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: u64 = WORKER_STATE_LIVE_WINDOW_S * 1_000 / 2;
+pub const WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: u64 = WORKER_STATE_LIVE_WINDOW_SECONDS * 1_000 / 2;
 
 /// The fail-closed window is `running_stale_threshold_ms` divided by this.
 ///
-/// With `auto_fail_stale_running` on, a worker stops when no runner heartbeat
+/// With `fail_stale_running` on, a worker stops when no runner heartbeat
 /// lands for this window. The rest of the threshold is the time left to stop
 /// its work before the reaper acts. Mirrors Python's
 /// `FAIL_CLOSED_WINDOW_DIVISOR`.
@@ -24,7 +24,7 @@ pub const FAIL_CLOSED_WINDOW_DIVISOR: u64 = 2;
 /// Python's `RUNNER_BEAT_LANDING_ALLOWANCE_MS`.
 pub const RUNNER_BEAT_LANDING_ALLOWANCE_MS: u64 = 2_000;
 
-/// Smallest `running_stale_threshold_ms` with `auto_fail_stale_running` on:
+/// Smallest `running_stale_threshold_ms` with `fail_stale_running` on:
 /// its fail-closed window holds one beat interval plus
 /// [`RUNNER_BEAT_LANDING_ALLOWANCE_MS`].
 pub fn fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: u64) -> u64 {
@@ -43,7 +43,7 @@ pub fn fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: u64) -> u64 
 pub struct RecoveryConfig {
     /// Automatically requeue tasks stuck in CLAIMED (safe — user code never ran).
     #[serde(default = "default_true")]
-    pub auto_requeue_stale_claimed: bool,
+    pub requeue_stale_claimed: bool,
 
     /// Milliseconds without claimer heartbeat before CLAIMED task is stale (1s–1hr).
     #[serde(default = "default_claimed_stale_threshold")]
@@ -51,7 +51,7 @@ pub struct RecoveryConfig {
 
     /// Automatically mark stale RUNNING tasks as FAILED.
     #[serde(default = "default_true")]
-    pub auto_fail_stale_running: bool,
+    pub fail_stale_running: bool,
 
     /// Cancel orphaned workflow tasks — claimed or pending rows whose
     /// workflow_task linkage is no longer in a runnable state, so they can
@@ -59,7 +59,7 @@ pub struct RecoveryConfig {
     /// them CANCELLED and the pre-start check cancels one it is handed;
     /// `false`: orphans are left CLAIMED for inspection.
     #[serde(default = "default_true")]
-    pub auto_terminate_orphaned_workflow_tasks: bool,
+    pub terminate_orphaned_workflow_tasks: bool,
 
     /// Minimum time between bounded orphan workflow-task audits.
     /// One audit examines at most 500 live workflow tasks.
@@ -87,9 +87,10 @@ pub struct RecoveryConfig {
     #[serde(default = "default_crashed_worker_recovery_grace")]
     pub crashed_worker_recovery_grace_ms: u64,
 
-    /// Recovery passes allowed before an unresolvable phase-2 row is quarantined.
-    #[serde(default = "default_phase2_quarantine_after_attempts")]
-    pub phase2_quarantine_after_attempts: u32,
+    /// Recovery passes allowed before an unresolvable pending finalization
+    /// (phase-2) row is quarantined.
+    #[serde(default = "default_finalization_quarantine_after_attempts")]
+    pub finalization_quarantine_after_attempts: u32,
 
     /// Reaper passes in which the recovery of a workflow may fail with a persistent error before the
     /// workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED` (3-1000). A retryable database or connection
@@ -122,11 +123,11 @@ pub struct RecoveryConfig {
 const MOVED_TO_RETENTION: [&str; 9] = [
     "heartbeat_leaf_horizon_hours",
     "history_leaf_horizon_days",
-    "partition_maintenance_interval_s",
-    "paused_workflow_auto_cancel_after",
+    "partition_maintenance_interval_seconds",
+    "paused_workflow_cancel_after",
     "retention_classes",
     "retention_delete_batch_size",
-    "retention_sweep_interval_s",
+    "retention_sweep_interval_seconds",
     "terminal_record_retention_hours",
     "worker_state_retention_hours",
 ];
@@ -135,13 +136,13 @@ const MOVED_TO_RETENTION: [&str; 9] = [
 #[serde(deny_unknown_fields)]
 struct RecoveryConfigWire {
     #[serde(default = "default_true")]
-    auto_requeue_stale_claimed: bool,
+    requeue_stale_claimed: bool,
     #[serde(default = "default_claimed_stale_threshold")]
     claimed_stale_threshold_ms: u64,
     #[serde(default = "default_true")]
-    auto_fail_stale_running: bool,
+    fail_stale_running: bool,
     #[serde(default = "default_true")]
-    auto_terminate_orphaned_workflow_tasks: bool,
+    terminate_orphaned_workflow_tasks: bool,
     #[serde(default = "default_orphan_task_audit_interval")]
     orphan_task_audit_interval_ms: u64,
     #[serde(default = "default_running_stale_threshold")]
@@ -150,8 +151,8 @@ struct RecoveryConfigWire {
     finalizing_stale_threshold_ms: u64,
     #[serde(default = "default_crashed_worker_recovery_grace")]
     crashed_worker_recovery_grace_ms: u64,
-    #[serde(default = "default_phase2_quarantine_after_attempts")]
-    phase2_quarantine_after_attempts: u32,
+    #[serde(default = "default_finalization_quarantine_after_attempts")]
+    finalization_quarantine_after_attempts: u32,
     #[serde(default = "default_workflow_recovery_failure_limit")]
     workflow_recovery_failure_limit: u32,
     #[serde(default = "default_check_interval")]
@@ -193,15 +194,15 @@ impl<'de> Deserialize<'de> for RecoveryConfig {
 
         let wire: RecoveryConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
         Ok(Self {
-            auto_requeue_stale_claimed: wire.auto_requeue_stale_claimed,
+            requeue_stale_claimed: wire.requeue_stale_claimed,
             claimed_stale_threshold_ms: wire.claimed_stale_threshold_ms,
-            auto_fail_stale_running: wire.auto_fail_stale_running,
-            auto_terminate_orphaned_workflow_tasks: wire.auto_terminate_orphaned_workflow_tasks,
+            fail_stale_running: wire.fail_stale_running,
+            terminate_orphaned_workflow_tasks: wire.terminate_orphaned_workflow_tasks,
             orphan_task_audit_interval_ms: wire.orphan_task_audit_interval_ms,
             running_stale_threshold_ms: wire.running_stale_threshold_ms,
             finalizing_stale_threshold_ms: wire.finalizing_stale_threshold_ms,
             crashed_worker_recovery_grace_ms: wire.crashed_worker_recovery_grace_ms,
-            phase2_quarantine_after_attempts: wire.phase2_quarantine_after_attempts,
+            finalization_quarantine_after_attempts: wire.finalization_quarantine_after_attempts,
             workflow_recovery_failure_limit: wire.workflow_recovery_failure_limit,
             check_interval_ms: wire.check_interval_ms,
             runner_heartbeat_interval_ms: wire.runner_heartbeat_interval_ms,
@@ -226,7 +227,7 @@ fn default_finalizing_stale_threshold() -> u64 {
 fn default_crashed_worker_recovery_grace() -> u64 {
     10_000
 }
-fn default_phase2_quarantine_after_attempts() -> u32 {
+fn default_finalization_quarantine_after_attempts() -> u32 {
     25
 }
 fn default_workflow_recovery_failure_limit() -> u32 {
@@ -247,15 +248,15 @@ fn default_worker_state_snapshot_interval() -> u64 {
 impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
-            auto_requeue_stale_claimed: true,
+            requeue_stale_claimed: true,
             claimed_stale_threshold_ms: 120_000,
-            auto_fail_stale_running: true,
-            auto_terminate_orphaned_workflow_tasks: true,
+            fail_stale_running: true,
+            terminate_orphaned_workflow_tasks: true,
             orphan_task_audit_interval_ms: 60_000,
             running_stale_threshold_ms: 300_000,
             finalizing_stale_threshold_ms: 300_000,
             crashed_worker_recovery_grace_ms: 10_000,
-            phase2_quarantine_after_attempts: 25,
+            finalization_quarantine_after_attempts: 25,
             workflow_recovery_failure_limit: 25,
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
@@ -277,15 +278,15 @@ pub enum RecoveryConfigError {
         minimum: u64,
     },
 
-    /// With `auto_fail_stale_running` on, the worker stops when no runner
+    /// With `fail_stale_running` on, the worker stops when no runner
     /// heartbeat lands for half of `running_stale_threshold_ms`; that half
     /// must hold one beat interval plus the landing allowance.
     #[error(
-        "running_stale_threshold_ms ({threshold}ms) too low for auto_fail_stale_running: \
+        "running_stale_threshold_ms ({threshold}ms) too low for fail_stale_running: \
          the worker stops when no runner heartbeat lands for half of the threshold, and \
          that half must hold one runner_heartbeat_interval_ms ({heartbeat}ms) plus \
          {allowance}ms for a beat to land; set running_stale_threshold_ms >= {minimum}ms, \
-         or set auto_fail_stale_running=false",
+         or set fail_stale_running=false",
         allowance = RUNNER_BEAT_LANDING_ALLOWANCE_MS
     )]
     RunningThresholdBelowFailClosedFloor {
@@ -300,7 +301,7 @@ pub enum RecoveryConfigError {
         "worker_state_snapshot_interval_ms={value}ms is above the cap of {cap}ms: \
          the cap is half the {window}s live window; a worker reads as live only \
          while its latest snapshot is inside the live window",
-        window = WORKER_STATE_LIVE_WINDOW_S
+        window = WORKER_STATE_LIVE_WINDOW_SECONDS
     )]
     SnapshotIntervalAboveLiveWindowCap { value: u64, cap: u64 },
 
@@ -403,16 +404,16 @@ impl RecoveryConfig {
             });
         }
 
-        if self.phase2_quarantine_after_attempts < 3 {
+        if self.finalization_quarantine_after_attempts < 3 {
             errors.push(RecoveryConfigError::BelowMinimum {
-                field: "phase2_quarantine_after_attempts",
-                value: u64::from(self.phase2_quarantine_after_attempts),
+                field: "finalization_quarantine_after_attempts",
+                value: u64::from(self.finalization_quarantine_after_attempts),
                 min: 3,
             });
-        } else if self.phase2_quarantine_after_attempts > 1_000 {
+        } else if self.finalization_quarantine_after_attempts > 1_000 {
             errors.push(RecoveryConfigError::AboveMaximum {
-                field: "phase2_quarantine_after_attempts",
-                value: u64::from(self.phase2_quarantine_after_attempts),
+                field: "finalization_quarantine_after_attempts",
+                value: u64::from(self.finalization_quarantine_after_attempts),
                 max: 1_000,
             });
         }
@@ -489,7 +490,7 @@ impl RecoveryConfig {
         }
 
         // Relational: thresholds must be >= 2x heartbeat; with
-        // auto_fail_stale_running on, the running threshold must also hold
+        // fail_stale_running on, the running threshold must also hold
         // the fail-closed window (Python `_running_threshold_errors`).
         let min_running = self.runner_heartbeat_interval_ms * 2;
         if let Some(error) = self.running_threshold_error() {
@@ -518,14 +519,14 @@ impl RecoveryConfig {
 
     /// The refusal of `running_stale_threshold_ms`, or none.
     ///
-    /// With `auto_fail_stale_running` on, the floor is
+    /// With `fail_stale_running` on, the floor is
     /// [`fail_closed_threshold_floor_ms`]: below it the worker stops while
     /// every runner heartbeat lands. With it off, the floor is two beat
     /// intervals.
     fn running_threshold_error(&self) -> Option<RecoveryConfigError> {
         let threshold = self.running_stale_threshold_ms;
         let heartbeat = self.runner_heartbeat_interval_ms;
-        match self.auto_fail_stale_running {
+        match self.fail_stale_running {
             true => {
                 let minimum = fail_closed_threshold_floor_ms(heartbeat);
                 (threshold < minimum).then_some(
@@ -563,7 +564,7 @@ mod tests {
         let config = RecoveryConfig {
             running_stale_threshold_ms: 10_000,
             runner_heartbeat_interval_ms: 30_000,
-            auto_fail_stale_running: false,
+            fail_stale_running: false,
             ..Default::default()
         };
         let errors = config.validate();
@@ -575,7 +576,7 @@ mod tests {
     }
 
     /// The floor rule of `RecoveryConfig._running_threshold_errors`: with
-    /// `auto_fail_stale_running` on, the smallest threshold is
+    /// `fail_stale_running` on, the smallest threshold is
     /// 2 x (interval + 2,000 ms); one millisecond less is refused.
     #[test]
     fn the_smallest_fail_closed_threshold_holds_one_interval_and_a_landing() {
@@ -613,20 +614,20 @@ mod tests {
         ));
     }
 
-    /// With `auto_fail_stale_running` off, the floor stays two beat intervals:
+    /// With `fail_stale_running` off, the floor stays two beat intervals:
     /// the fail-closed window does not exist.
     #[test]
     fn without_auto_fail_the_running_floor_is_two_intervals() {
         let config = RecoveryConfig {
             runner_heartbeat_interval_ms: 1_000,
             running_stale_threshold_ms: 2_000,
-            auto_fail_stale_running: false,
+            fail_stale_running: false,
             ..Default::default()
         };
         assert!(config.validate().is_empty(), "{:?}", config.validate());
 
         let on = RecoveryConfig {
-            auto_fail_stale_running: true,
+            fail_stale_running: true,
             ..config
         };
         assert!(matches!(
@@ -882,7 +883,7 @@ mod tests {
     /// Python `test_app_config.py::TestWorkerStateSnapshotInterval::test_cap_is_60_seconds_half_the_120_second_live_window`.
     #[test]
     fn snapshot_interval_cap_is_60_seconds_half_the_120_second_live_window() {
-        assert_eq!(WORKER_STATE_LIVE_WINDOW_S, 120);
+        assert_eq!(WORKER_STATE_LIVE_WINDOW_SECONDS, 120);
         assert_eq!(WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS, 60_000);
         let previous_cap = RecoveryConfig {
             worker_state_snapshot_interval_ms: 300_000,
@@ -918,18 +919,18 @@ mod tests {
     #[test]
     fn phase2_quarantine_attempt_bounds_and_default_are_exact() {
         let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
-        assert_eq!(from_empty.phase2_quarantine_after_attempts, 25);
+        assert_eq!(from_empty.finalization_quarantine_after_attempts, 25);
 
         for value in [3, 1_000] {
             let config = RecoveryConfig {
-                phase2_quarantine_after_attempts: value,
+                finalization_quarantine_after_attempts: value,
                 ..Default::default()
             };
             assert!(config.validate().is_empty());
         }
         for value in [2, 1_001] {
             let config = RecoveryConfig {
-                phase2_quarantine_after_attempts: value,
+                finalization_quarantine_after_attempts: value,
                 ..Default::default()
             };
             assert_eq!(config.validate().len(), 1);

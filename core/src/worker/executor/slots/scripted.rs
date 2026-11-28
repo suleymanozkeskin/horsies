@@ -131,7 +131,7 @@ fn child_pool() -> ChildPool {
 
 fn init_of(child_kind: ChildKind) -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),
@@ -161,6 +161,7 @@ pub(super) fn shared_thread_init(seats: u64) -> InitFrame {
         seats: ThreadSeats::new(seats).unwrap(),
         pool: child_pool(),
         task_send_pool: TaskSendPool::new(1).unwrap(),
+        recycle_above: MemoryLimit::Off,
     }))
 }
 
@@ -171,6 +172,7 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         task_name: task.task_name.clone(),
         queue_name: crate::events::QueueName::cut(&task.queue_name),
         attempt: task.retry.attempt(),
+        max_retries: task.retry.max_retries_allowed(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,

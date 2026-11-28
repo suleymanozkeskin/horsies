@@ -46,22 +46,23 @@ import time
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
-app = Horsies(AppConfig(broker=PostgresConfig(database_url='postgresql://u:p@localhost/none')))
+app = Horsies(AppConfig(database=PostgresConfig(database_url='postgresql://u:p@localhost/none')))
 
 
-@app.task(task_name='hang')
-def hang() -> TaskResult[None, TaskError]:
+@app.task(name='hang')
+def hang() -> Result[None, TaskError]:
     time.sleep(60)
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
-@app.task(task_name='gil_hang')
-def gil_hang() -> TaskResult[None, TaskError]:
+@app.task(name='gil_hang')
+def gil_hang() -> Result[None, TaskError]:
     # PyDLL keeps the GIL during the foreign call.
     ctypes.PyDLL(None).sleep(60)
-    return TaskResult(ok=None)
+    return Ok(None)
 """
 
 PARENT_PROGRAM: Final = """

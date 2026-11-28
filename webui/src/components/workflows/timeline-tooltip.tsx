@@ -62,7 +62,7 @@ function RunFocusTip({
         />
       ) : null;
     case 'segment': {
-      const node = nodes.find(candidate => candidate.task_index === focus.taskIndex);
+      const node = nodes.find(candidate => candidate.node_index === focus.taskIndex);
       const segment = node === undefined ? undefined : timedSegments(node.timing)[focus.segmentIndex];
       // A refetch can remove the segment under the cursor.
       return node === undefined || segment === undefined ? null : (
@@ -117,15 +117,15 @@ export function RunTableTooltip({
     case 'none':
       return null;
     case 'row': {
-      const node = nodes.find(candidate => candidate.task_index === inspection.taskIndex);
+      const node = nodes.find(candidate => candidate.node_index === inspection.taskIndex);
       // A refetch can remove the node under the cursor.
       return node === undefined ? null : (
         <FloatingTooltip id={id} xPx={inspection.xPx} yPx={inspection.yPx}>
           <NodeTooltip
-            workflowId={detail.run.id}
+            workflowId={detail.run.workflow_id}
             node={node}
             drawAtMs={drawAtMs}
-            membership={chainMembership(chain, node.task_index)}
+            membership={chainMembership(chain, node.node_index)}
             focus={inspection.focus}
             pause={inspection.pause}
             facts={[]}
@@ -141,8 +141,8 @@ export function RunTableTooltip({
         </FloatingTooltip>
       );
     case 'link': {
-      const from = nodes.find(node => node.task_index === inspection.fromIndex);
-      const to = nodes.find(node => node.task_index === inspection.toIndex);
+      const from = nodes.find(node => node.node_index === inspection.fromIndex);
+      const to = nodes.find(node => node.node_index === inspection.toIndex);
       return from === undefined || to === undefined ? null : (
         <FloatingTooltip id={id} xPx={inspection.xPx} yPx={inspection.yPx}>
           <LinkTip from={from} to={to} drawAtMs={drawAtMs} />

@@ -1,0 +1,69 @@
+[package]
+name = "horsies-typescript"
+version = "0.1.0"
+edition = "2021"
+description = "The Node-API addon of the TypeScript client: the call bridge from Node and Bun to horsies-core"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+publish = false
+
+[lib]
+# `napi build` copies the built library to `<binaryName>.<platform>.node`
+# (`binaryName` is in package.json).
+name = "horsies_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The TypeScript package ships the monitoring web handler, so the core's web
+# layer is always on.
+horsies-core = { path = "../../../core", features = ["web"] }
+# - `napi8`: threadsafe functions need Node-API level 4, BigInt level 6,
+#   object type tags and async cleanup hooks level 8. Node 26 and Bun 1.4
+#   give level 10.
+# - `dyn-symbols`: the Node-API functions are read from the host process when
+#   the module registers, so a test binary of this crate links with no
+#   Node-API library.
+# - No `tokio_rt` and no `async`: every operation runs on the core's process
+#   runtime, not on a runtime of napi.
+napi = { version = "=3.16.3", default-features = false, features = ["napi8", "dyn-symbols"] }
+napi-derive = "=3.7.2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# `catch_unwind` of a future: the guard of an operation catches its panic.
+futures-util = "0.3"
+tracing = "0.1"
+serde_json = "1"
+uuid = "1"
+chrono = "0.4"
+# The zone data of the core's scheduler (`horsies-core` reads zones with the
+# same version), so the zone check of the `schedule` section and the scheduler start
+# read one zone table.
+chrono-tz = "0.10"
+# `fcntl` of the child's socket: the duplicate that the host thread keeps
+# until the process ends (`child::exit`).
+libc = "0.2"
+
+[build-dependencies]
+napi-build = "=2.7.0"
+
+[dev-dependencies]
+# `test-util`: the unit tests of the wait bounds run on a paused clock
+# (`tokio::time::pause`), so a bound of seconds takes no wall time.
+tokio = { version = "1", features = ["test-util"] }
+
+[features]
+default = []
+# Test code only: the exports that only the native tests call
+# (`probeCallback`, `src/call/callback_probe.rs`). `build:dev` in
+# package.json turns it on; a published addon is built without it.
+test-probes = []
+
+# musl's malloc is slow under allocation from many threads, and the core is
+# multi-threaded. glibc and macOS targets keep the system allocator.
+# `local_dynamic_tls` builds mimalloc with the local-dynamic TLS model: Node
+# and Bun load this addon with dlopen, and musl's loader refuses initial-exec
+# TLS in such a library.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
+[lints]
+workspace = true

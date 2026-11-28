@@ -33,11 +33,12 @@ from horsies.core.models.tasks import (
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     Execution,
-    OperationalErrorCode,
+    OperationalCode,
     TaskError,
-    TaskResult,
 )
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
 from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst
+from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, child_runner, shared_child, shared_runner
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_frames import (
@@ -91,7 +92,7 @@ of a run frame. The core codec refuses a smaller one, as the stored
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://u:p@localhost/unused'),
         ),
     ),
@@ -120,85 +121,85 @@ class _StartMark:
 STARTED = _StartMark()
 
 
-@APP.task(task_name='seat_double', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def seat_double(*, x: int) -> TaskResult[int, TaskError]:
+@APP.task(name='seat_double', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def seat_double(*, x: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
-    return TaskResult(ok=x * 2)
+    return Ok(x * 2)
 
 
-@APP.task(task_name='seat_sync')
-def seat_sync() -> TaskResult[int, TaskError]:
+@APP.task(name='seat_sync')
+def seat_sync() -> Result[int, TaskError]:
     RAN.append('seat_sync')
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-@APP.task(task_name='seat_never', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
-async def seat_never() -> TaskResult[int, TaskError]:
+@APP.task(name='seat_never', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+async def seat_never() -> Result[int, TaskError]:
     RAN.append('seat_never')
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 @APP.task(
-    task_name='seat_core_stopped', execution=Execution.SHARED_ASYNC, timeout_ms=1000
+    name='seat_core_stopped', execution=Execution.SHARED_ASYNC, timeout_ms=1000
 )
-async def seat_core_stopped() -> TaskResult[int, TaskError]:
+async def seat_core_stopped() -> Result[int, TaskError]:
     """A core call of the body met the stopped core of the child."""
     raise core.CoreStopped('log forwarder', 'planned panic')
 
 
-@APP.task(task_name='seat_raises', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
-async def seat_raises() -> TaskResult[int, TaskError]:
+@APP.task(name='seat_raises', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+async def seat_raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
 
-@APP.task(task_name='seat_waits', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
-async def seat_waits() -> TaskResult[int, TaskError]:
+@APP.task(name='seat_waits', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+async def seat_waits() -> Result[int, TaskError]:
     STARTED.set()
     await asyncio.Event().wait()
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-@APP.task(task_name='seat_quick', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
-async def seat_quick() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+@APP.task(name='seat_quick', execution=Execution.SHARED_ASYNC, timeout_ms=1000)
+async def seat_quick() -> Result[int, TaskError]:
+    return Ok(1)
 
 
 @APP.task(
-    task_name='seat_cancels_itself',
+    name='seat_cancels_itself',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
 )
-async def seat_cancels_itself() -> TaskResult[int, TaskError]:
+async def seat_cancels_itself() -> Result[int, TaskError]:
     current = asyncio.current_task()
     assert current is not None
     current.cancel()
     await asyncio.sleep(0)
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 @APP.task(
-    task_name='seat_cancels_itself_and_returns',
+    name='seat_cancels_itself_and_returns',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
 )
-async def seat_cancels_itself_and_returns() -> TaskResult[int, TaskError]:
+async def seat_cancels_itself_and_returns() -> Result[int, TaskError]:
     """Asks to cancel its own task, then returns before any ``await``: the
     request is still pending when the call returns."""
     current = asyncio.current_task()
     assert current is not None
     current.cancel()
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 @APP.task(
-    task_name='seat_raises_generator_exit',
+    name='seat_raises_generator_exit',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=1000,
     exception_mapper={GeneratorExit: 'GENERATOR_EXIT_OF_BODY'},
 )
-async def seat_raises_generator_exit() -> TaskResult[int, TaskError]:
+async def seat_raises_generator_exit() -> Result[int, TaskError]:
     raise GeneratorExit
 
 
@@ -220,25 +221,25 @@ async def _ignore_cancels_until_release() -> None:
 
 
 @APP.task(
-    task_name='seat_leaves_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
+    name='seat_leaves_work', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
 )
-async def seat_leaves_work() -> TaskResult[int, TaskError]:
+async def seat_leaves_work() -> Result[int, TaskError]:
     """Returns while an asyncio task that it started still runs."""
     _ = asyncio.get_running_loop().create_task(_wait_for_release())
-    return TaskResult(ok=5)
+    return Ok(5)
 
 
 @APP.task(
-    task_name='seat_left_work_ignores_cancel',
+    name='seat_left_work_ignores_cancel',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
 )
-async def seat_left_work_ignores_cancel() -> TaskResult[int, TaskError]:
+async def seat_left_work_ignores_cancel() -> Result[int, TaskError]:
     """Waits until its deadline cancel. An asyncio task that it started
     ignores every cancel until ``RELEASE`` is set."""
     _ = asyncio.get_running_loop().create_task(_ignore_cancels_until_release())
     await asyncio.Event().wait()
-    return TaskResult(ok=6)
+    return Ok(6)
 
 
 CANCEL_STATES: list[RunCancelState] = []
@@ -249,9 +250,9 @@ STARTS: list[asyncio.Event] = []
 
 
 @APP.task(
-    task_name='seat_reads_cancel_state', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
+    name='seat_reads_cancel_state', execution=Execution.SHARED_ASYNC, timeout_ms=10_000
 )
-async def seat_reads_cancel_state(runtime: TaskRuntime) -> TaskResult[int, TaskError]:
+async def seat_reads_cancel_state(runtime: TaskRuntime) -> Result[int, TaskError]:
     """Waits until it is cancelled, records its cancel state, and returns a
     value, which the operator cancel drops."""
     STARTED.set()
@@ -259,16 +260,16 @@ async def seat_reads_cancel_state(runtime: TaskRuntime) -> TaskResult[int, TaskE
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         CANCEL_STATES.append(runtime.cancel_state())
-    return TaskResult(ok=7)
+    return Ok(7)
 
 
 @APP.task(
-    task_name='seat_swallows_then_cancels_itself',
+    name='seat_swallows_then_cancels_itself',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=10_000,
     exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
 )
-async def seat_swallows_then_cancels_itself() -> TaskResult[int, TaskError]:
+async def seat_swallows_then_cancels_itself() -> Result[int, TaskError]:
     """Swallows the cancel that reaches it, then asks to cancel its own task
     and returns before any ``await``: the requests are still pending when
     the call returns, and ``_without_left_cancel`` clears them."""
@@ -280,7 +281,7 @@ async def seat_swallows_then_cancels_itself() -> TaskResult[int, TaskError]:
     current = asyncio.current_task()
     assert current is not None
     current.cancel()
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 def _frame(
@@ -372,8 +373,17 @@ def _set_running(seat_return: SeatReturn) -> ResultEnvelope:
     return seat_return.result
 
 
-def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskResult[Any, TaskError]:
+def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskOutcome[Any, TaskError]:
     return decode_task_result(loads_json(envelope.text).unwrap(), ok_type)
+
+
+def _failed(outcome: TaskOutcome[Any, TaskError]) -> TaskError:
+    """The task error of a failed outcome; any other outcome fails the test."""
+    match outcome:
+        case Failed(error=error):
+            return error
+        case Succeeded():
+            pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
 
 @pytest.fixture(autouse=True)
@@ -391,7 +401,7 @@ def test_an_async_task_runs_on_the_running_loop(steps: _Steps) -> None:
     end of the run, not the run itself."""
     envelope = _set_running(_run(_frame('seat_double', {'x': 21})))
 
-    assert _result(envelope, int).unwrap() == 42
+    assert _result(envelope, int) == Succeeded(42)
     steps.confirm.assert_awaited_once_with(
         str(TASK_ID),
         'worker-1',
@@ -404,8 +414,8 @@ def test_an_async_task_runs_on_the_running_loop(steps: _Steps) -> None:
 def test_a_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_sync')))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
+    error = _failed(_result(envelope, int))
+    assert error.code == OperationalCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve seat_sync: the task is def, and a shared async '
         'child runs only async def tasks'
@@ -430,8 +440,8 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         'seat_double',
         CancelGraceInvalid(reason=reason),
     ).envelope
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    error = _failed(_result(envelope, int))
+    assert error.code == OperationalCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'seat_double',
         'field': 'cancel_grace_ms',
@@ -464,8 +474,8 @@ def test_a_stop_before_start_runs_no_body_and_reports_no_running_row(
 def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('seat_raises')))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+    error = _failed(_result(envelope, int))
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
 
 
 def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
@@ -511,8 +521,8 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
         envelope = _set_running(asyncio.run(cancel_after_start()))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+    error = _failed(_result(envelope, int))
+    assert error.code == OperationalCode.UNHANDLED_EXCEPTION
     assert 'CancelledError' in (error.message or '')
 
 
@@ -523,8 +533,8 @@ def test_a_body_that_cancels_its_own_task_goes_through_the_mapper(
     maps it through the exception mapper of the task."""
     envelope = _set_running(_run(_frame('seat_cancels_itself')))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    error = _failed(_result(envelope, int))
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> None:
@@ -532,8 +542,8 @@ def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> 
     ``GeneratorExit`` that leaves the body as well."""
     envelope = _set_running(_run(_frame('seat_raises_generator_exit')))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == 'GENERATOR_EXIT_OF_BODY'
+    error = _failed(_result(envelope, int))
+    assert error.code == 'GENERATOR_EXIT_OF_BODY'
 
 
 class TestTheMarkerOfASeat:
@@ -576,8 +586,8 @@ def test_a_body_that_returns_after_cancelling_its_own_task_goes_through_the_mapp
     does not end cancelled."""
     envelope = _set_running(_run(_frame('seat_cancels_itself_and_returns')))
 
-    error = _result(envelope, int).unwrap_err()
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    error = _failed(_result(envelope, int))
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 class _Exited(BaseException):
@@ -677,9 +687,9 @@ def test_a_pending_self_cancel_on_the_seat_loop_ends_only_that_run(
 
     assert exits == []
     ends = {frame.dispatch: frame.end for frame in writer.results()}
-    assert _result(_envelope_of(ends[1]), int).unwrap() == 8
-    error = _result(_envelope_of(ends[2]), int).unwrap_err()
-    assert error.error_code == 'CANCELLED_BY_BODY'
+    assert _result(_envelope_of(ends[1]), int) == Succeeded(8)
+    error = _failed(_result(_envelope_of(ends[2]), int))
+    assert error.code == 'CANCELLED_BY_BODY'
 
 
 class TestTheMarkerOnTheSeatLoop:
@@ -716,7 +726,7 @@ class TestTheMarkerOnTheSeatLoop:
 
         assert exits == []
         assert _kinds(writer, 1) == ['SharedResultFrame']
-        assert _result(_envelope_of(writer.results()[0].end), int).unwrap() == 1
+        assert _result(_envelope_of(writer.results()[0].end), int) == Succeeded(1)
         steps.mark.assert_awaited_once()
         # The end report came when the marker ended (1.5 s), after the
         # deadline (1 s).
@@ -796,7 +806,7 @@ class TestTheMarkerOnTheSeatLoop:
 
         assert exits == []
         assert results_at_marker == [0]
-        assert _result(_envelope_of(writer.results()[0].end), int).unwrap() == 5
+        assert _result(_envelope_of(writer.results()[0].end), int) == Succeeded(5)
 
     def test_a_run_whose_work_is_stuck_after_its_deadline_writes_no_marker(
         self,
@@ -976,5 +986,5 @@ class TestAnOperatorCancelOnTheSeatLoop:
         assert exits == []
         ends = {frame.dispatch: frame.end for frame in writer.results()}
         assert ends[1] == SeatCancelled(body=CancelledBody.RAN)
-        assert _result(_envelope_of(ends[2]), int).unwrap() == 6
+        assert _result(_envelope_of(ends[2]), int) == Succeeded(6)
         assert 'CancelFiredFrame' not in _kinds(writer, 2)

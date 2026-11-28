@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::state::test_rows::{delete_state, seed_state, state_row};
 use super::{fire_due_schedule, manifest_plan, ActivePlan, DueSchedule, StartPlan};
 use crate::broker::core_rows::StatementLog;
-use crate::core::{OperationalErrorCode, RetryPolicy, TaskErrorCode, TaskOptions};
+use crate::core::{OperationalCode, RetryPolicy, TaskErrorCode, TaskOptions};
 use crate::scheduler_manifest::parse_scheduler_manifest;
 use crate::test_support::sql::{self, TestPool};
 
@@ -77,11 +77,9 @@ async fn seed_earlier_slot_row(
 fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
     let options = TaskOptions {
         task_name: task_name.to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: Some(vec![TaskErrorCode::from(
-            OperationalErrorCode::TaskException,
-        )]),
+        retry_for: Some(vec![TaskErrorCode::from(OperationalCode::TaskException)]),
         retry_policy: Some(
             RetryPolicy::fixed(RETRY_INTERVALS_SECONDS.to_vec(), true)
                 .expect("two intervals inside the bounds"),
@@ -91,8 +89,10 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
         cancel_grace_ms: None,
     };
     let pattern_json = format!(
-        "{{\"type\":\"interval\",\"seconds\":{SCHEDULE_INTERVAL_SECONDS},\"minutes\":null,\
-         \"hours\":null,\"days\":null}}"
+        "{{\"kind\":\"interval\",\"every\":\"{}\"}}",
+        crate::core::config::schedule::interval_text(std::time::Duration::from_secs(u64::from(
+            SCHEDULE_INTERVAL_SECONDS
+        )))
     );
     let document = json!({
         "manifest_version": 1,
@@ -108,7 +108,7 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
                 "max_catch_up_runs": 100,
                 "send": {
                     "task_name": task_name,
-                    "queue_name": "default",
+                    "queue": "default",
                     "priority": 100,
                     "input_json": "{\"value\":1}",
                     "task_options": {"kind": "ENCODED", "json": options.stored_options_text()},

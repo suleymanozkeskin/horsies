@@ -17,7 +17,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -27,7 +28,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(
+    database=PostgresConfig(
         database_url=SecretStr(DB_URL),
         pool_size=5,
         max_overflow=5,
@@ -36,23 +37,23 @@ config = AppConfig(
 )
 
 app = Horsies(config)
-broker = PostgresBroker(config.broker)
+broker = PostgresBroker(config.database)
 app._broker = broker  # pyright: ignore[reportPrivateUsage]
 broker.app = app
 
-app.on_child_process_start(fail_loop_creation_on_demand)
+app.on_child_start(fail_loop_creation_on_demand)
 
 
-@app.task(task_name='e2e_loop_boot_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+@app.task(name='e2e_loop_boot_healthcheck')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
-@app.task(task_name='e2e_loop_boot_async_pid')
-async def async_pid() -> TaskResult[int, TaskError]:
+@app.task(name='e2e_loop_boot_async_pid')
+async def async_pid() -> Result[int, TaskError]:
     """Runs on the task loop that its child created at boot."""
     await asyncio.sleep(0)
-    return TaskResult(ok=os.getpid())
+    return Ok(os.getpid())
 
 
 app.discover_tasks(['tests.e2e.tasks.instance_task_loop_boot'])

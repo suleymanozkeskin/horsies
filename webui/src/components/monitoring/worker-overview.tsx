@@ -21,12 +21,13 @@ import {
 import { cn } from '@/lib/utils';
 import type {
   BudgetLoad,
-  ClassReport,
+  DatabaseLiveness,
+  ExecutionClassReport,
   SnapshotProfile,
   WorkerState,
 } from '@/types/workers';
 
-import { budgetsOf } from './class-coverage';
+import { budgetsOf, downSlotsOf } from './class-coverage';
 import {
   BudgetChips,
   BudgetTable,
@@ -141,6 +142,7 @@ function WorkerCard({
   onSelect: () => void;
 }) {
   const status = workerStatus(worker, responsive);
+  const downSlots = downSlotsOf(worker.slot_health);
   return (
     <button
       type="button"
@@ -164,7 +166,7 @@ function WorkerCard({
             </span>
           </div>
           <span className="font-mono text-11 text-muted-foreground">
-            pid {worker.pid} · {worker.processes} proc
+            pid {worker.pid} · {worker.child_count} proc
             {showsProfile && ` · ${profileText(worker.profile)}`}
           </span>
         </div>
@@ -190,14 +192,14 @@ function WorkerCard({
           claimed
         </span>
         <span className="ml-auto" title={formatTime(worker.worker_started_at)}>
-          up {formatDuration(worker.uptime_s)}
+          up {formatDuration(worker.uptime_seconds)}
         </span>
       </div>
 
-      {(budgets !== undefined || worker.down_slots.length > 0) && (
+      {(budgets !== undefined || downSlots.length > 0) && (
         <div className="flex flex-wrap items-center gap-1.5">
           {budgets !== undefined && <BudgetChips budgets={budgets} />}
-          {worker.down_slots.length > 0 && (
+          {downSlots.length > 0 && (
             <span
               className="rounded border px-1.5 py-0.5 text-10 font-medium"
               style={{
@@ -205,8 +207,8 @@ function WorkerCard({
                 color: 'var(--warning-dark)',
               }}
             >
-              {worker.down_slots.length} slot
-              {worker.down_slots.length === 1 ? '' : 's'} down
+              {downSlots.length} slot
+              {downSlots.length === 1 ? '' : 's'} down
             </span>
           )}
         </div>
@@ -252,7 +254,7 @@ function WorkerFocus({
           </div>
           <span className="font-mono text-xs text-muted-foreground">
             {profileText(worker.profile)} · pid {worker.pid} ·{' '}
-            {worker.processes} proc · up {formatDuration(worker.uptime_s)}
+            {worker.child_count} proc · up {formatDuration(worker.uptime_seconds)}
           </span>
         </div>
         <span
@@ -315,12 +317,12 @@ function WorkerFocus({
         )}
       </div>
 
-      {worker.slot_health === 'slots_down' && (
+      {worker.slot_health.kind === 'slots_down' && (
         <div className="flex flex-col gap-2 border-t border-hairline pt-3">
           <span className="text-11 font-medium text-muted-foreground">
             Down slots
           </span>
-          <DownSlotList slots={worker.down_slots} />
+          <DownSlotList slots={worker.slot_health.slots} />
         </div>
       )}
 
@@ -333,8 +335,13 @@ function WorkerFocus({
 
 /** The state of a reachable database: its round trip as a duration, or the
  * word alone when the ping measured none. */
-function reachableText(latencyMs: number | null): string {
-  return latencyMs === null ? 'reachable' : `reachable · ${formatMilliseconds(latencyMs)}`;
+function databaseText(database: DatabaseLiveness): string {
+  switch (database.kind) {
+    case 'ping':
+      return `reachable · ${formatMilliseconds(database.latency_ms)}`;
+    case 'unreachable':
+      return 'unreachable';
+  }
 }
 
 function LivenessBanner({
@@ -371,7 +378,7 @@ function LivenessBanner({
           className="font-medium"
           style={{
             color:
-              isError || liveness?.db_reachable === false
+              isError || liveness?.database.kind === 'unreachable'
                 ? 'var(--error)'
                 : 'var(--success)',
           }}
@@ -380,9 +387,7 @@ function LivenessBanner({
             ? 'ping failed'
             : liveness === undefined
               ? '…'
-              : liveness.db_reachable
-                ? reachableText(liveness.db_latency_ms)
-                : 'unreachable'}
+              : databaseText(liveness.database)}
         </span>
       </span>
       <span className="flex items-center gap-2">
@@ -410,7 +415,7 @@ function LivenessBanner({
 /** Whether the class report was read. A report from an earlier read counts
  * as read when a later read failed: its budgets stay on the page. */
 function classReportRead(
-  report: ClassReport | undefined,
+  report: ExecutionClassReport | undefined,
   isError: boolean
 ): ClassReportRead {
   if (report !== undefined) {
@@ -458,7 +463,7 @@ export function WorkerOverview() {
     return [...workers].sort(
       (a, b) =>
         rank(a) - rank(b) ||
-        (a.snapshot_age_s ?? 1e9) - (b.snapshot_age_s ?? 1e9)
+        (a.snapshot_age_seconds ?? 1e9) - (b.snapshot_age_seconds ?? 1e9)
     );
   }, [workers, responsiveIds]);
 

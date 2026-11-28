@@ -1,6 +1,6 @@
 //! The class budgets of a worker state snapshot: the `class_capacity` column.
 //!
-//! Python reference: `ClassBudget`, `ClassBudgets` and `parse_class_capacity`
+//! Python reference: `ExecutionClassBudget`, `ExecutionClassBudgets` and `parse_class_capacity`
 //! (`clients/python/horsies/core/models/health.py:261-395`).
 //!
 //! This module is pure. It does no I/O.
@@ -12,7 +12,7 @@ use crate::core::task::Execution;
 
 /// One claim budget of a worker, as its snapshot recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassBudget {
+pub struct ExecutionClassBudget {
     /// The class whose children (`ISOLATED`) or seats (a shared class) make
     /// the budget.
     pub budget: Execution,
@@ -29,17 +29,17 @@ pub struct ClassBudget {
 /// No class is in the `serves` of two budgets. A class that no budget serves
 /// is not claimed by the worker. Empty when the worker serves no class.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassBudgets(Vec<ClassBudget>);
+pub struct ExecutionClassBudgets(Vec<ExecutionClassBudget>);
 
-impl ClassBudgets {
+impl ExecutionClassBudgets {
     /// The budgets, in [`Execution`] order.
-    pub fn as_slice(&self) -> &[ClassBudget] {
+    pub fn as_slice(&self) -> &[ExecutionClassBudget] {
         &self.0
     }
 
     /// The budget whose `serves` holds `execution`; `None` when the worker
     /// does not claim rows of that class.
-    pub fn serving(&self, execution: Execution) -> Option<&ClassBudget> {
+    pub fn serving(&self, execution: Execution) -> Option<&ExecutionClassBudget> {
         self.0
             .iter()
             .find(|budget| budget.serves.contains(&execution))
@@ -68,7 +68,9 @@ fn unreadable(reason: impl Into<String>) -> ClassCapacityUnreadable {
 /// distinct [`Execution`] names that holds the key. No class may be in the
 /// `serves` of two budgets. Other keys of an entry are not read. Any other
 /// value is [`ClassCapacityUnreadable`]. Reads only.
-pub fn parse_class_capacity(value: &Value) -> Result<ClassBudgets, ClassCapacityUnreadable> {
+pub fn parse_class_capacity(
+    value: &Value,
+) -> Result<ExecutionClassBudgets, ClassCapacityUnreadable> {
     let Value::Object(entries) = value else {
         return Err(unreadable("class_capacity is not a JSON object"));
     };
@@ -87,12 +89,15 @@ pub fn parse_class_capacity(value: &Value) -> Result<ClassBudgets, ClassCapacity
         return Err(unreadable("a class is in the serves of two budgets"));
     }
     budgets.sort_by_key(|budget| budget.budget);
-    Ok(ClassBudgets(budgets))
+    Ok(ExecutionClassBudgets(budgets))
 }
 
 /// One entry (Python `_parse_class_budget`,
 /// `clients/python/horsies/core/models/health.py:332-368`), checked in Python's order.
-fn class_budget(name: &str, value: &Value) -> Result<ClassBudget, ClassCapacityUnreadable> {
+fn class_budget(
+    name: &str,
+    value: &Value,
+) -> Result<ExecutionClassBudget, ClassCapacityUnreadable> {
     let budget = Execution::from_stored(name)
         .ok_or_else(|| unreadable(format!("budget '{name}' is not an execution class")))?;
     let Value::Object(fields) = value else {
@@ -110,7 +115,7 @@ fn class_budget(name: &str, value: &Value) -> Result<ClassBudget, ClassCapacityU
             budget.as_str()
         )));
     }
-    Ok(ClassBudget {
+    Ok(ExecutionClassBudget {
         budget,
         capacity,
         serves,
@@ -182,12 +187,12 @@ mod tests {
         assert_eq!(
             budgets.as_slice(),
             [
-                ClassBudget {
+                ExecutionClassBudget {
                     budget: Execution::Isolated,
                     capacity: 0,
                     serves: vec![Execution::Isolated, Execution::SharedThread],
                 },
-                ClassBudget {
+                ExecutionClassBudget {
                     budget: Execution::SharedAsync,
                     capacity: 40,
                     serves: vec![Execution::SharedAsync],

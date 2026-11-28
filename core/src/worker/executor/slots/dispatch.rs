@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::core::task::error::OperationalErrorCode;
-use crate::events::{AttemptNumber, AttemptStart, OperatorCancelEnd, RunTrace};
+use crate::core::task::error::OperationalCode;
+use crate::events::{AttemptNumber, AttemptStart, MaxRetries, OperatorCancelEnd, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
     BodyEnd, CancelledBody, FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason,
@@ -39,6 +39,23 @@ impl RetryFacts {
     /// The attempt that this claim runs ([`attempt_of`]).
     pub fn attempt(&self) -> AttemptNumber {
         attempt_of(self.retry_count)
+    }
+}
+
+impl RetryFacts {
+    /// The retry budget of the row: `max_retries`, which the table holds
+    /// from 0 to 20 (`horsies_tasks_retry_range`).
+    pub fn max_retries_allowed(&self) -> MaxRetries {
+        match u32::try_from(self.max_retries)
+            .ok()
+            .and_then(|count| MaxRetries::try_from(count).ok())
+        {
+            Some(budget) => budget,
+            None => unreachable!(
+                "the table holds max_retries from 0 to MAX_TASK_RETRIES: {}",
+                self.max_retries
+            ),
+        }
     }
 }
 
@@ -159,10 +176,10 @@ pub enum LoopKillCode {
 }
 
 impl LoopKillCode {
-    pub fn code(self) -> OperationalErrorCode {
+    pub fn code(self) -> OperationalCode {
         match self {
-            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop,
-            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop,
+            Self::TaskBlockedLoop => OperationalCode::TaskBlockedLoop,
+            Self::NeighbourBlockedLoop => OperationalCode::NeighbourBlockedLoop,
         }
     }
 }
@@ -176,8 +193,8 @@ pub enum CancelEnd {
     /// The task and its work ended within the cancel grace after the cancel
     /// at the deadline: the child sent no `second_cancel`.
     ReturnedAfterSignal,
-    /// Something of the run was alive after the cancel grace: the child sent
-    /// `second_cancel` and stopped it (a Rust child drops the future).
+    /// Something of the run was alive after the cancel grace, and the child
+    /// sent `second_cancel`.
     DroppedAfterGrace,
     /// The run ended when the worker killed its child, before the child
     /// reported its end.
@@ -316,8 +333,8 @@ pub enum AttemptEnd {
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
-    /// An operator cancelled the task while it ran (`cancel_task` with
-    /// `include_running`). The cancel statement wrote the `CANCELLED`
+    /// An operator cancelled the task while it ran (`cancel_task` with the
+    /// policy `INCLUDE_RUNNING`). The cancel statement wrote the `CANCELLED`
     /// attempt and moved the row; nothing is written.
     Cancelled(CancelledEnd),
 }

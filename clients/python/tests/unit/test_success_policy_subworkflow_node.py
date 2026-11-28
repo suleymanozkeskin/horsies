@@ -14,11 +14,12 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.app import Horsies
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     SubWorkflowNode,
     SuccessCase,
     SuccessPolicy,
@@ -28,6 +29,7 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
 )
 from horsies.core.task_decorator import TaskFunction
+from horsies.core.types.result import Ok, Result
 
 
 pytestmark = [pytest.mark.unit]
@@ -44,12 +46,12 @@ def _key(label: str) -> str:
 
 def _app_with_tasks() -> tuple[Horsies, TaskFunction[..., int]]:
     app = Horsies(AppConfig(
-        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+        database=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
     ))
 
     @app.task('success_policy_sub.work')
-    def work() -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def work() -> Result[int, TaskError]:
+        return Ok(1)
 
     return app, work
 
@@ -58,7 +60,7 @@ def _child_definition(work: TaskFunction[..., int]) -> type[WorkflowDefinition[i
     class Child(WorkflowDefinition[int]):
         name = 'success_policy_sub_child'
         definition_key = _key('child')
-        step = TaskNode(fn=work)
+        step = TaskNode(function=work)
 
         config = WorkflowDefinitionConfig(output=step)
 
@@ -68,8 +70,8 @@ def _child_definition(work: TaskFunction[..., int]) -> type[WorkflowDefinition[i
 class TestSpecValidation:
     def test_a_subworkflow_node_in_required_and_optional_is_accepted(self) -> None:
         app, work = _app_with_tasks()
-        child = SubWorkflowNode(workflow_def=_child_definition(work))
-        other = TaskNode(fn=work)
+        child = SubWorkflowNode(workflow_definition=_child_definition(work))
+        other = TaskNode(function=work)
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[child])],
             optional=[other],
@@ -77,7 +79,7 @@ class TestSpecValidation:
 
         spec = app.workflow(
             name='sp_accept',
-            tasks=[child, other],
+            nodes=[child, other],
             success_policy=policy,
             definition_key=_key('accept'),
         )
@@ -86,40 +88,40 @@ class TestSpecValidation:
 
     def test_a_subworkflow_node_outside_the_workflow_is_refused(self) -> None:
         app, work = _app_with_tasks()
-        inside = TaskNode(fn=work)
-        outside = SubWorkflowNode(workflow_def=_child_definition(work))
+        inside = TaskNode(function=work)
+        outside = SubWorkflowNode(workflow_definition=_child_definition(work))
         policy = SuccessPolicy(cases=[SuccessCase(required=[outside])])
 
         with pytest.raises(WorkflowValidationError, match='not in workflow') as raised:
             app.workflow(
                 name='sp_refuse',
-                tasks=[inside],
+                nodes=[inside],
                 success_policy=policy,
                 definition_key=_key('refuse'),
             )
 
-        assert raised.value.code == ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
+        assert raised.value.code == HorsiesErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY
 
 
 class TestSpecCopy:
     def test_the_policy_points_to_the_copy_of_a_subworkflow_node(self) -> None:
         app, work = _app_with_tasks()
-        child = SubWorkflowNode(workflow_def=_child_definition(work))
-        optional_child = SubWorkflowNode(workflow_def=_child_definition(work))
+        child = SubWorkflowNode(workflow_definition=_child_definition(work))
+        optional_child = SubWorkflowNode(workflow_definition=_child_definition(work))
         policy = SuccessPolicy(
             cases=[SuccessCase(required=[child])],
             optional=[optional_child],
         )
 
         spec: WorkflowSpec[Any] = WorkflowSpec(
-            name='sp_copy', tasks=[child, optional_child], success_policy=policy,
+            name='sp_copy', nodes=[child, optional_child], success_policy=policy,
         )
 
         assert spec.success_policy is not None
-        assert spec.success_policy.cases[0].required[0] is spec.tasks[0]
+        assert spec.success_policy.cases[0].required[0] is spec.nodes[0]
         assert spec.success_policy.cases[0].required[0] is not child
         assert spec.success_policy.optional is not None
-        assert spec.success_policy.optional[0] is spec.tasks[1]
+        assert spec.success_policy.optional[0] is spec.nodes[1]
         _ = app
 
 
@@ -128,11 +130,11 @@ class TestDefinitionCopy:
         app, work = _app_with_tasks()
         child_definition = _child_definition(work)
 
-        class Parent(WorkflowDefinition[None]):
+        class Parent(WorkflowDefinition[NoWorkflowOutput]):
             name = 'success_policy_sub_parent'
             definition_key = _key('parent')
-            child = SubWorkflowNode(workflow_def=child_definition)
-            extra = TaskNode(fn=work)
+            child = SubWorkflowNode(workflow_definition=child_definition)
+            extra = TaskNode(function=work)
 
             config = WorkflowDefinitionConfig(
                 success_policy=SuccessPolicy(
@@ -145,7 +147,7 @@ class TestDefinitionCopy:
 
         assert spec.success_policy is not None
         copied_child = next(
-            node for node in spec.tasks if isinstance(node, SubWorkflowNode)
+            node for node in spec.nodes if isinstance(node, SubWorkflowNode)
         )
         assert copied_child is not Parent.child
         assert spec.success_policy.cases[0].required[0] is copied_child

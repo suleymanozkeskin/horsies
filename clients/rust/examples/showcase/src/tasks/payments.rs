@@ -19,7 +19,7 @@ use super::{runtime, task_store};
     "authorize_payment",
     queue = "payments",
     retry_policy = crate::tasks::psp_retry(),
-    auto_retry_for = ["PSP_UNAVAILABLE", "WORKER_CRASHED"]
+    retry_for = ["PSP_UNAVAILABLE", "WORKER_CRASHED"]
 )]
 pub async fn authorize_payment(
     rt: TaskRuntime,
@@ -35,7 +35,7 @@ pub async fn authorize_payment(
     "capture_payment",
     queue = "payments",
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn capture_payment(
     rt: TaskRuntime,
@@ -57,7 +57,7 @@ pub async fn capture_payment(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn refund_payment(
     order_id: String,
@@ -77,7 +77,7 @@ pub async fn refund_payment(
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = crate::tasks::crash_retry(),
-    auto_retry_for = ["WORKER_CRASHED"]
+    retry_for = ["WORKER_CRASHED"]
 )]
 pub async fn reconcile_payments(
     window: String,

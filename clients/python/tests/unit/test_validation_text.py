@@ -45,15 +45,15 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
     without_validation_input,
 )
-from horsies.core.errors import ErrorCode, TaskDefinitionError
+from horsies.core.errors import HorsiesErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
-from horsies.core.models.tasks import ContractCode, TaskError, TaskResult
+from horsies.core.models.tasks import ContractCode, TaskError
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 pytestmark = pytest.mark.unit
 
@@ -399,36 +399,36 @@ class TestFlattenException:
 def _make_app() -> Any:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
-def _stored_text(result: TaskResult[Any, TaskError]) -> str:
+def _stored_text(result: Result[Any, TaskError]) -> str:
     return json.dumps(encode_task_result(result, int))
 
 
 class TestReturnTypeMismatch:
     def test_the_output_value_is_not_stored(self) -> None:
-        def returns_wrong_type(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok={'secret': MARKER})  # type: ignore[arg-type]
+        def returns_wrong_type(*, x: int) -> Result[int, TaskError]:
+            return Ok({'secret': MARKER})  # type: ignore[arg-type]
 
         wrapper = create_task_wrapper(returns_wrong_type, _make_app(), 'test.returns_wrong_type')
 
         result = wrapper(x=1)
 
-        assert result.is_err()
+        assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert err.code == ContractCode.RETURN_TYPE_MISMATCH
         assert err.exception is None
         assert MARKER not in (err.message or '')
         assert MARKER not in json.dumps(err.data)
         assert MARKER not in _stored_text(result)
-        assert 'TaskResult(ok=<dict>)' in (err.message or '')
+        assert 'returned Ok(<dict>)' in (err.message or '')
         data = cast(dict[str, Any], err.data)
         assert data['actual_type'] == 'dict'
         assert data['validation_error_count'] == 1
@@ -438,15 +438,15 @@ class TestReturnTypeMismatch:
 
 class TestTaskRaisesValidationError:
     def test_the_refused_input_is_not_stored(self) -> None:
-        def validates_its_input(*, x: int) -> TaskResult[int, TaskError]:
+        def validates_its_input(*, x: int) -> Result[int, TaskError]:
             TypeAdapter(int).validate_python(MARKER)
-            return TaskResult(ok=x)
+            return Ok(x)
 
         wrapper = create_task_wrapper(validates_its_input, _make_app(), 'test.validates_its_input')
 
         result = wrapper(x=1)
 
-        assert result.is_err()
+        assert isinstance(result, Err)
         assert MARKER not in (result.err_value.message or '')
         assert MARKER not in _stored_text(result)
 
@@ -455,8 +455,8 @@ class TestSendOptions:
     def test_a_refused_send_option_gives_a_cause_without_input(self) -> None:
         naive_deadline = datetime(2031, 7, 9, 11, 22, 33)
 
-        def task_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def task_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
         wrapper = create_task_wrapper(task_fn, _make_app(), 'test.send_options')
 
@@ -465,9 +465,9 @@ class TestSendOptions:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, TaskSendValidationFailed)
-        assert isinstance(err.exception, ValueValidationError)
+        assert isinstance(err.cause, ValueValidationError)
         assert '2031' not in err.message
-        assert '2031' not in str(err.exception)
+        assert '2031' not in str(err.cause)
         assert 'good_until must be timezone-aware' in err.message
 
 
@@ -496,27 +496,27 @@ class TestDefinitionTimeOptions:
     def test_a_refused_decorator_option_holds_no_value(self) -> None:
         app = object.__new__(Horsies)
 
-        def task_fn() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='x')
+        def task_fn() -> Result[str, TaskError]:
+            return Ok('x')
 
         with pytest.raises(TaskDefinitionError) as caught:
             refused_options: dict[str, Any] = {'timeout_ms': MARKER}
-            app.task(task_name='test.bad_timeout', **refused_options)(task_fn)
+            app.task(name='test.bad_timeout', **refused_options)(task_fn)
 
         notes = ' '.join(caught.value.notes)
-        assert caught.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert caught.value.code == HorsiesErrorCode.TASK_INVALID_OPTIONS
         assert MARKER not in notes
         assert 'timeout_ms: Input should be a valid integer' in notes
 
     def test_refused_retry_policy_metadata_holds_no_value(self) -> None:
         app = Horsies(
             config=AppConfig(
-                broker=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
+                database=PostgresConfig(database_url=SecretStr('postgresql://x/y')),
             ),
         )
         app.tasks['test.metadata'] = cast(Any, SimpleNamespace(
             task_options_json=json.dumps({
-                'retry_policy': {'max_retries': MARKER, 'auto_retry_for': ['TRANSIENT']},
+                'retry_policy': {'max_retries': MARKER, 'retry_for': ['TRANSIENT']},
             }),
         ))
 

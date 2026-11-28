@@ -9,12 +9,13 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { formatTime } from '@/lib/format-duration';
-import type { BudgetLoad, ClassReport, DownSlot } from '@/types/workers';
+import type { BudgetLoad, DownSlot, ExecutionClassReport } from '@/types/workers';
 
 import {
   budgetFreeText,
   coverageText,
   fleetWarningText,
+  freeCapacity,
   uncoveredStreams,
   waitText,
 } from './class-coverage';
@@ -22,7 +23,7 @@ import { ErrorState } from './states';
 
 /** One alert row per pending stream that no live worker can run. An unserved
  * stream is an error; a stream whose workers have no capacity is a warning. */
-export function FleetWarnings({ report }: { report: ClassReport }) {
+export function FleetWarnings({ report }: { report: ExecutionClassReport }) {
   const uncovered = uncoveredStreams(report);
   if (uncovered.length === 0) {
     return null;
@@ -36,7 +37,7 @@ export function FleetWarnings({ report }: { report: ClassReport }) {
             : 'var(--warning-dark)';
         return (
           <div
-            key={`${stream.queue_name}/${stream.execution}`}
+            key={`${stream.queue}/${stream.execution}`}
             className="flex items-start gap-3 rounded-lg border px-3 py-2 text-sm"
             style={{ borderColor: color }}
           >
@@ -61,7 +62,7 @@ export function ClassCoveragePanel({
   isError,
   onRetry,
 }: {
-  report: ClassReport | undefined;
+  report: ExecutionClassReport | undefined;
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
@@ -74,7 +75,7 @@ export function ClassCoveragePanel({
           <span className="text-sm font-semibold">Pending by execution class</span>
           {report !== undefined && (
             <span className="text-11 text-muted-foreground">
-              live window {report.live_window_s}s · checked{' '}
+              live window {report.live_window_seconds}s · checked{' '}
               {formatTime(report.checked_at)}
             </span>
           )}
@@ -110,9 +111,9 @@ export function ClassCoveragePanel({
             </TableHeader>
             <TableBody>
               {report.streams.map(stream => (
-                <TableRow key={`${stream.queue_name}/${stream.execution}`}>
+                <TableRow key={`${stream.queue}/${stream.execution}`}>
                   <TableCell className="font-mono text-xs">
-                    {stream.queue_name}
+                    {stream.queue}
                   </TableCell>
                   <TableCell className="font-mono text-xs">
                     {stream.execution}
@@ -191,7 +192,9 @@ export function BudgetTable({ budgets }: { budgets: BudgetLoad[] }) {
             <TableCell className="text-right tabular-nums">
               {budget.in_flight}
             </TableCell>
-            <TableCell className="text-right tabular-nums">{budget.free}</TableCell>
+            <TableCell className="text-right tabular-nums">
+              {freeCapacity(budget)}
+            </TableCell>
             <TableCell className="font-mono text-10 text-muted-foreground">
               {budget.serves.join(', ')}
             </TableCell>

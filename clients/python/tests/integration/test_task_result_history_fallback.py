@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
+    DatabaseErrorCode,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
@@ -144,14 +144,14 @@ class TestHistoryFallback:
             record = outcome.ok_value
             assert record is not None
             assert record.status is TaskStatus.COMPLETED
-            assert record.raw_result == {'ok': {'value': 7}}
+            assert record.envelope == {'ok': {'value': 7}}
 
             outcome = await broker.get_raw_result_record_async(uuid.UUID(cancelled))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
             assert record.status is TaskStatus.CANCELLED
-            assert record.raw_result is None
+            assert record.envelope is None
         finally:
             await broker.close_async()
 
@@ -234,13 +234,13 @@ class TestStagedResultReader:
 
             failed = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert is_err(failed)
-            assert failed.err_value.code is BrokerErrorCode.TASK_INFO_QUERY_FAILED
+            assert failed.err_value.code is DatabaseErrorCode.TASK_INFO_QUERY_FAILED
             assert TASK_RESULT_FUNCTION in failed.err_value.message
 
             outcome = await broker.get_raw_result_record_async(uuid.UUID(completed))
             assert not is_err(outcome), outcome
             record = outcome.ok_value
             assert record is not None
-            assert record.raw_result == {'ok': {'value': 7}}
+            assert record.envelope == {'ok': {'value': 7}}
         finally:
             await broker.close_async()

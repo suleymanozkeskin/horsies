@@ -22,12 +22,12 @@ use super::*;
 use crate::broker::claims::WorkflowNodeIndex;
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
-use crate::core::task::fencing::FencingToken;
+use crate::core::task::error::{OperationalCode, TaskError};
+use crate::core::task::fencing::TaskAttempt;
 use crate::core::task::fn_trait::{
-    AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMeta, TaskModule,
+    AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMetadata, TaskModule,
 };
-use crate::events::{QueueName, TraceCarrierText};
+use crate::events::{MaxRetries, QueueName, TraceCarrierText};
 use crate::worker::executor::protocol::{IsolatedWork, RunEnd, RunFrame, TaskInputText};
 
 /// The task name of the row that `seed_claimed` writes.
@@ -37,7 +37,7 @@ const SEEDED_TASK_NAME: &str = "app.tasks.start";
 const CARRIER_TEXT: &str =
     r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01","tracestate":""}"#;
 
-/// The user code of a body that fails.
+/// The custom code of a body that fails.
 const DECLINED: &str = "DECLINED";
 
 thread_local! {
@@ -120,6 +120,8 @@ enum ScopeCall {
 struct RecordingSpans {
     probe: tracing::Dispatch,
     calls: Mutex<Vec<ScopeCall>>,
+    /// The run that each close named, in order.
+    closed_runs: Mutex<Vec<BodyRunKey>>,
 }
 
 impl RecordingSpans {
@@ -127,7 +129,15 @@ impl RecordingSpans {
         Self {
             probe: tracing::Dispatch::new(EnterProbe::default()),
             calls: Mutex::new(Vec::new()),
+            closed_runs: Mutex::new(Vec::new()),
         }
+    }
+
+    fn closed_runs(&self) -> Vec<BodyRunKey> {
+        self.closed_runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn calls(&self) -> Vec<ScopeCall> {
@@ -169,7 +179,11 @@ impl BodySpans for RecordingSpans {
         span
     }
 
-    fn close(&self, span: &tracing::Span, end: &BodyOutcome<'_>) {
+    fn close(&self, run: BodyRunKey, span: &tracing::Span, end: &BodyOutcome<'_>) {
+        self.closed_runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(run);
         let end = match end {
             BodyOutcome::Returned => ClosedEnd::Returned,
             BodyOutcome::Failed { error_code } => ClosedEnd::Failed((*error_code).clone()),
@@ -233,7 +247,9 @@ fn returns_one() -> RawTaskResult {
 }
 
 fn declines() -> RawTaskResult {
-    TaskResult::Err(TaskError::new(DECLINED, "the card was declined").expect("a free user code"))
+    TaskResult::Err(
+        TaskError::custom(DECLINED, "the card was declined").expect("a free custom code"),
+    )
 }
 
 fn panics() -> RawTaskResult {
@@ -249,7 +265,7 @@ fn async_task(seen: &SeenInside, result: fn() -> RawTaskResult) -> RegisteredTas
             seen: Arc::clone(seen),
             result,
         }),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 
@@ -259,7 +275,7 @@ fn blocking_task(seen: &SeenInside, result: fn() -> RawTaskResult) -> Registered
             seen: Arc::clone(seen),
             result,
         }),
-        meta: TaskMeta::default(),
+        metadata: TaskMetadata::default(),
     }
 }
 
@@ -296,6 +312,7 @@ fn facts(task_id: Uuid) -> RunFacts {
         task_name: "app.tasks.scoped".to_owned(),
         queue_name: QueueName::cut(SCOPE_QUEUE),
         attempt: third_attempt(),
+        max_retries: MaxRetries::SMALLEST,
         worker_id: "scope-worker".to_owned(),
         claimed_at: Utc::now(),
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -400,6 +417,67 @@ fn a_client_scope_opens_with_the_run_facts_and_closes_with_the_end() {
     );
 }
 
+/// A client whose spans are `Span::none()`, as a client that traces outside
+/// `tracing` has. It keeps the run of each close.
+struct NoSpanClient {
+    closed: Mutex<Vec<(BodyRunKey, bool)>>,
+}
+
+impl BodySpans for NoSpanClient {
+    fn open(&self, _run: &BodyRun<'_>) -> tracing::Span {
+        tracing::Span::none()
+    }
+
+    fn close(&self, run: BodyRunKey, span: &tracing::Span, _end: &BodyOutcome<'_>) {
+        self.closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((run, span.id().is_some()));
+    }
+}
+
+/// A close names the run that its open saw: the task and the attempt, also
+/// for a client whose spans have no id.
+#[test]
+fn a_close_names_the_run_that_its_open_saw() {
+    let task_id = Uuid::new_v4();
+    let trace = carrier_trace();
+
+    let recording = Arc::new(RecordingSpans::new());
+    let scope = BodyScope::Spans(Arc::clone(&recording) as Arc<dyn BodySpans>);
+    scope
+        .open(&facts(task_id), Execution::SharedThread, source(&trace))
+        .close(&BodyOutcome::Returned);
+    assert_eq!(
+        recording.closed_runs(),
+        vec![BodyRunKey {
+            task_id,
+            attempt: third_attempt(),
+        }]
+    );
+
+    let no_span = Arc::new(NoSpanClient {
+        closed: Mutex::new(Vec::new()),
+    });
+    let scope = BodyScope::Spans(Arc::clone(&no_span) as Arc<dyn BodySpans>);
+    scope
+        .open(&facts(task_id), Execution::Isolated, source(&trace))
+        .close(&BodyOutcome::Cancelled);
+    assert_eq!(
+        *no_span
+            .closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+        vec![(
+            BodyRunKey {
+                task_id,
+                attempt: third_attempt(),
+            },
+            false,
+        )]
+    );
+}
+
 /// The run of `task` as an isolated body inside a client scope. Returns the
 /// result, the calls of the scope and the span that the body saw in each of
 /// its polls.
@@ -431,7 +509,7 @@ async fn isolated_run_with(
     let facts = facts(Uuid::new_v4());
     let open = scope.open(&facts, Execution::Isolated, source(&RunTrace::NoCarrier));
     let task = make_task(&seen_inside, result);
-    let run_scope = RunScope::new(facts.fencing_token());
+    let run_scope = RunScope::new(facts.task_attempt());
     match cancel {
         CancelBeforeBody::NoCancel => {}
         CancelBeforeBody::OperatorCancel => {
@@ -504,7 +582,7 @@ async fn a_failed_body_closes_its_scope_with_its_error_code() {
 /// A body that panics closes its scope with `UNHANDLED_EXCEPTION`.
 #[tokio::test]
 async fn a_panicking_body_closes_its_scope_with_unhandled_exception() {
-    let unhandled = TaskErrorCode::BuiltIn(OperationalErrorCode::UnhandledException.into());
+    let unhandled = TaskErrorCode::BuiltIn(OperationalCode::UnhandledException.into());
     for make_task in [async_task, blocking_task] {
         let (_result, calls, _seen) = isolated_run_of(make_task, panics).await;
         let span = opened_span(&calls);
@@ -564,7 +642,7 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
         "app.tasks.scoped",
         TaskModule::default(),
         &span,
-        FencingToken::new(task_id, AttemptNumber::SMALLEST),
+        TaskAttempt::new(task_id, AttemptNumber::SMALLEST, MaxRetries::SMALLEST),
         RunCancelSignal::new(),
     );
     assert!(matches!(result, TaskResult::Ok(_)));
@@ -592,6 +670,7 @@ async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier()
         task_name: SEEDED_TASK_NAME.to_owned(),
         queue_name: QueueName::cut(SCOPE_QUEUE),
         attempt: third_attempt(),
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at: generation,
         orphan_self_heal: OrphanSelfHeal::Off,

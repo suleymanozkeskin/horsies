@@ -14,7 +14,7 @@ use crate::db::{
 };
 
 use crate::core::config::app::AppConfig;
-use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
+use crate::core::config::worker_profile::{ClaimLimits, TaskLimitSetting, WorkerProfile};
 use crate::core::task::execution::Execution;
 
 use crate::telemetry::worker::WorkerTelemetry;
@@ -192,37 +192,50 @@ pub fn budget_columns(service: &PoolService) -> Vec<BudgetColumn> {
         .collect()
 }
 
-/// The columns of a worker snapshot that the children and the claim limits
-/// of the worker decide.
+/// The children and the claim limits of a worker, the source of three
+/// snapshot columns.
+///
+/// The snapshot records the limits of the profile as they are. A claimed
+/// limit that the profile does not set is recorded as no limit; the
+/// effective limit is the seat count of the worker, which the snapshot holds
+/// in its class capacities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimColumns {
     /// `processes`: the children of the worker.
     pub processes: u32,
-    /// `max_claim_batch`: the most rows that one pass claims from one queue;
-    /// 0 is no limit.
-    pub max_claim_batch: u32,
-    /// `max_claim_per_worker`: the most CLAIMED rows of the worker, resolved.
-    /// With no set limit it is the seats of the worker, never 0.
-    pub max_claim_per_worker: u32,
+    /// The claim limits of the profile: `max_claim_batch` and
+    /// `max_claim_per_worker`.
+    pub claim: ClaimLimits,
 }
 
 impl ClaimColumns {
-    /// The columns of a worker that runs `profile`: its child count, its per
-    /// queue limit or 0, and its claimed limit or else its seat count
-    /// (Python: `cfg.max_claim_per_worker if > 0 else cfg.seat_count()`).
-    /// Pure.
+    /// The columns of a worker that runs `profile`. Pure.
     pub fn of_profile(profile: &WorkerProfile) -> Self {
         Self {
             processes: profile.child_count(),
-            max_claim_batch: match profile.claim.per_queue_per_pass {
-                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
-                TaskLimitSetting::NoTaskLimit {} => 0,
-            },
-            max_claim_per_worker: match profile.claim.claimed_per_worker {
-                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
-                TaskLimitSetting::NoTaskLimit {} => profile.seat_count(),
-            },
+            claim: profile.claim,
         }
+    }
+
+    /// The column `max_claim_batch`: the limit of one pass per queue, 0 for
+    /// no limit. Pure.
+    pub fn stored_max_claim_batch(&self) -> u32 {
+        stored_task_limit(self.claim.per_queue_per_pass)
+    }
+
+    /// The column `max_claim_per_worker`: the claimed limit of the profile,
+    /// 0 for no limit. Never the seat count. Pure.
+    pub fn stored_max_claim_per_worker(&self) -> u32 {
+        stored_task_limit(self.claim.claimed_per_worker)
+    }
+}
+
+/// The stored integer of a task limit: the task count, or 0 for no limit.
+/// Pure.
+fn stored_task_limit(limit: TaskLimitSetting) -> u32 {
+    match limit {
+        TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
+        TaskLimitSetting::NoTaskLimit {} => 0,
     }
 }
 
@@ -236,6 +249,18 @@ struct ResourceMetrics {
     cpu_percent: Option<f64>,
 }
 
+impl ResourceMetrics {
+    /// No metric could be read.
+    fn unreadable() -> Self {
+        Self {
+            parent_rss: ParentRss::Unreadable,
+            memory_usage_mb: None,
+            memory_percent: None,
+            cpu_percent: None,
+        }
+    }
+}
+
 /// Collect resource metrics (memory and CPU) for the current process.
 ///
 /// Uses the `sysinfo` crate to mirror Python's psutil-based metrics:
@@ -246,7 +271,9 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[pid]),
         true,
-        sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory(),
     );
 
     if let Some(process) = sys.process(pid) {
@@ -269,12 +296,7 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
             cpu_percent: Some((cpu_percent * 100.0).round() / 100.0),
         }
     } else {
-        ResourceMetrics {
-            parent_rss: ParentRss::Unreadable,
-            memory_usage_mb: None,
-            memory_percent: None,
-            cpu_percent: None,
-        }
+        ResourceMetrics::unreadable()
     }
 }
 
@@ -402,7 +424,9 @@ pub(crate) struct SnapshotSource {
     pub handler_child: HandlerChildView,
     /// Where each snapshot sets the worker gauges of the values it writes.
     pub telemetry: WorkerTelemetry,
-    sys: System,
+    /// The process reader; `None` when the host refused to start it, so
+    /// every resource read is unreadable.
+    sys: Option<System>,
     sys_pid: Pid,
 }
 
@@ -441,13 +465,17 @@ impl SnapshotSource {
         telemetry: WorkerTelemetry,
     ) -> Self {
         let sys_pid = Pid::from(pid as usize);
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
-            true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
-        );
-        sys.refresh_memory();
+        let mut sys = System::new().ok();
+        if let Some(reader) = sys.as_mut() {
+            reader.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory(),
+            );
+            reader.refresh_memory();
+        }
         Self {
             worker_id,
             hostname,
@@ -476,7 +504,10 @@ impl SnapshotSource {
             down,
             down_by_kind,
             budgets: budget_columns(&self.children.service()),
-            resources: collect_resource_metrics(&mut self.sys, self.sys_pid),
+            resources: match self.sys.as_mut() {
+                Some(sys) => collect_resource_metrics(sys, self.sys_pid),
+                None => ResourceMetrics::unreadable(),
+            },
             children_rss: children_rss_of(&self.children.child_rss()),
         }
     }
@@ -609,9 +640,15 @@ pub(crate) async fn write_snapshot(
     let metrics = read.resources;
     let recovery_value = source.recovery_value().await;
     let processes = source.claim_columns.processes as i32;
-    let max_claim_batch = source.claim_columns.max_claim_batch as i32;
-    let max_claim_per_worker = source.claim_columns.max_claim_per_worker as i32;
-    let cluster_wide_cap = source.app_config.cluster_wide_cap.map(|cap| cap as i32);
+    let max_claim_batch = source.claim_columns.stored_max_claim_batch() as i32;
+    let max_claim_per_worker = source.claim_columns.stored_max_claim_per_worker() as i32;
+    // The column `cluster_wide_cap` stores the cap as a nullable integer:
+    // NULL for no cap.
+    let cluster_wide_cap = source
+        .app_config
+        .cluster_wide_cap
+        .claim_parameter()
+        .map(|cap| cap as i32);
     // The queue maps are stored as they are: an empty map is `{}`, never
     // NULL (both columns are NOT NULL on the baseline).
     let queue_priorities = Json(&source.worker_config.queue_priorities);
@@ -770,8 +807,7 @@ mod tests {
     fn isolated_claim_columns(isolated: u32) -> ClaimColumns {
         ClaimColumns {
             processes: isolated,
-            max_claim_batch: 0,
-            max_claim_per_worker: isolated,
+            claim: ClaimLimits::default(),
         }
     }
 
@@ -786,7 +822,7 @@ mod tests {
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
         health.write().await.phase2_recovery = Some(phase2.clone());
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 10;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
@@ -1004,7 +1040,7 @@ mod tests {
                 },
             )]);
 
-            let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+            let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
                 panic!("the written down slot reads back: {column}");
             };
 
@@ -1049,7 +1085,7 @@ mod tests {
                 failed_boots: NonZeroU32::new(3).expect("3"),
             },
         )]);
-        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+        let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
             panic!("the written down slot reads back: {column}");
         };
         let [DownSlot {
@@ -1084,12 +1120,12 @@ mod tests {
     }
 
     /// Python `test_health_models.py::TestClassCapacity::test_the_writer_covers_every_read_field`:
-    /// each field of the read `ClassBudget` but the budget (the key of its
+    /// each field of the read `ExecutionClassBudget` but the budget (the key of its
     /// entry) reaches the stored entry, so a new field cannot be read
     /// without a writer. The pattern names every field with no rest.
     #[test]
     fn the_writer_covers_every_read_field_of_a_budget() {
-        use crate::broker::class_budgets::{parse_class_capacity, ClassBudget};
+        use crate::broker::class_budgets::{parse_class_capacity, ExecutionClassBudget};
         use std::collections::BTreeSet;
 
         let column = class_capacity_json(&[BudgetColumn {
@@ -1098,7 +1134,7 @@ mod tests {
             serves: vec![Execution::Isolated],
         }]);
         let budgets = parse_class_capacity(&column).expect("the written column reads back");
-        let [ClassBudget {
+        let [ExecutionClassBudget {
             budget,
             capacity,
             serves,
@@ -1146,42 +1182,42 @@ mod tests {
         assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
     }
 
-    /// `processes` is the child count,
-    /// `max_claim_batch` the per-queue limit or 0, and `max_claim_per_worker`
-    /// the claimed limit or else the seat count.
-    #[test]
-    fn the_claim_columns_of_a_profile_are_resolved_as_python() {
-        use crate::core::config::worker_profile::TaskCount;
-
-        let mut profile: WorkerProfile = serde_json::from_value(serde_json::json!({
+    fn profile_with_claim(claim: &serde_json::Value) -> WorkerProfile {
+        serde_json::from_value(serde_json::json!({
             "isolated": {"kind": "isolated_children", "count": 2},
             "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 10},
-            "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 4}
+            "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 4},
+            "claim": claim
         }))
-        .expect("the profile is valid");
+        .expect("the profile is valid")
+    }
 
+    /// A profile with no claim limit records no limit: the claimed limit is
+    /// 0 in the column, not the seat count (20).
+    #[test]
+    fn a_profile_with_no_claim_limit_records_no_limit() {
+        let profile = profile_with_claim(&serde_json::json!({}));
+        let columns = ClaimColumns::of_profile(&profile);
+        assert_eq!(columns.processes, 5);
         assert_eq!(
-            ClaimColumns::of_profile(&profile),
-            ClaimColumns {
-                processes: 5,
-                max_claim_batch: 0,
-                max_claim_per_worker: 2 + 10 + 8,
-            },
+            columns.claim.claimed_per_worker,
+            TaskLimitSetting::NoTaskLimit {}
         );
+        assert_eq!(columns.stored_max_claim_batch(), 0);
+        assert_eq!(columns.stored_max_claim_per_worker(), 0);
+        assert_eq!(profile.seat_count(), 20);
+    }
 
-        let tasks = |count: u32| TaskLimitSetting::TaskLimit {
-            tasks: TaskCount::try_from(count).expect("a test limit is inside its bounds"),
-        };
-        profile.claim.per_queue_per_pass = tasks(3);
-        profile.claim.claimed_per_worker = tasks(7);
-        assert_eq!(
-            ClaimColumns::of_profile(&profile),
-            ClaimColumns {
-                processes: 5,
-                max_claim_batch: 3,
-                max_claim_per_worker: 7,
-            },
-        );
+    /// A profile with claim limits records them as set.
+    #[test]
+    fn a_profile_with_claim_limits_records_the_limits() {
+        let profile = profile_with_claim(&serde_json::json!({
+            "per_queue_per_pass": {"kind": "task_limit", "tasks": 3},
+            "claimed_per_worker": {"kind": "task_limit", "tasks": 7}
+        }));
+        let columns = ClaimColumns::of_profile(&profile);
+        assert_eq!(columns.stored_max_claim_batch(), 3);
+        assert_eq!(columns.stored_max_claim_per_worker(), 7);
     }
 
     /// Python `class_capacity_json(plan, capacity)` of a worker of isolated
@@ -1221,7 +1257,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         assert!(worker_config.queue_priorities.is_empty());
@@ -1296,8 +1332,8 @@ mod tests {
             class_capacity,
             class_capacity_json(&budget_columns(&isolated_children(2).service()))
         );
-        // No limit is stored resolved: the seats of the worker (#804).
-        assert_eq!(max_claim_per_worker, 2);
+        // No limit is stored as no limit, not as the seats of the worker.
+        assert_eq!(max_claim_per_worker, 0);
         // No `--metrics-listen` and no handler child: both are off. No child
         // sent an unreadable RSS reading: `children_rss` names none.
         assert_eq!(
@@ -1331,7 +1367,7 @@ mod tests {
             "claimed-count-test".to_owned(),
             std::process::id() as i32,
             WorkerConfig::default(),
-            AppConfig::for_database_url("postgresql://unused/test"),
+            AppConfig::from_database_url("postgresql://unused/test"),
             new_reaper_health(),
             children,
             isolated_claim_columns(isolated),
@@ -1714,11 +1750,13 @@ mod tests {
     #[test]
     fn collect_resource_metrics_returns_values() {
         let pid = Pid::from(std::process::id() as usize);
-        let mut sys = System::new();
+        let mut sys = System::new().expect("the process reader starts on a supported host");
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
-            sysinfo::ProcessRefreshKind::new().with_cpu().with_memory(),
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
         sys.refresh_memory();
         let metrics = collect_resource_metrics(&mut sys, pid);
@@ -1742,7 +1780,7 @@ mod tests {
             crate::ClientFamily::Rust,
         ));
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
@@ -1814,7 +1852,7 @@ mod tests {
 
         let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
-        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        let mut app_config = AppConfig::from_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();

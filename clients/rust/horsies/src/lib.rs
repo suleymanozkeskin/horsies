@@ -60,7 +60,7 @@ pub mod tools;
 pub use crate::app::{AppRole, Horsies, SchemaMode, StateNotProvided, SUPPRESS_SENDS_ENV};
 pub use crate::config::*;
 pub use crate::error::*;
-pub use horsies_core::handle::CoreHandle;
+pub use horsies_core::handle::CoreConnection;
 
 pub use crate::check::*;
 pub use crate::child::*;
@@ -82,47 +82,36 @@ pub mod __private {
     pub use crate::task::body::{
         body_result, check_input, decode_input, decode_unit_input, StoredTaskError,
     };
-    pub use horsies_core::core::task::fn_trait::TaskMeta;
+    pub use horsies_core::core::task::fn_trait::TaskMetadata;
     pub use horsies_core::core::task::{AsyncTaskFn, BlockingTaskFn, RawTaskResult};
     pub use horsies_core::{RegisteredTask, TaskResult};
     /// The generated `Input` struct of a task derives serde through this
     /// path, so the user's crate needs no serde name of its own for it.
     pub use serde;
 
-    /// The cancel grace of a `SHARED_ASYNC` task that names none.
-    pub const DEFAULT_CANCEL_GRACE: crate::CancelGraceMs = crate::CancelGraceMs::DEFAULT;
-
     /// The field token of one field of a workflow node's input type.
     pub const fn input_field<I, F>(name: &'static str) -> crate::InputField<I, F> {
         crate::InputField::raw(name)
     }
 
-    /// Whether `text` may be a user error code: not the name of a built-in
-    /// code and not a reserved name. `#[derive(UserErrorCode)]` asserts it
+    /// Whether `text` may be a custom error code: not the name of a built-in
+    /// code and not a reserved name. `#[derive(CustomErrorCode)]` asserts it
     /// for each code at compile time.
-    pub const fn is_free_user_code(text: &str) -> bool {
-        crate::task::is_free_user_code(text)
+    pub const fn is_free_custom_code(text: &str) -> bool {
+        crate::task::is_free_custom_code(text)
     }
 
-    /// Whether `text` may stand in `auto_retry_for` of a task whose code
-    /// type has `user_codes`: a built-in code or one of `user_codes`. The
+    /// Whether `text` may stand in `retry_for` of a task whose code
+    /// type has `custom_codes`: a built-in code or one of `custom_codes`. The
     /// task attribute asserts it for each entry at compile time.
-    pub const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
-        crate::task::is_retry_code(text, user_codes)
+    pub const fn is_retry_code(text: &str, custom_codes: &[&str]) -> bool {
+        crate::task::is_retry_code(text, custom_codes)
     }
 
-    /// The stored code of an `auto_retry_for` entry that passed
+    /// The stored code of a `retry_for` entry that passed
     /// [`is_retry_code`].
     pub fn retry_code(text: &str) -> horsies_core::TaskErrorCode {
         crate::task::stored_retry_code(text)
-    }
-
-    /// The cancel grace of `milliseconds`. The task attribute checks the
-    /// bounds at compile time, so a value outside them is a defect.
-    pub fn cancel_grace(milliseconds: u32) -> crate::CancelGraceMs {
-        crate::CancelGraceMs::new(milliseconds).unwrap_or_else(|refused| {
-            panic!("the task attribute let through a cancel grace out of bounds: {refused}")
-        })
     }
 
     /// The `CODES` of the code type `E` of the async task function
@@ -133,7 +122,7 @@ pub mod __private {
     where
         F: Fn(I) -> Fut,
         Fut: std::future::Future<Output = Result<T, crate::TaskError<E>>>,
-        E: crate::UserErrorCode,
+        E: crate::CustomErrorCode,
     {
         E::CODES
     }
@@ -144,7 +133,7 @@ pub mod __private {
     pub fn blocking_task_codes<I, F, T, E>(_function: &F) -> &'static [&'static str]
     where
         F: Fn(I) -> Result<T, crate::TaskError<E>>,
-        E: crate::UserErrorCode,
+        E: crate::CustomErrorCode,
     {
         E::CODES
     }
@@ -158,26 +147,38 @@ pub mod __private {
         }
     }
 
-    /// The refusal of `name::send` and `name::schedule` before
-    /// `name::register(&mut app)` in this process: `VALIDATION_FAILED`,
-    /// nothing written.
-    pub fn send_before_register(task_name: &str) -> crate::TaskSendError {
-        crate::TaskSendError::ValidationFailed {
-            message: format!(
-                "task '{task_name}' is not registered in this process; call \
-                 {task_name}::register(&mut app) when main builds the app"
-            ),
-            cause: horsies_core::FailureCause::PreconditionFailed,
-        }
+    /// The typed function of the task `task_name` on `app`, for the
+    /// generated `name::send` and `name::with_options(..).send`.
+    ///
+    /// Errors: `VALIDATION_FAILED` with the cause `Check` when
+    /// `app` holds no task of this name with these types; nothing is
+    /// written. The message is the text of the [`crate::TaskFunctionNotFound`]
+    /// cause.
+    pub fn send_function<A, T, E>(
+        app: &crate::Horsies,
+        task_name: &str,
+    ) -> Result<crate::TaskFunction<A, T, E>, crate::TaskSendError>
+    where
+        A: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        T: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        E: crate::CustomErrorCode,
+    {
+        app.functions()
+            .get::<A, T, E>(task_name)
+            .map_err(|not_found| crate::TaskSendError::ValidationFailed {
+                message: not_found.to_string(),
+                cause: horsies_core::BrokerRefusalCause::Check,
+            })
     }
 
-    /// The refusal of `name::node()` before `name::register(&mut app)`:
-    /// `HRS-302`, the task of the node is not registered in this process.
-    pub fn node_before_register(task_name: &str) -> crate::HorsiesError {
-        crate::HorsiesError::new(format!(
-            "task '{task_name}' is not registered in this process; call \
-             {task_name}::register(&mut app) when main builds the app"
-        ))
-        .with_code(crate::ErrorCode::WorkflowUnregisteredTask)
+    /// A workflow node of the task `task_name` with the output `T`, the
+    /// input `I` and an empty input `{}`, for the generated `name::node()`.
+    /// The workflow builder resolves the rest from its app when the node is
+    /// added.
+    pub fn task_node<T, I>(task_name: &str) -> crate::TaskNode<T, I>
+    where
+        I: serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        crate::TaskNode::of_task(task_name)
     }
 }

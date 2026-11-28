@@ -1,0 +1,53 @@
+{
+  "rule": "An unknown in the public surface passes only on a place of this list, with the same path and form. A place that is not in this list needs the owner's sign-off. Each place is a generic constraint or a match position; none is a value that a user receives. An entry whose declaration is not built yet keeps the name and the short form of the type-level model (\"...\" marks elided text); the package that builds it writes the built name and the built text of the same form, with the same role.",
+  "places": [
+    {
+      "path": "AnyWire",
+      "form": "Wire<unknown, unknown, Presence, Role>",
+      "role": "Constraint: every wire type",
+      "model": "AnyWire"
+    },
+    {
+      "path": "ValueWire",
+      "form": "Wire<unknown, unknown, Presence, \"value\">",
+      "role": "Constraint: every value wire type",
+      "model": "AnyValueWire"
+    },
+    {
+      "path": "RequiredWire",
+      "form": "Wire<unknown, unknown, \"required\", \"value\">",
+      "role": "Constraint: every output wire type",
+      "model": "OutputWire"
+    },
+    {
+      "path": "AnyNode",
+      "form": "NodeRef<unknown, string, string>",
+      "role": "Constraint: every workflow node",
+      "model": "AnyNode"
+    },
+    {
+      "path": "StateEntry",
+      "form": "readonly [StateKey<unknown>, unknown]",
+      "role": "Constraint: every state entry (the state of TaskRuntime.forTest)",
+      "model": "StateEntry"
+    },
+    {
+      "path": "CheckedState",
+      "form": "S[K] extends readonly [StateKey<infer T>, unknown] ? ... : ...",
+      "role": "Match position (the state of TaskRuntime.forTest)",
+      "model": "CheckedState"
+    },
+    {
+      "path": "NodeCode",
+      "form": "N extends NodeRef<unknown, infer E, string> ? E : never",
+      "role": "Match position",
+      "model": "NodeCode<N>"
+    },
+    {
+      "path": "NodeById",
+      "form": "N extends NodeRef<unknown, string, infer NodeId> ? (Id extends NodeId ? N : never) : never",
+      "role": "Match position",
+      "model": "NodeById<N, Id>"
+    }
+  ]
+}

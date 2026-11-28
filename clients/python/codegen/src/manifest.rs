@@ -4,10 +4,16 @@
 //! frozen dataclass per manifest
 //! type, the integer bounds the core's parser enforces, and the dump
 //! function that gives the manifest's JSON text.
+//!
+//! The renderer has no Python form for a time of day, a length of time, an
+//! optional value or a variant that holds the fields of a record type: only
+//! the schedule pattern schema (`SCHEDULE_PATTERN`) uses them, and the
+//! Python package keeps its own pattern models. A module that holds one of them is a
+//! defect of the caller, and the renderer stops with a panic that names it.
 
 use horsies_core::manifest_schema::{
-    ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, PythonValue,
-    TaggedVariant,
+    ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType,
+    TaggedVariant, ValueType, VariantFields,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -66,10 +72,23 @@ const STRICT_JSON_IO_HELPERS: &str =
      case _:\n            \
      return value\n";
 
+/// What reads the manifest text, as the Python module names it: the long
+/// form for the module doc and the short form for the dump function doc.
+/// The producer and scheduler manifests name the Python bridge classes; the
+/// other readers are named by the model.
+fn python_reader(module: &ManifestModule) -> (&'static str, &'static str) {
+    match module.root {
+        "ProducerManifest" => ("`horsies._core.CoreHandle`", "`CoreHandle`"),
+        "SchedulerManifest" => ("`horsies._core.CoreScheduler`", "`CoreScheduler`"),
+        _ => (module.reader, module.reader_short),
+    }
+}
+
 /// The text of the manifest module.
 pub fn render_manifest_module(module: &ManifestModule, encoder: DumpEncoder) -> String {
     let dump = dump_function_name(module.root);
     let bounds = module.int_bounds();
+    let (reader, _) = python_reader(module);
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str(&format!(
         "\"\"\"The {} of horsies-core, generated from its Rust types.\n\n\
@@ -77,7 +96,7 @@ pub fn render_manifest_module(module: &ManifestModule, encoder: DumpEncoder) -> 
          parser enforces, and `{dump}`, which gives the JSON text that\n\
          {} takes.\n\"\"\"\n\n",
         words(module.root),
-        module.reader
+        reader
     ));
     text.push_str(match encoder {
         DumpEncoder::PlainJson => PLAIN_JSON_IMPORTS,
@@ -111,7 +130,7 @@ fn render_dump(module: &ManifestModule, dump: &str, encoder: DumpEncoder) -> Str
              \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\"\"\"\n    \
              return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
             root = module.root,
-            reader = module.reader_short
+            reader = python_reader(module).1
         ),
         DumpEncoder::StrictJsonIo => format!(
             "{STRICT_JSON_IO_HELPERS}\n\ndef {dump}(manifest: {root}) -> SerdeResult[str]:\n    \
@@ -122,7 +141,7 @@ fn render_dump(module: &ManifestModule, dump: &str, encoder: DumpEncoder) -> Str
              \"\"\"\n    \
              return dumps_json(dataclasses.asdict(manifest, dict_factory=_json_object))\n",
             root = module.root,
-            reader = module.reader_short
+            reader = python_reader(module).1
         ),
     }
 }
@@ -131,13 +150,9 @@ fn render_all_list(module: &ManifestModule, dump: &str, bounds: &[IntBound]) -> 
     let mut names: Vec<String> = Vec::new();
     for manifest_type in module.types {
         if let ManifestShape::Tagged { variants, .. } = manifest_type.shape {
-            names.extend(
-                variants
-                    .iter()
-                    .map(|variant| variant.python_class.to_owned()),
-            );
+            names.extend(variants.iter().map(|variant| variant.type_name.to_owned()));
         }
-        names.push(manifest_type.python_name.to_owned());
+        names.push(manifest_type.type_name.to_owned());
     }
     names.push(dump.to_owned());
     names.push("MANIFEST_VERSION".to_owned());
@@ -158,7 +173,7 @@ fn render_type(manifest_type: &ManifestType) -> String {
     match manifest_type.shape {
         ManifestShape::Record { fields } => format!(
             "\n\n{}",
-            render_dataclass(manifest_type.python_name, manifest_type.doc, None, fields)
+            render_dataclass(manifest_type.type_name, manifest_type.doc, None, fields)
         ),
         ManifestShape::Tagged {
             tag_field,
@@ -180,21 +195,26 @@ fn render_tagged(
             name: tag_field,
             value: variant.tag_value,
         };
+        let fields = match variant.fields {
+            VariantFields::Own(fields) => fields,
+            VariantFields::OfRecord(record) => panic!(
+                "{}: the Python renderer has no form for a variant that holds the fields of \
+                 the record type {record}",
+                variant.type_name
+            ),
+        };
         text.push_str("\n\n");
         text.push_str(&render_dataclass(
-            variant.python_class,
+            variant.type_name,
             variant.doc,
             Some(tag),
-            variant.fields,
+            fields,
         ));
     }
-    let members: Vec<&str> = variants
-        .iter()
-        .map(|variant| variant.python_class)
-        .collect();
+    let members: Vec<&str> = variants.iter().map(|variant| variant.type_name).collect();
     text.push_str(&format!(
         "\n\ntype {} = {}\n",
-        manifest_type.python_name,
+        manifest_type.type_name,
         members.join(" | ")
     ));
     if let Some(doc) = docstring(manifest_type.doc, "") {
@@ -211,7 +231,7 @@ fn render_choice(manifest_type: &ManifestType, values: &[ChoiceValue]) -> String
         .collect();
     let mut text = format!(
         "\n\ntype {} = Literal[{}]\n",
-        manifest_type.python_name,
+        manifest_type.type_name,
         literals.join(", ")
     );
     let mut doc = manifest_type.doc.trim().to_owned();
@@ -274,14 +294,17 @@ fn render_dataclass(
 
 /// The annotation of a field: a `Vec` is a tuple of any length, a map a
 /// `dict` with text keys.
-fn python_type(value: PythonValue) -> String {
+fn python_type(value: ValueType) -> String {
     match value {
-        PythonValue::Bool => "bool".to_owned(),
-        PythonValue::Str => "str".to_owned(),
-        PythonValue::Int(_) => "int".to_owned(),
-        PythonValue::Named(name) => name.to_owned(),
-        PythonValue::List(item) => format!("tuple[{}, ...]", python_type(item.value())),
-        PythonValue::Map(item) => format!("dict[str, {}]", python_type(item.value())),
+        ValueType::Bool => "bool".to_owned(),
+        ValueType::Str => "str".to_owned(),
+        ValueType::Int(_) => "int".to_owned(),
+        ValueType::Named(name) => name.to_owned(),
+        ValueType::List(item) => format!("tuple[{}, ...]", python_type(item.value())),
+        ValueType::Map(item) => format!("dict[str, {}]", python_type(item.value())),
+        ValueType::Optional(_) | ValueType::TimeOfDay | ValueType::Duration(_) => {
+            panic!("the Python renderer has no form for the manifest value {value:?}")
+        }
     }
 }
 
@@ -311,7 +334,8 @@ pub(crate) fn snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use horsies_core::manifest_schema::{
-        PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
+        ItemType, MemberDefault, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+        WORKFLOW_SPEC_DATA,
     };
 
     use super::*;
@@ -326,12 +350,14 @@ mod tests {
         ManifestField {
             name: "pool_size",
             doc: "Connections of the pool.",
-            value: PythonValue::Int(BOUND),
+            value: ValueType::Int(BOUND),
+            default: MemberDefault::NoDefault,
         },
         ManifestField {
             name: "echo",
             doc: "",
-            value: PythonValue::Bool,
+            value: ValueType::Bool,
+            default: MemberDefault::NoDefault,
         },
     ];
 
@@ -363,7 +389,7 @@ mod tests {
     #[test]
     fn a_choice_is_a_literal_alias_that_lists_its_value_docs() {
         let manifest_type = ManifestType {
-            python_name: "Mode",
+            type_name: "Mode",
             doc: "The mode.",
             shape: ManifestShape::Choice {
                 values: &[
@@ -394,12 +420,12 @@ mod tests {
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in PRODUCER_MANIFEST.types {
             let defined = match manifest_type.shape {
-                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.type_name),
                 ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
-                    format!("\ntype {} = ", manifest_type.python_name)
+                    format!("\ntype {} = ", manifest_type.type_name)
                 }
             };
-            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+            assert!(rendered.contains(&defined), "{}", manifest_type.type_name);
         }
         for bound in PRODUCER_MANIFEST.int_bounds() {
             assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
@@ -424,11 +450,11 @@ mod tests {
     #[test]
     fn a_container_field_is_a_tuple_or_a_dict_of_its_item() {
         assert_eq!(
-            python_type(PythonValue::List(PythonItem::Str)),
+            python_type(ValueType::List(ItemType::Str)),
             "tuple[str, ...]"
         );
         assert_eq!(
-            python_type(PythonValue::Map(PythonItem::Named("Execution"))),
+            python_type(ValueType::Map(ItemType::Named("Execution"))),
             "dict[str, Execution]"
         );
     }
@@ -439,12 +465,12 @@ mod tests {
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in WORKER_MANIFEST.types {
             let defined = match manifest_type.shape {
-                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.type_name),
                 ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
-                    format!("\ntype {} = ", manifest_type.python_name)
+                    format!("\ntype {} = ", manifest_type.type_name)
                 }
             };
-            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+            assert!(rendered.contains(&defined), "{}", manifest_type.type_name);
         }
         for bound in WORKER_MANIFEST.int_bounds() {
             assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
@@ -460,12 +486,12 @@ mod tests {
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in SCHEDULER_MANIFEST.types {
             let defined = match manifest_type.shape {
-                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.type_name),
                 ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
-                    format!("\ntype {} = ", manifest_type.python_name)
+                    format!("\ntype {} = ", manifest_type.type_name)
                 }
             };
-            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+            assert!(rendered.contains(&defined), "{}", manifest_type.type_name);
         }
         for bound in SCHEDULER_MANIFEST.int_bounds() {
             assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
@@ -482,12 +508,12 @@ mod tests {
         assert!(rendered.starts_with(GENERATED_HEADER));
         for manifest_type in WORKFLOW_SPEC_DATA.types {
             let defined = match manifest_type.shape {
-                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.type_name),
                 ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
-                    format!("\ntype {} = ", manifest_type.python_name)
+                    format!("\ntype {} = ", manifest_type.type_name)
                 }
             };
-            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+            assert!(rendered.contains(&defined), "{}", manifest_type.type_name);
         }
         for bound in WORKFLOW_SPEC_DATA.int_bounds() {
             assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
@@ -506,5 +532,44 @@ mod tests {
         assert!(rendered.contains("    nodes: tuple[SpecNode, ...]\n"));
         assert!(rendered.contains("    args_from: dict[str, int]\n"));
         assert!(rendered.contains("    queue_classes: dict[str, str]\n"));
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value TimeOfDay")]
+    fn a_time_of_day_has_no_python_form() {
+        let _refused = python_type(ValueType::TimeOfDay);
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value Duration")]
+    fn a_length_of_time_has_no_python_form() {
+        let _refused = python_type(ValueType::Duration(BOUND));
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value Optional")]
+    fn an_optional_value_has_no_python_form() {
+        let _refused = python_type(ValueType::Optional(ItemType::Str));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the Python renderer has no form for a variant that holds the fields"
+    )]
+    fn a_variant_that_holds_a_record_has_no_python_form() {
+        let manifest_type = ManifestType {
+            type_name: "Pattern",
+            doc: "",
+            shape: ManifestShape::Tagged {
+                tag_field: "type",
+                variants: &[TaggedVariant {
+                    type_name: "PatternDaily",
+                    tag_value: "daily",
+                    doc: "",
+                    fields: VariantFields::OfRecord("Daily"),
+                }],
+            },
+        };
+        let _refused = render_type(&manifest_type);
     }
 }

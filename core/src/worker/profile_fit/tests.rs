@@ -161,19 +161,19 @@ async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_sta
         need > usable,
         "the test server has {usable} usable slots, not fewer than the {need} of the profile"
     );
-    let app_config = AppConfig::for_database_url(migrated_database_url().await);
+    let app_config = AppConfig::from_database_url(migrated_database_url().await);
     let broker = Arc::new(
-        PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
+        PostgresBroker::connect_worker_with(&app_config.database, crate::ClientFamily::Rust)
             .await
             .expect("connect the worker broker to the test server"),
     );
     let launch = ChildLaunch {
         command: idle_child_of_any_kind(),
         preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
-        database_url: DatabaseUrl::new(app_config.broker.database_url.clone()),
-        connection: ChildConnection::of_config(&app_config.broker)
+        database_url: DatabaseUrl::new(app_config.database.database_url.clone()),
+        connection: ChildConnection::of_config(&app_config.database)
             .expect("the config of the test database validates"),
     };
     let profile = SelectedProfile {

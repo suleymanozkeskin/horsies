@@ -44,14 +44,16 @@ use crate::core::lifecycle::{
     PhaseTwoStep, TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
-use crate::core::task::error::{OperationalErrorCode, TaskError};
-use crate::core::task::result::TaskResult;
+use crate::core::task::error::{OperationalCode, TaskError, TaskErrorCode};
+use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
+use crate::core::TaskRegistry;
 use crate::db::{
     CheckoutClass, CorePool, ParameterType, StatementBound, StatementFailure, TypedStatement,
 };
 use crate::workflow_engine::args_merge::{
-    args_from_inner_text, object_members, object_text, ARGS_FROM_ENVELOPE_KEY,
+    args_from_inner_text, args_from_source, object_members, object_text, ArgsFromSource,
+    ARGS_FROM_ENVELOPE_KEY,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::phase2_recovery::Phase2Wake;
@@ -185,12 +187,12 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// The input must pass the core's strict JSON read rule; a refused text fails
 /// the task before user code runs. An object input is Python's keyword input;
 /// its engine members (Python `core/worker/child_runner.py:1362-1580`):
-/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_ctx`,
+/// - `WORKFLOW_CTX_KWARG` becomes `workflow_context` when `accepts_workflow_context`,
 ///   and is removed otherwise (check-time callers pass `false`: no runtime
 ///   context);
 /// - `WORKFLOW_META_KWARG` is removed;
 /// - an `args_from` entry is replaced by its `inner` result envelope, which
-///   the receiving `TaskResult` field decodes with its own type.
+///   the receiving `TaskOutcome` parameter decodes with its own type.
 ///
 /// Every other member value, and any other input except `null` as one value,
 /// follows the rules of a user value (no engine key, at most
@@ -204,9 +206,17 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// ([`workflow_ctx_text`]). No value is parsed and written again, so an
 /// integer outside the `i64` and `u64` range reaches the task as stored, as
 /// Python's `loads_json` reads any integer (`core/codec/json_io.py:97`).
+///
+/// `upstream` is the registry of the tasks that declare their custom codes: an `args_from`
+/// result whose stored error holds a custom code that its upstream task, found there by name,
+/// does not declare is `WORKER_SERIALIZATION_ERROR`. A task that declares no code, a task that
+/// the registry does not hold, and a sub-workflow node are not checked, so an empty registry
+/// checks nothing
+/// ([`refuse_undeclared_upstream_code`]).
 pub(crate) fn build_task_input(
     input: &str,
-    accepts_workflow_ctx: bool,
+    accepts_workflow_context: bool,
+    upstream: &TaskRegistry,
 ) -> Result<Vec<u8>, TaskError> {
     check_json_text(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
@@ -226,7 +236,7 @@ pub(crate) fn build_task_input(
         return Ok(input.as_bytes().to_vec());
     }
 
-    let members = task_members(input)?;
+    let members = task_members(input, upstream)?;
     let args_from_names: HashSet<String> = members
         .task_members
         .iter()
@@ -241,16 +251,16 @@ pub(crate) fn build_task_input(
         .collect();
     check_input_members(&user_members, &args_from_names)
         .map_err(|refusal| input_refused(&refusal))?;
-    let workflow_ctx = match (members.workflow_ctx, accepts_workflow_ctx) {
+    let workflow_context = match (members.workflow_context, accepts_workflow_context) {
         (Some(payload), true) => Some(workflow_ctx_text(payload.get())?),
         (Some(_), false) | (None, _) => None,
     };
-    Ok(task_input_text(&members.task_members, workflow_ctx.as_deref()).into_bytes())
+    Ok(task_input_text(&members.task_members, workflow_context.as_deref()).into_bytes())
 }
 
-/// The input field that takes the workflow context (Python's `workflow_ctx`
+/// The input field that takes the workflow context (Python's `workflow_context`
 /// parameter).
-const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
+const WORKFLOW_CONTEXT_FIELD: &str = "workflow_context";
 
 /// Whether an object input holds a member that the engine writes: the
 /// workflow context, the workflow meta, or an `args_from` entry (an object
@@ -296,7 +306,7 @@ struct TaskMembers<'a> {
     /// The members that the task gets, in text order, each with its name.
     task_members: Vec<(String, TaskMember<'a>)>,
     /// The context payload (`WORKFLOW_CTX_KWARG`), as its text.
-    workflow_ctx: Option<&'a RawValue>,
+    workflow_context: Option<&'a RawValue>,
 }
 
 /// Read the members of the object input `input` from its text: the context
@@ -305,22 +315,25 @@ struct TaskMembers<'a> {
 /// Errors: `WORKER_SERIALIZATION_ERROR` for a malformed `args_from` entry
 /// ([`args_from_inner_text`]), and when serde_json does not read the members
 /// of a text that the strict read took. Pure.
-fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
+fn task_members<'a>(input: &'a str, upstream: &TaskRegistry) -> Result<TaskMembers<'a>, TaskError> {
     let members = object_members(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
     let mut read = TaskMembers {
         task_members: Vec::with_capacity(members.len()),
-        workflow_ctx: None,
+        workflow_context: None,
     };
     for (name, value) in members {
         match name.as_str() {
-            WORKFLOW_CTX_KWARG => read.workflow_ctx = Some(value),
+            WORKFLOW_CTX_KWARG => read.workflow_context = Some(value),
             WORKFLOW_META_KWARG => {}
             _ => {
                 let member = match args_from_inner_text(&name, value)
                     .map_err(|refusal| serialization_error(refusal.to_string()))?
                 {
-                    Some(inner) => TaskMember::ArgsFrom(inner),
+                    Some(inner) => {
+                        refuse_undeclared_upstream_code(&name, value, inner, upstream)?;
+                        TaskMember::ArgsFrom(inner)
+                    }
                     None => TaskMember::Stored(value),
                 };
                 read.task_members.push((name, member));
@@ -330,30 +343,69 @@ fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
     Ok(read)
 }
 
-/// The task input text: `members` in their order, with `workflow_ctx`, when
-/// given, as the `workflow_ctx` field. A member of that name keeps its place
-/// and takes the context, as Python's `kwargs['workflow_ctx'] = ...`; else
+/// The task input text: `members` in their order, with `workflow_context`, when
+/// given, as the `workflow_context` field. A member of that name keeps its place
+/// and takes the context, as Python's `kwargs['workflow_context'] = ...`; else
 /// the field comes last. Pure.
-fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_ctx: Option<&str>) -> String {
+fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_context: Option<&str>) -> String {
     let mut written: Vec<(&str, &str)> = members
         .iter()
         .map(|(name, member)| (name.as_str(), member.text()))
         .collect();
-    match workflow_ctx {
+    match workflow_context {
         None => {}
         Some(context) => match written
             .iter()
-            .position(|(name, _)| *name == WORKFLOW_CTX_FIELD)
+            .position(|(name, _)| *name == WORKFLOW_CONTEXT_FIELD)
         {
             Some(place) => written[place].1 = context,
-            None => written.push((WORKFLOW_CTX_FIELD, context)),
+            None => written.push((WORKFLOW_CONTEXT_FIELD, context)),
         },
     }
     object_text(&written)
 }
 
+/// Refuse an `args_from` result whose stored error holds a custom code that the upstream task
+/// does not declare. `entry` is the `args_from` entry of the kwarg `name`; `inner` is its result
+/// envelope. A result that does not read as an envelope is left to the decode of the receiving
+/// type. Pure.
+///
+/// Errors: `WORKER_SERIALIZATION_ERROR` naming the kwarg, the task and the code.
+fn refuse_undeclared_upstream_code(
+    name: &str,
+    entry: &RawValue,
+    inner: &RawValue,
+    upstream: &TaskRegistry,
+) -> Result<(), TaskError> {
+    let source_name = match args_from_source(entry) {
+        Some(ArgsFromSource::Task(source_name)) => source_name,
+        Some(ArgsFromSource::SubWorkflow) | None => return Ok(()),
+    };
+    let declared = match upstream.get(&source_name) {
+        Ok(task) => task.error_codes(),
+        Err(_not_registered) => return Ok(()),
+    };
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let error = match read_task_result_text(inner.get()) {
+        Ok(TaskResultText::Err(error)) => error,
+        Ok(TaskResultText::Ok(_)) | Err(_) => return Ok(()),
+    };
+    match error.error_code {
+        TaskErrorCode::Custom(code) if !declared.contains(&code.as_str()) => {
+            Err(serialization_error(format!(
+                "kwarg '{name}': the upstream outcome of task '{source_name}' holds the custom code \
+                 '{}', which the task does not declare",
+                code.as_str()
+            )))
+        }
+        TaskErrorCode::Custom(_) | TaskErrorCode::BuiltIn(_) => Ok(()),
+    }
+}
+
 fn serialization_error(message: String) -> TaskError {
-    TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+    TaskError::built_in(OperationalCode::WorkerSerializationError, message)
 }
 
 fn input_refused(refusal: &InputRefused) -> TaskError {
@@ -621,10 +673,7 @@ pub(crate) async fn persist_undecodable_result(
     placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let message = format!("failed to parse task result JSON: {diagnosis}");
-    let error = TaskError::builtin(
-        OperationalErrorCode::WorkerSerializationError,
-        message.clone(),
-    );
+    let error = TaskError::built_in(OperationalCode::WorkerSerializationError, message.clone());
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
         .map_err(|error| envelope_error(task_id, &error))?;
     let command = FinishFailedAttempt {
@@ -632,7 +681,7 @@ pub(crate) async fn persist_undecodable_result(
         fence,
         retry: RetryRequest::NoRetry,
         result_json,
-        error_code: Some(OperationalErrorCode::WorkerSerializationError.to_string()),
+        error_code: Some(OperationalCode::WorkerSerializationError.to_string()),
         failed_reason: None,
         attempt: AttemptFailure {
             kind: AttemptFailureKind::Failed,
@@ -1434,7 +1483,7 @@ mod parse {
     use serde_json::value::RawValue;
     use uuid::Uuid;
 
-    use crate::core::task::error::{OperationalErrorCode, TaskError, TaskErrorKind};
+    use crate::core::task::error::{OperationalCode, TaskError, TaskErrorKind};
     use crate::core::task::result::TaskResult;
     use crate::core::workflow::SubWorkflowSummary;
 
@@ -1454,7 +1503,7 @@ mod parse {
         summaries_by_id: HashMap<String, serde_json::Value>,
     }
 
-    /// The `workflow_ctx` field that the task reads, in the form of the core's `WorkflowContext`
+    /// The `workflow_context` field that the task reads, in the form of the core's `WorkflowContext`
     /// (`crate::core::workflow::context`).
     #[derive(Serialize)]
     struct WorkflowCtxField {
@@ -1476,7 +1525,7 @@ mod parse {
         Unreadable(TaskResult<serde_json::Value>),
     }
 
-    /// The text of the `workflow_ctx` field from the text of the context payload (Python
+    /// The text of the `workflow_context` field from the text of the context payload (Python
     /// `core/worker/child_runner.py:1438-1580`).
     ///
     /// - A result entry that reads as a result envelope is kept as its text. An entry that is
@@ -1490,8 +1539,8 @@ mod parse {
     pub(crate) fn workflow_ctx_text(payload_text: &str) -> Result<String, TaskError> {
         let payload: WorkflowCtxPayload =
             crate::core::codec::from_json_str(payload_text).map_err(|e| {
-                TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                TaskError::built_in(
+                    OperationalCode::WorkerSerializationError,
                     format!("failed to parse workflow context payload: {}", e),
                 )
             })?;
@@ -1518,8 +1567,8 @@ mod parse {
             summaries_by_id: context_summaries(summaries_by_id)?,
         };
         serde_json::to_string(&field).map_err(|e| {
-            TaskError::builtin(
-                OperationalErrorCode::WorkerSerializationError,
+            TaskError::built_in(
+                OperationalCode::WorkerSerializationError,
                 format!("failed to serialize workflow context: {}", e),
             )
         })
@@ -1535,8 +1584,8 @@ mod parse {
                 continue;
             };
             let parsed: SubWorkflowSummary = serde_json::from_str(&summary_text).map_err(|e| {
-                TaskError::builtin(
-                    OperationalErrorCode::WorkerSerializationError,
+                TaskError::built_in(
+                    OperationalCode::WorkerSerializationError,
                     format!(
                         "failed to parse workflow context summary for node_id '{}': {}",
                         node_id, e,
@@ -1558,7 +1607,7 @@ mod parse {
         let unreadable = |message: String, data: serde_json::Value| -> ContextEntry {
             ContextEntry::Unreadable(TaskResult::Err(TaskError {
                 exception: None,
-                error_code: OperationalErrorCode::ResultDeserializationError.into(),
+                error_code: OperationalCode::ResultDeserializationError.into(),
                 data: Some(crate::core::codec::JsonText::of_engine_value(&data)),
                 message: Some(message),
                 kind: TaskErrorKind::Plain,
@@ -1567,14 +1616,14 @@ mod parse {
         if envelope.get() == "null" {
             return unreadable(
                 format!(
-                    "workflow_ctx result for node '{node_id}' unavailable (source task not registered at encode time)"
+                    "workflow_context result for node '{node_id}' unavailable (source task not registered at encode time)"
                 ),
                 serde_json::json!({ "node_id": node_id }),
             );
         }
         let Some(serde_json::Value::String(source_task_name)) = source_task_name else {
             return unreadable(
-                format!("workflow_ctx missing task_name for node '{node_id}'; cannot decode"),
+                format!("workflow_context missing task_name for node '{node_id}'; cannot decode"),
                 serde_json::json!({ "node_id": node_id }),
             );
         };
@@ -1582,7 +1631,7 @@ mod parse {
         match read {
             Ok(_reads) => ContextEntry::Stored(envelope),
             Err(e) => unreadable(
-                format!("decode_task_result failed for workflow_ctx node '{node_id}': {e}"),
+                format!("decode_task_result failed for workflow_context node '{node_id}': {e}"),
                 serde_json::json!({ "node_id": node_id, "source_task_name": source_task_name }),
             ),
         }
@@ -1628,11 +1677,18 @@ mod result_wrap_tests {
 
 #[cfg(test)]
 mod task_input_tests {
+    use std::sync::Arc;
+
     use super::build_task_input;
+    use crate::core::task::fn_trait::{
+        BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMetadata,
+    };
+    use crate::core::task::result::TaskResult;
     use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
+    use crate::core::TaskRegistry;
 
     fn task_input(input: &str) -> String {
-        let bytes = build_task_input(input, false).expect("task input built");
+        let bytes = build_task_input(input, false, &TaskRegistry::new()).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1658,7 +1714,7 @@ mod task_input_tests {
     #[test]
     fn input_text_that_breaks_the_strict_read_rule_is_refused() {
         for input in ["{", "NaN", r#"{"a":1,"a":2}"#] {
-            let err = build_task_input(input, false).unwrap_err();
+            let err = build_task_input(input, false, &TaskRegistry::new()).unwrap_err();
             assert!(
                 err.message
                     .unwrap_or_default()
@@ -1675,7 +1731,7 @@ mod task_input_tests {
     }
 
     fn refusal(input: &str) -> String {
-        let err = build_task_input(input, false).unwrap_err();
+        let err = build_task_input(input, false, &TaskRegistry::new()).unwrap_err();
         assert_eq!(err.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
         err.message.unwrap_or_default()
     }
@@ -1766,7 +1822,7 @@ mod task_input_tests {
 
     /// The task input of a task that takes the workflow context.
     fn task_input_with_context(input: &str) -> String {
-        let bytes = build_task_input(input, true).expect("task input built");
+        let bytes = build_task_input(input, true, &TaskRegistry::new()).expect("task input built");
         String::from_utf8(bytes).expect("task input is UTF-8")
     }
 
@@ -1802,7 +1858,7 @@ mod task_input_tests {
         assert_eq!(
             task_input_with_context(&input),
             format!(
-                r#"{{"x":1,"workflow_ctx":{{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":2,"task_name":"consume","results_by_id":{{"below":{BELOW_I64_ENVELOPE},"max":{U128_MAX_ENVELOPE}}},"summaries_by_id":{{}}}}}}"#
+                r#"{{"x":1,"workflow_context":{{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":2,"task_name":"consume","results_by_id":{{"below":{BELOW_I64_ENVELOPE},"max":{U128_MAX_ENVELOPE}}},"summaries_by_id":{{}}}}}}"#
             )
         );
     }
@@ -1834,7 +1890,7 @@ mod task_input_tests {
             format!(r#"{{"long":{long},"x":{{"__h_x":1}},"__h_workflow_meta__":{{}}}}"#),
             r#"{"__h_other__":1}"#.to_owned(),
         ] {
-            let error = build_task_input(&refused, false).unwrap_err();
+            let error = build_task_input(&refused, false, &TaskRegistry::new()).unwrap_err();
             assert_eq!(
                 error.error_code.to_string(),
                 "WORKER_SERIALIZATION_ERROR",
@@ -1843,20 +1899,75 @@ mod task_input_tests {
         }
     }
 
-    /// The context takes the place of a member named `workflow_ctx`, as Python's
-    /// `kwargs['workflow_ctx'] = ...`; without one, it comes last.
+    struct EchoTask;
+
+    impl BlockingTaskFn for EchoTask {
+        fn execute(&self, input: &[u8]) -> RawTaskResult {
+            TaskResult::Ok(input.to_vec())
+        }
+    }
+
+    /// A registry with the task `upstream`, which declares `codes`.
+    fn registry_with(codes: &'static [&'static str]) -> TaskRegistry {
+        let mut registry = TaskRegistry::new();
+        registry
+            .register(
+                "upstream",
+                RegisteredTask::Blocking {
+                    task: Arc::new(EchoTask),
+                    metadata: TaskMetadata::default().with_error_codes(codes),
+                },
+            )
+            .expect("the task registers");
+        registry
+    }
+
+    /// The input of a task whose member `dep` is the result of `upstream`, a failure with `code`.
+    fn input_with_upstream_code(code: &str) -> String {
+        format!(
+            r#"{{"dep":{{"__h_taskresult_envelope__":true,"source_task_name":"upstream","source_definition_key":null,"inner":{{"__h_task_result__":true,"ok":null,"err":{{"error_code":"{code}","message":"no","data":null,"exception":null}}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn an_upstream_code_that_the_upstream_task_declares_reads() {
+        let registry = registry_with(&["RATE_LIMITED"]);
+        let built = build_task_input(&input_with_upstream_code("RATE_LIMITED"), false, &registry);
+        assert!(built.is_ok(), "{built:?}");
+    }
+
+    #[test]
+    fn an_upstream_code_that_the_upstream_task_does_not_declare_is_worker_serialization_error() {
+        let registry = registry_with(&["RATE_LIMITED"]);
+        let error = build_task_input(&input_with_upstream_code("CARD_DECLINED"), false, &registry)
+            .unwrap_err();
+        assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+        let message = error.message.unwrap_or_default();
+        assert!(message.contains("CARD_DECLINED"), "{message}");
+        assert!(message.contains("'dep'"), "{message}");
+    }
+
+    #[test]
+    fn an_upstream_task_without_declared_codes_reads_any_code() {
+        let registry = registry_with(&[]);
+        let built = build_task_input(&input_with_upstream_code("CARD_DECLINED"), false, &registry);
+        assert!(built.is_ok(), "{built:?}");
+    }
+
+    /// The context takes the place of a member named `workflow_context`, as Python's
+    /// `kwargs['workflow_context'] = ...`; without one, it comes last.
     #[test]
     fn the_context_takes_the_place_of_a_member_of_its_name() {
         let payload = r#"{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":0,"task_name":"t"}"#;
         let context = r#"{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":0,"task_name":"t","results_by_id":{},"summaries_by_id":{}}"#;
         for (input, expected) in [
             (
-                format!(r#"{{"workflow_ctx":5,"y":2,"__h_workflow_ctx__":{payload}}}"#),
-                format!(r#"{{"workflow_ctx":{context},"y":2}}"#),
+                format!(r#"{{"workflow_context":5,"y":2,"__h_workflow_ctx__":{payload}}}"#),
+                format!(r#"{{"workflow_context":{context},"y":2}}"#),
             ),
             (
                 format!(r#"{{"__h_workflow_ctx__":{payload},"y":2}}"#),
-                format!(r#"{{"y":2,"workflow_ctx":{context}}}"#),
+                format!(r#"{{"y":2,"workflow_context":{context}}}"#),
             ),
         ] {
             assert_eq!(task_input_with_context(&input), expected, "{input}");
@@ -1873,7 +1984,7 @@ mod workflow_ctx_tests {
     use crate::core::workflow::context::WorkflowContext;
     use crate::core::workflow::node::NodeKey;
 
-    /// The context that the task reads from the `workflow_ctx` field built from `payload`.
+    /// The context that the task reads from the `workflow_context` field built from `payload`.
     fn built_context(payload: &serde_json::Value) -> WorkflowContext {
         let text = workflow_ctx_text(&payload.to_string()).unwrap();
         serde_json::from_str(&text).unwrap()
@@ -1887,7 +1998,7 @@ mod workflow_ctx_tests {
     /// the definition key of each node, and the stored summary text.
     #[test]
     fn pythons_context_payload_reads() {
-        let summary = r#"{"status":"COMPLETED","output":5,"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}"#;
+        let summary = r#"{"status":"COMPLETED","output":5,"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}"#;
         let payload = serde_json::json!({
             "workflow_id": "00000000-0000-0000-0000-000000000000",
             "task_index": 2,
@@ -1922,13 +2033,13 @@ mod workflow_ctx_tests {
         assert_eq!(summary.output.as_ref().map(JsonText::get), Some("5"));
     }
 
-    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_ctx` field,
+    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_context` field,
     /// and the task's context reads it as `u128` or `i128`.
     #[test]
     fn a_summary_output_keeps_its_stored_text() {
         let summary = |output: &str| {
             format!(
-                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+                r#"{{"status":"COMPLETED","output":{output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}}"#
             )
         };
         let wide = "340282366920938463463374607431768211455";

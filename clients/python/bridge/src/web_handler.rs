@@ -26,10 +26,10 @@ use horsies_core::db::Transience;
 use horsies_core::monitoring::database_failure_status;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded, FoldedNames};
 use horsies_core::web::{
-    route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
-    Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
-    RequestParts, ResponseForm, ResponseParts, TraceLink, TraceLinkTemplate, Verdict,
-    DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    refusal_by_policy, route_access, AccessGrant as CoreGrant, AccessNeed, Actions, Bytes,
+    EventFrames, EventStreamItem, Method, MonitoringHandler as CoreHandler,
+    MonitoringHandlerConfig, MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts,
+    TraceLink, TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -267,8 +267,9 @@ pub struct EventFrame {
 #[derive(Clone, Debug)]
 pub struct EventStreamEnded {}
 
-/// No stream: the handler has no broker. The host writes `frame`, the
-/// degraded frame, and ends the response.
+/// No stream: the handler has no broker, or it serves its bound of open
+/// streams (`MAX_OPEN_EVENT_STREAMS`). The host writes `frame`, the degraded
+/// frame, and ends the response.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct EventStreamRefused {
@@ -442,9 +443,20 @@ impl<'py> IntoPyObject<'py> for SubscribeOutcome {
 
 async fn handle_operation(
     state: Arc<HandlerState>,
+    actions: Actions,
     core: &'static Core,
     request: MonitoringRequest,
 ) -> HandleOutcome {
+    // A refused caller gets the refusal before the broker connects, so the
+    // answer shows nothing of the database.
+    if let Some(refusal) = refusal_by_policy(
+        route_access(actions, &request.parts.method, &request.parts.path).need,
+        request.grant,
+    )
+    .await
+    {
+        return HandleOutcome::Response(MonitoringResponse::of(refusal));
+    }
     let built = match state.built(core).await {
         Ok(built) => built,
         Err(error) => return HandleOutcome::Response(MonitoringResponse::broker_failed(&error)),
@@ -458,9 +470,13 @@ async fn handle_operation(
 
 async fn subscribe_operation(state: Arc<HandlerState>, core: &'static Core) -> SubscribeOutcome {
     match state.built(core).await {
-        Ok(built) => {
-            SubscribeOutcome::Stream(EventStream::new(built.handler.subscribe_events().await))
-        }
+        Ok(built) => match built.handler.try_subscribe_events().await {
+            Ok(frames) => SubscribeOutcome::Stream(EventStream::new(frames)),
+            Err(refused) => SubscribeOutcome::Refused(EventStreamRefused {
+                message: format!("The monitoring handler refused an event stream: {refused}"),
+                frame: DEGRADED_FRAME.to_owned(),
+            }),
+        },
         Err(error) => SubscribeOutcome::Refused(EventStreamRefused {
             message: format!("The monitoring handler has no broker: {error}"),
             frame: DEGRADED_FRAME.to_owned(),
@@ -490,18 +506,31 @@ fn heartbeat_of(heartbeat_ms: u64) -> Result<Duration, String> {
     }
 }
 
-/// The trace link of a template text: `NoTraceLink` for `None`. Pure.
+/// The trace link of a template text: `TraceLink::Text` for `None`. Pure.
 fn trace_link_of(template: Option<&str>) -> Result<TraceLink, horsies_core::web::TraceLinkRefusal> {
     match template {
-        None => Ok(TraceLink::NoTraceLink),
+        None => Ok(TraceLink::Text),
         Some(text) => TraceLinkTemplate::parse(text).map(TraceLink::Template),
+    }
+}
+
+/// The actions switch of a text: `ENABLED` or `DISABLED`. Pure.
+///
+/// Failure exits: the refusal text for any other text.
+fn actions_of(text: &str) -> Result<Actions, String> {
+    match text {
+        "ENABLED" => Ok(Actions::Enabled),
+        "DISABLED" => Ok(Actions::Disabled),
+        other => Err(format!(
+            "actions must be 'ENABLED' or 'DISABLED', not {other:?}"
+        )),
     }
 }
 
 /// The monitoring handler of one `CoreHandle`.
 #[pyclass(module = "horsies._core", name = "MonitoringHandler", frozen)]
 pub struct MonitoringHandler {
-    actions_enabled: bool,
+    actions: Actions,
     state: Arc<HandlerState>,
 }
 
@@ -515,15 +544,17 @@ impl MonitoringHandler {
     /// `schedule_names` the label values of `/metrics` (every other name is
     /// `(unknown)`). A name that cannot be a label value of its own (empty,
     /// `(unknown)`, or past the bound of names) counts in the `(unknown)`
-    /// series, and the build logs one WARNING line that names it. Starts
+    /// series, and the build logs one WARNING line that names it. `actions`
+    /// is `ENABLED` or `DISABLED`: whether the action routes run. Starts
     /// nothing: the first call builds the handler. A handle without a child
-    /// spec source raises `RuntimeError`; a heartbeat out of bounds or a
-    /// template that `trace_link_refusal` refuses raises `ValueError`.
+    /// spec source raises `RuntimeError`; an `actions` text that is not one
+    /// of the two, a heartbeat out of bounds or a template that
+    /// `trace_link_refusal` refuses raises `ValueError`.
     #[new]
     #[pyo3(signature = (
         handle,
         *,
-        actions_enabled,
+        actions,
         custom_css_url,
         trace_link_template,
         client_version,
@@ -533,7 +564,7 @@ impl MonitoringHandler {
     ))]
     fn new(
         handle: &Bound<'_, CoreHandle>,
-        actions_enabled: bool,
+        actions: &str,
         custom_css_url: Option<String>,
         trace_link_template: Option<&str>,
         client_version: String,
@@ -541,6 +572,7 @@ impl MonitoringHandler {
         queue_names: Vec<String>,
         schedule_names: Vec<String>,
     ) -> PyResult<Self> {
+        let actions = actions_of(actions).map_err(PyValueError::new_err)?;
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
         let trace_link = trace_link_of(trace_link_template)
             .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
@@ -555,13 +587,13 @@ impl MonitoringHandler {
             )
         })?;
         Ok(Self {
-            actions_enabled,
+            actions,
             state: Arc::new(HandlerState {
                 plan: HandlerPlan {
                     connection: handle.connection(),
                     child_source,
                     config: MonitoringHandlerConfig {
-                        actions_enabled,
+                        actions,
                         ui: MonitoringUiConfig {
                             custom_css_url,
                             trace_link,
@@ -589,7 +621,7 @@ impl MonitoringHandler {
     /// an HTTP token raises `ValueError`.
     fn route_access(&self, method: &str, path: &str) -> PyResult<RouteAccess> {
         Ok(RouteAccess::of(route_access(
-            self.actions_enabled,
+            self.actions,
             &parse_method(method)?,
             path,
         )))
@@ -618,7 +650,7 @@ impl MonitoringHandler {
             core,
             "MonitoringHandler.handle_async",
             kind,
-            handle_operation(Arc::clone(&self.state), core, request),
+            handle_operation(Arc::clone(&self.state), self.actions, core, request),
         )
     }
 
@@ -665,12 +697,19 @@ mod tests {
 
     #[test]
     fn route_access_names_need_and_form() {
-        let access = RouteAccess::of(route_access(true, &Method::GET, "/api/events"));
+        let access = RouteAccess::of(route_access(Actions::Enabled, &Method::GET, "/api/events"));
         assert_eq!(access.need, "VIEW");
         assert_eq!(access.form, "EVENT_STREAM");
-        let meta = RouteAccess::of(route_access(true, &Method::GET, "/api/meta"));
+        let meta = RouteAccess::of(route_access(Actions::Enabled, &Method::GET, "/api/meta"));
         assert_eq!(meta.need, "VIEW_REPORT_ACT");
         assert_eq!(meta.form, "ONE_RESPONSE");
+    }
+
+    #[test]
+    fn the_actions_text_is_one_of_two() {
+        assert_eq!(actions_of("ENABLED"), Ok(Actions::Enabled));
+        assert_eq!(actions_of("DISABLED"), Ok(Actions::Disabled));
+        assert!(actions_of("enabled").is_err());
     }
 
     #[test]

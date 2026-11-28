@@ -21,8 +21,9 @@
 //!
 //! `pattern_json` is the JSON text of the client's pattern model, in the
 //! form of Python's `pattern.model_dump(mode='json')`: an object with a
-//! `type` key and every field of the pattern, `null` for an unset optional
-//! field, a time of day as `HH:MM:SS`. The zone of a schedule comes only
+//! `kind` key and every field of the pattern, a time of day as `HH:MM:SS`,
+//! the length of an interval as ISO 8601 text with days, hours, minutes and
+//! seconds only (`{"kind":"interval","every":"PT1M30S"}`). The zone of a schedule comes only
 //! from its `timezone`, and slots fire at whole seconds: the parser refuses
 //! a time of day with a UTC offset or with a fraction of a second, as the
 //! Python config refuses a `time` with `tzinfo` or with microseconds.
@@ -35,7 +36,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::config::schedule::{MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN};
 use crate::core::config::{EnqueueRetention, SchedulePattern};
 use crate::manifest::{parse_manifest, ManifestRefused};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 use crate::worker_manifest::QueuePriority;
 
 /// The one scheduler manifest version this core reads.
@@ -78,7 +79,7 @@ impl TryFrom<u32> for SchedulerManifestVersion {
 }
 
 impl ManifestValue for SchedulerManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: SCHEDULER_MANIFEST_VERSION as u64,
         max: SCHEDULER_MANIFEST_VERSION as u64,
@@ -93,7 +94,7 @@ pub struct CheckIntervalSeconds(
 );
 
 impl ManifestValue for CheckIntervalSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "CHECK_INTERVAL_SECONDS",
         min: MIN_CHECK_INTERVAL_SECONDS as u64,
         max: MAX_CHECK_INTERVAL_SECONDS as u64,
@@ -107,7 +108,7 @@ impl ManifestValue for CheckIntervalSeconds {
 pub struct CatchUpRuns(pub BoundedU32<MAX_CATCH_UP_RUNS_MIN, MAX_CATCH_UP_RUNS_MAX>);
 
 impl ManifestValue for CatchUpRuns {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MAX_CATCH_UP_RUNS",
         min: MAX_CATCH_UP_RUNS_MIN as u64,
         max: MAX_CATCH_UP_RUNS_MAX as u64,
@@ -149,7 +150,7 @@ impl TryFrom<String> for PatternJson {
 }
 
 impl ManifestValue for PatternJson {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// A retention class key: `forever`, or `standard_<days>d` of a period of
@@ -177,7 +178,7 @@ impl TryFrom<String> for RetentionClassKey {
 }
 
 impl ManifestValue for RetentionClassKey {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 /// The options of the task that each slot sends.
@@ -208,7 +209,7 @@ pub struct ScheduleSendManifest {
     /// The task that each slot sends.
     pub task_name: String,
     /// The queue of each slot: the schedule's queue, else the task's queue.
-    pub queue_name: String,
+    pub queue: String,
     /// The priority of that queue: 1 is claimed first, 100 last.
     pub priority: QueuePriority,
     /// The input of each slot as one JSON value; the row stores the text as

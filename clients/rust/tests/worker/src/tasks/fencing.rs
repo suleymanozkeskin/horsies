@@ -1,14 +1,14 @@
-//! Tasks that return the fencing token of their run: one per execution
+//! Tasks that return the fencing token and the attempt facts of their run: one per execution
 //! class, one that reads it twice and in work that it started, and one that
 //! a retry runs again. Each task is on the default queue.
 
-use horsies::{blocking_task, task, RetryPolicy, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{blocking_task, task, CustomErrorCode, RetryPolicy, TaskError, TaskRuntime};
 use serde::{Deserialize, Serialize};
 
 use crate::markers;
 
 /// The codes of the fencing tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum FenceCode {
     /// The body read no fencing token.
     NoToken,
@@ -18,6 +18,8 @@ pub enum FenceCode {
     Transient,
     /// A marker operation failed in the child.
     MarkerFailed,
+    /// The body read no attempt facts.
+    NoAttempt,
 }
 
 /// A fencing token that a body read: the task id as text, and the value.
@@ -39,7 +41,7 @@ pub struct FenceRun {
 fn fence_of(rt: &TaskRuntime) -> Result<Fence, TaskError<FenceCode>> {
     let token = rt
         .fencing_token()
-        .map_err(|refused| TaskError::user(FenceCode::NoToken, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(FenceCode::NoToken, refused.to_string()))?;
     Ok(Fence {
         task_id: token.task_id().to_string(),
         value: token.value().get(),
@@ -93,10 +95,10 @@ pub async fn fence_reads_twice(rt: TaskRuntime) -> Result<Vec<Fence>, TaskError<
     let work_runtime = rt.clone();
     let work = rt
         .spawn("read_fence", async move { fence_of(&work_runtime) })
-        .map_err(|refused| TaskError::user(FenceCode::WorkFailed, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(FenceCode::WorkFailed, refused.to_string()))?;
     let from_work = work
         .await
-        .map_err(|joined| TaskError::user(FenceCode::WorkFailed, joined.to_string()))??;
+        .map_err(|joined| TaskError::custom(FenceCode::WorkFailed, joined.to_string()))??;
     Ok(vec![first, second, from_work])
 }
 
@@ -105,7 +107,7 @@ pub async fn fence_reads_twice(rt: TaskRuntime) -> Result<Vec<Fence>, TaskError<
 #[task(
     "e2e_fence_retry",
     retry_policy = one_retry(),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn fence_retry(
     rt: TaskRuntime,
@@ -113,12 +115,73 @@ pub async fn fence_retry(
 ) -> Result<FenceRun, TaskError<FenceCode>> {
     let fence = fence_of(&rt)?;
     let counted_run = markers::next_attempt(&marker)
-        .map_err(|cause| TaskError::user(FenceCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(FenceCode::MarkerFailed, cause.to_string()))?;
     match counted_run {
-        1 => Err(TaskError::user(
+        1 => Err(TaskError::custom(
             FenceCode::Transient,
             format!("run 1 read the fence value {}", fence.value),
         )),
         _ => Ok(FenceRun { fence, counted_run }),
+    }
+}
+
+/// The attempt facts that a body read: the task id as text, the attempt
+/// number, the retry budget and the retries left.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptRead {
+    pub task_id: String,
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub retries_left: u32,
+}
+
+/// The output of `e2e_attempt_retry`: the facts of the run that succeeded,
+/// and the number of the run that the marker files counted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptRun {
+    pub read: AttemptRead,
+    pub counted_run: u32,
+}
+
+/// The attempt facts of the current run, as an [`AttemptRead`].
+fn attempt_read_of(rt: &TaskRuntime) -> Result<AttemptRead, TaskError<FenceCode>> {
+    let refused = |refused: horsies::TaskAttemptRefused| {
+        TaskError::custom(FenceCode::NoAttempt, refused.to_string())
+    };
+    Ok(AttemptRead {
+        task_id: rt.task_id().map_err(refused)?.to_string(),
+        attempt: rt.attempt().map_err(refused)?.get(),
+        max_retries: rt.max_retries().map_err(refused)?.get(),
+        retries_left: rt.retries_left().map_err(refused)?.get(),
+    })
+}
+
+/// The attempt facts of a first run whose task has one retry.
+#[task("e2e_attempt_first", retry_policy = one_retry(), retry_for = ["TRANSIENT"])]
+pub async fn attempt_first(rt: TaskRuntime) -> Result<AttemptRead, TaskError<FenceCode>> {
+    attempt_read_of(&rt)
+}
+
+/// The first run for `marker` fails with `TRANSIENT`; its retry returns
+/// its attempt facts and the number of the run, which the marker files
+/// count.
+#[task(
+    "e2e_attempt_retry",
+    retry_policy = one_retry(),
+    retry_for = ["TRANSIENT"]
+)]
+pub async fn attempt_retry(
+    rt: TaskRuntime,
+    marker: String,
+) -> Result<AttemptRun, TaskError<FenceCode>> {
+    let read = attempt_read_of(&rt)?;
+    let counted_run = markers::next_attempt(&marker)
+        .map_err(|cause| TaskError::custom(FenceCode::MarkerFailed, cause.to_string()))?;
+    match counted_run {
+        1 => Err(TaskError::custom(
+            FenceCode::Transient,
+            format!("run 1 read the attempt {}", read.attempt),
+        )),
+        _ => Ok(AttemptRun { read, counted_run }),
     }
 }

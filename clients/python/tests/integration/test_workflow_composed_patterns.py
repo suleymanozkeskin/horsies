@@ -1,7 +1,7 @@
 """Integration tests for composed workflow patterns.
 
 These tests cross two axes:
-- **Features**: join modes, args_from, allow_failed_deps, success_policy
+- **Features**: join modes, args_from, allow_failed_dependencies, success_policy
 - **Topologies**: diamond, fan-out, wide fan-in, mixed DAG
 
 Existing tests cover features on simple topologies and topologies with default
@@ -21,8 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase, OnError
+from horsies.core.types.result import Err, Ok, Result
 
 from .conftest import (
     finish_task,
@@ -32,6 +34,15 @@ from .conftest import (
     make_workflow_spec,
     start_ok,
 )
+
+
+def _outcome_status(outcome: TaskOutcome[int, TaskError]) -> str:
+    """``'ok'`` for a succeeded upstream, ``'err'`` for a failed one."""
+    match outcome:
+        case Succeeded():
+            return 'ok'
+        case Failed():
+            return 'err'
 
 
 @pytest.mark.integration
@@ -130,11 +141,11 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'dja_c')
         task_d = make_simple_task(app, 'dja_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
@@ -149,21 +160,21 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
 
         # Complete B → D ENQUEUED immediately (join='any' satisfied)
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
         # C still ENQUEUED (running independently)
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
         # Complete D → complete C → workflow COMPLETED
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=40))
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(40))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
 
     # -----------------------------------------------------------------
@@ -182,11 +193,11 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'djaf_c')
         task_d = make_simple_task(app, 'djaf_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
@@ -201,32 +212,32 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         # B fails → D stays PENDING (join='any' waits for at least one success)
-        fail_result: TaskResult[int, TaskError] = TaskResult(
-            err=TaskError(error_code='ARM_FAIL', message='B failed'),
+        fail_result: Result[int, TaskError] = Err(
+            TaskError(code='ARM_FAIL', message='B failed'),
         )
         await finish_task(session, broker, str(handle.workflow_id), 1, fail_result)
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
 
         # C succeeds → D ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
         # Complete D → workflow FAILED (B failed, no success_policy override)
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=40))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(40))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # -----------------------------------------------------------------
-    # Test 3: Diamond + allow_failed_deps + args_from on sink
+    # Test 3: Diamond + allow_failed_dependencies + args_from on sink
     # -----------------------------------------------------------------
 
-    async def test_diamond_allow_failed_deps_on_sink(
+    async def test_diamond_allow_failed_dependencies_on_sink(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C]→D(allow_failed_deps, args_from={b_result: B, c_result: C}).
+        """A→[B,C]→D(allow_failed_dependencies, args_from={b_result: B, c_result: C}).
 
         B fails, C succeeds → D ENQUEUED with both results injected.
         """
@@ -237,23 +248,21 @@ class TestComposedPatterns:
         task_c = make_simple_task(app, 'dafd_c')
 
         # Receiver task that accepts two injected results
-        @app.task(task_name='dafd_d')
+        @app.task(name='dafd_d')
         def diamond_sink(
-            *, b_result: TaskResult[int, TaskError],
-            c_result: TaskResult[int, TaskError],
-        ) -> TaskResult[str, TaskError]:
-            b_status = 'err' if b_result.is_err() else 'ok'
-            c_status = 'err' if c_result.is_err() else 'ok'
-            return TaskResult(ok=f'b={b_status},c={c_status}')
+            *, b_result: TaskOutcome[int, TaskError],
+            c_result: TaskOutcome[int, TaskError],
+        ) -> Result[str, TaskError]:
+            return Ok(f'b={_outcome_status(b_result)},c={_outcome_status(c_result)}')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 5}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 5}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=diamond_sink,
+            function=diamond_sink,
             waits_for=[node_b, node_c],
             args_from={'b_result': node_b, 'c_result': node_c},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -265,7 +274,7 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
@@ -275,13 +284,13 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             1,
-            TaskResult(err=TaskError(error_code='B_FAILED', message='B failed')),
+            Err(TaskError(code='B_FAILED', message='B failed')),
         )
         # D still PENDING (C not terminal yet)
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
 
-        # C succeeds → all deps terminal → D ENQUEUED (allow_failed_deps=True)
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=100))
+        # C succeeds → all deps terminal → D ENQUEUED (allow_failed_dependencies=True)
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(100))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
         # Verify D's kwargs contain both injected results
@@ -297,7 +306,7 @@ class TestComposedPatterns:
         assert c_injected['ok'] is not None
 
         # Complete D → workflow FAILED (B failed, no success_policy override)
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok='done'))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok('done'))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # -----------------------------------------------------------------
@@ -319,10 +328,10 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'fsp_c')
         task_d = make_failing_task(app, 'fsp_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, waits_for=[node_a])
+        node_d = TaskNode(function=task_d, waits_for=[node_a])
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
@@ -336,13 +345,13 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C, D ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
         # B completes successfully
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
 
         # C and D fail
         await finish_task(
@@ -350,14 +359,14 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             2,
-            TaskResult(err=TaskError(error_code='C_FAIL', message='C failed')),
+            Err(TaskError(code='C_FAIL', message='C failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             3,
-            TaskResult(err=TaskError(error_code='D_FAIL', message='D failed')),
+            Err(TaskError(code='D_FAIL', message='D failed')),
         )
 
         # C and D are FAILED
@@ -388,13 +397,13 @@ class TestComposedPatterns:
         task_e = make_simple_task(app, 'wfq_e')
         task_f = make_simple_task(app, 'wfq_f')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
-        node_d = TaskNode(fn=task_d, kwargs={'value': 4}, waits_for=[node_a])
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_d = TaskNode(function=task_d, kwargs={'value': 4}, waits_for=[node_a])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_a])
         node_f = TaskNode(
-            fn=task_f,
+            function=task_f,
             kwargs={'value': 0},
             waits_for=[node_b, node_c, node_d, node_e],
             join='quorum',
@@ -410,17 +419,17 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C, D, E all ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         for idx in range(1, 5):
             assert await self._get_task_status(session, str(handle.workflow_id), idx) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 5) == 'PENDING'
 
         # Complete B → F still PENDING (only 1 success, need 2)
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
         assert await self._get_task_status(session, str(handle.workflow_id), 5) == 'PENDING'
 
         # Complete C → F ENQUEUED (2 successes, quorum met)
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_task_status(session, str(handle.workflow_id), 5) == 'ENQUEUED'
 
         # D and E still ENQUEUED (running independently)
@@ -428,9 +437,9 @@ class TestComposedPatterns:
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'ENQUEUED'
 
         # Complete F, then D and E → workflow COMPLETED
-        await finish_task(session, broker, str(handle.workflow_id), 5, TaskResult(ok=0))
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=40))
-        await finish_task(session, broker, str(handle.workflow_id), 4, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 5, Ok(0))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(40))
+        await finish_task(session, broker, str(handle.workflow_id), 4, Ok(50))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
 
     # -----------------------------------------------------------------
@@ -441,7 +450,7 @@ class TestComposedPatterns:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C], B→D(allow_failed_deps, args_from={input_result: B}), [C,D]→E.
+        """A→[B,C], B→D(allow_failed_dependencies, args_from={input_result: B}), [C,D]→E.
 
         B fails → D runs (recovery). C and D complete → E ENQUEUED.
         Workflow FAILED (B failed, no success_policy to override).
@@ -454,16 +463,16 @@ class TestComposedPatterns:
         task_d = make_recovery_task(app, 'mdr_d')
         task_e = make_simple_task(app, 'mdr_e')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
         spec = make_workflow_spec(
             name='mixed_recovery',
@@ -474,17 +483,17 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
-        # B fails → D ENQUEUED (allow_failed_deps=True)
+        # B fails → D ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            TaskResult(err=TaskError(error_code='B_FAILED', message='B failed')),
+            Err(TaskError(code='B_FAILED', message='B failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'FAILED'
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
@@ -492,15 +501,15 @@ class TestComposedPatterns:
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'PENDING'
 
         # C completes → E still PENDING (D not terminal yet)
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'PENDING'
 
         # D completes (recovery value 999) → E ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=999))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(999))
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'ENQUEUED'
 
         # Complete E → workflow FAILED (B failed, no success_policy to override)
-        await finish_task(session, broker, str(handle.workflow_id), 4, TaskResult(ok=50))
+        await finish_task(session, broker, str(handle.workflow_id), 4, Ok(50))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # =================================================================
@@ -527,18 +536,18 @@ class TestComposedPatterns:
         task_b = make_simple_task(app, 'jap_b')
         task_c = make_simple_task(app, 'jap_c')
 
-        @app.task(task_name='jap_d')
+        @app.task(name='jap_d')
         def partial_receiver(
-            *, b_result: TaskResult[int, TaskError] | None = None,
-            c_result: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=f'b={b_result is not None},c={c_result is not None}')
+            *, b_result: TaskOutcome[int, TaskError] | None = None,
+            c_result: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[str, TaskError]:
+            return Ok(f'b={b_result is not None},c={c_result is not None}')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=partial_receiver,
+            function=partial_receiver,
             waits_for=[node_b, node_c],
             args_from={'b_result': node_b, 'c_result': node_c},
             join='any',
@@ -553,10 +562,10 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         # Complete B → D ENQUEUED (join='any' satisfied)
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
         # C is still ENQUEUED (not terminal)
@@ -570,8 +579,8 @@ class TestComposedPatterns:
         )
 
         # Finish both branches → workflow COMPLETED
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok='done'))
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok('done'))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
 
     # -----------------------------------------------------------------
@@ -582,7 +591,7 @@ class TestComposedPatterns:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→B(allow_failed_deps, args_from)→C→D.
+        """A→B(allow_failed_dependencies, args_from)→C→D.
 
         A fails → B runs (recovery) but also fails → C SKIPPED → D SKIPPED.
         Workflow FAILED.
@@ -594,23 +603,23 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'rff_d')
 
         # "Recovery" task that always fails too
-        @app.task(task_name='rff_b')
+        @app.task(name='rff_b')
         def failing_recovery(
-            *, input_result: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(
-                err=TaskError(error_code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
+            *, input_result: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            return Err(
+                TaskError(code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
             )
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=failing_recovery,
+            function=failing_recovery,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
-        node_c = TaskNode(fn=task_c, kwargs={'value': 1}, waits_for=[node_b])
-        node_d = TaskNode(fn=task_d, kwargs={'value': 2}, waits_for=[node_c])
+        node_c = TaskNode(function=task_c, kwargs={'value': 1}, waits_for=[node_b])
+        node_d = TaskNode(function=task_d, kwargs={'value': 2}, waits_for=[node_c])
 
         spec = make_workflow_spec(
             name='double_failure',
@@ -620,13 +629,13 @@ class TestComposedPatterns:
 
         handle = await start_ok(spec, broker)
 
-        # A fails → B ENQUEUED (allow_failed_deps=True)
+        # A fails → B ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 0) == 'FAILED'
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
@@ -637,8 +646,8 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             1,
-            TaskResult(
-                err=TaskError(error_code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
+            Err(
+                TaskError(code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
             ),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'FAILED'
@@ -649,14 +658,14 @@ class TestComposedPatterns:
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # -----------------------------------------------------------------
-    # Test 12: success_policy + allow_failed_deps + recovery on diamond
+    # Test 12: success_policy + allow_failed_dependencies + recovery on diamond
     # -----------------------------------------------------------------
 
     async def test_success_policy_with_recovery_on_diamond(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C], B→D(allow_failed_deps, args_from), success_policy requires D.
+        """A→[B,C], B→D(allow_failed_dependencies, args_from), success_policy requires D.
 
         B fails, C fails → D runs (recovery), D completes.
         Workflow COMPLETED (policy requires only D, D completed).
@@ -669,14 +678,14 @@ class TestComposedPatterns:
         task_c = make_failing_task(app, 'sprd_c')
         task_d = make_recovery_task(app, 'sprd_d')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_d])])
@@ -691,17 +700,17 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
-        # B fails → D ENQUEUED (allow_failed_deps=True)
+        # B fails → D ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            TaskResult(err=TaskError(error_code='B_FAIL', message='B failed')),
+            Err(TaskError(code='B_FAIL', message='B failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
@@ -711,11 +720,11 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             2,
-            TaskResult(err=TaskError(error_code='C_FAIL', message='C failed')),
+            Err(TaskError(code='C_FAIL', message='C failed')),
         )
 
         # D completes (recovery value)
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=999))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(999))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'COMPLETED'
 
         # Workflow COMPLETED — success_policy requires only D, and D succeeded
@@ -743,16 +752,16 @@ class TestComposedPatterns:
         task_d = make_simple_task(app, 'jai_d')
         task_e = make_simple_task(app, 'jai_e')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
-        node_c = TaskNode(fn=task_c, kwargs={'value': 3}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a, kwargs={'value': 1})
+        node_b = TaskNode(function=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        node_c = TaskNode(function=task_c, kwargs={'value': 3}, waits_for=[node_a])
         node_d = TaskNode(
-            fn=task_d,
+            function=task_d,
             kwargs={'value': 4},
             waits_for=[node_b, node_c],
             join='any',
         )
-        node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_d])
+        node_e = TaskNode(function=task_e, kwargs={'value': 5}, waits_for=[node_d])
 
         spec = make_workflow_spec(
             name='join_any_intermediate',
@@ -763,28 +772,28 @@ class TestComposedPatterns:
         handle = await start_ok(spec, broker)
 
         # Complete A → B, C ENQUEUED
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'PENDING'
 
         # Complete B → D ENQUEUED (join='any')
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
         # E still PENDING (D not terminal)
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'PENDING'
 
         # Complete D → E ENQUEUED (D's downstream chains correctly)
-        await finish_task(session, broker, str(handle.workflow_id), 3, TaskResult(ok=40))
+        await finish_task(session, broker, str(handle.workflow_id), 3, Ok(40))
         assert await self._get_task_status(session, str(handle.workflow_id), 4) == 'ENQUEUED'
 
         # C still running independently
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
         # Complete E and C → workflow COMPLETED
-        await finish_task(session, broker, str(handle.workflow_id), 4, TaskResult(ok=50))
-        await finish_task(session, broker, str(handle.workflow_id), 2, TaskResult(ok=30))
+        await finish_task(session, broker, str(handle.workflow_id), 4, Ok(50))
+        await finish_task(session, broker, str(handle.workflow_id), 2, Ok(30))
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'COMPLETED'
 
     # -----------------------------------------------------------------
@@ -805,8 +814,8 @@ class TestComposedPatterns:
         task_a = make_failing_task(app, 'psp_a')
         task_b = make_simple_task(app, 'psp_b')
 
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1})
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1})
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_b])])
 
@@ -830,12 +839,12 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 
         # B can still complete (was already enqueued before PAUSE)
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(42))
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'COMPLETED'
 
         # But workflow stays PAUSED — PAUSE overrides success_policy

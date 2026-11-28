@@ -4,7 +4,7 @@
 //! Python client validates it into its Pydantic model with one
 //! `model_validate_json`, and the web handler writes the same text. An
 //! expected failure is the generated class of the core's
-//! `MonitoringQueryError` (`MonitoringQueryDbOperationFailed` or
+//! `MonitoringQueryError` (`MonitoringQueryDatabaseOperationFailed` or
 //! `MonitoringQueryHistoryContractViolation` of
 //! `horsies._catalog.monitoring_errors`), built in Rust (`catalog_errors`)
 //! with the read as the subject of its exception. The task detail of an id
@@ -18,12 +18,12 @@ use std::sync::Arc;
 use horsies_core::catalog::CodeEnum;
 use horsies_core::monitoring::{
     get_task_detail, get_workflow_node, get_workflow_run, list_schedules, list_tasks,
-    list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_stats,
-    ErrorCategory, HistoryWindow, MonitoringQueryError, SortDirection,
+    list_workflow_names, list_workflow_runs, task_breakdown, task_facets, task_status_counts,
+    ErrorCategory, MonitoringQueryError, MonitoringWindow, SortDirection,
     TaskBreakdownQuery as CoreTaskBreakdownQuery, TaskDetailRead,
     TaskFacetsQuery as CoreTaskFacetsQuery, TaskFilters, TaskGroupBy,
-    TaskListQuery as CoreTaskListQuery, TaskSortField, TaskStatsQuery as CoreTaskStatsQuery,
-    WorkflowRunsQuery as CoreWorkflowRunsQuery,
+    TaskListQuery as CoreTaskListQuery, TaskSortField,
+    TaskStatusCountsQuery as CoreTaskStatusCountsQuery, WorkflowRunsQuery as CoreWorkflowRunsQuery,
 };
 use horsies_core::{BrokerError, PostgresBroker, TaskStatus};
 use pyo3::exceptions::PyValueError;
@@ -162,8 +162,8 @@ impl TaskListQuery {
         error_codes,
         error_categories,
         retried_only,
-        sort_by,
-        sort_dir,
+        sort_field,
+        sort_direction,
         offset,
         limit,
     ))]
@@ -182,8 +182,8 @@ impl TaskListQuery {
         error_codes: Vec<String>,
         error_categories: Vec<String>,
         retried_only: bool,
-        sort_by: &str,
-        sort_dir: &str,
+        sort_field: &str,
+        sort_direction: &str,
         offset: i64,
         limit: i64,
     ) -> PyResult<Self> {
@@ -198,8 +198,8 @@ impl TaskListQuery {
                 .map_err(PyValueError::new_err)?,
             retried_only,
         };
-        let field = sort_field(sort_by).map_err(PyValueError::new_err)?;
-        let direction = sort_direction(sort_dir).map_err(PyValueError::new_err)?;
+        let field = sort_field_of(sort_field).map_err(PyValueError::new_err)?;
+        let direction = sort_direction_of(sort_direction).map_err(PyValueError::new_err)?;
         let query = CoreTaskListQuery::new(window)
             .with_filters(filters)
             .with_sort(field, direction)
@@ -251,23 +251,23 @@ impl TaskFacetsQuery {
     }
 }
 
-/// One frozen task stats read: the window and every filter but the status
+/// One frozen task status counts read: the window and every filter but the status
 /// (the stats are the status selector). A value outside its rule raises
 /// `ValueError`, and a naive bound raises `TypeError`.
 #[pyclass(module = "horsies._core", frozen)]
-pub struct TaskStatsQuery {
-    query: CoreTaskStatsQuery,
+pub struct TaskStatusCountsQuery {
+    query: CoreTaskStatusCountsQuery,
 }
 
-impl TaskStatsQuery {
+impl TaskStatusCountsQuery {
     /// The core query.
-    pub fn query(&self) -> CoreTaskStatsQuery {
+    pub fn query(&self) -> CoreTaskStatusCountsQuery {
         self.query.clone()
     }
 }
 
 #[pymethods]
-impl TaskStatsQuery {
+impl TaskStatusCountsQuery {
     #[new]
     #[pyo3(signature = (
         *,
@@ -306,7 +306,7 @@ impl TaskStatsQuery {
             retried_only,
         };
         Ok(Self {
-            query: CoreTaskStatsQuery::new(window).with_filters(filters),
+            query: CoreTaskStatusCountsQuery::new(window).with_filters(filters),
         })
     }
 }
@@ -398,10 +398,10 @@ impl WorkflowRunsQuery {
 #[pymethods]
 impl WorkflowRunsQuery {
     #[new]
-    #[pyo3(signature = (*, name, status, limit))]
-    fn new(name: Option<String>, status: Option<String>, limit: i64) -> PyResult<Self> {
+    #[pyo3(signature = (*, workflow_name, status, limit))]
+    fn new(workflow_name: Option<String>, status: Option<String>, limit: i64) -> PyResult<Self> {
         let query = CoreWorkflowRunsQuery::new()
-            .with_name(name)
+            .with_workflow_name(workflow_name)
             .with_status(status)
             .with_limit(limit)
             .map_err(|refused| PyValueError::new_err(refused.reason))?;
@@ -424,8 +424,8 @@ fn group_column(value: &str) -> Result<TaskGroupBy, String> {
 pub fn history_window(
     lower: &Bound<'_, PyAny>,
     upper: &Bound<'_, PyAny>,
-) -> PyResult<HistoryWindow> {
-    HistoryWindow::new(utc_instant(lower)?, utc_instant(upper)?)
+) -> PyResult<MonitoringWindow> {
+    MonitoringWindow::new(utc_instant(lower)?, utc_instant(upper)?)
         .map_err(|refused| PyValueError::new_err(refused.to_string()))
 }
 
@@ -457,19 +457,24 @@ pub fn error_categories_of(values: &[String]) -> Result<Vec<ErrorCategory>, Stri
 }
 
 /// The sort key of its wire value. Pure.
-fn sort_field(value: &str) -> Result<TaskSortField, String> {
+fn sort_field_of(value: &str) -> Result<TaskSortField, String> {
     TaskSortField::ALL
         .into_iter()
         .find(|field| field.as_str() == value)
-        .ok_or_else(|| format!("sort_by: {value:?} is not a sort key"))
+        .ok_or_else(|| format!("sort_field: {value:?} is not a sort key"))
 }
 
-/// The sort direction of its wire value, `asc` or `desc`. Pure.
-fn sort_direction(value: &str) -> Result<SortDirection, String> {
-    SortDirection::ALL
-        .into_iter()
-        .find(|direction| direction.as_str() == value)
-        .ok_or_else(|| format!("sort_dir: {value:?} is not 'asc' or 'desc'"))
+/// The sort direction of its Python text, the value of a
+/// `horsies.monitoring.SortDirection` member: `ASCENDING` or `DESCENDING`.
+/// Pure.
+fn sort_direction_of(value: &str) -> Result<SortDirection, String> {
+    match value {
+        "ASCENDING" => Ok(SortDirection::Ascending),
+        "DESCENDING" => Ok(SortDirection::Descending),
+        other => Err(format!(
+            "sort_direction: {other:?} is not 'ASCENDING' or 'DESCENDING'"
+        )),
+    }
 }
 
 /// The record of the JSON text of the core model `model`. A model that does
@@ -508,16 +513,16 @@ where
 }
 
 /// The count of each task status: the JSON of `Vec<StatusCount>`.
-pub async fn task_stats_operation(
+pub async fn task_status_counts_operation(
     connection: BrokerConnection,
-    query: CoreTaskStatsQuery,
+    query: CoreTaskStatusCountsQuery,
 ) -> ReadOutcome {
     json_read(
         connection,
-        "task stats query",
+        "task status counts query",
         "Vec<StatusCount>",
         move |broker| async move {
-            task_stats(&broker, &query)
+            task_status_counts(&broker, &query)
                 .await
                 .map(|counts| serde_json::to_string(&counts))
         },
@@ -595,19 +600,19 @@ pub async fn workflow_run_operation(
     .await
 }
 
-/// One node with its task: the JSON of `Option<WorkflowTaskDetail>`
+/// One node with its task: the JSON of `Option<WorkflowNodeDetail>`
 /// (`null` when the run has no node at the index).
 pub async fn workflow_node_operation(
     connection: BrokerConnection,
     workflow_id: Uuid,
-    task_index: i32,
+    node_index: i32,
 ) -> ReadOutcome {
     json_read(
         connection,
         "workflow node detail query",
-        "Option<WorkflowTaskDetail>",
+        "Option<WorkflowNodeDetail>",
         move |broker| async move {
-            get_workflow_node(&broker, workflow_id, task_index)
+            get_workflow_node(&broker, workflow_id, node_index)
                 .await
                 .map(|node| serde_json::to_string(&node))
         },
@@ -700,8 +705,8 @@ mod tests {
         let refused = task_statuses(&["pending".to_owned()]).expect_err("the wire value is upper");
         assert!(refused.contains("\"pending\""), "{refused}");
         assert_eq!(
-            error_categories_of(&["DOMAIN".to_owned(), "OUTCOME".to_owned()]),
-            Ok(vec![ErrorCategory::Domain, ErrorCategory::Outcome])
+            error_categories_of(&["CUSTOM".to_owned(), "OUTCOME".to_owned()]),
+            Ok(vec![ErrorCategory::Custom, ErrorCategory::Outcome])
         );
         assert!(error_categories_of(&["OTHER".to_owned()]).is_err());
     }
@@ -717,13 +722,16 @@ mod tests {
     #[test]
     fn every_sort_key_and_direction_has_its_wire_value() {
         for field in TaskSortField::ALL {
-            assert_eq!(sort_field(field.as_str()), Ok(field));
+            assert_eq!(sort_field_of(field.as_str()), Ok(field));
         }
-        for direction in SortDirection::ALL {
-            assert_eq!(sort_direction(direction.as_str()), Ok(direction));
-        }
-        assert!(sort_field("id").is_err());
-        assert!(sort_direction("DESC").is_err());
+        assert_eq!(sort_direction_of("ASCENDING"), Ok(SortDirection::Ascending));
+        assert_eq!(
+            sort_direction_of("DESCENDING"),
+            Ok(SortDirection::Descending)
+        );
+        assert!(sort_field_of("id").is_err());
+        assert!(sort_field_of("queue_name").is_err());
+        assert!(sort_direction_of("desc").is_err());
     }
 
     #[test]
@@ -751,7 +759,7 @@ mod tests {
         assert_eq!(failed.subject, "task list query");
         assert_eq!(
             failed.error.code(),
-            horsies_core::monitoring::MonitoringQueryErrorCode::DbOperationFailed
+            horsies_core::monitoring::MonitoringQueryErrorCode::DatabaseOperationFailed
         );
         assert_eq!(
             failed.error.message(),

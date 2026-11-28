@@ -15,9 +15,24 @@
 //! cancel (`cancel_run`) in every child kind, the reports of work a body
 //! left ([`spawn_in_run`]), and the protocol's exit codes.
 //!
+//! A host program that runs task code outside the Rust runtime takes the
+//! handle of a run in its async body ([`current_run`]) and registers the work
+//! that it runs there as host-held work ([`RunHandle::register_host_work`]):
+//! the cancel rounds ask such work to stop and do not drop it, and the run
+//! keeps its seat until the host ends it. A host that runs that code on an
+//! event loop of its own gives the child its [`HostLoop`]
+//! ([`EventLoopWatch::Host`]): a block of that loop is reported with
+//! `loop_blocked`, as a blocked poll of a Rust future is.
+//!
 //! A client that traces its task bodies gives the host a [`BodySpans`]: the
 //! host runs each body inside the `tracing` span that it opens for the run
 //! ([`BodyScope`]).
+//!
+//! A host program with a core of its own next to the child host gives the
+//! read of that core's state ([`HostCoreWatch::Host`]): a run that meets the
+//! stopped host core before its start write or before its finalizing
+//! marker ends the child with exit code 80 after its frame
+//! ([`ChildHostExit::CoreStopped`]).
 //!
 //! The same binary serves the handler child of a worker: an init frame of
 //! the `handler` kind boots a child that runs the app's event handlers
@@ -25,15 +40,17 @@
 //! own with a bounded queue; a full queue drops and counts, and a handler
 //! that fails or panics is counted and logged with its name while the
 //! child lives. The child sends `handler_stats` frames every
-//! [`HANDLER_STATS_INTERVAL`].
+//! [`HANDLER_STATISTICS_INTERVAL`].
 
 mod args;
 mod body_scope;
 mod ended_spans;
+mod event_loop;
 mod handle_setup;
 mod handler_host;
 mod handlers;
 mod host;
+mod host_core;
 mod link;
 mod panic;
 mod producer;
@@ -61,24 +78,30 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
+pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans};
 pub use ended_spans::{
     EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
 };
+pub use event_loop::{EventLoopWatch, HostLoop, HOST_LOOP_TURN_TICK};
 pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
 pub use handlers::{
     EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerError, HANDLER_DRAIN,
     HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL,
+    HANDLER_STATISTICS_INTERVAL,
 };
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
-    ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
+    ChildStartFacts, ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
+};
+pub use host_core::{
+    HostCoreRead, HostCoreState, HostCoreStop, HostCoreWatch, CORE_STOPPED_FLUSH_BOUND,
 };
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
-    run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, CancelCause,
-    RunCancelSignal, RunCancelState, RunSignalRefused, RunSpawnRefused, MAX_RUN_WORK,
+    current_run, run_cancel_signal, run_cancel_state, run_fencing_token, run_task_attempt,
+    spawn_in_run, with_test_blocking_run_scope, with_test_run_scope, CancelCause, HostStopState,
+    HostWork, HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused,
+    RunSignalRefused, RunSpawnRefused, TestRunCancel, TestRunFacts, WorkStopCause, MAX_RUN_WORK,
 };

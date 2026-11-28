@@ -7,7 +7,7 @@ import { leafTask, normalAttempt } from '@/test/attempt-fixtures';
 import { TIMING_EXAMPLES } from '@/test/timing-examples';
 import { CASCADE_EDGES, CASCADE_NODES, nth, workflowRun } from '@/test/workflow-fixtures';
 import type { TaskDetail } from '@/types/tasks';
-import type { WorkflowNode, WorkflowRunDetail, WorkflowTaskDetail } from '@/types/workflows';
+import type { WorkflowNode, WorkflowRunDetail, WorkflowNodeDetail } from '@/types/workflows';
 
 const RUN: WorkflowRunDetail = {
   ...workflowRun('FAILED', CASCADE_NODES, nth(TIMING_EXAMPLES.run_timings, 2)),
@@ -16,34 +16,34 @@ const RUN: WorkflowRunDetail = {
 
 const LEAF = { ...leafTask('COMPLETED', 0, 2, { enqueuedAt: null, startedAt: null }), task_id: 'task-a' };
 
-const nodeDetail = (node: WorkflowNode, patch: Partial<WorkflowTaskDetail>): WorkflowTaskDetail => ({
-  task_index: node.task_index,
+const nodeDetail = (node: WorkflowNode, patch: Partial<WorkflowNodeDetail>): WorkflowNodeDetail => ({
+  node_index: node.node_index,
   node_id: node.node_id,
   task_name: node.task_name,
   node_status: node.node_status,
-  is_subworkflow: false,
+  is_sub_workflow: false,
   node_error: null,
-  leaf: null,
+  task_row: null,
   attempts: [],
   ...patch,
 });
 
 /** The task read of the node: the same attempts, with the queue and the
  * priority that the node read does not hold. */
-const taskOf = (detail: WorkflowTaskDetail): TaskDetail => ({
-  leaf: detail.leaf ?? LEAF,
+const taskOf = (detail: WorkflowNodeDetail): TaskDetail => ({
+  task_row: detail.task_row ?? LEAF,
   task_name: detail.task_name,
-  queue_name: 'payments',
+  queue: 'payments',
   priority: 7,
   is_workflow_task: true,
   error_category: null,
   attempts: detail.attempts,
   workflow_id: 'run-1',
-  workflow_task_index: detail.task_index,
+  workflow_node_index: detail.node_index,
 });
 
 /** Answers the run read, the node read and the task read of the panel. */
-function stubApi(detail: WorkflowTaskDetail): void {
+function stubApi(detail: WorkflowNodeDetail): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
@@ -72,7 +72,7 @@ afterEach(() => {
 describe('NodeDetailContent', () => {
   it('shows the node timing and the attempt panel of the task of a node that ran', async () => {
     const node = nth(CASCADE_NODES, 0);
-    stubApi(nodeDetail(node, { leaf: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
+    stubApi(nodeDetail(node, { task_row: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
     renderPanel(node);
 
     expect(await screen.findByRole('region', { name: 'Node timing' })).not.toBeNull();
@@ -83,7 +83,7 @@ describe('NodeDetailContent', () => {
 
   it('marks a node on the longest chain on its chip line', async () => {
     const node = nth(CASCADE_NODES, 0);
-    stubApi(nodeDetail(node, { leaf: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
+    stubApi(nodeDetail(node, { task_row: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
     renderPanel(node);
 
     expect(await screen.findByText('longest chain')).not.toBeNull();
@@ -93,7 +93,7 @@ describe('NodeDetailContent', () => {
   it('shows a node error once: not again when an attempt has it as its message', async () => {
     const node = nth(CASCADE_NODES, 1);
     const message = 'unreachable on attempt 1';
-    stubApi(nodeDetail(node, { node_error: message, leaf: LEAF, attempts: [normalAttempt(1, 0, 'FAILED')] }));
+    stubApi(nodeDetail(node, { node_error: message, task_row: LEAF, attempts: [normalAttempt(1, 0, 'FAILED')] }));
     renderPanel(node);
 
     await screen.findByRole('region', { name: 'Errors' });
@@ -106,7 +106,7 @@ describe('NodeDetailContent', () => {
     stubApi(
       nodeDetail(node, {
         node_error: 'upstream dependency failed',
-        leaf: LEAF,
+        task_row: LEAF,
         attempts: [normalAttempt(1, 0, 'FAILED')],
       })
     );

@@ -400,10 +400,10 @@ fn the_ready_frame_names_the_protocol() {
 }
 
 #[test]
-fn the_init_frame_of_a_rust_child() {
+fn the_init_frame_of_a_host_child() {
     assert_parent_bytes(
         &ParentFrame::Init(InitFrame {
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
             connection: ChildConnection::default(),
@@ -412,7 +412,7 @@ fn the_init_frame_of_a_rust_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
@@ -466,6 +466,84 @@ fn the_init_frame_of_a_python_child() {
     );
 }
 
+fn shared_thread_init(recycle_above: MemoryLimit) -> ParentFrame {
+    ParentFrame::Init(InitFrame {
+        program: ChildProgram::Host,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
+        process_name: "horsies-child".to_owned(),
+        child_kind: ChildKind::SharedThread(SharedThreadChild {
+            seats: ThreadSeats::new(4).unwrap(),
+            pool: pool(),
+            task_send_pool: TaskSendPool::new(3).unwrap(),
+            recycle_above,
+        }),
+    })
+}
+
+/// The init frame of a shared thread child, with `recycle_above` as the
+/// JSON text of its limit (and none when `None`).
+fn shared_thread_init_bytes(recycle_above: Option<&str>) -> Vec<u8> {
+    let limit = recycle_above
+        .map(|text| format!(r#","recycle_above":{text}"#))
+        .unwrap_or_default();
+    framed(
+        &format!(
+            concat!(
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"host"}},"log_level":"info","#,
+                r#""database_url":"postgresql://u@h/db","#,
+                r#""connection":{{"tcp_keepalives":{{"kind":"on","idle_seconds":30,"#,
+                r#""interval_seconds":10,"probes":3}},"tcp_user_timeout":{{"kind":"after","#,
+                r#""milliseconds":30000}},"server_sessions":{{"kind":"kept"}}}},"#,
+                r#""process_name":"horsies-child","child_kind":{{"kind":"shared_thread","#,
+                r#""seats":4,"pool":{{"min_size":0,"max_size":1,"check":true}},"#,
+                r#""task_send_pool":3{limit}}}}}"#,
+            ),
+            limit = limit,
+        ),
+        b"",
+    )
+}
+
+#[test]
+fn the_init_frame_of_a_shared_thread_child_carries_its_memory_limit() {
+    assert_parent_bytes(
+        &shared_thread_init(MemoryLimit::AtMb(NonZeroU64::new(1536).unwrap())),
+        &shared_thread_init_bytes(Some(r#"{"kind":"at_mb","mb":1536}"#)),
+    );
+}
+
+#[test]
+fn the_init_frame_of_a_shared_thread_child_without_a_limit_says_off() {
+    assert_parent_bytes(
+        &shared_thread_init(MemoryLimit::Off),
+        &shared_thread_init_bytes(Some(r#"{"kind":"off"}"#)),
+    );
+}
+
+#[test]
+fn a_shared_thread_init_frame_without_its_memory_limit_is_refused() {
+    assert_eq!(
+        malformed_parent(&shared_thread_init_bytes(None)),
+        MalformedFrame::MissingField {
+            field: "child_kind.recycle_above".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_shared_thread_init_frame_with_a_zero_memory_limit_is_refused() {
+    assert_eq!(
+        malformed_parent(&shared_thread_init_bytes(Some(
+            r#"{"kind":"at_mb","mb":0}"#
+        ))),
+        MalformedFrame::OutOfBounds {
+            field: "child_kind.recycle_above.mb".to_owned(),
+        },
+    );
+}
+
 /// Keepalives off, the system's TCP user timeout and PgBouncer transaction
 /// mode, with the session URL of the parent's config.
 fn transaction_mode_connection() -> ChildConnection {
@@ -480,7 +558,7 @@ fn transaction_mode_connection() -> ChildConnection {
 
 fn init_with(connection: ChildConnection) -> InitFrame {
     InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@pooler/db".to_owned()),
         connection,
@@ -495,7 +573,7 @@ fn the_init_frame_carries_keepalives_off_and_transaction_mode() {
         &ParentFrame::Init(init_with(transaction_mode_connection())),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@pooler/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
                 r#""tcp_user_timeout":{"kind":"system_default"},"#,
@@ -546,7 +624,7 @@ fn init_bytes_with_connection(connection: &str) -> Vec<u8> {
     framed(
         &format!(
             concat!(
-                r#"{{"kind":"init","protocol":4,"program":{{"kind":"rust"}},"#,
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"host"}},"#,
                 r#""log_level":"info","database_url":"postgresql://u@h/db","#,
                 r#""connection":{},"process_name":"c","#,
                 r#""child_kind":{{"kind":"isolated","pool":{{"min_size":0,"max_size":1,"#,
@@ -592,7 +670,7 @@ fn a_keepalive_value_outside_its_bounds_is_refused() {
 fn an_init_frame_without_its_connection_settings_is_refused() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":4,"program":{"kind":"host"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","process_name":"c","#,
             r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
             r#""check":true},"task_send_pool":2}}"#,
@@ -624,13 +702,13 @@ fn transaction_mode_without_its_session_url_is_refused() {
 #[test]
 fn the_connection_of_a_config_is_its_tcp_settings_and_server_sessions() {
     assert_eq!(
-        ChildConnection::of_config(&PostgresConfig::from_url("postgresql://u@h/db")),
+        ChildConnection::of_config(&PostgresConfig::from_database_url("postgresql://u@h/db")),
         Ok(ChildConnection::default()),
     );
     let mut config =
         PostgresConfig::from_pgbouncer_urls("postgresql://u@pooler/db", "postgresql://u@direct/db");
-    config.tcp_keepalives = TcpKeepalivesConfig::Off;
-    config.tcp_user_timeout = TcpUserTimeoutConfig::SystemDefault;
+    config.tcp_keepalives = crate::core::config::TcpKeepalivesConfig::Off;
+    config.tcp_user_timeout = crate::core::config::TcpUserTimeoutConfig::SystemDefault;
     assert_eq!(
         ChildConnection::of_config(&config),
         Ok(transaction_mode_connection()),
@@ -639,11 +717,11 @@ fn the_connection_of_a_config_is_its_tcp_settings_and_server_sessions() {
 
 #[test]
 fn a_config_that_does_not_validate_has_no_child_connection() {
-    let mut config = PostgresConfig::from_url("postgresql://u@pooler/db");
+    let mut config = PostgresConfig::from_database_url("postgresql://u@pooler/db");
     config.pgbouncer_transaction_mode = true;
     assert_eq!(
         ChildConnection::of_config(&config),
-        Err(PostgresConfigError::MissingSessionDatabaseUrl),
+        Err(PostgresConfigError::MissingSessionDatabase),
     );
 }
 
@@ -655,6 +733,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             task_name: "app.tasks.add".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
@@ -665,7 +744,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","orphan_self_heal":true,"#,
                 r#""work":{"kind":"run"},"#,
@@ -684,6 +763,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             task_name: "app.tasks.add".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -696,7 +776,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"refusal","#,
@@ -717,6 +797,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
             task_name: "app.tasks.fetch".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -730,7 +811,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
             concat!(
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
+                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{},"#,
                 r#""trace":{{"kind":"no_carrier"}}}}"#,
@@ -1147,6 +1228,7 @@ fn the_claim_generation_round_trips_exactly() {
         task_name: "t".to_owned(),
         queue_name: default_queue(),
         attempt: AttemptNumber::SMALLEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -1171,6 +1253,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
             task_name: "t".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
@@ -1184,6 +1267,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
             task_name: "t".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
@@ -1204,7 +1288,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
 #[test]
 fn a_run_frame_without_its_orphan_self_heal_is_refused() {
     let run = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"max_retries":0,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&run, b"{}")),
@@ -1213,7 +1297,7 @@ fn a_run_frame_without_its_orphan_self_heal_is_refused() {
         },
     );
     let shared = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"max_retries":0,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&shared, b"{}")),
@@ -1229,7 +1313,7 @@ fn a_claim_generation_with_an_offset_is_read() {
     let run = framed(
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-            r#""task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","#,
+            r#""task_name":"t","queue_name":"default","attempt":1,"max_retries":0,"worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","orphan_self_heal":false,"#,
             r#""work":{"kind":"run"},"#,
             r#""trace":{"kind":"no_carrier"}}"#,
@@ -1255,6 +1339,21 @@ fn an_unknown_kind_is_malformed() {
             kind: BoundedText::cut("dance"),
         },
     );
+}
+
+#[test]
+fn the_program_kind_rust_is_an_unknown_kind() {
+    let init = framed(
+        concat!(
+            r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
+            r#""database_url":"postgresql://u@h/db","process_name":"c"}"#,
+        ),
+        b"",
+    );
+    assert!(matches!(
+        malformed_parent(&init),
+        MalformedFrame::UnknownKind { .. }
+    ));
 }
 
 #[test]
@@ -1331,7 +1430,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"max_retries":0,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1407,7 +1506,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"max_retries":0,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),
@@ -1581,6 +1680,25 @@ fn the_core_stopped_code_is_a_named_child_code() {
     assert_eq!(
         ChildExitCode::CoreStopped.code(),
         super::CORE_STOPPED_EXIT_CODE
+    );
+}
+
+/// The code of a child above its memory limit is a code of the protocol,
+/// apart from the codes of the worker process and from the other child codes.
+#[test]
+fn the_memory_limit_code_is_a_named_child_code() {
+    assert_eq!(super::MEMORY_LIMIT_EXIT_CODE, 81);
+    assert_eq!(
+        ChildExitCode::from_code(super::MEMORY_LIMIT_EXIT_CODE),
+        Some(ChildExitCode::MemoryLimit)
+    );
+    assert_eq!(
+        ChildExitCode::MemoryLimit.code(),
+        super::MEMORY_LIMIT_EXIT_CODE
+    );
+    assert_eq!(
+        crate::worker::executor::child_host::ChildHostExit::MemoryLimit.exit_code(),
+        super::MEMORY_LIMIT_EXIT_CODE
     );
 }
 

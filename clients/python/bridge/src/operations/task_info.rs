@@ -3,7 +3,9 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{ExecutionClass, StoredEnvelopeText, TaskAttemptInfo, TaskInfo, TaskInfoRead};
+use horsies_core::{
+    ExecutionClass, ResultSlot, StoredEnvelopeText, TaskAttemptInfo, TaskInfo, TaskInfoRead,
+};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -62,9 +64,63 @@ impl From<TaskAttemptInfo> for TaskAttemptRecord {
     }
 }
 
+/// The read did not ask for the result of the task.
+#[pyclass(module = "horsies._core", frozen)]
+#[derive(Clone, Debug)]
+pub struct TaskInfoResultNotRequested;
+
+/// The read asked for the result, and the task stored none.
+#[pyclass(module = "horsies._core", frozen)]
+#[derive(Clone, Debug)]
+pub struct TaskInfoResultNotStored;
+
+/// The read asked for the result, and the task stored one: `envelope_json` is
+/// the envelope as JSON text, as stored.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct TaskInfoResultStored {
+    pub envelope_json: String,
+}
+
+/// The stored result of a task info record, in one of three states.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskInfoResult {
+    NotRequested,
+    NotStored,
+    Stored(String),
+}
+
+impl<'py> IntoPyObject<'py> for TaskInfoResult {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self {
+            Self::NotRequested => TaskInfoResultNotRequested.into_bound_py_any(py),
+            Self::NotStored => TaskInfoResultNotStored.into_bound_py_any(py),
+            Self::Stored(envelope_json) => {
+                TaskInfoResultStored { envelope_json }.into_bound_py_any(py)
+            }
+        }
+    }
+}
+
+impl From<ResultSlot<StoredEnvelopeText>> for TaskInfoResult {
+    /// The stored envelope passes as its stored text. Pure.
+    fn from(slot: ResultSlot<StoredEnvelopeText>) -> Self {
+        match slot {
+            ResultSlot::NotRequested => Self::NotRequested,
+            ResultSlot::NotStored => Self::NotStored,
+            ResultSlot::Stored(envelope) => Self::Stored(envelope.as_str().to_owned()),
+        }
+    }
+}
+
 /// The metadata of one task, with the fields of Python's `TaskInfo`.
-/// `result_json` is the stored result envelope as JSON text, as stored, when
-/// the read asked for it and the task has one; `attempts` is a list when the
+/// `result` is `TaskInfoResultNotRequested`, `TaskInfoResultNotStored`, or
+/// `TaskInfoResultStored` with the envelope as JSON text, as stored;
+/// `attempts` is a list when the
 /// read asked for attempts. `execution` is the stored class of a live task
 /// (`ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`), and `None` for a task
 /// read from history, which does not keep the class (Python
@@ -76,13 +132,13 @@ pub struct TaskInfoRecord {
     pub task_name: String,
     /// A member of `TaskStatus`, as its wire value.
     pub status: String,
-    pub queue_name: String,
+    pub queue: String,
     pub priority: i32,
     pub retry_count: u32,
     pub max_retries: u32,
     pub next_retry_at: Option<DateTime<Utc>>,
     pub sent_at: Option<DateTime<Utc>>,
-    pub enqueued_at: DateTime<Utc>,
+    pub due_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -92,7 +148,7 @@ pub struct TaskInfoRecord {
     pub worker_process_name: Option<String>,
     pub error_code: Option<String>,
     pub failed_reason: Option<String>,
-    pub result_json: Option<String>,
+    pub result: TaskInfoResult,
     pub attempts: Option<Vec<TaskAttemptRecord>>,
     pub execution: Option<String>,
 }
@@ -102,7 +158,7 @@ impl TaskInfoRecord {
     /// stored text: the typed decode is the app's (Python
     /// `Horsies.get_task_info_async`). Pure.
     fn from_core(info: TaskInfo<StoredEnvelopeText>) -> Self {
-        let result_json = info.result.map(|envelope| envelope.as_str().to_owned());
+        let result = TaskInfoResult::from(info.result);
         let attempts = info
             .attempts
             .map(|attempts| attempts.into_iter().map(TaskAttemptRecord::from).collect());
@@ -110,13 +166,13 @@ impl TaskInfoRecord {
             task_id: info.task_id,
             task_name: info.task_name,
             status: info.status.wire_value().to_owned(),
-            queue_name: info.queue_name,
+            queue: info.queue,
             priority: info.priority,
             retry_count: info.retry_count,
             max_retries: info.max_retries,
             next_retry_at: info.next_retry_at,
             sent_at: info.sent_at,
-            enqueued_at: info.enqueued_at,
+            due_at: info.due_at,
             claimed_at: info.claimed_at,
             started_at: info.started_at,
             completed_at: info.completed_at,
@@ -126,7 +182,7 @@ impl TaskInfoRecord {
             worker_process_name: info.worker_process_name,
             error_code: info.error_code,
             failed_reason: info.failed_reason,
-            result_json,
+            result,
             attempts,
             execution: execution_of(info.execution),
         }
@@ -187,7 +243,7 @@ pub async fn task_info_operation(
         Err(error) => {
             return TaskInfoOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                horsies_core::BrokerOperationError::task_info_query_failed(
+                horsies_core::DatabaseOperationError::task_info_query_failed(
                     task_id,
                     horsies_core::BrokerOperationSource::Broker(error),
                 ),
@@ -214,18 +270,18 @@ mod tests {
 
     use super::*;
 
-    fn history_info(result: Option<StoredEnvelopeText>) -> TaskInfo<StoredEnvelopeText> {
+    fn history_info(result: ResultSlot<StoredEnvelopeText>) -> TaskInfo<StoredEnvelopeText> {
         TaskInfo {
             task_id: Uuid::nil(),
             task_name: "failed_task".to_owned(),
             status: TaskStatus::Failed,
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             priority: 100,
             retry_count: 0,
             max_retries: 0,
             next_retry_at: None,
             sent_at: None,
-            enqueued_at: Utc::now(),
+            due_at: Utc::now(),
             claimed_at: None,
             started_at: None,
             completed_at: None,
@@ -249,12 +305,20 @@ mod tests {
         let envelope = StoredEnvelopeText::parse(stored.to_owned())
             .expect("the text is strict JSON")
             .expect("the text is an object");
-        let record = TaskInfoRecord::from_core(history_info(Some(envelope)));
-        assert_eq!(record.result_json.as_deref(), Some(stored));
-        assert_eq!(
-            TaskInfoRecord::from_core(history_info(None)).result_json,
-            None
-        );
+        let record = TaskInfoRecord::from_core(history_info(ResultSlot::Stored(envelope)));
+        assert_eq!(record.result, TaskInfoResult::Stored(stored.to_owned()));
+    }
+
+    #[test]
+    fn a_result_that_was_not_requested_passes_as_not_requested() {
+        let record = TaskInfoRecord::from_core(history_info(ResultSlot::NotRequested));
+        assert_eq!(record.result, TaskInfoResult::NotRequested);
+    }
+
+    #[test]
+    fn a_result_that_is_not_stored_passes_as_not_stored() {
+        let record = TaskInfoRecord::from_core(history_info(ResultSlot::NotStored));
+        assert_eq!(record.result, TaskInfoResult::NotStored);
     }
 
     #[test]

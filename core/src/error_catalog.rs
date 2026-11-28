@@ -1,45 +1,46 @@
 //! The error classes of the core's catalogs, as static data for clients.
 //!
-//! An error enum of the core has one variant per Python class that the core
+//! An error enum of the core has one variant per error class that the core
 //! produces. `#[derive(horsies_core_derive::ErrorCatalog)]` records, per
-//! variant, the Python class: its name, its doc (the variant's `///` lines),
-//! and its slots in order. `horsies-codegen` renders the frozen dataclasses
+//! variant, the class: its name, its doc (the variant's `///` lines),
+//! and its slots in order. `horsies-codegen` renders the classes
 //! and the union of each catalog from [`ERROR_CATALOGS`], so a class is
-//! named once, here. The classes that only a Python client produces stay in
-//! Python; each public union of Python is a generated union plus them.
+//! named once, here. The classes that only one client produces stay in
+//! that client; each public union of a client is a generated union plus them.
 //!
 //! The slots of a class, in order:
 //!
-//! 1. `code`: a `ClassVar` member of the code catalog, or an instance field
-//!    typed by a `Literal` subset of it ([`CodeSubset`]);
-//! 2. `retryable: ClassVar[bool] = False` for a class that never clears;
+//! 1. `code`: a fixed member of the code catalog, or an instance field
+//!    typed by a subset of it ([`CodeSubset`]);
+//! 2. `retryable`, false for a class whose call a repeat does not
+//!    complete, or true for a class whose same call, unchanged, can succeed
+//!    later;
 //! 3. the fields of the variant, in declaration order, each with its
-//!    Python type and whether `repr` shows it;
-//! 4. `exception`, the core's exception class of the cause, for a class
-//!    that has one.
+//!    type and whether the text form of the class shows it;
+//! 4. `cause`, the core's failure of the cause, for a class that has one.
 //!
 //! Adding an error enum: derive `ErrorCatalog` on it, add it to
 //! [`ERROR_CATALOGS`], and name its per-operation unions in
 //! [`ERROR_UNIONS`].
 //!
 //! A field type of a class that is a record of its own (the payload of a
-//! send) is a [`RecordClass`] in [`ERROR_RECORDS`], and a `NewType` that a
+//! send) is a [`RecordClass`] in [`ERROR_RECORDS`], and a text type that a
 //! record field holds is a [`TextNewType`] in [`TEXT_NEW_TYPES`]. They are
-//! written by hand here, in Python's shape: the core's own structs hold the
-//! same facts in Rust types.
+//! written by hand here: the core's own structs hold the same facts in Rust
+//! types.
 //!
 //! A client builds the class of a value from [`ErrorClassValues`]
 //! (`#[derive(horsies_core_derive::ErrorClassValues)]`): the values of the
-//! instance slots, by name, in the class's order. The `exception` slot is
+//! instance slots, by name, in the class's order. The `cause` slot is
 //! built from the variant's typed cause (`#[error_slot(cause)]`, an
-//! [`ExceptionCause`]), so the exception keeps the cause's own text. A
-//! refusal whose Python exception is a class that the client defines (a
-//! `ValueError` of a rule, a `SerializationError` of a JSON text) names
-//! that class ([`ClientExceptionClass`]).
+//! [`ExceptionCause`]), so the class keeps the cause's own text. A
+//! refusal whose cause is a class that the client defines (a rule of a
+//! value, a JSON text that does not read) names that class
+//! ([`ClientExceptionClass`]).
 //!
 //! [`EXCEPTION_CLASSES`] are the exception classes that the core defines
-//! for its clients (for example `OutcomeDecodeError`): `Exception`
-//! subclasses whose one argument is their message.
+//! for its clients (for example `OutcomeDecodeError`): failures whose one
+//! argument is their message.
 
 use uuid::Uuid;
 
@@ -54,24 +55,24 @@ use crate::monitoring::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorSource, TaskActionError,
 };
 use crate::workflow_engine::error::WorkflowError;
-use crate::{BrokerOperationError, BrokerOperationFailedCode, HandleOperationError};
+use crate::{DatabaseOperationError, DatabaseOperationFailedCode, WorkflowHandleError};
 
-/// The Python type of an instance field of a generated class.
+/// The type of an instance field of a generated class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotType {
-    /// `str`.
+    /// Text.
     Str,
-    /// `bool`.
+    /// A truth value.
     Bool,
-    /// `int`.
+    /// A whole number.
     Int,
-    /// `uuid.UUID`.
+    /// A UUID.
     Uuid,
-    /// `str` holding the text of a UUID: a workflow id of the Python client.
+    /// The text of a UUID: a workflow id of the Python client.
     UuidText,
-    /// `TaskStatus`, the code catalog of `horsies._catalog.status`.
+    /// A task status, the code catalog of the `status` module.
     TaskStatus,
-    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`] in the module of
+    /// The send payload, the record [`TASK_SEND_PAYLOAD`] in the module of
     /// the class.
     TaskSendPayload,
 }
@@ -80,60 +81,64 @@ pub enum SlotType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotRepr {
     Shown,
-    /// `field(repr=False)`: a message or a cause, which can be long or hold
-    /// data of the caller.
+    /// A message or a cause, which the text form of the class leaves out
+    /// because it can be long or hold data of the caller.
     Hidden,
 }
 
-/// The Python type of the `exception` slot. The runtime class is the class
-/// that the cause names ([`ExceptionValue`]): the core's exception class of
-/// the cause (`horsies._core.CoreFailure` and its subclasses), a generated
-/// exception class, or a class that the client defines; the declared type
-/// is Python's.
+/// Whether the `cause` slot always has a cause. The cause is the value that
+/// [`ExceptionValue`] names: the core's failure class of the cause, a
+/// generated exception class, or a class that the client defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExceptionType {
-    /// `BaseException`.
+    /// The slot always holds a cause.
     Exception,
-    /// `BaseException | NoCause`.
+    /// The slot holds a cause, or [`ExceptionValue::NoCause`] when a check
+    /// of the core found the failure.
     ExceptionOrNoCause,
 }
 
 /// One slot of a generated class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSlot {
-    /// `code: ClassVar[<CodeEnum>] = <CodeEnum>.<member>`.
+    /// `code` is a fixed member of the code catalog.
     CodeMember { member: &'static str },
-    /// `code: <subset>`: an instance field typed by a `Literal` subset of
-    /// the code catalog, named by [`CodeSubset::name`].
+    /// `code` is an instance field typed by a subset of the code catalog,
+    /// named by [`CodeSubset::name`].
     CodeSubset { subset: &'static str },
-    /// `retryable: ClassVar[bool] = False`: the state never clears.
+    /// `retryable` is false: a repeat of the same call does not complete
+    /// it. The caller must change the call.
     NeverRetryable,
+    /// `retryable` is true: a repeat of the same call, unchanged, can
+    /// succeed later. It does not say that a repeat is safe.
+    AlwaysRetryable,
     /// An instance field of the variant.
     Field {
         name: &'static str,
-        python_type: SlotType,
+        slot_type: SlotType,
         repr: SlotRepr,
     },
-    /// `exception: <type> = field(repr=False)`, built from the cause of the
-    /// variant (`failure_cause()`).
-    Exception { python_type: ExceptionType },
+    /// `cause`, built from the cause of the variant (`failure_cause()`).
+    /// The text form of the class leaves it out.
+    Exception { cause_type: ExceptionType },
 }
 
-/// The Python class of one variant.
+/// The class of one variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorClass {
-    pub python_class: &'static str,
+    /// The name of the class.
+    pub type_name: &'static str,
     /// The class doc, from the variant's `///` lines.
     pub doc: &'static str,
-    /// The slots in their Python order.
+    /// The slots in their order.
     pub slots: &'static [ErrorSlot],
 }
 
 /// The classes of one error enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorCatalog {
-    /// The module under `horsies._catalog` that holds the classes.
-    pub python_module: &'static str,
+    /// The module that holds the classes.
+    pub module: &'static str,
     /// The code catalog of the `code` slots.
     pub code_catalog: CodeCatalog,
     /// The name of the union of every class of the enum.
@@ -151,19 +156,19 @@ pub trait ErrorEnum: 'static {
     const ERROR_CATALOG: ErrorCatalog;
     /// The catalog code of this value.
     fn error_code(&self) -> Self::Code;
-    /// The Python class of this value's variant.
-    fn python_class(&self) -> &'static str;
+    /// The class name of this value's variant.
+    fn type_name(&self) -> &'static str;
 }
 
 /// An error enum whose instance slot values the derive generates
 /// (`#[derive(horsies_core_derive::ErrorClassValues)]`). Each variant with
-/// an `exception` slot carries its typed cause.
+/// a `cause` slot carries its typed cause.
 pub trait ErrorClassValues: ErrorEnum {
     /// The values of the instance slots of this value's class
-    /// ([`ErrorEnum::python_class`]), by name, in the class's slot order:
-    /// the `code` field of a `Literal` subset, the fields, then
-    /// `exception`. The class values (`code` of one member, `retryable`
-    /// of a class that never clears) are not instance slots. Pure.
+    /// ([`ErrorEnum::type_name`]), by name, in the class's slot order:
+    /// the `code` field of a subset, the fields, then
+    /// `cause`. The class values (`code` of one member, the fixed
+    /// `retryable` of a class) are not instance slots. Pure.
     fn slot_values(&self) -> Vec<SlotValue<'_>>;
 }
 
@@ -174,29 +179,29 @@ pub struct SlotValue<'a> {
     pub value: SlotData<'a>,
 }
 
-/// The value of an instance slot, by the Python type of the slot.
+/// The value of an instance slot, by the type of the slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotData<'a> {
-    /// `str`.
+    /// Text.
     Str(&'a str),
-    /// `bool`.
+    /// A truth value.
     Bool(bool),
-    /// `int`: any integer field of 64 bits or less, widened.
+    /// A whole number: any integer field of 64 bits or less, widened.
     Int(i128),
-    /// `TaskSendPayload`, the record [`TASK_SEND_PAYLOAD`]: a client builds
+    /// The send payload, the record [`TASK_SEND_PAYLOAD`]: a client builds
     /// it from [`TaskSendPayload::record_values`].
     TaskSendPayload(&'a TaskSendPayload),
-    /// `uuid.UUID`.
+    /// A UUID.
     Uuid(Uuid),
-    /// `str` holding the text of the UUID.
+    /// The text of the UUID.
     UuidText(Uuid),
-    /// A member of a code catalog: the Python enum class of `catalog`,
-    /// called with the wire value `value`.
+    /// A member of a code catalog: the type of `catalog`, with the wire
+    /// value `value`.
     CodeMember {
         catalog: CodeCatalog,
         value: &'static str,
     },
-    /// The `exception` slot.
+    /// The `cause` slot.
     Exception(ExceptionValue),
 }
 
@@ -213,9 +218,8 @@ impl<'a> SlotData<'a> {
 /// The exception that a client builds from a typed cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExceptionValue {
-    /// The core's exception class of `cause` (Python: the `CoreFailure`
-    /// leaf classes of `horsies._core`), with the operation that failed as
-    /// its subject. `text` is the cause's own text; for a server error the
+    /// The core's failure class of `cause`, with the operation that failed
+    /// as its subject. `text` is the cause's own text; for a server error the
     /// class carries the server's primary message instead.
     CoreFailure {
         text: String,
@@ -232,9 +236,9 @@ pub enum ExceptionValue {
         class: ClientExceptionClass,
         text: String,
     },
-    /// No exception: a check of the core found the failure (Python:
-    /// `horsies._catalog.error_detail.NoCause()`). Only a slot of the type
-    /// `BaseException | NoCause` holds it.
+    /// No exception: a check of the core found the failure. Only a slot
+    /// with an optional cause ([`ExceptionType::ExceptionOrNoCause`]) holds
+    /// it.
     NoCause,
 }
 
@@ -243,15 +247,13 @@ pub enum ExceptionValue {
 /// member to its own class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientExceptionClass {
-    /// A rule refused a value; the text is the rule (Python: the built-in
-    /// `ValueError`).
+    /// A rule refused a value; the text is the rule.
     ValueError,
-    /// A text does not read as JSON; the text is the reader's error
-    /// (Python: `horsies.core.codec.json_io.SerializationError`).
+    /// A text does not read as JSON; the text is the reader's error.
     SerializationError,
 }
 
-/// The typed cause of a variant with an `exception` slot: the value that
+/// The typed cause of a variant with a `cause` slot: the value that
 /// the client builds the exception from.
 pub trait ExceptionCause {
     /// The exception of this cause. Pure.
@@ -400,9 +402,10 @@ impl ExceptionCause for OutcomeDecodeError {
 /// whose one argument is its message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExceptionClass {
-    /// The module under `horsies._catalog` that holds the class.
-    pub python_module: &'static str,
-    pub python_class: &'static str,
+    /// The module that holds the class.
+    pub module: &'static str,
+    /// The name of the class.
+    pub type_name: &'static str,
     /// The class doc.
     pub doc: &'static str,
 }
@@ -411,8 +414,8 @@ pub struct ExceptionClass {
 /// (Python `horsies.core.lifecycle.outcomes.OutcomeDecodeError`;
 /// [`OutcomeDecodeError`] in the core).
 pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
-    python_module: "lifecycle_errors",
-    python_class: "OutcomeDecodeError",
+    module: "lifecycle_errors",
+    type_name: "OutcomeDecodeError",
     doc: "The returned row does not satisfy the wire contract.\n\n\
           Never raised for a task outcome — only when the database returned\n\
           something this code cannot interpret, which means one side is running\n\
@@ -423,31 +426,30 @@ pub const OUTCOME_DECODE_ERROR: ExceptionClass = ExceptionClass {
 /// `horsies.core.history.errors.HistoryContractError`; the core's
 /// [`HistoryContractSource`]).
 pub const HISTORY_CONTRACT_ERROR: ExceptionClass = ExceptionClass {
-    python_module: "history_errors",
-    python_class: "HistoryContractError",
+    module: "history_errors",
+    type_name: "HistoryContractError",
     doc: "The database state violates an invariant this subsystem relies on.",
 };
 
-/// Every exception class of the core for the Python package, in render
-/// order.
+/// Every exception class of the core for the clients, in render order.
 pub const EXCEPTION_CLASSES: &[ExceptionClass] = &[OUTCOME_DECODE_ERROR, HISTORY_CONTRACT_ERROR];
 
 /// A union of some classes of one catalog: the failures of one operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorUnion {
     /// The module of the catalog of its classes.
-    pub python_module: &'static str,
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     /// The class names, each a class of the catalog.
     pub members: &'static [&'static str],
 }
 
-/// A `Literal` subset of a code catalog: the type of a `code` field.
+/// A subset of a code catalog: the type of a `code` field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeSubset {
     /// The module of the catalog that uses it.
-    pub python_module: &'static str,
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     /// The code catalog of the members.
@@ -456,32 +458,32 @@ pub struct CodeSubset {
     pub members: Vec<&'static str>,
 }
 
-/// Every error catalog that the Python package gets, in render order.
+/// Every error catalog that the clients get, in render order.
 pub const ERROR_CATALOGS: &[ErrorCatalog] = &[
-    <BrokerOperationError as ErrorEnum>::ERROR_CATALOG,
-    <HandleOperationError as ErrorEnum>::ERROR_CATALOG,
+    <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG,
+    <WorkflowHandleError as ErrorEnum>::ERROR_CATALOG,
     <MonitoringQueryError as ErrorEnum>::ERROR_CATALOG,
     <TaskActionError as ErrorEnum>::ERROR_CATALOG,
     <TaskSendError as ErrorEnum>::ERROR_CATALOG,
     <WorkflowStartError as ErrorEnum>::ERROR_CATALOG,
 ];
 
-/// The Python type of a field of a generated record class.
+/// The type of a field of a generated record class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordFieldType {
-    /// `str`.
+    /// Text.
     Str,
-    /// `int`.
+    /// A whole number.
     Int,
-    /// `datetime`.
+    /// A point in time.
     DateTime,
-    /// `str | None`.
+    /// Text, or no value.
     OptionalStr,
-    /// `int | None`.
+    /// A whole number, or no value.
     OptionalInt,
-    /// `datetime | None`.
+    /// A point in time, or no value.
     OptionalDateTime,
-    /// `RetentionClassKey | None`, the [`RETENTION_CLASS_KEY`] new type.
+    /// A [`RETENTION_CLASS_KEY`], or no value.
     OptionalRetentionClassKey,
 }
 
@@ -490,7 +492,7 @@ pub enum RecordFieldType {
 pub enum FieldDefault {
     /// No default: the caller gives the value.
     Required,
-    /// `None`.
+    /// No value.
     NoneValue,
     /// [`DEFAULT_RETENTION_CLASS`], a constant of [`RETENTION_CLASS_KEY`].
     DefaultRetentionClassKey,
@@ -500,20 +502,20 @@ pub enum FieldDefault {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordField {
     pub name: &'static str,
-    pub python_type: RecordFieldType,
+    pub field_type: RecordFieldType,
     pub default: FieldDefault,
     /// Comment lines above the field; empty for none.
     pub note: &'static str,
 }
 
-/// A frozen dataclass that a field of an error class holds.
+/// A record that a field of an error class holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordClass {
-    /// The module under `horsies._catalog` that holds the record.
-    pub python_module: &'static str,
-    pub python_class: &'static str,
+    /// The module that holds the record.
+    pub module: &'static str,
+    pub type_name: &'static str,
     pub doc: &'static str,
-    /// The fields in their Python order: each field with a default comes
+    /// The fields in their order: each field with a default comes
     /// after every field without one.
     pub fields: &'static [RecordField],
 }
@@ -526,11 +528,11 @@ pub struct NewTypeConstant {
     pub value: &'static str,
 }
 
-/// A `NewType` of `str`, with its named values.
+/// A named text type, with its named values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextNewType {
-    /// The module under `horsies._catalog` that holds it.
-    pub python_module: &'static str,
+    /// The module that holds it.
+    pub module: &'static str,
     pub name: &'static str,
     pub doc: &'static str,
     pub constants: &'static [NewTypeConstant],
@@ -538,10 +540,9 @@ pub struct TextNewType {
 
 /// The key of a retention class, and the key of the default class.
 pub const RETENTION_CLASS_KEY: TextNewType = TextNewType {
-    python_module: "retention_class",
+    module: "retention_class",
     name: "RetentionClassKey",
-    doc: "The key of a finite period class. ``period_class_key`` of\n\
-          ``horsies.core.history.periods`` builds it.\n\
+    doc: "The key of a finite period class.\n\
           \n\
           The enqueue paths take this type, so a raw string key is a type error at\n\
           a typed call site, not a row that has no partition later. Like\n\
@@ -560,72 +561,72 @@ pub const DEFAULT_RETENTION_CLASS: NewTypeConstant = NewTypeConstant {
     value: DEFAULT_RETENTION_CLASS_KEY,
 };
 
-/// Every `NewType` that the Python package gets, in render order.
+/// Every text type that the clients get, in render order.
 pub const TEXT_NEW_TYPES: &[TextNewType] = &[RETENTION_CLASS_KEY];
 
-/// The payload of a send that the retry methods send again (Python
+/// The payload of a send that the resend methods send again (Python
 /// `TaskSendPayload`). The core's [`crate::core::task::send_types::TaskSendPayload`]
 /// holds the same facts with a resolved retention.
 pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
-    python_module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.python_module,
-    python_class: "TaskSendPayload",
-    doc: "Serialized envelope for idempotent retry.\n\
+    module: <TaskSendError as ErrorEnum>::ERROR_CATALOG.module,
+    type_name: "TaskSendPayload",
+    doc: "Serialized envelope for an idempotent resend.\n\
           \n\
           All value fields are pre-serialized to avoid round-trip issues.\n\
-          The retry methods extract this payload directly — no user args needed.",
+          The resend methods extract this payload directly — no user args needed.",
     fields: &[
         RecordField {
             name: "task_name",
-            python_type: RecordFieldType::Str,
+            field_type: RecordFieldType::Str,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "queue_name",
-            python_type: RecordFieldType::Str,
+            field_type: RecordFieldType::Str,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "priority",
-            python_type: RecordFieldType::Int,
+            field_type: RecordFieldType::Int,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "input_json",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::Required,
             note: "The task input as JSON text: the keyword arguments as one object, or\n\
                    None for a send with none (stored as ``{}``).",
         },
         RecordField {
             name: "sent_at",
-            python_type: RecordFieldType::DateTime,
+            field_type: RecordFieldType::DateTime,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "good_until",
-            python_type: RecordFieldType::OptionalDateTime,
+            field_type: RecordFieldType::OptionalDateTime,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "enqueue_delay_seconds",
-            python_type: RecordFieldType::OptionalInt,
+            field_type: RecordFieldType::OptionalInt,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "task_options",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::Required,
             note: "",
         },
         RecordField {
             name: "idempotency_key",
-            python_type: RecordFieldType::OptionalStr,
+            field_type: RecordFieldType::OptionalStr,
             default: FieldDefault::NoneValue,
             note: "The caller's idempotency key, distinct from task identity. Riding the\n\
                    payload keeps the uncertain-commit resend keyed: a replayed send\n\
@@ -633,7 +634,7 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
         },
         RecordField {
             name: "retention_class_key",
-            python_type: RecordFieldType::OptionalRetentionClassKey,
+            field_type: RecordFieldType::OptionalRetentionClassKey,
             default: FieldDefault::DefaultRetentionClassKey,
             note: "The retention class snapshotted at enqueue. ``None`` means forever,\n\
                    so the field defaults to the immutable 30-day class rather than to\n\
@@ -643,26 +644,26 @@ pub const TASK_SEND_PAYLOAD: RecordClass = RecordClass {
     ],
 };
 
-/// Every record class that the Python package gets, in render order.
+/// Every record class that the clients get, in render order.
 pub const ERROR_RECORDS: &[RecordClass] = &[TASK_SEND_PAYLOAD];
 
 /// The value of one field of a generated record class, by the field's
-/// Python type ([`RecordFieldType`]).
+/// type ([`RecordFieldType`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordValue<'a> {
-    /// `str`.
+    /// Text.
     Str(&'a str),
-    /// `int`.
+    /// A whole number.
     Int(i64),
-    /// `datetime`, aware, in UTC.
+    /// A point in time, in UTC.
     DateTime(chrono::DateTime<chrono::Utc>),
-    /// `str | None`.
+    /// Text, or no value.
     OptionalStr(Option<&'a str>),
-    /// `int | None`.
+    /// A whole number, or no value.
     OptionalInt(Option<i64>),
-    /// `datetime | None`, aware, in UTC.
+    /// A point in time in UTC, or no value.
     OptionalDateTime(Option<chrono::DateTime<chrono::Utc>>),
-    /// `RetentionClassKey | None`: the key text, or `None` for forever.
+    /// A retention class key: the key text, or `None` for forever.
     OptionalRetentionClassKey(Option<String>),
 }
 
@@ -674,29 +675,29 @@ pub struct RecordFieldValue<'a> {
 }
 
 /// The unions of the failures of one operation that the core produces, in
-/// render order. Python's public union of the operation adds its
-/// client-only classes.
+/// render order. The public union of a client adds its client-only
+/// classes.
 pub const ERROR_UNIONS: &[ErrorUnion] = &[ErrorUnion {
-    python_module: <BrokerOperationError as ErrorEnum>::ERROR_CATALOG.python_module,
-    name: "BrokerCoreEnqueueError",
+    module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.module,
+    name: "DatabaseCoreEnqueueError",
     doc: "Every failure of an enqueue that the core gives.",
     members: &[
-        "BrokerEnqueueFailed",
-        "BrokerPayloadMismatch",
-        "BrokerIdempotencyKeyConflict",
-        "BrokerInvalidTaskOptions",
-        "BrokerInvalidInput",
+        "DatabaseEnqueueFailed",
+        "DatabasePayloadMismatch",
+        "DatabaseIdempotencyKeyConflict",
+        "DatabaseInvalidTaskOptions",
+        "DatabaseInvalidInput",
     ],
 }];
 
-/// The `Literal` subsets that the `code` field of a class holds.
+/// The subsets that the `code` field of a class holds.
 pub fn code_subsets() -> Vec<CodeSubset> {
     vec![CodeSubset {
-        python_module: <BrokerOperationError as ErrorEnum>::ERROR_CATALOG.python_module,
-        name: "BrokerOperationFailedCode",
-        doc: "The operation codes of ``BrokerOperationFailed``.",
-        code_catalog: <crate::BrokerErrorCode as CodeEnum>::CATALOG,
-        members: BrokerOperationFailedCode::ALL
+        module: <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.module,
+        name: "DatabaseOperationFailedCode",
+        doc: "The operation codes of ``DatabaseOperationFailed``.",
+        code_catalog: <crate::DatabaseErrorCode as CodeEnum>::CATALOG,
+        members: DatabaseOperationFailedCode::ALL
             .iter()
             .map(|code| code.broker_code().wire_value())
             .collect(),
@@ -713,7 +714,7 @@ mod tests {
     fn class_names() -> Vec<&'static str> {
         ERROR_CATALOGS
             .iter()
-            .flat_map(|catalog| catalog.classes.iter().map(|class| class.python_class))
+            .flat_map(|catalog| catalog.classes.iter().map(|class| class.type_name))
             .collect()
     }
 
@@ -736,16 +737,16 @@ mod tests {
             for class in catalog.classes {
                 match class.slots.first() {
                     Some(ErrorSlot::CodeMember { member }) => {
-                        assert!(members.contains(member), "{}: {member}", class.python_class);
+                        assert!(members.contains(member), "{}: {member}", class.type_name);
                     }
                     Some(ErrorSlot::CodeSubset { subset }) => {
                         assert!(
                             code_subsets().iter().any(|known| known.name == *subset),
                             "{}: {subset}",
-                            class.python_class
+                            class.type_name
                         );
                     }
-                    other => panic!("{} starts with {other:?}, not its code", class.python_class),
+                    other => panic!("{} starts with {other:?}, not its code", class.type_name),
                 }
             }
         }
@@ -765,9 +766,9 @@ mod tests {
                 match exceptions.as_slice() {
                     [] => {}
                     [position] => {
-                        assert_eq!(*position, class.slots.len() - 1, "{}", class.python_class);
+                        assert_eq!(*position, class.slots.len() - 1, "{}", class.type_name);
                     }
-                    more => panic!("{} has {} exception slots", class.python_class, more.len()),
+                    more => panic!("{} has {} exception slots", class.type_name, more.len()),
                 }
             }
         }
@@ -778,14 +779,14 @@ mod tests {
         for union in ERROR_UNIONS {
             let catalog = ERROR_CATALOGS
                 .iter()
-                .find(|catalog| catalog.python_module == union.python_module)
-                .unwrap_or_else(|| panic!("{}: no catalog in {}", union.name, union.python_module));
+                .find(|catalog| catalog.module == union.module)
+                .unwrap_or_else(|| panic!("{}: no catalog in {}", union.name, union.module));
             for member in union.members {
                 assert!(
                     catalog
                         .classes
                         .iter()
-                        .any(|class| class.python_class == *member),
+                        .any(|class| class.type_name == *member),
                     "{}: {member}",
                     union.name
                 );
@@ -804,7 +805,7 @@ mod tests {
                 "SCHEMA_INIT_FAILED",
                 "TASK_INFO_QUERY_FAILED",
                 "MONITORING_QUERY_FAILED",
-                "DB_PING_FAILED",
+                "DATABASE_PING_FAILED",
                 "WORKER_PING_FAILED",
                 "CLEANUP_FAILED",
                 "CLOSE_FAILED",
@@ -818,37 +819,37 @@ mod tests {
     /// (`clients/python/horsies/core/brokers/result_types.py`).
     #[test]
     fn a_class_has_python_s_slots_in_python_s_order() {
-        let classes = <BrokerOperationError as ErrorEnum>::ERROR_CATALOG.classes;
+        let classes = <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG.classes;
         let class = |name: &str| {
             classes
                 .iter()
-                .find(|class| class.python_class == name)
+                .find(|class| class.type_name == name)
                 .unwrap_or_else(|| panic!("no class {name}"))
         };
         let message = ErrorSlot::Field {
             name: "message",
-            python_type: SlotType::Str,
+            slot_type: SlotType::Str,
             repr: SlotRepr::Hidden,
         };
         assert_eq!(
-            class("BrokerOperationFailed").slots,
+            class("DatabaseOperationFailed").slots,
             [
                 ErrorSlot::CodeSubset {
-                    subset: "BrokerOperationFailedCode"
+                    subset: "DatabaseOperationFailedCode"
                 },
                 message,
                 ErrorSlot::Field {
                     name: "retryable",
-                    python_type: SlotType::Bool,
+                    slot_type: SlotType::Bool,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::Exception
+                    cause_type: ExceptionType::Exception
                 },
             ]
         );
         assert_eq!(
-            class("BrokerIdempotencyKeyConflict").slots,
+            class("DatabaseIdempotencyKeyConflict").slots,
             [
                 ErrorSlot::CodeMember {
                     member: "IDEMPOTENCY_KEY_CONFLICT"
@@ -857,17 +858,17 @@ mod tests {
                 message,
                 ErrorSlot::Field {
                     name: "owner_task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
             ]
         );
-        assert!(class("BrokerOperationFailed")
+        assert!(class("DatabaseOperationFailed")
             .doc
             .starts_with("A broker operation failed with a database, driver or connection error."));
     }
 
-    /// The slots of two send classes, as Python declares them
+    /// The slots of three send classes, as Python declares them
     /// (`clients/python/horsies/core/models/task_send_types.py`).
     #[test]
     fn a_send_class_has_python_s_slots_in_python_s_order() {
@@ -875,12 +876,12 @@ mod tests {
         let class = |name: &str| {
             classes
                 .iter()
-                .find(|class| class.python_class == name)
+                .find(|class| class.type_name == name)
                 .unwrap_or_else(|| panic!("no class {name}"))
         };
         let message = ErrorSlot::Field {
             name: "message",
-            python_type: SlotType::Str,
+            slot_type: SlotType::Str,
             repr: SlotRepr::Hidden,
         };
         assert_eq!(
@@ -891,22 +892,22 @@ mod tests {
                 },
                 ErrorSlot::Field {
                     name: "task_id",
-                    python_type: SlotType::Uuid,
+                    slot_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Field {
                     name: "payload",
-                    python_type: SlotType::TaskSendPayload,
+                    slot_type: SlotType::TaskSendPayload,
                     repr: SlotRepr::Hidden,
                 },
                 message,
                 ErrorSlot::Field {
                     name: "retryable",
-                    python_type: SlotType::Bool,
+                    slot_type: SlotType::Bool,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::ExceptionOrNoCause
+                    cause_type: ExceptionType::ExceptionOrNoCause
                 },
             ]
         );
@@ -919,17 +920,42 @@ mod tests {
                 message,
                 ErrorSlot::Field {
                     name: "size_bytes",
-                    python_type: SlotType::Int,
+                    slot_type: SlotType::Int,
                     repr: SlotRepr::Shown,
                 },
                 ErrorSlot::Field {
                     name: "limit_bytes",
-                    python_type: SlotType::Int,
+                    slot_type: SlotType::Int,
                     repr: SlotRepr::Shown,
                 },
             ]
         );
-        let names: Vec<&str> = classes.iter().map(|class| class.python_class).collect();
+        assert_eq!(
+            class("TaskSendIdempotencyKeyConflict").slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "IDEMPOTENCY_KEY_CONFLICT"
+                },
+                ErrorSlot::NeverRetryable,
+                ErrorSlot::Field {
+                    name: "task_id",
+                    slot_type: SlotType::Uuid,
+                    repr: SlotRepr::Shown,
+                },
+                ErrorSlot::Field {
+                    name: "payload",
+                    slot_type: SlotType::TaskSendPayload,
+                    repr: SlotRepr::Hidden,
+                },
+                message,
+                ErrorSlot::Field {
+                    name: "owner_task_id",
+                    slot_type: SlotType::Uuid,
+                    repr: SlotRepr::Shown,
+                },
+            ]
+        );
+        let names: Vec<&str> = classes.iter().map(|class| class.type_name).collect();
         assert_eq!(
             names,
             [
@@ -972,7 +998,7 @@ mod tests {
         assert_eq!(names, record_names);
         for (value, field) in values.iter().zip(TASK_SEND_PAYLOAD.fields) {
             let in_its_form = matches!(
-                (&value.value, field.python_type),
+                (&value.value, field.field_type),
                 (RecordValue::Str(_), RecordFieldType::Str)
                     | (RecordValue::Int(_), RecordFieldType::Int)
                     | (RecordValue::DateTime(_), RecordFieldType::DateTime)
@@ -990,7 +1016,7 @@ mod tests {
             assert!(
                 in_its_form,
                 "{}: {:?} for {:?}",
-                field.name, value.value, field.python_type
+                field.name, value.value, field.field_type
             );
         }
         assert_eq!(
@@ -1024,7 +1050,7 @@ mod tests {
                     .iter()
                     .all(|field| field.default != FieldDefault::Required),
                 "{}",
-                record.python_class
+                record.type_name
             );
         }
     }
@@ -1039,14 +1065,14 @@ mod tests {
                     matches!(
                         slot,
                         ErrorSlot::Field {
-                            python_type: SlotType::TaskSendPayload,
+                            slot_type: SlotType::TaskSendPayload,
                             ..
                         }
                     )
                 })
             });
             match holds_payload {
-                true => assert_eq!(catalog.python_module, TASK_SEND_PAYLOAD.python_module),
+                true => assert_eq!(catalog.module, TASK_SEND_PAYLOAD.module),
                 false => {}
             }
         }
@@ -1059,7 +1085,7 @@ mod tests {
         let fields: Vec<(&str, RecordFieldType, FieldDefault)> = TASK_SEND_PAYLOAD
             .fields
             .iter()
-            .map(|field| (field.name, field.python_type, field.default))
+            .map(|field| (field.name, field.field_type, field.default))
             .collect();
         assert_eq!(
             fields,
@@ -1106,31 +1132,31 @@ mod tests {
     /// variant, and its code is the class's code.
     #[test]
     fn a_value_names_its_class_and_its_code() {
-        let failed = BrokerOperationError::OperationFailed {
-            code: BrokerOperationFailedCode::CloseFailed,
+        let failed = DatabaseOperationError::OperationFailed {
+            code: DatabaseOperationFailedCode::CloseFailed,
             message: "close failed".to_owned(),
             retryable: true,
             cause: Box::new(crate::BrokerOperationSource::Broker(
                 crate::BrokerError::ConnectionFailed("lost".to_owned()),
             )),
         };
-        assert_eq!(failed.python_class(), "BrokerOperationFailed");
-        assert_eq!(failed.error_code(), crate::BrokerErrorCode::CloseFailed);
-        let conflict = BrokerOperationError::IdempotencyKeyConflict {
+        assert_eq!(failed.type_name(), "DatabaseOperationFailed");
+        assert_eq!(failed.error_code(), crate::DatabaseErrorCode::CloseFailed);
+        let conflict = DatabaseOperationError::IdempotencyKeyConflict {
             message: "held".to_owned(),
             owner_task_id: uuid::Uuid::nil(),
         };
-        assert_eq!(conflict.python_class(), "BrokerIdempotencyKeyConflict");
+        assert_eq!(conflict.type_name(), "DatabaseIdempotencyKeyConflict");
         assert_eq!(
             conflict.error_code(),
-            crate::BrokerErrorCode::IdempotencyKeyConflict
+            crate::DatabaseErrorCode::IdempotencyKeyConflict
         );
         let refused = TaskActionError::NotCancellable {
             message: "refused".to_owned(),
             task_id: uuid::Uuid::nil(),
             current_status: crate::TaskStatus::Completed,
         };
-        assert_eq!(refused.python_class(), "TaskActionNotCancellable");
+        assert_eq!(refused.type_name(), "TaskActionNotCancellable");
         assert_eq!(
             refused.error_code(),
             crate::monitoring::TaskActionErrorCode::TaskNotCancellable
@@ -1155,17 +1181,19 @@ mod tests {
     const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
 
     /// The instance slots of `class`, by name, in order. The class values
-    /// (`code` of one member, `retryable` of a class that never clears)
-    /// are not instance slots.
+    /// (`code` of one member, the fixed `retryable` of a class) are not
+    /// instance slots.
     fn instance_slot_names(class: &ErrorClass) -> Vec<&'static str> {
         class
             .slots
             .iter()
             .filter_map(|slot| match slot {
-                ErrorSlot::CodeMember { .. } | ErrorSlot::NeverRetryable => None,
+                ErrorSlot::CodeMember { .. }
+                | ErrorSlot::NeverRetryable
+                | ErrorSlot::AlwaysRetryable => None,
                 ErrorSlot::CodeSubset { .. } => Some("code"),
                 ErrorSlot::Field { name, .. } => Some(*name),
-                ErrorSlot::Exception { .. } => Some("exception"),
+                ErrorSlot::Exception { .. } => Some("cause"),
             })
             .collect()
     }
@@ -1182,7 +1210,7 @@ mod tests {
                 task_id: TASK,
                 current_status: crate::TaskStatus::Completed,
             },
-            TaskActionError::WorkflowTask {
+            TaskActionError::IsWorkflowTask {
                 message: format!(
                     "Task {TASK} belongs to a workflow; use the workflow actions instead."
                 ),
@@ -1192,6 +1220,17 @@ mod tests {
             TaskActionError::cancel_failed(
                 TASK,
                 BrokerError::ConnectionFailed("refused".to_owned()),
+            ),
+            TaskActionError::cancel_outcome_unknown(
+                TASK,
+                crate::db::StatementFailure::OutcomeUnknown {
+                    statement: "cancel_task",
+                    cause: crate::db::UnknownOutcomeCause::NoReplyWithinBound {
+                        bound: std::time::Duration::from_secs(1),
+                        grace: std::time::Duration::from_secs(1),
+                        cancel: crate::db::CancelRequestOutcome::Sent,
+                    },
+                },
             ),
             TaskActionError::StoredDataInvalid {
                 message: "Task cancel failed: stored data does not parse: \
@@ -1213,16 +1252,16 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
@@ -1258,7 +1297,7 @@ mod tests {
         );
     }
 
-    /// Python's `TaskActionDbOperationFailed` of a cancel that met a broker
+    /// Python's `TaskActionDatabaseOperationFailed` of a cancel that met a broker
     /// error: the message holds the error's text, and the exception is the
     /// core's class of each cause with the same text and the error's retry
     /// rule.
@@ -1312,7 +1351,7 @@ mod tests {
                         value: SlotData::Uuid(TASK),
                     },
                     SlotValue {
-                        name: "exception",
+                        name: "cause",
                         value: SlotData::Exception(ExceptionValue::CoreFailure {
                             text: text.clone(),
                             retryable: expected_retryable,
@@ -1344,7 +1383,7 @@ mod tests {
         assert_eq!(
             invalid.slot_values().last(),
             Some(&SlotValue {
-                name: "exception",
+                name: "cause",
                 value: SlotData::Exception(cause.exception_value()),
             })
         );
@@ -1358,7 +1397,7 @@ mod tests {
     fn the_exception_classes_are_named_once_with_python_s_doc() {
         let names: HashSet<&str> = EXCEPTION_CLASSES
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(names.len(), EXCEPTION_CLASSES.len());
         assert!(OUTCOME_DECODE_ERROR
@@ -1393,21 +1432,21 @@ mod tests {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
 
-    /// Python's `MonitoringQueryDbOperationFailed` of a failed connect: the
+    /// Python's `MonitoringQueryDatabaseOperationFailed` of a failed connect: the
     /// message names the read and holds the error's text; the exception is
     /// the core's class of the cause with the same text.
     #[test]
@@ -1430,7 +1469,7 @@ mod tests {
                     value: SlotData::Bool(true),
                 },
                 SlotValue {
-                    name: "exception",
+                    name: "cause",
                     value: SlotData::Exception(ExceptionValue::CoreFailure {
                         text: "connection failed: connection refused".to_owned(),
                         retryable: true,
@@ -1457,7 +1496,7 @@ mod tests {
                     value: SlotData::Str(&format!("task detail history read failed: {text}")),
                 },
                 SlotValue {
-                    name: "exception",
+                    name: "cause",
                     value: SlotData::Exception(ExceptionValue::Generated {
                         class: HISTORY_CONTRACT_ERROR,
                         text,
@@ -1476,20 +1515,20 @@ mod tests {
     }
 
     /// One value of each variant of the handle catalog.
-    fn every_handle_error() -> Vec<HandleOperationError> {
+    fn every_handle_error() -> Vec<WorkflowHandleError> {
         vec![
-            HandleOperationError::not_found(WORKFLOW),
-            HandleOperationError::connect_failed(
+            WorkflowHandleError::not_found(WORKFLOW),
+            WorkflowHandleError::connect_failed(
                 &crate::HandleOperation::Status,
                 WORKFLOW,
                 refused(),
             ),
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 message: format!("Status failed for workflow {WORKFLOW}: invalid status: BOGUS"),
                 workflow_id: WORKFLOW,
                 cause: WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
-            HandleOperationError::ResumeRecoveryFailed {
+            WorkflowHandleError::ResumeRecoveryFailed {
                 message: format!(
                     "Workflow {WORKFLOW} resumed; the recovery pass for its tree failed: \
                      broker error: connection failed: refused"
@@ -1497,7 +1536,7 @@ mod tests {
                 workflow_id: WORKFLOW,
                 cause: WorkflowError::Broker(refused()),
             },
-            HandleOperationError::AsyncContext {
+            WorkflowHandleError::AsyncContext {
                 message: "sync call inside a loop".to_owned(),
                 workflow_id: WORKFLOW,
             },
@@ -1508,33 +1547,33 @@ mod tests {
     /// class, in the class's order, and the values cover every class.
     #[test]
     fn the_values_of_each_handle_error_name_the_instance_slots_of_its_class() {
-        let catalog = <HandleOperationError as ErrorEnum>::ERROR_CATALOG;
+        let catalog = <WorkflowHandleError as ErrorEnum>::ERROR_CATALOG;
         let errors = every_handle_error();
         for error in &errors {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
 
-    /// Python's `HandleDbOperationFailed` of a failed connect: the message
+    /// Python's `WorkflowHandleDatabaseOperationFailed` of a failed connect: the message
     /// names the operation, the workflow id is its text, and the exception
     /// is the core's class of the broker error with the broker error's own
     /// text.
     #[test]
     fn a_handle_database_failure_builds_its_exception_from_its_cause() {
-        let failed = HandleOperationError::connect_failed(
+        let failed = WorkflowHandleError::connect_failed(
             &crate::HandleOperation::Status,
             WORKFLOW,
             refused(),
@@ -1556,7 +1595,7 @@ mod tests {
                     value: SlotData::UuidText(WORKFLOW),
                 },
                 SlotValue {
-                    name: "exception",
+                    name: "cause",
                     value: SlotData::Exception(ExceptionValue::CoreFailure {
                         text: "connection failed: refused".to_owned(),
                         retryable: true,
@@ -1618,19 +1657,19 @@ mod tests {
         );
     }
 
-    /// Python's `HandleResumeRecoveryFailed`: the exception has the text of
+    /// Python's `WorkflowHandleResumeRecoveryFailed`: the exception has the text of
     /// the failure of the recovery pass alone, as in 0.7, not the message
     /// that names the resume.
     #[test]
     fn a_failed_recovery_pass_builds_its_exception_from_its_cause_alone() {
         let failed = every_handle_error()
             .into_iter()
-            .find(|error| matches!(error, HandleOperationError::ResumeRecoveryFailed { .. }))
+            .find(|error| matches!(error, WorkflowHandleError::ResumeRecoveryFailed { .. }))
             .expect("the list holds the failed recovery pass");
         assert_eq!(
             failed.slot_values().last(),
             Some(&SlotValue {
-                name: "exception",
+                name: "cause",
                 value: SlotData::Exception(ExceptionValue::CoreFailure {
                     text: "connection failed: refused".to_owned(),
                     retryable: true,
@@ -1643,40 +1682,40 @@ mod tests {
 
     /// One value of each variant of the broker catalog, each built by the
     /// constructor of its code where it has one.
-    fn every_broker_error() -> Vec<BrokerOperationError> {
+    fn every_broker_error() -> Vec<DatabaseOperationError> {
         vec![
-            BrokerOperationError::db_ping_failed(refused()),
-            BrokerOperationError::EnqueueFailed {
+            DatabaseOperationError::database_ping_failed(refused()),
+            DatabaseOperationError::EnqueueFailed {
                 message: "enqueue unconfirmed".to_owned(),
                 retryable: true,
                 cause: Box::new(BrokerCheckCause::Error(refused())),
             },
-            BrokerOperationError::PayloadMismatch {
+            DatabaseOperationError::PayloadMismatch {
                 message: "payload mismatch".to_owned(),
             },
-            BrokerOperationError::IdempotencyKeyConflict {
+            DatabaseOperationError::IdempotencyKeyConflict {
                 message: "held".to_owned(),
                 owner_task_id: TASK,
             },
-            BrokerOperationError::task_info_invalid_json(
+            DatabaseOperationError::task_info_invalid_json(
                 TASK,
                 &"history result digest is absent",
                 BrokerCheckCause::Check,
             ),
-            BrokerOperationError::InvalidTaskOptions {
+            DatabaseOperationError::InvalidTaskOptions {
                 message: "options refused".to_owned(),
                 cause: BrokerRefusalCause::Check,
             },
-            BrokerOperationError::invalid_input(
+            DatabaseOperationError::invalid_input(
                 "limit must be positive when set, got 0".to_owned(),
             ),
-            BrokerOperationError::AsyncContext {
+            DatabaseOperationError::AsyncContext {
                 message: "sync call inside a loop".to_owned(),
             },
-            BrokerOperationError::ListenerDisabled {
+            DatabaseOperationError::ListenerDisabled {
                 message: "no listener".to_owned(),
             },
-            BrokerOperationError::WaitInsideTask {
+            DatabaseOperationError::WaitInsideTask {
                 message: "wait inside a task".to_owned(),
             },
         ]
@@ -1686,41 +1725,41 @@ mod tests {
     /// class, in the class's order, and the values cover every class.
     #[test]
     fn the_values_of_each_broker_error_name_the_instance_slots_of_its_class() {
-        let catalog = <BrokerOperationError as ErrorEnum>::ERROR_CATALOG;
+        let catalog = <DatabaseOperationError as ErrorEnum>::ERROR_CATALOG;
         let errors = every_broker_error();
         for error in &errors {
             let class = catalog
                 .classes
                 .iter()
-                .find(|class| class.python_class == error.python_class())
-                .unwrap_or_else(|| panic!("no class {}", error.python_class()));
+                .find(|class| class.type_name == error.type_name())
+                .unwrap_or_else(|| panic!("no class {}", error.type_name()));
             let names: Vec<&str> = error.slot_values().iter().map(|slot| slot.name).collect();
-            assert_eq!(names, instance_slot_names(class), "{}", class.python_class);
+            assert_eq!(names, instance_slot_names(class), "{}", class.type_name);
         }
-        let covered: HashSet<&str> = errors.iter().map(|error| error.python_class()).collect();
+        let covered: HashSet<&str> = errors.iter().map(|error| error.type_name()).collect();
         let classes: HashSet<&str> = catalog
             .classes
             .iter()
-            .map(|class| class.python_class)
+            .map(|class| class.type_name)
             .collect();
         assert_eq!(covered, classes);
     }
 
-    /// Python 0.7's `BrokerOperationFailed` of a failed database ping: the
+    /// Python 0.7's `DatabaseOperationFailed` of a failed database ping: the
     /// code as a member of the subset, Python's message, the retry rule of
     /// the broker error, and the core's class of the broker error with its
     /// own text.
     #[test]
     fn a_failed_operation_gives_its_code_its_message_and_the_exception_of_its_source() {
-        let failed = BrokerOperationError::db_ping_failed(refused());
+        let failed = DatabaseOperationError::database_ping_failed(refused());
         assert_eq!(
             failed.slot_values(),
             vec![
                 SlotValue {
                     name: "code",
                     value: SlotData::CodeMember {
-                        catalog: <crate::BrokerErrorCode as CodeEnum>::CATALOG,
-                        value: "DB_PING_FAILED",
+                        catalog: <crate::DatabaseErrorCode as CodeEnum>::CATALOG,
+                        value: "DATABASE_PING_FAILED",
                     },
                 },
                 SlotValue {
@@ -1732,7 +1771,7 @@ mod tests {
                     value: SlotData::Bool(true),
                 },
                 SlotValue {
-                    name: "exception",
+                    name: "cause",
                     value: SlotData::Exception(ExceptionValue::CoreFailure {
                         text: "connection failed: refused".to_owned(),
                         retryable: true,
@@ -1747,18 +1786,18 @@ mod tests {
     /// class of its cause, with the source's own text and its retry rule.
     #[test]
     fn each_source_builds_the_core_class_of_its_cause() {
-        let refused_read = BrokerOperationError::monitoring_query_refused(
-            "get_class_coverage",
+        let refused_read = DatabaseOperationError::monitoring_query_refused(
+            "get_execution_class_coverage",
             crate::broker::class_coverage::ClassReadRefused {
                 reason: "a live snapshot holds no budgets".to_owned(),
             },
         );
         assert_eq!(
             refused_read.message(),
-            "get_class_coverage refused: a live snapshot holds no budgets"
+            "get_execution_class_coverage refused: a live snapshot holds no budgets"
         );
         assert!(!refused_read.retryable());
-        let unreadable = BrokerOperationError::monitoring_query_failed(
+        let unreadable = DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",
             BrokerOperationSource::Snapshot(crate::broker::health::WorkerStateUnreadable {
                 worker_id: "w1".to_owned(),
@@ -1768,7 +1807,7 @@ mod tests {
             }),
         );
         assert!(!unreadable.retryable());
-        let moved = BrokerOperationError::task_info_query_failed(
+        let moved = DatabaseOperationError::task_info_query_failed(
             TASK,
             BrokerOperationSource::TaskInfoMoved {
                 task_id: TASK,
@@ -1788,7 +1827,7 @@ mod tests {
             (&unreadable, FailureCause::ContractViolation),
             (&moved, FailureCause::PreconditionFailed),
         ] {
-            let BrokerOperationError::OperationFailed { cause: source, .. } = error else {
+            let DatabaseOperationError::OperationFailed { cause: source, .. } = error else {
                 panic!("a failed read gives OperationFailed");
             };
             assert_eq!(
@@ -1807,7 +1846,7 @@ mod tests {
     /// value gives the core's class of its cause.
     #[test]
     fn a_check_gives_no_cause_and_an_error_gives_its_class() {
-        let refused_argument = BrokerOperationError::invalid_input(
+        let refused_argument = DatabaseOperationError::invalid_input(
             "limit must be positive when set, got 0".to_owned(),
         );
         assert_eq!(
@@ -1818,7 +1857,7 @@ mod tests {
                     value: SlotData::Str("limit must be positive when set, got 0"),
                 },
                 SlotValue {
-                    name: "exception",
+                    name: "cause",
                     value: SlotData::Exception(ExceptionValue::NoCause),
                 },
             ]
@@ -1829,12 +1868,12 @@ mod tests {
         );
         let parse_error =
             serde_json::from_str::<serde_json::Value>("{").expect_err("the text is not JSON");
-        let unreadable = BrokerOperationError::task_info_invalid_json(
+        let unreadable = DatabaseOperationError::task_info_invalid_json(
             TASK,
             &"serialization error",
             BrokerCheckCause::Error(BrokerError::Serialization(parse_error)),
         );
-        let BrokerOperationError::InvalidJsonPayload { cause, .. } = &unreadable else {
+        let DatabaseOperationError::InvalidJsonPayload { cause, .. } = &unreadable else {
             panic!("a stored value that does not parse gives InvalidJsonPayload");
         };
         assert!(matches!(
@@ -1857,15 +1896,15 @@ mod tests {
 
     /// The values of a refused or failed enqueue: its class, its message
     /// and the exception of its cause.
-    fn enqueue_values(error: &BrokerOperationError) -> (&'static str, &str, ExceptionValue) {
+    fn enqueue_values(error: &DatabaseOperationError) -> (&'static str, &str, ExceptionValue) {
         let exception = match error.slot_values().pop() {
             Some(SlotValue {
-                name: "exception",
+                name: "cause",
                 value: SlotData::Exception(exception),
             }) => exception,
-            other => panic!("{} ends with {other:?}", error.python_class()),
+            other => panic!("{} ends with {other:?}", error.type_name()),
         };
-        (error.python_class(), error.message(), exception)
+        (error.type_name(), error.message(), exception)
     }
 
     /// Python's refusal of a send before any statement: the code of the
@@ -1889,13 +1928,13 @@ mod tests {
         for (part, class, code) in [
             (
                 SendPart::Input,
-                "BrokerInvalidInput",
-                crate::BrokerErrorCode::InvalidInput,
+                "DatabaseInvalidInput",
+                crate::DatabaseErrorCode::InvalidInput,
             ),
             (
                 SendPart::TaskOptions,
-                "BrokerInvalidTaskOptions",
-                crate::BrokerErrorCode::InvalidTaskOptions,
+                "DatabaseInvalidTaskOptions",
+                crate::DatabaseErrorCode::InvalidTaskOptions,
             ),
         ] {
             let cases = [
@@ -1930,7 +1969,7 @@ mod tests {
                     message: "the text was refused".to_owned(),
                     cause,
                 };
-                let refused = BrokerOperationError::enqueue_error(
+                let refused = DatabaseOperationError::enqueue_error(
                     SENT_TASK,
                     BrokerError::EnqueueContract(refusal.clone()),
                 );
@@ -1954,14 +1993,14 @@ mod tests {
     /// refusal, with the refusal's own text.
     #[test]
     fn an_empty_retention_key_is_invalid_input_and_an_underived_one_a_failed_enqueue() {
-        let empty = BrokerOperationError::enqueue_error(
+        let empty = DatabaseOperationError::enqueue_error(
             SENT_TASK,
             BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::empty_retention_class_key()),
         );
         assert_eq!(
             enqueue_values(&empty),
             (
-                "BrokerInvalidInput",
+                "DatabaseInvalidInput",
                 "enqueue input refused for send.task: retention_class_key must be non-empty",
                 ExceptionValue::ClientClass {
                     class: ClientExceptionClass::ValueError,
@@ -1973,7 +2012,7 @@ mod tests {
         let refused_key = crate::EnqueueRetention::from_class_key("standard_0d")
             .expect_err("a period of 0 days is below the bounds");
         let refused_text = refused_key.to_string();
-        let underived = BrokerOperationError::enqueue_error(
+        let underived = DatabaseOperationError::enqueue_error(
             SENT_TASK,
             BrokerError::RetentionClassKey(refused_key),
         );
@@ -1987,7 +2026,7 @@ mod tests {
         assert_eq!(
             enqueue_values(&underived),
             (
-                "BrokerEnqueueFailed",
+                "DatabaseEnqueueFailed",
                 message.as_str(),
                 ExceptionValue::CoreFailure {
                     text: refused_text,
@@ -2011,10 +2050,14 @@ mod tests {
             BrokerError::InvalidIdempotencyReservationWindow("0 s".to_owned()),
         ] {
             let text = error.to_string();
-            let refused = BrokerOperationError::enqueue_error(SENT_TASK, error);
+            let refused = DatabaseOperationError::enqueue_error(SENT_TASK, error);
             assert_eq!(
                 enqueue_values(&refused),
-                ("BrokerInvalidInput", text.as_str(), ExceptionValue::NoCause)
+                (
+                    "DatabaseInvalidInput",
+                    text.as_str(),
+                    ExceptionValue::NoCause
+                )
             );
             assert!(!refused.retryable(), "{text}");
         }
@@ -2025,11 +2068,11 @@ mod tests {
     /// `IDEMPOTENCY_KEY_CONFLICT` with Python's text and the owner.
     #[test]
     fn a_payload_mismatch_and_a_key_conflict_keep_the_error_s_text_and_the_owner() {
-        let mismatch = BrokerOperationError::enqueue_error(
+        let mismatch = DatabaseOperationError::enqueue_error(
             SENT_TASK,
             BrokerError::PayloadMismatch { task_id: TASK },
         );
-        assert_eq!(mismatch.python_class(), "BrokerPayloadMismatch");
+        assert_eq!(mismatch.type_name(), "DatabasePayloadMismatch");
         assert_eq!(
             mismatch.slot_values(),
             vec![SlotValue {
@@ -2043,14 +2086,14 @@ mod tests {
         assert!(!mismatch.retryable());
 
         let owner = Uuid::from_u128(0x0198_c0de_0000_7000_8000_0000_0000_00ff);
-        let conflict = BrokerOperationError::enqueue_error(
+        let conflict = DatabaseOperationError::enqueue_error(
             SENT_TASK,
             BrokerError::IdempotencyKeyConflict {
                 task_name: SENT_TASK.to_owned(),
                 task_id: owner,
             },
         );
-        assert_eq!(conflict.python_class(), "BrokerIdempotencyKeyConflict");
+        assert_eq!(conflict.type_name(), "DatabaseIdempotencyKeyConflict");
         assert_eq!(
             conflict.slot_values(),
             vec![
@@ -2075,7 +2118,7 @@ mod tests {
     /// `NoCause()`.
     #[test]
     fn a_conflict_whose_row_was_gone_is_a_failed_enqueue_with_no_cause() {
-        let gone = BrokerOperationError::enqueue_error(
+        let gone = DatabaseOperationError::enqueue_error(
             SENT_TASK,
             BrokerError::EnqueueConflictUnverifiable {
                 task_id: TASK,
@@ -2089,7 +2132,7 @@ mod tests {
         assert_eq!(
             enqueue_values(&gone),
             (
-                "BrokerEnqueueFailed",
+                "DatabaseEnqueueFailed",
                 message.as_str(),
                 ExceptionValue::NoCause
             )
@@ -2126,7 +2169,7 @@ mod tests {
         ];
         for (error, cause, retryable) in cases {
             let text = error.to_string();
-            let failed = BrokerOperationError::enqueue_error(SENT_TASK, error);
+            let failed = DatabaseOperationError::enqueue_error(SENT_TASK, error);
             let message = format!("Failed to enqueue task send.task: {text}");
             assert_eq!(
                 failed.slot_values(),
@@ -2140,7 +2183,7 @@ mod tests {
                         value: SlotData::Bool(retryable),
                     },
                     SlotValue {
-                        name: "exception",
+                        name: "cause",
                         value: SlotData::Exception(ExceptionValue::CoreFailure {
                             text: text.clone(),
                             retryable,
@@ -2150,7 +2193,7 @@ mod tests {
                 ],
                 "{text}"
             );
-            assert_eq!(failed.python_class(), "BrokerEnqueueFailed");
+            assert_eq!(failed.type_name(), "DatabaseEnqueueFailed");
             assert_eq!(failed.failure_cause(), cause, "{text}");
             assert!(std::error::Error::source(&failed).is_some());
         }
@@ -2180,5 +2223,135 @@ mod tests {
                 text: "task_name must be non-empty".to_owned(),
             }
         );
+    }
+
+    /// One value of the send classes that have a fixed `retryable`.
+    fn fixed_send_errors() -> Vec<TaskSendError> {
+        let payload = || {
+            Box::new(TaskSendPayload {
+                task_name: "report".to_owned(),
+                queue_name: "default".to_owned(),
+                priority: 50,
+                input_json: "{}".to_owned(),
+                sent_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                good_until: None,
+                enqueue_delay_seconds: None,
+                task_options: None,
+                idempotency_key: None,
+                retention: crate::core::config::EnqueueRetention::Default,
+            })
+        };
+        vec![
+            TaskSendError::AsyncContext {
+                task_id: TASK,
+                payload: payload(),
+                message: "blocking send on a runtime thread".to_owned(),
+            },
+            TaskSendError::IdempotencyKeyConflict {
+                task_id: TASK,
+                payload: payload(),
+                message: "the key is held".to_owned(),
+                owner_task_id: TASK,
+            },
+        ]
+    }
+
+    /// One value of each workflow start class.
+    fn every_start_error() -> Vec<WorkflowStartError> {
+        let name = || "report".to_owned();
+        vec![
+            WorkflowStartError::ValidationFailed {
+                message: "refused".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+                cause: StartRefusalCause::Check,
+            },
+            WorkflowStartError::id_conflict("report", WORKFLOW, "other".to_owned()),
+            WorkflowStartError::CommandConflict {
+                message: "another command".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+            },
+            WorkflowStartError::EnqueueFailed {
+                message: "failed".to_owned(),
+                retryable: true,
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+                cause: Box::new(WorkflowError::Broker(refused())),
+            },
+            WorkflowStartError::AsyncContext {
+                message: "sync call inside a loop".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+            },
+        ]
+    }
+
+    /// The `retryable` of each class that fixes it is the value of the retry
+    /// function of the enum that raises the class, and every class that fixes
+    /// it is checked. A class whose text says a repeat can succeed has
+    /// `retryable = True`; a class whose success needs a change outside the
+    /// call (a row that appears, data that an operator repairs) has `False`.
+    #[test]
+    fn the_fixed_retryable_of_each_class_is_the_retry_function_of_its_values() {
+        let mut by_class: Vec<(&'static str, bool)> = Vec::new();
+        by_class.extend(
+            every_broker_error()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+        by_class.extend(
+            every_handle_error()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+        by_class.extend(
+            every_monitoring_query_error()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+        by_class.extend(
+            every_task_action_error()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+        by_class.extend(
+            fixed_send_errors()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+        by_class.extend(
+            every_start_error()
+                .iter()
+                .map(|error| (error.type_name(), error.retryable())),
+        );
+
+        let mut checked = 0_usize;
+        for catalog in ERROR_CATALOGS {
+            for class in catalog.classes {
+                let fixed = class.slots.iter().find_map(|slot| match slot {
+                    ErrorSlot::NeverRetryable => Some(false),
+                    ErrorSlot::AlwaysRetryable => Some(true),
+                    ErrorSlot::CodeMember { .. }
+                    | ErrorSlot::CodeSubset { .. }
+                    | ErrorSlot::Field { .. }
+                    | ErrorSlot::Exception { .. } => None,
+                });
+                let Some(flag) = fixed else { continue };
+                let values: Vec<bool> = by_class
+                    .iter()
+                    .filter(|(name, _)| *name == class.type_name)
+                    .map(|(_, retryable)| *retryable)
+                    .collect();
+                assert!(!values.is_empty(), "no value of {}", class.type_name);
+                assert!(
+                    values.iter().all(|retryable| *retryable == flag),
+                    "{}: the flag is {flag}, the retry function gives {values:?}",
+                    class.type_name
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 23);
     }
 }

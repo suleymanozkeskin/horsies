@@ -10,7 +10,8 @@
 use std::time::Duration;
 
 use horsies::{
-    OutputlessResults, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, WorkflowSpecBuilder,
+    NoWorkflowOutput, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, TypedNodeRef,
+    WorkflowSpecBuilder,
 };
 use horsies_test_support::rows::{self, TaskRow};
 use horsies_test_support::tokio_postgres::Client;
@@ -110,7 +111,7 @@ async fn assert_refused_in_one_claim(suite: &Suite, client: &Client, task_id: Uu
 /// attempt.
 async fn assert_not_claimed_again(suite: &Suite, client: &Client, task_id: Uuid, ended: &TaskRow) {
     let later = suite
-        .function(basic::simple::handle)
+        .function(basic::simple::function)
         .send(basic::simple::Input { x: 1 })
         .await
         .expect("send the later task");
@@ -141,13 +142,24 @@ async fn assert_not_claimed_again(suite: &Suite, client: &Client, task_id: Uuid,
     );
 }
 
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
+}
+
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
-        .function(workflow::step::handle)
+        .function(workflow::step::function)
         .node()
         .node_id(id)
-        .set(workflow::step::params::step(), id.to_owned())
+        .set(workflow::step::fields::step(), id.to_owned())
         .expect("a step input")
 }
 
@@ -161,7 +173,7 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
     let client = suite.client().await;
     let token = Uuid::new_v4().simple().to_string();
     let handle = suite
-        .function(basic::idempotent::handle)
+        .function(basic::idempotent::function)
         .send(basic::idempotent::Input {
             token: token.clone(),
         })
@@ -171,7 +183,7 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
     let _worker = suite.worker(Profile::Isolated1).await;
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), REFUSAL_CODE);
+            assert_eq!(error.code().as_str(), REFUSAL_CODE);
             assert_eq!(error.message(), Some(above_bound_message().as_str()));
         }
         TaskOutcome::Succeeded(value) => panic!("the task succeeded with {value:?}"),
@@ -192,16 +204,16 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
 async fn a_refused_timeout_fails_its_workflow_node() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let client = suite.client().await;
-    let mut spec = WorkflowSpecBuilder::new("stored_timeout_flow");
+    let mut spec = suite.app.workflow_builder("stored_timeout_flow");
     let _key = spec.definition_key("tests.e2e.stored_timeout_flow.v1");
-    let a = spec.task(step(&suite, "a"));
-    let _b = spec.task(step(&suite, "b").waits_for(a));
+    let a = add(&mut spec, step(&suite, "a"));
+    let _b = add(&mut spec, step(&suite, "b").waits_for(a));
     let spec = spec
         .build()
         .unwrap_or_else(|refused| panic!("build the spec: {refused}"));
     let handle = suite
         .app
-        .start::<OutputlessResults>(&spec)
+        .start::<NoWorkflowOutput>(&spec)
         .await
         .unwrap_or_else(|refused| panic!("start the workflow: {refused}"));
     let workflow_id = handle.workflow_id();

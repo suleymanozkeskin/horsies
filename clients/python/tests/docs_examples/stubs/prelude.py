@@ -22,7 +22,7 @@ from horsies import (
 
 app = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
         ),
     ),
@@ -33,6 +33,7 @@ app = Horsies(
 # handle, a task function with any parameters), so the stand-ins are `Any`.
 my_task: Any
 broker: Any
+database: Any
 handle: Any
 spec: Any
 ctx: Any

@@ -34,6 +34,7 @@ use crate::core::config::queue::{CustomQueueConfig, QueueMode};
 use crate::core::config::worker_profile::{ProfileSelectionRefused, SelectedProfile};
 use crate::core::task::DeclaredErrorCodes;
 use crate::core::PostgresConfig;
+use crate::process_exit::ProcessExit;
 use crate::telemetry::listen::ListenAddress;
 use crate::worker::children::{ChildLaunch, PreloadProgram};
 use crate::worker::claim_pass::RegisteredClasses;
@@ -145,7 +146,7 @@ pub struct TelemetryPlan {
     pub task_names: Vec<String>,
     /// The values of the `queue` label: every queue of the app.
     pub queue_names: Vec<String>,
-    /// The user error codes that each task declares, for the `error_code`
+    /// The custom error codes that each task declares, for the `error_code`
     /// label.
     pub declared_codes: BTreeMap<String, DeclaredErrorCodes>,
 }
@@ -233,6 +234,10 @@ impl Worker {
     /// names) is not declared: its samples count in the fallback series, and
     /// one WARNING line names it.
     ///
+    /// The liveness and runner heartbeat watches of the worker end the
+    /// process through `exit` when they fail closed (exits 79 and 77): a
+    /// Rust binary and the Python bridge give [`ProcessExit::Standard`].
+    ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
     /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`],
     /// and with an endpoint when the core is built without the feature
@@ -241,6 +246,7 @@ impl Worker {
         plan: WorkerPlan,
         child_specs: Arc<dyn ChildSpecSource>,
         family: ClientFamily,
+        exit: ProcessExit,
     ) -> Result<Self, WorkerError> {
         let broker = worker_broker(&plan.broker_config, family).await?;
         let worker = Worker::of_child_specs(
@@ -251,7 +257,8 @@ impl Worker {
             plan.profile,
             plan.launch,
             plan.registered,
-        )?;
+        )?
+        .with_process_exit(exit);
         with_planned_telemetry(worker, &plan.telemetry, plan.metrics_endpoint)
     }
 }
@@ -290,6 +297,11 @@ fn serve_metrics(
 ///
 /// Errors: [`WorkerError::Config`], always.
 #[cfg(not(feature = "metrics-endpoint"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the build with the feature `metrics-endpoint` takes the address by value; both builds \
+              have one signature"
+)]
 fn serve_metrics(
     worker: Worker,
     address: ListenAddress,
@@ -412,6 +424,11 @@ fn serve_registry(
 ///
 /// Errors: [`WorkerError::Config`], always.
 #[cfg(not(feature = "metrics-endpoint"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the build with the feature `metrics-endpoint` takes the address by value; both builds \
+              have one signature"
+)]
 fn serve_registry(
     worker: Worker,
     address: ListenAddress,
@@ -444,8 +461,8 @@ async fn worker_broker(
 
 /// The app config of the worker: the queue mode and the claim settings of
 /// the claim section, the four config sections, every profile, and the
-/// broker config of the app's connection settings. Pure.
-fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig {
+/// database config of the app's connection settings. Pure.
+fn app_config_of(manifest: &WorkerManifest, database: PostgresConfig) -> AppConfig {
     let claim = &manifest.claim;
     let (queue_mode, custom_queues) = match &claim.queues {
         Queues::Default => (QueueMode::Default, None),
@@ -469,10 +486,14 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
     AppConfig {
         queue_mode,
         custom_queues,
-        broker,
+        database,
+        // The manifest keeps its own tags (`TASKS`, `NO_LIMIT`) for the two
+        // config states.
         cluster_wide_cap: match claim.cluster_wide_cap {
-            ClusterWideCap::Tasks { tasks } => Some(tasks.0.get()),
-            ClusterWideCap::NoLimit => None,
+            ClusterWideCap::Tasks { tasks } => crate::core::config::ClusterCapSetting::ClusterCap {
+                tasks: tasks.0.get(),
+            },
+            ClusterWideCap::NoLimit => crate::core::config::ClusterCapSetting::NoClusterCap,
         },
         prefetch_buffer: claim.prefetch_buffer.0.get(),
         claim_lease_ms: match claim.claim_lease {
@@ -484,9 +505,9 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
         recovery: manifest.recovery.to_config(),
         retention: manifest.retention.to_config(),
         resilience: manifest.resilience.to_config(),
-        worker_profiles: manifest.profile_set(),
+        worker_profiles: manifest.config_profiles(),
         schedule: None,
-        resend_on_transient_err: false,
+        resend_on_transient_error: false,
     }
 }
 
@@ -500,7 +521,7 @@ fn worker_config_of(manifest: &WorkerManifest, app_config: &AppConfig) -> Worker
     };
     let mut config = WorkerConfig {
         queues,
-        loglevel: worker_log_level(manifest.child_launch.log_level),
+        log_level: worker_log_level(manifest.child_launch.log_level),
         ..WorkerConfig::default()
     };
     config.apply_queue_config(app_config);
@@ -562,7 +583,7 @@ fn launch_of(manifest: &WorkerManifest, connection: ChildConnection) -> ChildLau
                 parent_sys_path: parent_sys_path.clone(),
                 parent_argv: parent_argv.clone(),
             }),
-            ManifestChildProgram::Rust => ChildProgram::Rust,
+            ManifestChildProgram::Host => ChildProgram::Host,
         },
         log_level: child_log_level(launch.log_level),
         database_url: DatabaseUrl::new(manifest.database.database_url.expose().to_owned()),

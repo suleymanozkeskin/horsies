@@ -21,6 +21,7 @@ use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::claims::{RunWorkflow, WorkflowNodeIndex};
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
+use crate::process_exit::ProcessExit;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::protocol::StopReason;
 
@@ -30,7 +31,8 @@ const TASK_NAME: &str = "p1_task";
 /// A child context on `pool`; its frames go to a socket no one reads.
 fn context(pool: &TestPool) -> (HostContext, UnixStream) {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
-    let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
+    let writer =
+        FrameWriter::start(ours, 16, ProcessExit::Standard).expect("the frame writer starts");
     let context = HostContext {
         broker: Arc::new(PostgresBroker::from_test_url(
             pool.url(),
@@ -45,6 +47,9 @@ fn context(pool: &TestPool) -> (HostContext, UnixStream) {
             family: crate::ClientFamily::Rust,
             body_scope: super::BodyScope::NoScope,
             handler_child: super::HandlerChildApp::without_handlers(),
+            event_loop: super::EventLoopWatch::RuntimeOnly,
+            exit: ProcessExit::Standard,
+            host_core: super::HostCoreWatch::NoHostCore,
         }),
         pid: 1,
         writer,
@@ -137,6 +142,7 @@ fn facts_with(task_id: Uuid, claimed_at: DateTime<Utc>, self_heal: OrphanSelfHea
         task_name: TASK_NAME.to_owned(),
         queue_name: crate::events::QueueName::cut("default"),
         attempt: crate::events::AttemptNumber::SMALLEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: self_heal,

@@ -16,8 +16,8 @@ __all__ = ['WorkflowStartValidationFailed', 'WorkflowStartIdConflict', 'Workflow
 class WorkflowStartValidationFailed:
     """The spec, its args or the retry input was refused. Nothing was written.
 
-    The same start is refused again. ``exception`` is ``NoCause()`` when a
-    check refused the input without a Python exception. The retry methods
+    The same start is refused again. ``cause`` is ``NoCause`` when a
+    check refused the input without an exception. The resend methods
     refuse this error.
     """
 
@@ -26,7 +26,15 @@ class WorkflowStartValidationFailed:
     message: str = field(repr=False)
     workflow_name: str
     workflow_id: str
-    exception: BaseException | NoCause = field(repr=False)
+    cause: BaseException | NoCause = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,7 +42,7 @@ class WorkflowStartIdConflict:
     """The workflow id exists for another workflow name. Nothing was written.
 
     ``existing_workflow_name`` names the workflow that holds the id. A start
-    with the same id is refused again; use another id. The retry methods
+    with the same id is refused again; use another id. The resend methods
     refuse this error.
     """
 
@@ -44,6 +52,14 @@ class WorkflowStartIdConflict:
     workflow_name: str
     workflow_id: str
     existing_workflow_name: str
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 @dataclass(slots=True, frozen=True)
@@ -55,7 +71,7 @@ class WorkflowStartCommandConflict:
     from the command of this start, or the run is a sub-workflow, which has
     no start command. ``workflow_id`` is the id of that run. A start with
     this id must send the same command; another command is refused again,
-    so send the same command or use another id. The retry methods refuse
+    so send the same command or use another id. The resend methods refuse
     this error.
     """
 
@@ -65,6 +81,14 @@ class WorkflowStartCommandConflict:
     workflow_name: str
     workflow_id: str
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class WorkflowStartEnqueueFailed:
@@ -72,7 +96,7 @@ class WorkflowStartEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. The transaction
-    rolled back, or its commit outcome is unknown. ``retry_start(err)``
+    rolled back, or its commit outcome is unknown. ``resend_start(err)``
     starts again with the same id; a workflow that the failed attempt
     committed comes back as the existing handle.
     """
@@ -82,14 +106,22 @@ class WorkflowStartEnqueueFailed:
     retryable: bool
     workflow_name: str
     workflow_id: str
-    exception: BaseException = field(repr=False)
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
 
 
 @dataclass(slots=True, frozen=True)
 class WorkflowStartAsyncContext:
-    """Sync ``start()`` or ``retry_start()`` was called on a thread that runs an event loop.
+    """Sync ``start()`` or ``resend_start()`` was called on a thread that runs an event loop.
 
-    Nothing was written: the wait would stall that loop. ``retry_start_async(err)``
+    Nothing was written: the wait would stall that loop. the async resend
     starts the workflow with the same id; a sync call on that thread returns
     this error again.
     """
@@ -99,6 +131,14 @@ class WorkflowStartAsyncContext:
     message: str = field(repr=False)
     workflow_name: str
     workflow_id: str
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type WorkflowStartCoreError = (

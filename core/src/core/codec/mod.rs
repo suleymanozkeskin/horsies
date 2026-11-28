@@ -19,6 +19,7 @@ pub use strict_read::{
 };
 pub use user_value::{
     check_user_value, check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
+    STRICT_JSON_ERROR_CAUSE,
 };
 
 /// Why a JSON text did not read as a value.
@@ -171,11 +172,9 @@ mod tests {
 
     #[test]
     fn encode_decode_task_result_err() {
-        use crate::core::task::error::{OperationalErrorCode, TaskError};
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalErrorCode::TaskException,
-            "fail",
-        ));
+        use crate::core::task::error::{OperationalCode, TaskError};
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::built_in(OperationalCode::TaskException, "fail"));
         let bytes = encode_task_result(&result).unwrap();
         let back: TaskResult<i32> = decode_task_result(&bytes).unwrap();
         assert!(back.is_err());
@@ -275,8 +274,10 @@ mod tests {
     #[test]
     fn task_result_err_round_trip() {
         use crate::core::task::error::{RetrievalCode, TaskError};
-        let result: TaskResult<String> =
-            TaskResult::Err(TaskError::builtin(RetrievalCode::TaskNotFound, "not found"));
+        let result: TaskResult<String> = TaskResult::Err(TaskError::built_in(
+            RetrievalCode::TaskNotFound,
+            "not found",
+        ));
         let json = task_result_to_json_string(&result).unwrap();
         let back: TaskResult<String> = task_result_from_json_str(&json).unwrap();
         assert!(back.is_err());

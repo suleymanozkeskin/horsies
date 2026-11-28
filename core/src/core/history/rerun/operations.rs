@@ -1,17 +1,20 @@
 //! Post-terminal rerun as a fresh, lineage-bearing enqueue.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::{RowDecodeError, StatementLog};
 use crate::broker::pools::PoolSettingsError;
-use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
+use crate::core::config::EnqueueRetention;
 use crate::core::history::enqueue::EnqueuePreparationError;
 use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::core::history::identity::keys::{validate_reservation_window, IdempotencyKeyError};
 use crate::core::history::identity::uuid7::Uuid7Error;
 use crate::core::history::reads::detail::TaskAbsenceReason;
+use crate::core::task::DeclaredErrorCodes;
 use crate::db::{ParameterType, StatementFailure, Transaction, TypedStatement};
 use crate::telemetry::trace_carrier::{SendTrace, StoredTrace};
 
@@ -20,27 +23,27 @@ use super::steps::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRowError,
 };
 
-/// One rerun request: the source task, the deadline and the caller key of
-/// the new task, and its trace carrier ([`RerunTask::new`] has none;
-/// [`RerunTask::with_trace`] sets one).
+/// One rerun command: the source task, the latest start time (`good_until`)
+/// and the idempotency key of the new task, and its trace carrier
+/// ([`RerunCommand::new`] has none; [`RerunCommand::with_trace`] sets one).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RerunTask {
+pub struct RerunCommand {
     source_task_id: Uuid,
-    deadline: Option<DateTime<Utc>>,
-    caller_key: Option<String>,
+    good_until: Option<DateTime<Utc>>,
+    idempotency_key: Option<String>,
     trace: StoredTrace,
 }
 
-impl RerunTask {
+impl RerunCommand {
     pub fn new(
         source_task_id: Uuid,
-        deadline: Option<DateTime<Utc>>,
-        caller_key: Option<String>,
+        good_until: Option<DateTime<Utc>>,
+        idempotency_key: Option<String>,
     ) -> Self {
         Self {
             source_task_id,
-            deadline,
-            caller_key,
+            good_until,
+            idempotency_key,
             trace: StoredTrace::NoCarrier,
         }
     }
@@ -65,37 +68,33 @@ impl RerunTask {
         self.source_task_id
     }
 
-    pub fn deadline(&self) -> Option<DateTime<Utc>> {
-        self.deadline
+    pub fn good_until(&self) -> Option<DateTime<Utc>> {
+        self.good_until
     }
 
-    pub fn caller_key(&self) -> Option<&str> {
-        self.caller_key.as_deref()
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunEnqueuePolicy {
-    retention_class_key: String,
+    retention: EnqueueRetention,
     retain_rerun_input: bool,
     reservation_window: Duration,
 }
 
 impl RerunEnqueuePolicy {
+    /// Errors: [`RerunError::Idempotency`] for a reservation window that is
+    /// not above zero, is above 30 days, or is finer than a microsecond.
     pub fn new(
-        retention_class_key: impl Into<String>,
+        retention: EnqueueRetention,
         retain_rerun_input: bool,
         reservation_window: Duration,
     ) -> Result<Self, RerunError> {
-        let retention_class_key = retention_class_key.into();
-        if retention_class_key.is_empty() {
-            return Err(RerunError::InvalidPolicy(
-                "retention class key must be non-empty".to_owned(),
-            ));
-        }
         validate_reservation_window(reservation_window)?;
         Ok(Self {
-            retention_class_key,
+            retention,
             retain_rerun_input,
             reservation_window,
         })
@@ -103,14 +102,19 @@ impl RerunEnqueuePolicy {
 
     pub fn standard(retain_rerun_input: bool) -> Self {
         Self {
-            retention_class_key: DEFAULT_RETENTION_CLASS_KEY.to_owned(),
+            retention: EnqueueRetention::Default,
             retain_rerun_input,
             reservation_window: Duration::hours(24),
         }
     }
 
-    pub fn retention_class_key(&self) -> &str {
-        &self.retention_class_key
+    pub fn retention(&self) -> EnqueueRetention {
+        self.retention
+    }
+
+    /// The class key of the retention ([`EnqueueRetention::class_key`]).
+    pub fn retention_class_key(&self) -> String {
+        self.retention.class_key()
     }
 
     pub fn retain_rerun_input(&self) -> bool {
@@ -120,6 +124,49 @@ impl RerunEnqueuePolicy {
     pub fn reservation_window(&self) -> Duration {
         self.reservation_window
     }
+}
+
+/// The declared custom codes of every task that the calling app registers,
+/// by task name: the app's registry as a rerun reads it. A rerun checks the
+/// stored retry list of its source against it
+/// ([`RerunError::RetryCodeNotDeclared`], [`RerunError::TaskNotRegistered`]).
+/// Built-in codes are not in it: the core knows them. Frozen once built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredTaskCodes {
+    tasks: BTreeMap<String, DeclaredErrorCodes>,
+}
+
+impl RegisteredTaskCodes {
+    /// The codes of an app that registers no task.
+    pub const NONE: Self = Self {
+        tasks: BTreeMap::new(),
+    };
+
+    /// The codes of the registered tasks `tasks`: each task by its name,
+    /// with the custom codes that it declares ([`DeclaredErrorCodes::NONE`]
+    /// for a task that declares none). The map holds each name once.
+    pub fn new(tasks: BTreeMap<String, DeclaredErrorCodes>) -> Self {
+        Self { tasks }
+    }
+
+    /// The declared custom codes of the task `task_name`. Pure.
+    pub fn of(&self, task_name: &str) -> DeclaredCodes<'_> {
+        match self.tasks.get(task_name) {
+            Some(custom) => DeclaredCodes::Registered { custom },
+            None => DeclaredCodes::TaskNotRegistered,
+        }
+    }
+}
+
+/// The declared custom codes of one task in the calling app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredCodes<'a> {
+    /// The app registers the task. `custom` holds the custom codes that the
+    /// task declares; it is empty for a task that declares none.
+    Registered { custom: &'a DeclaredErrorCodes },
+    /// The app does not register the task, so no custom code of the task
+    /// can be checked.
+    TaskNotRegistered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +211,7 @@ pub enum RerunOutcome {
     },
     KeyConflict {
         task_id: Uuid,
-        reserved_by_task_id: Uuid,
+        owner_task_id: Uuid,
     },
     KeyReplay {
         existing_task_id: Uuid,
@@ -197,6 +244,28 @@ pub enum RerunError {
     UnknownRetentionClass(String),
     #[error("invalid rerun policy: {0}")]
     InvalidPolicy(String),
+    /// The stored retry list of the source names the custom code `code`,
+    /// and the task `task_name` of the calling app does not declare it: the
+    /// new task would not retry on the code that the list names. Nothing
+    /// was written. Not retryable: the same call meets it again until the
+    /// app declares the code.
+    #[error(
+        "rerun refused: the stored retry list of task '{task_name}' names the code '{retry_code}', \
+         which the task does not declare"
+    )]
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the
+    /// calling app does not register the task `task_name`, so the code
+    /// cannot be checked. Nothing was written. Not retryable: the same call
+    /// meets it again until the app registers the task.
+    #[error(
+        "rerun refused: the app does not register task '{task_name}', so the custom codes of \
+         its stored retry list cannot be checked"
+    )]
+    TaskNotRegistered { task_name: String },
     #[error("rerun enqueue preparation failed: {0}")]
     EnqueuePreparation(#[from] EnqueuePreparationError),
     #[error("rerun fingerprint failed: {0}")]
@@ -256,7 +325,7 @@ pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
 }
 
 /// `horsies_enqueue_task` for a rerun, in the caller's transaction (Python
-/// `rerun_task`): start `NOW`, lineage `RERUN`, send kind `FIRST`; a keyed
+/// `rerun_task_in_async`): start `NOW`, lineage `RERUN`, send kind `FIRST`; a keyed
 /// rerun claims its key inside the call. Parameters in order: task id, task
 /// name, queue name, priority, input, task options, execution, retention
 /// class key, retain rerun input, max retries, good until, sent at,
@@ -299,22 +368,25 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// Run one rerun inside the caller's transaction (Python `rerun_task`,
+/// Run one rerun inside the caller's transaction (Python `rerun_task_in_async`,
 /// `clients/python/horsies/core/history/rerun/operations.py`): the three steps of
 /// `steps` on `transaction`, so the core's own path and a client's
 /// transaction run one rerun.
 ///
 /// Statements: the source read (`horsies_rerun_source_read`); for a source
 /// with an inline input, one `horsies_enqueue_task` with the lineage `RERUN`,
-/// which claims a caller key first. Each outcome but `Enqueued` writes
+/// which claims an idempotency key first. Each outcome but `Enqueued` writes
 /// nothing. The caller's commit or rollback decides whether the claim and
 /// the row stay. `own` is the family of the calling handle: a database of
-/// another family is refused before the write.
+/// another family is refused before the write. `codes` are the declared
+/// custom codes of the calling app's tasks: the stored retry list of the
+/// source is checked against them before the write.
 ///
 /// Errors: [`RerunError::UnknownRetentionClass`],
 /// [`RerunError::ClientFamilyMismatch`], [`RerunError::UnknownStoredFamily`],
-/// [`RerunError::Idempotency`] (the
-/// caller key) and [`RerunError::Identity`] before any write;
+/// [`RerunError::Idempotency`] (the idempotency key),
+/// [`RerunError::RetryCodeNotDeclared`], [`RerunError::TaskNotRegistered`]
+/// and [`RerunError::Identity`] before any write;
 /// [`RerunError::Statement`] (a missing history reader is refused with
 /// `42883`); [`RerunError::RowDecode`] and [`RerunError::CallerRow`]. After
 /// an error the caller's transaction may hold the claim; the caller does not
@@ -322,8 +394,9 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
 pub(crate) async fn rerun_task_in_transaction(
     transaction: &mut Transaction<'_>,
     log: StatementLog,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     own: ClientFamily,
 ) -> Result<RerunOutcome, RerunError> {
     let read = rerun_read(command, policy);
@@ -332,7 +405,7 @@ pub(crate) async fn rerun_task_in_transaction(
         .query_one(&read)
         .await
         .map_err(own_transaction_error)?;
-    let write = match prepare_rerun_write(&read, &row, command, policy, own, Utc::now())? {
+    let write = match prepare_rerun_write(&read, &row, command, policy, codes, own, Utc::now())? {
         RerunPreparation::Write(write) => write,
         RerunPreparation::Refused(refusal) => return Ok(refusal.into()),
         RerunPreparation::ClassNotRegistered { class_key } => {
@@ -344,8 +417,20 @@ pub(crate) async fn rerun_task_in_transaction(
         RerunPreparation::UnknownStoredFamily(unknown) => {
             return Err(RerunError::UnknownStoredFamily(unknown));
         }
-        RerunPreparation::CallerKeyRefused(refused) => {
+        RerunPreparation::IdempotencyKeyRefused(refused) => {
             return Err(RerunError::Idempotency(refused));
+        }
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => {
+            return Err(RerunError::RetryCodeNotDeclared {
+                task_name,
+                retry_code,
+            });
+        }
+        RerunPreparation::TaskNotRegistered { task_name } => {
+            return Err(RerunError::TaskNotRegistered { task_name });
         }
         RerunPreparation::IdMintRefused(refused) => return Err(RerunError::Identity(refused)),
     };

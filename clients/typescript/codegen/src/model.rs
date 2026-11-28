@@ -1,0 +1,460 @@
+//! The adapter over the codegen model of horsies-core.
+//!
+//! This module is the only renderer code that reads the model's field
+//! names and its value types (`CoreValueType`, `CoreItemType`). It gives the
+//! rest of the renderer its own names, so a rename in the core changes this
+//! module's functions only. The renderer reads every other
+//! part of the model directly. A test module builds literal model values
+//! with the core's own field names, because a renderer test renders the
+//! core's types.
+//!
+//! The `module` field holds a short
+//! group name (`broker`, `task_send_errors`), which is also the stem of the
+//! TypeScript module. The renderer does not read the facts that only
+//! Python needs (`values`, whether enum members equal their text).
+
+use horsies_core::catalog::CodeCatalog;
+use horsies_core::error_catalog::{
+    CodeSubset, ErrorCatalog, ErrorClass, ErrorSlot, ErrorUnion, ExceptionClass, ExceptionType,
+    RecordClass, RecordField, RecordFieldType, SlotRepr, SlotType, TextNewType,
+};
+use horsies_core::events::{CodeUnion, VariantType};
+use horsies_core::manifest_schema::{
+    IntBound, ItemType as CoreItemType, ManifestField, ManifestType, TaggedVariant,
+    ValueType as CoreValueType,
+};
+
+// Code catalogs.
+
+/// The module of a code catalog: a group name such as `status`. Pure.
+pub fn catalog_module(catalog: &CodeCatalog) -> &'static str {
+    catalog.module
+}
+
+/// The type name of a code catalog, such as `TaskStatus`. Pure.
+pub fn catalog_type_name(catalog: &CodeCatalog) -> &'static str {
+    catalog.type_name
+}
+
+// Error catalogs.
+
+/// The module of an error catalog, such as `task_send_errors`. Pure.
+pub fn error_catalog_module(catalog: &ErrorCatalog) -> &'static str {
+    catalog.module
+}
+
+/// The type name of an error class, such as `TaskSendEnqueueFailed`. Pure.
+pub fn error_class_type_name(class: &ErrorClass) -> &'static str {
+    class.type_name
+}
+
+/// Whether the cause slot of an error class always holds a cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CauseSlot {
+    /// The slot holds a cause.
+    Required,
+    /// The slot holds a cause, or the value that says that no cause
+    /// exists: a check of the core found the failure.
+    Optional,
+}
+
+/// One slot of an error class, in neutral names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassSlot {
+    /// The class has one code: the catalog member named `member`.
+    CodeMember { member: &'static str },
+    /// The value holds a code of the code subset named `subset`.
+    CodeSubset { subset: &'static str },
+    /// The state of the class never clears: `retryable` is always false.
+    NeverRetryable,
+    /// The state of the class may clear: `retryable` is always true.
+    AlwaysRetryable,
+    /// A field of the value.
+    Field {
+        name: &'static str,
+        slot_type: SlotType,
+        display: SlotRepr,
+    },
+    /// The cause of the failure.
+    Cause { cause_type: CauseSlot },
+}
+
+/// The slot of the model's `slot`. Pure.
+pub fn class_slot(slot: &ErrorSlot) -> ClassSlot {
+    match *slot {
+        ErrorSlot::CodeMember { member } => ClassSlot::CodeMember { member },
+        ErrorSlot::CodeSubset { subset } => ClassSlot::CodeSubset { subset },
+        ErrorSlot::NeverRetryable => ClassSlot::NeverRetryable,
+        ErrorSlot::AlwaysRetryable => ClassSlot::AlwaysRetryable,
+        ErrorSlot::Field {
+            name,
+            slot_type,
+            repr,
+        } => ClassSlot::Field {
+            name,
+            slot_type,
+            display: repr,
+        },
+        ErrorSlot::Exception { cause_type } => ClassSlot::Cause {
+            cause_type: match cause_type {
+                ExceptionType::Exception => CauseSlot::Required,
+                ExceptionType::ExceptionOrNoCause => CauseSlot::Optional,
+            },
+        },
+    }
+}
+
+/// The slots of `class`, in the model's order. Pure.
+pub fn class_slots(class: &ErrorClass) -> Vec<ClassSlot> {
+    class.slots.iter().map(class_slot).collect()
+}
+
+/// The module of an error union: the module of its catalog. Pure.
+pub fn error_union_module(union: &ErrorUnion) -> &'static str {
+    union.module
+}
+
+/// The module of a code subset: the module of the catalog that uses it.
+/// Pure.
+pub fn code_subset_module(subset: &CodeSubset) -> &'static str {
+    subset.module
+}
+
+/// The type name of an exception class of the core, such as
+/// `OutcomeDecodeError`. Pure.
+pub fn exception_class_type_name(class: &ExceptionClass) -> &'static str {
+    class.type_name
+}
+
+/// The module of a record that a field of an error class holds. Pure.
+pub fn record_module(record: &RecordClass) -> &'static str {
+    record.module
+}
+
+/// The type name of a record, such as `TaskSendPayload`. Pure.
+pub fn record_type_name(record: &RecordClass) -> &'static str {
+    record.type_name
+}
+
+/// The type of a field of a record. Pure.
+pub fn record_field_type(field: &RecordField) -> RecordFieldType {
+    field.field_type
+}
+
+/// The module of a named text type, such as `retention_class`. Pure.
+pub fn new_type_module(new_type: &TextNewType) -> &'static str {
+    new_type.module
+}
+
+// Manifests, the workflow spec data and the schedule pattern.
+
+/// The type of an item of a list or of a value of a map: a value that is
+/// not a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemType {
+    Bool,
+    Str,
+    Int(IntBound),
+    /// A type of the same manifest module, by its type name.
+    Named(&'static str),
+    /// A time of day in whole seconds, as the text `HH:MM:SS`.
+    TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
+}
+
+/// The type of a manifest field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueType {
+    Bool,
+    Str,
+    Int(IntBound),
+    /// A type of the same manifest module, by its type name.
+    Named(&'static str),
+    /// A list of items of one type.
+    List(ItemType),
+    /// A map from text keys to values of one type.
+    Map(ItemType),
+    /// An item or no value: the text holds `null`, and the reader also
+    /// takes a missing member.
+    Optional(ItemType),
+    /// A time of day in whole seconds, as the text `HH:MM:SS`.
+    TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only.
+    Duration(IntBound),
+}
+
+/// The item type of the model's `item`. Pure.
+pub fn item_type(item: CoreItemType) -> ItemType {
+    match item {
+        CoreItemType::Bool => ItemType::Bool,
+        CoreItemType::Str => ItemType::Str,
+        CoreItemType::Int(bound) => ItemType::Int(bound),
+        CoreItemType::Named(name) => ItemType::Named(name),
+        CoreItemType::TimeOfDay => ItemType::TimeOfDay,
+        CoreItemType::Duration(bound) => ItemType::Duration(bound),
+    }
+}
+
+/// The type of a manifest field. Pure.
+pub fn field_value_type(field: &ManifestField) -> ValueType {
+    match field.value {
+        CoreValueType::Bool => ValueType::Bool,
+        CoreValueType::Str => ValueType::Str,
+        CoreValueType::Int(bound) => ValueType::Int(bound),
+        CoreValueType::Named(name) => ValueType::Named(name),
+        CoreValueType::List(item) => ValueType::List(item_type(item)),
+        CoreValueType::Map(item) => ValueType::Map(item_type(item)),
+        CoreValueType::Optional(item) => ValueType::Optional(item_type(item)),
+        CoreValueType::TimeOfDay => ValueType::TimeOfDay,
+        CoreValueType::Duration(bound) => ValueType::Duration(bound),
+    }
+}
+
+/// The type name of a manifest type: a record, a tagged union or a choice.
+/// A field names a type by this name (`ValueType::Named`). Pure.
+pub fn manifest_type_name(manifest_type: &ManifestType) -> &'static str {
+    manifest_type.type_name
+}
+
+/// The type name of one variant of a tagged manifest type. Pure.
+pub fn tagged_variant_type_name(variant: &TaggedVariant) -> &'static str {
+    variant.type_name
+}
+
+// Events.
+
+/// The name of the union of the catalogs of a code union, such as
+/// `BuiltInTaskCode`. Pure.
+pub fn code_union_alias_name(union: &CodeUnion) -> &'static str {
+    union.alias_name
+}
+
+/// The type name of one variant of a closed event type: the type name,
+/// then the variant name. Pure.
+pub fn event_variant_type_name(variant: &VariantType) -> &'static str {
+    variant.type_name
+}
+
+/// A variant of a closed event type whose interface is named `type_name`,
+/// for the samples of the renderer's tests. Pure.
+#[cfg(test)]
+pub const fn event_variant(
+    tag: &'static str,
+    type_name: &'static str,
+    fields: &'static [horsies_core::events::EventField],
+) -> VariantType {
+    VariantType {
+        tag,
+        type_name,
+        doc: "",
+        fields,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use horsies_core::catalog::{CodeEnum, CODE_CATALOGS};
+    use horsies_core::error_catalog::{
+        code_subsets, ErrorEnum, ERROR_CATALOGS, ERROR_RECORDS, ERROR_UNIONS, OUTCOME_DECODE_ERROR,
+        RETENTION_CLASS_KEY, TASK_SEND_PAYLOAD,
+    };
+    use horsies_core::events::BUILT_IN_TASK_CODES;
+    use horsies_core::manifest_schema::{MemberDefault, VariantFields};
+    use horsies_core::TaskStatus;
+
+    use super::*;
+
+    const BOUND: IntBound = IntBound {
+        name: "PRIORITY",
+        min: 1,
+        max: 100,
+    };
+
+    fn field(value: CoreValueType) -> ManifestField {
+        ManifestField {
+            name: "field",
+            doc: "",
+            value,
+            default: MemberDefault::NoDefault,
+        }
+    }
+
+    #[test]
+    fn a_code_catalog_has_its_module_and_type_name() {
+        let catalog = <TaskStatus as CodeEnum>::CATALOG;
+        assert_eq!(catalog_module(&catalog), "status");
+        assert_eq!(catalog_type_name(&catalog), "TaskStatus");
+        assert!(CODE_CATALOGS.contains(&catalog));
+    }
+
+    #[test]
+    fn an_error_catalog_and_its_classes_have_their_names() {
+        let catalog = ERROR_CATALOGS
+            .iter()
+            .find(|catalog| error_catalog_module(catalog) == "task_send_errors")
+            .expect("the send catalog is in the model");
+        assert!(catalog
+            .classes
+            .iter()
+            .any(|class| error_class_type_name(class) == "TaskSendEnqueueFailed"));
+    }
+
+    #[test]
+    fn each_error_slot_has_its_neutral_slot() {
+        let class = ErrorClass {
+            type_name: "Sample",
+            doc: "",
+            slots: &[
+                ErrorSlot::CodeMember {
+                    member: "ENQUEUE_FAILED",
+                },
+                ErrorSlot::CodeSubset {
+                    subset: "DatabaseOperationFailedCode",
+                },
+                ErrorSlot::NeverRetryable,
+                ErrorSlot::AlwaysRetryable,
+                ErrorSlot::Field {
+                    name: "message",
+                    slot_type: SlotType::Str,
+                    repr: SlotRepr::Hidden,
+                },
+                ErrorSlot::Exception {
+                    cause_type: ExceptionType::Exception,
+                },
+                ErrorSlot::Exception {
+                    cause_type: ExceptionType::ExceptionOrNoCause,
+                },
+            ],
+        };
+        assert_eq!(
+            class_slots(&class),
+            vec![
+                ClassSlot::CodeMember {
+                    member: "ENQUEUE_FAILED"
+                },
+                ClassSlot::CodeSubset {
+                    subset: "DatabaseOperationFailedCode"
+                },
+                ClassSlot::NeverRetryable,
+                ClassSlot::AlwaysRetryable,
+                ClassSlot::Field {
+                    name: "message",
+                    slot_type: SlotType::Str,
+                    display: SlotRepr::Hidden,
+                },
+                ClassSlot::Cause {
+                    cause_type: CauseSlot::Required
+                },
+                ClassSlot::Cause {
+                    cause_type: CauseSlot::Optional
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unions_subsets_records_and_new_types_have_their_modules() {
+        let broker = <horsies_core::DatabaseOperationError as ErrorEnum>::ERROR_CATALOG;
+        for union in ERROR_UNIONS {
+            assert_eq!(error_union_module(union), error_catalog_module(&broker));
+        }
+        for subset in code_subsets() {
+            assert_eq!(code_subset_module(&subset), error_catalog_module(&broker));
+        }
+        assert_eq!(record_module(&TASK_SEND_PAYLOAD), "task_send_errors");
+        assert_eq!(record_type_name(&TASK_SEND_PAYLOAD), "TaskSendPayload");
+        assert_eq!(ERROR_RECORDS, &[TASK_SEND_PAYLOAD]);
+        assert_eq!(
+            record_field_type(&TASK_SEND_PAYLOAD.fields[0]),
+            RecordFieldType::Str
+        );
+        assert_eq!(new_type_module(&RETENTION_CLASS_KEY), "retention_class");
+        assert_eq!(
+            exception_class_type_name(&OUTCOME_DECODE_ERROR),
+            "OutcomeDecodeError"
+        );
+    }
+
+    #[test]
+    fn each_manifest_value_has_its_value_type() {
+        let cases = [
+            (CoreValueType::Bool, ValueType::Bool),
+            (CoreValueType::Str, ValueType::Str),
+            (CoreValueType::Int(BOUND), ValueType::Int(BOUND)),
+            (CoreValueType::Named("Queues"), ValueType::Named("Queues")),
+            (
+                CoreValueType::List(CoreItemType::Int(BOUND)),
+                ValueType::List(ItemType::Int(BOUND)),
+            ),
+            (
+                CoreValueType::Map(CoreItemType::Named("TaskManifest")),
+                ValueType::Map(ItemType::Named("TaskManifest")),
+            ),
+            (
+                CoreValueType::Optional(CoreItemType::Str),
+                ValueType::Optional(ItemType::Str),
+            ),
+            (CoreValueType::TimeOfDay, ValueType::TimeOfDay),
+            (CoreValueType::Duration(BOUND), ValueType::Duration(BOUND)),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(field_value_type(&field(value)), expected);
+        }
+    }
+
+    #[test]
+    fn each_manifest_item_has_its_item_type() {
+        let cases = [
+            (CoreItemType::Bool, ItemType::Bool),
+            (CoreItemType::Str, ItemType::Str),
+            (CoreItemType::Int(BOUND), ItemType::Int(BOUND)),
+            (CoreItemType::Named("Weekday"), ItemType::Named("Weekday")),
+            (CoreItemType::TimeOfDay, ItemType::TimeOfDay),
+            (CoreItemType::Duration(BOUND), ItemType::Duration(BOUND)),
+        ];
+        for (item, expected) in cases {
+            assert_eq!(item_type(item), expected);
+        }
+    }
+
+    #[test]
+    fn manifest_types_and_variants_have_their_type_names() {
+        let variant = TaggedVariant {
+            type_name: "CustomQueues",
+            tag_value: "CUSTOM",
+            doc: "",
+            fields: VariantFields::Own(&[]),
+        };
+        assert_eq!(tagged_variant_type_name(&variant), "CustomQueues");
+        let manifest_type = horsies_core::manifest_schema::PRODUCER_MANIFEST
+            .type_named("ProducerManifest")
+            .expect("the root is a type of its module");
+        assert_eq!(manifest_type_name(manifest_type), "ProducerManifest");
+    }
+
+    #[test]
+    fn code_unions_and_event_variants_have_their_names() {
+        assert_eq!(
+            code_union_alias_name(&BUILT_IN_TASK_CODES),
+            "BuiltInTaskCode"
+        );
+        let variant = VariantType {
+            tag: "BuiltIn",
+            type_name: "AttemptErrorCodeBuiltIn",
+            doc: "",
+            fields: &[],
+        };
+        assert_eq!(event_variant_type_name(&variant), "AttemptErrorCodeBuiltIn");
+    }
+
+    #[test]
+    fn a_sample_event_variant_has_its_tag_and_type_name() {
+        let variant = event_variant("BuiltIn", "AttemptErrorCodeBuiltIn", &[]);
+        assert_eq!(variant.tag, "BuiltIn");
+        assert_eq!(event_variant_type_name(&variant), "AttemptErrorCodeBuiltIn");
+        assert!(variant.fields.is_empty());
+    }
+}

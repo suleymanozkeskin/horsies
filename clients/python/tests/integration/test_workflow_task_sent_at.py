@@ -1,6 +1,6 @@
 """The sent_at of a task that the workflow engine creates.
 
-``sent_at`` is the call time of ``.send()``, ``.schedule()`` or ``.start()``.
+``sent_at`` is the call time of ``.send()`` (with or without a delay) or ``.start()``.
 A task that the engine creates for a workflow node stores the ``sent_at`` of
 its workflow row: the call time of the start of that workflow. This holds for
 a root task written at the start, for a dependent promoted later, and for the
@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 from tests.integration.conftest import finish_task
@@ -34,9 +34,9 @@ START_CALL_TIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 def _task(app: Horsies, prefix: str) -> Any:
-    @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
-    def fn(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    @app.task(name=f'{prefix}_{uuid.uuid4().hex[:8]}')
+    def fn(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return fn
 
@@ -79,8 +79,8 @@ class TestEngineTaskSentAt:
         session: AsyncSession,
     ) -> None:
         fn = _task(app, 'sent_at')
-        root = TaskNode(fn=fn, kwargs={'value': 0})
-        dependent = TaskNode(fn=fn, kwargs={'value': 1}, waits_for=[root])
+        root = TaskNode(function=fn, kwargs={'value': 0})
+        dependent = TaskNode(function=fn, kwargs={'value': 1}, waits_for=[root])
         spec = app.workflow(
             f'sent_at_{uuid.uuid4().hex[:6]}', [root, dependent],
             definition_key=f'sent-at-{uuid.uuid4().hex[:6]}',
@@ -92,7 +92,7 @@ class TestEngineTaskSentAt:
         assert await _workflow_sent_at(session, workflow_id) == START_CALL_TIME
         assert await _task_sent_at(session, workflow_id) == {0: START_CALL_TIME}
 
-        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, workflow_id, 0, Ok(0))
         await session.commit()
 
         # Phase 1 moved the root's task to history; the live table holds the
@@ -116,11 +116,11 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = TaskNode(fn=child_fn, kwargs={'value': 2})
+                node = TaskNode(function=child_fn, kwargs={'value': 2})
                 return app.workflow(cls.name, [node], output=node)
 
         spec = app.workflow(
-            f'sent_at_parent_{suffix}', [SubWorkflowNode(workflow_def=SentAtChild)],
+            f'sent_at_parent_{suffix}', [SubWorkflowNode(workflow_definition=SentAtChild)],
             definition_key=f'sent-at-parent-{suffix}',
         )
         started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)
@@ -152,7 +152,7 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = TaskNode(fn=leaf_fn, kwargs={'value': 3})
+                node = TaskNode(function=leaf_fn, kwargs={'value': 3})
                 return app.workflow(cls.name, [node], output=node)
 
         class SentAtMiddle(WorkflowDefinition[int]):
@@ -162,11 +162,11 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = SubWorkflowNode(workflow_def=SentAtLeaf)
+                node = SubWorkflowNode(workflow_definition=SentAtLeaf)
                 return app.workflow(cls.name, [node], output=node)
 
         spec = app.workflow(
-            f'sent_at_top_{suffix}', [SubWorkflowNode(workflow_def=SentAtMiddle)],
+            f'sent_at_top_{suffix}', [SubWorkflowNode(workflow_definition=SentAtMiddle)],
             definition_key=f'sent-at-top-{suffix}',
         )
         started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)

@@ -4,7 +4,7 @@
 //! failures are values, not exceptions. The Python client maps them into its
 //! public result types.
 
-use horsies_core::BrokerOperationError;
+use horsies_core::DatabaseOperationError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
@@ -19,13 +19,13 @@ use crate::catalog_errors::catalog_error;
 pub struct BrokerFailure {
     /// The operation that failed, for example `ping_database`.
     pub subject: &'static str,
-    pub error: BrokerOperationError,
+    pub error: DatabaseOperationError,
 }
 
 impl BrokerFailure {
     /// The failure of the operation `subject` that a broker call, or a core
     /// constructor of the operation's code, answered with `error`. Pure.
-    pub fn of_operation_error(subject: &'static str, error: BrokerOperationError) -> Self {
+    pub fn of_operation_error(subject: &'static str, error: DatabaseOperationError) -> Self {
         Self { subject, error }
     }
 }

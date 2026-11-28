@@ -14,7 +14,7 @@ use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::TerminalizationOutcome;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
@@ -74,10 +74,10 @@ fn child_spec() -> WorkflowSpec {
             input_json: "{}".to_owned(),
             dependencies: Vec::new(),
             args_from: HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_context_from: None,
             queue: Some("default".to_owned()),
             priority: Some(100),
-            allow_failed_deps: false,
+            allow_failed_dependencies: false,
             join: JoinType::All,
             min_success: None,
             good_until: None,
@@ -86,7 +86,7 @@ fn child_spec() -> WorkflowSpec {
             task_options_json: None,
             is_subworkflow: false,
             sub_definition_key: None,
-            sub_workflow_params: SubWorkflowParams::NotGiven,
+            sub_workflow_params: SubWorkflowParameters::NotGiven,
         }],
         on_error: OnError::Fail,
         output_index: Some(0),
@@ -102,10 +102,10 @@ fn sub_workflow_node(index: usize, name: &str, definition_key: &str) -> AnyNode 
         input_json: "{}".to_owned(),
         dependencies: Vec::new(),
         args_from: HashMap::new(),
-        workflow_ctx_from: None,
+        workflow_context_from: None,
         queue: None,
         priority: None,
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         join: JoinType::All,
         min_success: None,
         good_until: None,
@@ -114,7 +114,7 @@ fn sub_workflow_node(index: usize, name: &str, definition_key: &str) -> AnyNode 
         task_options_json: None,
         is_subworkflow: true,
         sub_definition_key: Some(definition_key.to_owned()),
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
     }
 }
 
@@ -134,7 +134,7 @@ fn owed(workflow_id: Uuid, parent_depth: i32, definition_key: &str) -> OwedChild
         args_from: None,
         sub_workflow_name: Some(CHILD_NAME.to_owned()),
         sub_definition_key: Some(definition_key.to_owned()),
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
         parent_depth,
         sources: Vec::new(),
     }
@@ -490,7 +490,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     let children = TestChildSpecs::empty().with_build(CHILD_KEY, builder);
     let build: &dyn ChildSpecSource = &children;
     let mut merged = owed(workflow_id, 0, CHILD_KEY);
-    merged.sub_workflow_params = SubWorkflowParams::Given;
+    merged.sub_workflow_params = SubWorkflowParameters::Given;
     merged.args_from = Some(r#"{"value": 0}"#.to_owned());
     merged.sources = vec![ChildStartSource {
         task_index: 0,
@@ -546,7 +546,7 @@ fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_er
     let children = children_with_builder("spec_builder", builder);
     let mut refused = owed(workflow_id, 0, CHILD_KEY);
     refused.node_input = r#"{"count": "x"}"#.to_owned();
-    refused.sub_workflow_params = SubWorkflowParams::Given;
+    refused.sub_workflow_params = SubWorkflowParameters::Given;
 
     let error = failure_error(host_build(&refused, &children).expect("host build"));
 
@@ -588,7 +588,7 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
     let children = children_with_builder("build_with()", builder);
     let mut refused = owed(workflow_id, 0, CHILD_KEY);
     refused.node_input = r#"{"zeta": 1}"#.to_owned();
-    refused.sub_workflow_params = SubWorkflowParams::Given;
+    refused.sub_workflow_params = SubWorkflowParameters::Given;
     refused.args_from = Some(r#"{"alpha": 0}"#.to_owned());
     refused.sources = vec![ChildStartSource {
         task_index: 0,
@@ -995,7 +995,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
     let unloadable = sub_workflow_node(0, "child_start_missing", "tests.child_start.missing.v1");
     let mut dependent = sub_workflow_node(1, CHILD_NAME, CHILD_KEY);
     dependent.dependencies = vec![0];
-    dependent.allow_failed_deps = true;
+    dependent.allow_failed_dependencies = true;
     let spec = WorkflowSpec {
         name: "child_start_failed_root".to_owned(),
         definition_key: Some("tests.child_start.failed_root.v1".to_owned()),

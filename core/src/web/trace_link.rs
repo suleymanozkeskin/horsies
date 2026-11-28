@@ -21,7 +21,7 @@ const SCHEMES: [&str; 2] = ["https://", "http://"];
 pub enum TraceLink {
     /// The page shows the trace id as text.
     #[default]
-    NoTraceLink,
+    Text,
     /// The page links the trace id with the template.
     Template(TraceLinkTemplate),
 }
@@ -30,7 +30,7 @@ impl TraceLink {
     /// The template text that `/api/meta` reports, or `None`.
     pub fn template_text(&self) -> Option<&str> {
         match self {
-            Self::NoTraceLink => None,
+            Self::Text => None,
             Self::Template(template) => Some(template.as_str()),
         }
     }
@@ -211,6 +211,6 @@ mod tests {
     fn the_meta_text_is_the_template_or_none() {
         let template = TraceLinkTemplate::parse(GRAFANA).expect("the template is valid");
         assert_eq!(TraceLink::Template(template).template_text(), Some(GRAFANA));
-        assert_eq!(TraceLink::NoTraceLink.template_text(), None);
+        assert_eq!(TraceLink::Text.template_text(), None);
     }
 }

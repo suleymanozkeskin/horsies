@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[code_catalog(
     module = "status",
-    base = "str_enum",
+    values = "equal_text",
     terminal_states = "WORKFLOW_TERMINAL_STATES"
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -41,7 +41,7 @@ pub enum WorkflowStatus {
     /// User cancelled via WorkflowHandle.cancel().
     #[code_catalog(terminal)]
     Cancelled,
-    /// A paused workflow exceeded `paused_workflow_auto_cancel_after`.
+    /// A paused workflow exceeded `paused_workflow_cancel_after`.
     #[code_catalog(terminal)]
     Expired,
 }
@@ -100,7 +100,7 @@ impl std::fmt::Display for WorkflowStatus {
 /// State machine:
 ///   PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 ///                                         → FAILED
-///                   → SKIPPED (deps failed and allow_failed_deps=False)
+///                   → SKIPPED (deps failed and allow_failed_dependencies=False)
 #[derive(
     Debug,
     Clone,
@@ -114,11 +114,11 @@ impl std::fmt::Display for WorkflowStatus {
 )]
 #[code_catalog(
     module = "status",
-    base = "str_enum",
-    terminal_states = "WORKFLOW_TASK_TERMINAL_STATES"
+    values = "equal_text",
+    terminal_states = "WORKFLOW_NODE_TERMINAL_STATES"
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum WorkflowTaskStatus {
+pub enum WorkflowNodeStatus {
     /// Waiting for dependencies to become terminal.
     Pending,
     /// Dependencies satisfied, waiting to be enqueued.
@@ -138,7 +138,7 @@ pub enum WorkflowTaskStatus {
     Skipped,
 }
 
-impl WorkflowTaskStatus {
+impl WorkflowNodeStatus {
     /// Whether this status represents a final state (no further transitions).
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Skipped)
@@ -146,16 +146,16 @@ impl WorkflowTaskStatus {
 }
 
 /// Terminal workflow task states (no further transitions).
-pub const WORKFLOW_TASK_TERMINAL_STATES: &[WorkflowTaskStatus] = &[
-    WorkflowTaskStatus::Completed,
-    WorkflowTaskStatus::Failed,
-    WorkflowTaskStatus::Skipped,
+pub const WORKFLOW_NODE_TERMINAL_STATES: &[WorkflowNodeStatus] = &[
+    WorkflowNodeStatus::Completed,
+    WorkflowNodeStatus::Failed,
+    WorkflowNodeStatus::Skipped,
 ];
 
 /// Terminal workflow task status string values for SQL IN clauses.
 pub const WF_TASK_TERMINAL_VALUES: &[&str] = &["COMPLETED", "FAILED", "SKIPPED"];
 
-impl std::fmt::Display for WorkflowTaskStatus {
+impl std::fmt::Display for WorkflowNodeStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pending => write!(f, "PENDING"),
@@ -174,7 +174,7 @@ impl std::fmt::Display for WorkflowTaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OnError {
     /// Continue DAG resolution but mark workflow as will-fail.
-    /// Skip tasks without allow_failed_deps.
+    /// Skip tasks without allow_failed_dependencies.
     Fail,
     /// Pause workflow immediately. No new tasks enqueued until resume().
     Pause,
@@ -197,13 +197,13 @@ mod tests {
 
     #[test]
     fn workflow_task_status_terminal() {
-        assert!(WorkflowTaskStatus::Completed.is_terminal());
-        assert!(WorkflowTaskStatus::Failed.is_terminal());
-        assert!(WorkflowTaskStatus::Skipped.is_terminal());
-        assert!(!WorkflowTaskStatus::Pending.is_terminal());
-        assert!(!WorkflowTaskStatus::Ready.is_terminal());
-        assert!(!WorkflowTaskStatus::Enqueued.is_terminal());
-        assert!(!WorkflowTaskStatus::Running.is_terminal());
+        assert!(WorkflowNodeStatus::Completed.is_terminal());
+        assert!(WorkflowNodeStatus::Failed.is_terminal());
+        assert!(WorkflowNodeStatus::Skipped.is_terminal());
+        assert!(!WorkflowNodeStatus::Pending.is_terminal());
+        assert!(!WorkflowNodeStatus::Ready.is_terminal());
+        assert!(!WorkflowNodeStatus::Enqueued.is_terminal());
+        assert!(!WorkflowNodeStatus::Running.is_terminal());
     }
 
     #[test]
@@ -241,14 +241,14 @@ mod tests {
 
     #[test]
     fn workflow_task_terminal_states_constant_matches_method() {
-        for &s in WORKFLOW_TASK_TERMINAL_STATES {
+        for &s in WORKFLOW_NODE_TERMINAL_STATES {
             assert!(s.is_terminal(), "{:?} should be terminal", s);
         }
         assert_eq!(
-            WORKFLOW_TASK_TERMINAL_STATES.len(),
+            WORKFLOW_NODE_TERMINAL_STATES.len(),
             WF_TASK_TERMINAL_VALUES.len()
         );
-        for (&status, &value) in WORKFLOW_TASK_TERMINAL_STATES
+        for (&status, &value) in WORKFLOW_NODE_TERMINAL_STATES
             .iter()
             .zip(WF_TASK_TERMINAL_VALUES)
         {

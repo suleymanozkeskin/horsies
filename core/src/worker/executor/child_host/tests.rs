@@ -1,6 +1,6 @@
 //! Tests of the child host: the arguments, the exit codes, the result
 //! envelope, the run gate of thread seats, the end of a run on a seat, the
-//! poll watch, and the blocking frame read.
+//! poll watch and the host loop watch, and the blocking frame read.
 
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,20 +9,22 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use super::link::{read_frame, FrameWriter, QueuedFrames, ReadEnd};
+use super::event_loop::{HostCulprit, HostLoopWatched};
+use super::link::{read_frame, start_control_thread, FrameWriter, QueuedFrames, ReadEnd};
 use super::run::{refusal_end, result_end};
 use super::seats::{
     end_seat_run, end_seat_run_blocking, BodyStart, DeadlineFire, GateCancel, GateEnd,
     InFlightRuns, PollWatch, RunGate,
 };
 use super::*;
-use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
+use crate::process_exit::{ExitDrain, ProcessExit};
 use crate::worker::executor::protocol::{
     encode_parent_frame, ChildAfterFrame, ChildFrame, DispatchNumber, FrameReader, LoopCulprit,
     ParentFrame, RefusalReason, RssReading, RunEnd, RunRef, SeatEnd, SharedResultFrame,
-    StoredOptionsRefusal,
+    StoredOptionsRefusal, BAD_PARENT_FRAME_EXIT_CODE, LOOP_BLOCK_LIMIT, PARENT_GONE_EXIT_CODE,
 };
 
 /// The polls of a wait for a seat to free its run, and the time between two.
@@ -48,6 +50,7 @@ fn the_marker_takes_the_socket_and_the_worker_pid() {
     match child_mode(arguments(&["app", CHILD_MODE_ARGUMENT, "7", "4242"])) {
         ChildMode::Child(args) => {
             assert_eq!(args.socket_fd, 7);
+            assert_eq!(args.socket_fd(), 7);
             assert_eq!(args.worker_pid.get(), 4242);
         }
         other => panic!("expected child mode, got {other:?}"),
@@ -88,13 +91,13 @@ fn child_mode_arguments_that_cannot_be_used_are_named() {
 
 #[test]
 fn every_end_has_its_protocol_code() {
-    assert_eq!(ChildHostExit::Stopped.code(), 0);
-    assert_eq!(ChildHostExit::ParentGone.code(), 71);
-    assert_eq!(ChildHostExit::BadParentFrame.code(), 72);
-    assert_eq!(ChildHostExit::BadArguments.code(), 73);
-    assert_eq!(ChildHostExit::BootFailed.code(), 75);
-    assert_eq!(ChildHostExit::ProtocolMismatch.code(), 78);
-    assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
+    assert_eq!(ChildHostExit::Stopped.exit_code(), 0);
+    assert_eq!(ChildHostExit::ParentGone.exit_code(), 71);
+    assert_eq!(ChildHostExit::BadParentFrame.exit_code(), 72);
+    assert_eq!(ChildHostExit::BadArguments.exit_code(), 73);
+    assert_eq!(ChildHostExit::BootFailed.exit_code(), 75);
+    assert_eq!(ChildHostExit::ProtocolMismatch.exit_code(), 78);
+    assert_eq!(ChildHostExit::ChildHookFailed.exit_code(), 173);
 }
 
 fn envelope_of(end: RunEnd) -> String {
@@ -128,7 +131,7 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
 
 #[test]
 fn a_task_error_becomes_the_error_envelope() {
-    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
+    let error = TaskError::built_in(OperationalCode::TaskException, "boom");
     let envelope = envelope_of(result_end(TaskResult::Err(error)));
     assert!(
         envelope.starts_with(r#"{"__h_task_result__":true,"ok":null,"err":{"#),
@@ -139,9 +142,12 @@ fn a_task_error_becomes_the_error_envelope() {
 
 #[test]
 fn a_refusal_fails_the_task_with_its_reason() {
-    let envelope = envelope_of(refusal_end(&StoredOptionsRefusal::TimeoutValueInvalid(
-        RefusalReason::cut("stored timeout_ms is below 1000 ms"),
-    )));
+    let envelope = envelope_of(refusal_end(
+        "app.tasks.work",
+        &StoredOptionsRefusal::TimeoutValueInvalid(RefusalReason::cut(
+            "stored timeout_ms is below 1000 ms",
+        )),
+    ));
     assert!(
         envelope.contains("WORKER_SERIALIZATION_ERROR"),
         "{envelope}"
@@ -354,6 +360,64 @@ fn a_blocked_poll_of_work_of_a_run_is_reported_with_its_run() {
     assert!(watch.blocked_reports().is_empty(), "reported once");
 }
 
+/// The frame of a blocked host loop names the run of the held task while
+/// that run is in flight; a held task with no run in flight, and samples
+/// that named no run, give no named culprit.
+#[test]
+fn a_host_loop_frame_names_the_run_in_flight_of_the_held_task() {
+    let watch = PollWatch::without_thread(Instant::now());
+    let run = RunRef {
+        dispatch: DispatchNumber::new(5).unwrap(),
+        task_id: Uuid::from_u128(5),
+    };
+    let _polls = watch.register(run);
+    let culprit_of = |culprit: HostCulprit| match watch.host_loop_frame(5_000, culprit) {
+        ChildFrame::LoopBlocked(blocked) => {
+            assert_eq!(blocked.blocked_ms, 5_000);
+            assert_eq!(
+                blocked.location.as_str(),
+                "the event loop of the host program"
+            );
+            blocked.culprit
+        }
+        other => panic!("expected a loop report, got {other:?}"),
+    };
+    assert_eq!(
+        culprit_of(HostCulprit::Run(run.task_id)),
+        LoopCulprit::Run(run)
+    );
+    assert_eq!(
+        culprit_of(HostCulprit::Run(Uuid::from_u128(6))),
+        LoopCulprit::Unknown
+    );
+    assert_eq!(culprit_of(HostCulprit::Unknown), LoopCulprit::Unknown);
+}
+
+/// The watch of the main thread of a shared thread child: a host loop that
+/// stops turning gives one `loop_blocked` frame after the block limit, with
+/// no named culprit (the main thread holds no run), and no second frame.
+#[tokio::test]
+async fn the_main_thread_watch_reports_a_host_loop_that_stops_turning() {
+    let (writer, mut queued) = FrameWriter::without_thread(16);
+    let host = Arc::new(HostLoop::new());
+    let started = Instant::now();
+    let _watch = PollWatch::start(writer, HostLoopWatched::Watched(Arc::clone(&host)))
+        .expect("the watch thread starts");
+    let frame = tokio::time::timeout(Duration::from_secs(10), queued.take())
+        .await
+        .expect("one frame within 10 s");
+    assert!(started.elapsed() >= LOOP_BLOCK_LIMIT);
+    match frame {
+        ChildFrame::LoopBlocked(blocked) => {
+            assert_eq!(blocked.culprit, LoopCulprit::Unknown);
+            assert!(blocked.blocked_ms >= 5_000, "{}", blocked.blocked_ms);
+        }
+        other => panic!("expected a loop report, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(queued.count(), 0, "one report for the block");
+}
+
 #[test]
 fn a_blocking_read_takes_one_frame_and_names_the_eof() {
     let bytes = encode_parent_frame(&ParentFrame::Stop).unwrap().to_bytes();
@@ -383,4 +447,104 @@ fn the_parent_waits_past_the_end_of_left_work_and_the_marker() {
         crate::worker::executor::slots::isolated::ISOLATED_LEFTOVER_BACKSTOP > child_end,
         "{child_end:?}"
     );
+}
+
+/// Set only in the process that
+/// [`an_immediate_child_exit_gives_its_code_while_a_body_thread_is_blocked`]
+/// starts; names the case.
+const CHILD_EXIT_PROBE_ENV: &str = "HORSIES_TEST_CHILD_EXIT_PROBE";
+const CHILD_EXIT_PROBE_TEST: &str = "worker::executor::child_host::tests::child_exit_probe";
+/// The longest run of a child exit probe.
+const CHILD_EXIT_PROBE_WAIT: Duration = Duration::from_secs(20);
+
+/// The body of the child exit probe: a body thread that is blocked, and
+/// the one thread of a child whose exit is immediate that the case tests.
+/// The cases `eof` and `bad-frame` start the control thread only, and end
+/// the parent's side or write a bad frame. The case `write-fails` starts the
+/// writer thread only, ends the parent's side, and queues a frame: no
+/// control thread reads the end, so only a writer that ends the process at
+/// the failed write gives the code. Without the variable this test returns
+/// at once.
+#[test]
+fn child_exit_probe() {
+    let Some(case) = std::env::var_os(CHILD_EXIT_PROBE_ENV) else {
+        return;
+    };
+    let exit = ProcessExit::Immediate(ExitDrain::OutputOnly);
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    let _blocked_body = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(600)));
+    let start_control = |socket| {
+        start_control_thread(socket, FrameReader::new(), 4, exit.clone())
+            .expect("the control thread starts")
+    };
+    match case.to_str() {
+        Some("eof") => {
+            let _frames = start_control(ours);
+            drop(theirs);
+        }
+        Some("bad-frame") => {
+            use std::io::Write;
+            let _frames = start_control(ours);
+            let mut parent = &theirs;
+            parent
+                .write_all(&[0xff; 64])
+                .expect("the parent side writes");
+        }
+        Some("write-fails") => {
+            let writer =
+                FrameWriter::start(ours, 4, exit.clone()).expect("the writer thread starts");
+            drop(theirs);
+            writer.send_blocking(ChildFrame::CancelFired(RunRef {
+                dispatch: DispatchNumber::new(1).unwrap(),
+                task_id: Uuid::nil(),
+            }));
+        }
+        other => panic!("unknown probe case {other:?}"),
+    }
+    std::thread::sleep(CHILD_EXIT_PROBE_WAIT);
+    panic!("the child did not end the process");
+}
+
+/// The exit code of the child exit probe for `case`.
+fn child_exit_code(case: &str) -> Option<i32> {
+    std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            CHILD_EXIT_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_EXIT_PROBE_ENV, case)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the probe process runs")
+        .code()
+}
+
+/// A child whose exit is immediate: at the end of its parent (EOF on the
+/// control thread) it exits 71 while a body thread is blocked.
+#[test]
+fn an_immediate_child_exit_gives_its_code_while_a_body_thread_is_blocked() {
+    assert_eq!(child_exit_code("eof"), Some(PARENT_GONE_EXIT_CODE));
+    assert_eq!(PARENT_GONE_EXIT_CODE, 71);
+}
+
+/// A bad parent frame ends the child through its immediate exit with the
+/// bad-frame code.
+#[test]
+fn an_immediate_child_exit_at_a_bad_parent_frame_gives_the_bad_frame_code() {
+    assert_eq!(
+        child_exit_code("bad-frame"),
+        Some(BAD_PARENT_FRAME_EXIT_CODE)
+    );
+}
+
+/// A frame that the writer thread cannot write (the parent is gone) ends
+/// the child through its immediate exit with 71. The probe starts no control
+/// thread, so a writer that does not end the process at the failed write
+/// leaves the probe to its own panic (code 101), and this test fails.
+#[test]
+fn an_immediate_child_exit_at_a_failed_write_gives_71() {
+    assert_eq!(child_exit_code("write-fails"), Some(PARENT_GONE_EXIT_CODE));
 }

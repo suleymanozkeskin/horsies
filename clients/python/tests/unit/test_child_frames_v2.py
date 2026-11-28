@@ -481,7 +481,13 @@ _VALID_KINDS: Final[list[dict[str, object]]] = [
         'executor_threads': 4,
         'task_send_pool': _TASK_SEND_POOL,
     },
-    {'kind': 'shared_thread', 'seats': 4, 'pool': _POOL, 'task_send_pool': _TASK_SEND_POOL},
+    {
+        'kind': 'shared_thread',
+        'seats': 4,
+        'pool': _POOL,
+        'task_send_pool': _TASK_SEND_POOL,
+        'recycle_above': {'kind': 'off'},
+    },
 ]
 _ASYNC_KIND: Final = _VALID_KINDS[1]
 _THREAD_KIND: Final = _VALID_KINDS[2]
@@ -498,6 +504,7 @@ class TestThreadFrames:
             'seats': MAX_SEATS_PER_SHARED_THREAD_CHILD,
             'pool': pool(min_size=1, max_size=8, check=False),
             'task_send_pool': 5,
+            'recycle_above': {'kind': 'at_mb', 'mb': 512},
         }
         match _init_kind(kind):
             case core.InitFrame(child_kind=core.SharedThreadChildKind() as decoded):

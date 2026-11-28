@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -19,14 +20,15 @@ use super::metadata::{
     check_protocol, no_body, parse_metadata, text_body, time_text, Fields, MalformedFrame,
     ProtocolCheck, ProtocolMismatch,
 };
-use super::values::{DispatchNumber, RefusalReason, TaskInputText};
+use super::values::{DispatchNumber, MemoryLimit, RefusalReason, TaskInputText};
 use super::PROTOCOL_VERSION;
 use crate::broker::OrphanSelfHeal;
 use crate::core::codec::check_json_text;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
-use crate::core::config::{PostgresConfig, PostgresConfigError};
+use crate::core::config::{PostgresConfig, PostgresConfigError, SessionDatabase};
 use crate::core::mask_database_url;
-use crate::events::{AttemptNumber, QueueName, RunTrace, TraceCarrierText};
+use crate::core::task::fencing::TaskAttempt;
+use crate::events::{AttemptNumber, MaxRetries, QueueName, RunTrace, TraceCarrierText};
 
 /// The database URL a child connects with. It holds a password, so it
 /// travels in the init frame (never in argv, which `ps` shows) and its debug
@@ -118,8 +120,8 @@ pub struct PythonProgram {
 pub enum ChildProgram {
     /// The Python child program; it imports the app.
     Python(PythonProgram),
-    /// The worker binary in child mode; its tasks are compiled in.
-    Rust,
+    /// The app program started again in child mode; its tasks are compiled in.
+    Host,
 }
 
 /// The connection pool of a child: `min_size` connections stay open,
@@ -150,11 +152,16 @@ pub struct SharedAsyncChild {
 }
 
 /// A child that runs up to `seats` blocking tasks at once, each on a thread.
+///
+/// `recycle_above` is the resident-memory limit of the child (the
+/// `recycle.above` of the profile). The parent recycles the child at it. A
+/// host that runs its own seats reads it from the start facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedThreadChild {
     pub seats: ThreadSeats,
     pub pool: ChildPool,
     pub task_send_pool: TaskSendPool,
+    pub recycle_above: MemoryLimit,
 }
 
 /// A child that runs the event handlers of the app. It runs no task: it
@@ -206,21 +213,24 @@ impl ChildConnection {
     /// Errors: the [`PostgresConfigError`] of [`PostgresConfig::validate`].
     pub fn of_config(config: &PostgresConfig) -> Result<Self, PostgresConfigError> {
         config.validate()?;
-        let server_sessions = match (
-            config.pgbouncer_transaction_mode,
-            &config.session_database_url,
-        ) {
+        let server_sessions = match (config.pgbouncer_transaction_mode, &config.session_database) {
             (false, _) => ServerSessions::Kept,
-            (true, Some(session_url)) => ServerSessions::PgBouncerTransactionMode {
-                session_database_url: DatabaseUrl::new(session_url.clone()),
+            (true, SessionDatabase::Separate { url }) => ServerSessions::PgBouncerTransactionMode {
+                session_database_url: DatabaseUrl::new(url.clone()),
             },
-            (true, None) => unreachable!(
-                "PostgresConfig::validate refuses transaction mode without a session URL"
+            (true, SessionDatabase::SameAsDatabaseUrl) => unreachable!(
+                "PostgresConfig::validate refuses transaction mode without a separate session database"
             ),
         };
         Ok(Self {
-            tcp_keepalives: config.tcp_keepalives,
-            tcp_user_timeout: config.tcp_user_timeout,
+            tcp_keepalives: config
+                .tcp_keepalives
+                .checked()
+                .expect("PostgresConfig::validate checked the keepalive values"),
+            tcp_user_timeout: config
+                .tcp_user_timeout
+                .checked()
+                .expect("PostgresConfig::validate checked the TCP user timeout"),
             server_sessions,
         })
     }
@@ -305,6 +315,8 @@ pub struct RunFrame {
     pub queue_name: QueueName,
     /// The attempt that the claim runs: the retry count of the row plus 1.
     pub attempt: AttemptNumber,
+    /// The retry budget of the task row (`max_retries`), from 0.
+    pub max_retries: MaxRetries,
     /// The worker that holds the claim. The child fences each write of the
     /// attempt on it and on `claimed_at`.
     pub worker_id: String,
@@ -312,13 +324,21 @@ pub struct RunFrame {
     pub claimed_at: DateTime<Utc>,
     /// Whether the stop before start of a workflow task cancels the task
     /// when no node links it live (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: IsolatedWork,
     /// The trace carrier that the send stored on the task row. The child
     /// extracts it with the app's propagator.
     pub trace: RunTrace,
     pub input: TaskInputText,
+}
+
+impl RunFrame {
+    /// The attempt facts of the run: its task id, attempt number and retry
+    /// budget.
+    pub(crate) fn task_attempt(&self) -> TaskAttempt {
+        TaskAttempt::new(self.task_id, self.attempt, self.max_retries)
+    }
 }
 
 /// Run one task on a free seat of a shared child. Every frame of the child
@@ -332,6 +352,8 @@ pub struct SharedRunFrame {
     pub queue_name: QueueName,
     /// As [`RunFrame::attempt`].
     pub attempt: AttemptNumber,
+    /// As [`RunFrame::max_retries`].
+    pub max_retries: MaxRetries,
     pub worker_id: String,
     pub claimed_at: DateTime<Utc>,
     /// As [`RunFrame::orphan_self_heal`].
@@ -416,6 +438,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         queue_name: &'a str,
         attempt: u32,
+        max_retries: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -428,6 +451,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         queue_name: &'a str,
         attempt: u32,
+        max_retries: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -458,7 +482,7 @@ enum ProgramWire<'a> {
         parent_sys_path: &'a [String],
         parent_argv: &'a [String],
     },
-    Rust,
+    Host,
 }
 
 #[derive(Serialize)]
@@ -505,6 +529,13 @@ struct PoolWire {
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+enum MemoryLimitWire {
+    Off,
+    AtMb { mb: u64 },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 enum ChildKindWire {
     Isolated {
         pool: PoolWire,
@@ -520,6 +551,7 @@ enum ChildKindWire {
         seats: u64,
         pool: PoolWire,
         task_send_pool: u64,
+        recycle_above: MemoryLimitWire,
     },
     Handler {
         task_send_pool: u64,
@@ -580,7 +612,7 @@ fn program_wire(program: &ChildProgram) -> ProgramWire<'_> {
             parent_sys_path: &python.parent_sys_path,
             parent_argv: &python.parent_argv,
         },
-        ChildProgram::Rust => ProgramWire::Rust,
+        ChildProgram::Host => ProgramWire::Host,
     }
 }
 
@@ -623,6 +655,13 @@ fn pool_wire(pool: ChildPool) -> PoolWire {
     }
 }
 
+fn memory_limit_wire(limit: MemoryLimit) -> MemoryLimitWire {
+    match limit {
+        MemoryLimit::Off => MemoryLimitWire::Off,
+        MemoryLimit::AtMb(mb) => MemoryLimitWire::AtMb { mb: mb.get() },
+    }
+}
+
 fn child_kind_wire(kind: ChildKind) -> ChildKindWire {
     match kind {
         ChildKind::Isolated(child) => ChildKindWire::Isolated {
@@ -639,6 +678,7 @@ fn child_kind_wire(kind: ChildKind) -> ChildKindWire {
             seats: child.seats.get(),
             pool: pool_wire(child.pool),
             task_send_pool: child.task_send_pool.get(),
+            recycle_above: memory_limit_wire(child.recycle_above),
         },
         ChildKind::Handler(child) => ChildKindWire::Handler {
             task_send_pool: child.task_send_pool.get(),
@@ -728,6 +768,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 queue_name: run.queue_name.as_str(),
                 attempt: run.attempt.get(),
+                max_retries: run.max_retries.get(),
                 worker_id: &run.worker_id,
                 // The claim generation keeps every sub-second digit, so the
                 // child fences on the exact value.
@@ -745,6 +786,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 queue_name: run.queue_name.as_str(),
                 attempt: run.attempt.get(),
+                max_retries: run.max_retries.get(),
                 worker_id: &run.worker_id,
                 claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
@@ -867,9 +909,9 @@ fn decode_program(program: &Fields<'_>) -> Result<ChildProgram, MalformedFrame> 
                 parent_argv: program.text_list("parent_argv")?,
             }))
         }
-        "rust" => {
+        "host" => {
             program.only(&["kind"])?;
-            Ok(ChildProgram::Rust)
+            Ok(ChildProgram::Host)
         }
         other => Err(program.unknown_kind(other)),
     }
@@ -963,6 +1005,21 @@ fn decode_pool(pool: &Fields<'_>) -> Result<ChildPool, MalformedFrame> {
     })
 }
 
+fn decode_memory_limit(limit: &Fields<'_>) -> Result<MemoryLimit, MalformedFrame> {
+    match limit.kind()? {
+        "off" => {
+            limit.only(&["kind"])?;
+            Ok(MemoryLimit::Off)
+        }
+        "at_mb" => {
+            limit.only(&["kind", "mb"])?;
+            let mb: NonZeroU32 = config_count(limit, "mb")?;
+            Ok(MemoryLimit::AtMb(NonZeroU64::from(mb)))
+        }
+        other => Err(limit.unknown_kind(other)),
+    }
+}
+
 fn decode_child_kind(kind: &Fields<'_>) -> Result<ChildKind, MalformedFrame> {
     match kind.kind()? {
         "isolated" => {
@@ -988,11 +1045,12 @@ fn decode_child_kind(kind: &Fields<'_>) -> Result<ChildKind, MalformedFrame> {
             }))
         }
         "shared_thread" => {
-            kind.only(&["kind", "seats", "pool", "task_send_pool"])?;
+            kind.only(&["kind", "seats", "pool", "task_send_pool", "recycle_above"])?;
             Ok(ChildKind::SharedThread(SharedThreadChild {
                 seats: kind.bounded_count("seats")?,
                 pool: decode_pool(&kind.object("pool")?)?,
                 task_send_pool: kind.bounded_count("task_send_pool")?,
+                recycle_above: decode_memory_limit(&kind.object("recycle_above")?)?,
             }))
         }
         "handler" => {
@@ -1096,6 +1154,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         "task_name",
         "queue_name",
         "attempt",
+        "max_retries",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1107,6 +1166,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         task_name: fields.owned_text("task_name")?,
         queue_name: fields.bounded_text("queue_name")?,
         attempt: config_count(fields, "attempt")?,
+        max_retries: config_count(fields, "max_retries")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
@@ -1124,6 +1184,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "task_name",
         "queue_name",
         "attempt",
+        "max_retries",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1136,6 +1197,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         task_name: fields.owned_text("task_name")?,
         queue_name: fields.bounded_text("queue_name")?,
         attempt: config_count(fields, "attempt")?,
+        max_retries: config_count(fields, "max_retries")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),

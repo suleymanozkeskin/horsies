@@ -5,7 +5,7 @@
 //! checked against the app's registered definitions and converted to the
 //! core's spec data, the connect of the handle, then the core's start of
 //! the tree, whose sub-workflow roots build from the app's registry. With
-//! `AppConfig.resend_on_transient_err` the core runs a retryable failure of
+//! `AppConfig.resend_on_transient_error` the core runs a retryable failure of
 //! the start again, with the same workflow id and start time, up to 3
 //! times. In a worker child the start goes through the child's producer
 //! handle, as a send does. With the feature `otel`, the start runs inside
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, ChildProducer, ClientSpec, ClientStartError, ClientStartOutcome,
@@ -35,7 +35,7 @@ use crate::{Horsies, HorsiesError};
 /// its resend setting. Clones share one app.
 #[derive(Clone)]
 pub(crate) struct WorkflowStarter {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     workflows: Arc<WorkflowRegistry>,
 }
 
@@ -58,7 +58,7 @@ impl WorkflowStarter {
 
     /// The handle that a start and its reads go through: the child's
     /// producer handle in a worker child, else the app's.
-    fn operation_handle(&self) -> Arc<CoreHandle> {
+    fn operation_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),
@@ -162,7 +162,7 @@ impl WorkflowStarter {
                 workflow_id,
                 Utc::now(),
                 trace,
-                self.workflows.config().resend_on_transient_err,
+                self.workflows.config().resend_on_transient_error,
                 &*self.workflows,
             )
             .await;
@@ -180,7 +180,7 @@ impl WorkflowStarter {
     }
 
     /// Start `spec` again after `error`, with its workflow id (Python
-    /// `retry_start`).
+    /// `resend_start`).
     ///
     /// Errors: `VALIDATION_FAILED` for an error that is not
     /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT` (`WORKFLOW_ID_CONFLICT` and
@@ -189,7 +189,7 @@ impl WorkflowStarter {
     /// [`Self::start`]. The retry builds the spec again, so a spec that
     /// changed since the failed start meets the stored command as another
     /// command.
-    pub(crate) async fn retry_start<T: 'static>(
+    pub(crate) async fn resend_start<T: 'static>(
         &self,
         spec: &WorkflowSpec,
         error: &WorkflowStartError,
@@ -246,9 +246,9 @@ mod tests {
     use horsies_core::{BrokerError, ChildSpecUnavailable, WorkflowStartErrorCode};
 
     use super::*;
-    use crate::workflow::node::tests::task_node;
+    use crate::workflow::node::tests::{add, task_node, test_builder};
     use crate::workflow::{
-        SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+        SubWorkflowParameters, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
     };
     use crate::{AppConfig, HorsiesError};
 
@@ -257,7 +257,7 @@ mod tests {
 
     impl WorkflowDefinition for LateChild {
         type Output = u32;
-        type Params = ();
+        type Parameters = ();
 
         fn name() -> &'static str {
             "late_child"
@@ -267,9 +267,11 @@ mod tests {
             "tests.start.late_child.v1"
         }
 
-        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let tick = builder.task(task_node::<u32, ()>("tick"));
-            Ok(WorkflowDefConfig::new().output(tick))
+        fn define(
+            builder: &mut WorkflowSpecBuilder,
+        ) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+            let tick = add(builder, task_node::<u32, ()>("tick"));
+            Ok(WorkflowDefinitionConfig::new().output(tick))
         }
     }
 
@@ -278,15 +280,15 @@ mod tests {
     /// made passes the check of the start. No I/O.
     #[test]
     fn a_starter_made_before_a_registration_checks_against_it() {
-        let mut app = Horsies::new(AppConfig::for_database_url(
+        let mut app = Horsies::new(AppConfig::from_database_url(
             "postgresql://localhost/horsies",
         ))
         .unwrap();
         let starter = WorkflowStarter::of(&app);
         let clone = starter.clone();
-        let mut builder = WorkflowSpecBuilder::new("late_parent");
+        let mut builder = test_builder("late_parent");
         builder.definition_key("tests.start.late_parent.v1");
-        builder.sub_workflow(LateChild::node(SubWorkflowParams::NotGiven).unwrap());
+        builder.sub_workflow(LateChild::node(SubWorkflowParameters::NotGiven).unwrap());
         let spec = builder.build().unwrap();
         assert!(
             starter.workflows.prepare(&spec).is_err(),

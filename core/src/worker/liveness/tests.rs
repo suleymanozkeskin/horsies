@@ -25,7 +25,7 @@ use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::db::{ConnectError, ConnectFailure, CorePool, MaskedUrl, DEFAULT_SOCKET_SETTINGS};
-use crate::events::{Event, RecoveryAction};
+use crate::events::{AnyEvent, RecoveryAction};
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
@@ -167,7 +167,7 @@ fn the_watch_fails_closed_only_past_the_bound_with_a_task_at_risk() {
 fn the_rule_of_the_config_follows_stale_running_recovery() {
     let on = RecoveryConfig::default();
     let off = RecoveryConfig {
-        auto_fail_stale_running: false,
+        fail_stale_running: false,
         ..RecoveryConfig::default()
     };
 
@@ -281,9 +281,15 @@ async fn liveness_probe_process() {
         probe_interval: PROBE_INTERVAL,
         recovery: LivenessRecovery::FailClosed,
     };
-    let started = start_liveness_lock(Arc::new(test_plan(&url)), &worker_id, probe_rule, live)
-        .await
-        .expect("the probe takes its lock");
+    let started = start_liveness_lock(
+        Arc::new(test_plan(&url)),
+        &worker_id,
+        probe_rule,
+        live,
+        ProcessExit::Standard,
+    )
+    .await
+    .expect("the probe takes its lock");
     tokio::time::sleep(PROBE_LIFETIME).await;
     // Reached only when no test ended the process.
     started.running.stop().await;
@@ -597,13 +603,13 @@ async fn told_pass(
 /// The recovery events of `task_ids` in `events`: the task id, the action,
 /// the task name and the queue of each, sorted by task id.
 fn recoveries_of(
-    events: Vec<Event>,
+    events: Vec<AnyEvent>,
     task_ids: &[Uuid],
 ) -> Vec<(Uuid, RecoveryAction, String, String)> {
     let mut told: Vec<(Uuid, RecoveryAction, String, String)> = events
         .into_iter()
         .filter_map(|event| match event {
-            Event::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
+            AnyEvent::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
                 recovered.task_id,
                 recovered.action,
                 recovered.task_name.as_str().to_owned(),
@@ -846,6 +852,7 @@ async fn a_stopped_liveness_lock_is_released() {
         &worker_id,
         rule(LivenessRecovery::LogOnly),
         LiveDispatches::default(),
+        ProcessExit::Standard,
     )
     .await
     .expect("the lock is taken");
@@ -1069,4 +1076,55 @@ async fn a_lock_held_by_a_session_whose_write_did_not_end_confirms_nothing() {
          passed its bound"
     );
     assert_eq!(generation_at_exit, Some(held_generation));
+}
+
+/// Set only in the process that
+/// [`an_immediate_fail_closed_exit_of_the_liveness_watch_gives_79`] starts.
+const EXIT_PROBE_ENV: &str = "HORSIES_TEST_LIVENESS_EXIT_PROBE";
+const EXIT_PROBE_TEST: &str = "worker::liveness::tests::immediate_exit_probe";
+
+/// The body of the exit probe: the watchdog of a worker whose exit is
+/// immediate fails closed on a thread of its own while the main thread
+/// spins. No child holds a task. Without the probe variable this test
+/// returns at once.
+#[test]
+fn immediate_exit_probe() {
+    let Some(_probe) = std::env::var_os(EXIT_PROBE_ENV) else {
+        return;
+    };
+    let context = WatchContext {
+        shared: SharedConfirmation::new(Instant::now()),
+        rule: rule(LivenessRecovery::FailClosed),
+        live: LiveDispatches::default(),
+        exit: ProcessExit::Immediate(crate::process_exit::ExitDrain::OutputOnly),
+    };
+    let _watch = std::thread::spawn(move || {
+        fail_closed(&context, Duration::from_secs(60), &Hold::Confirmed);
+    });
+    let until = Instant::now() + WAIT;
+    while Instant::now() < until {
+        std::hint::spin_loop();
+    }
+    panic!("the watchdog did not end the process");
+}
+
+/// A worker whose exit is immediate: the liveness watchdog that fails
+/// closed ends the process with 79 (`LIVENESS_LOCK_LOST_EXIT_CODE`), from
+/// its own thread, while the main thread is busy.
+#[test]
+fn an_immediate_fail_closed_exit_of_the_liveness_watch_gives_79() {
+    let status = Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            EXIT_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(EXIT_PROBE_ENV, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("the probe process runs");
+    assert_eq!(status.code(), Some(LIVENESS_LOCK_LOST_EXIT_CODE));
+    assert_eq!(LIVENESS_LOCK_LOST_EXIT_CODE, 79);
 }

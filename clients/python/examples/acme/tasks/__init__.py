@@ -1,9 +1,9 @@
 # clients/python/examples/acme/tasks/__init__.py
 """Acme Clothing's task modules.
 
-Every task here is keyword-only, returns `TaskResult`, and reports database
-trouble through one shared conversion so the dashboard shows the failing
-operation instead of a stack trace.
+Every task here is keyword-only, returns `Result[T, TaskError]`, and reports
+database trouble through one shared conversion so the dashboard shows the
+failing operation instead of a stack trace.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from ..store import StoreError
 def store_failure(error: StoreError) -> TaskError:
     """Convert a database failure into a task error the dashboard can read."""
     return TaskError(
-        error_code=STORE_UNAVAILABLE,
+        code=STORE_UNAVAILABLE,
         message=f'{error.operation} failed: {error.message}',
         data={'operation': error.operation},
     )

@@ -1,0 +1,24 @@
+{
+  "name": "horsies-typescript-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "bridge",
+    "eslint-plugin",
+    "examples",
+    "examples/showcase",
+    "horsies",
+    "tests"
+  ],
+  "scripts": {
+    "lint": "oxlint --deny-warnings eslint-plugin examples horsies tests",
+    "typecheck-speed": "bun tests/typecheck-speed/cli.ts check",
+    "typecheck-speed:record": "bun tests/typecheck-speed/cli.ts record"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.93.0",
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
+    "oxlint": "1.93.0"
+  }
+}

@@ -9,9 +9,9 @@ import {
 
 describe('visibleCategories', () => {
   it('lists the categories that carry tasks, in display order', () => {
-    expect(visibleCategories({ DOMAIN: 3, OPERATIONAL: 1 }, [])).toEqual([
+    expect(visibleCategories({ CUSTOM: 3, OPERATIONAL: 1 }, [])).toEqual([
       'OPERATIONAL',
-      'DOMAIN',
+      'CUSTOM',
     ]);
   });
 
@@ -40,7 +40,7 @@ describe('TaxonomyStrip', () => {
   it('renders a chip per category with its count', () => {
     render(
       <TaxonomyStrip
-        totals={{ OPERATIONAL: 4, DOMAIN: 2 }}
+        totals={{ OPERATIONAL: 4, CUSTOM: 2 }}
         active={[]}
         onToggle={vi.fn()}
       />
@@ -56,7 +56,7 @@ describe('TaxonomyStrip', () => {
     const onToggle = vi.fn();
     render(
       <TaxonomyStrip
-        totals={{ OPERATIONAL: 4, DOMAIN: 2 }}
+        totals={{ OPERATIONAL: 4, CUSTOM: 2 }}
         active={[]}
         onToggle={onToggle}
       />
@@ -70,14 +70,14 @@ describe('TaxonomyStrip', () => {
   it('marks engaged chips pressed and leaves the others unpressed', () => {
     render(
       <TaxonomyStrip
-        totals={{ OPERATIONAL: 4, DOMAIN: 2 }}
-        active={['DOMAIN']}
+        totals={{ OPERATIONAL: 4, CUSTOM: 2 }}
+        active={['CUSTOM']}
         onToggle={vi.fn()}
       />
     );
 
     expect(
-      screen.getByRole('button', { name: /Domain/ }).getAttribute('aria-pressed')
+      screen.getByRole('button', { name: /Custom/ }).getAttribute('aria-pressed')
     ).toBe('true');
     expect(
       screen
@@ -90,15 +90,15 @@ describe('TaxonomyStrip', () => {
     const onToggle = vi.fn();
     render(
       <TaxonomyStrip
-        totals={{ DOMAIN: 2 }}
-        active={['DOMAIN']}
+        totals={{ CUSTOM: 2 }}
+        active={['CUSTOM']}
         onToggle={onToggle}
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Domain/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Custom/ }));
 
-    expect(onToggle).toHaveBeenCalledWith('DOMAIN');
+    expect(onToggle).toHaveBeenCalledWith('CUSTOM');
   });
 
   it('stays rendered while engaged even when its totals go empty', () => {

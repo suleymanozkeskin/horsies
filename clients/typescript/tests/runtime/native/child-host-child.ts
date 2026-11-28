@@ -1,0 +1,125 @@
+// A child process of `child.test.ts`: it runs one case of the child host entry and writes its outcome as one line on
+// stdout. A process serves as a child once, so each case runs in its own process.
+
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
+import type { ChildHostPlan } from "../../../horsies/src/native/child/addon.ts";
+import { loopTurned, serveChild } from "../../../horsies/src/native/child/child.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
+import { manifestJson } from "./manifest.ts";
+import { coreCall, panicForwarder, readCore, startTaskChild, untilCoreStopped } from "./task-child-rule.ts";
+
+// The addon of these cases is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
+
+/** A descriptor number that no test process holds open. */
+const CLOSED_DESCRIPTOR = "987";
+
+/** A pid that is never the parent of a test process. */
+const NOT_THE_PARENT = "1";
+
+/** How long the `backstop` case blocks its JavaScript thread: past the backstop of the host thread (2 s). */
+const BLOCK_PAST_BACKSTOP_MS = 6_000;
+
+/** A plan with no task and no hook, for the arguments `processArguments`. */
+function plan(processArguments: readonly string[]): ChildHostPlan {
+  return {
+    tasks: [],
+    startHooks: [],
+    producerManifestJson: manifestJson("postgresql://horsies@127.0.0.1:55432/horsies", false),
+    hostname: "test-host",
+    bodyFacts: "NO_SCOPE",
+    exitFlushBoundMs: 1000,
+    processArguments: [...processArguments],
+  };
+}
+
+const noPost = (): void => undefined;
+const noHook = (): void => undefined;
+
+/** Serve with `processArguments` and give the end as `<exit> <code>`. */
+async function served(processArguments: readonly string[]): Promise<string> {
+  const end = await serveChild(plan(processArguments), noPost, noHook);
+
+  return `${end.exit} ${String(end.code)}`;
+}
+
+/** Block the JavaScript thread for `milliseconds`. */
+function block(milliseconds: number): void {
+  const until = Date.now() + milliseconds;
+
+  while (Date.now() < until) {
+    // The host thread's backstop ends the process while this loop holds the thread.
+  }
+}
+
+/**
+ * A background panic after the first read of the core by the child host: the core stops, and the next core call
+ * ends the child with 80 and its stderr line.
+ */
+async function panicAfterRead(): Promise<string> {
+  startTaskChild();
+
+  const first = readCore();
+
+  if (first !== "running") {
+    return `the first read gave ${first}`;
+  }
+
+  panicForwarder();
+
+  const read = await untilCoreStopped();
+
+  return read === "stopped" ? coreCall() : "the core did not stop";
+}
+
+async function runCase(name: string | undefined): Promise<string> {
+  switch (name) {
+    case "socket-not-open":
+      return served(["--horsies-child", CLOSED_DESCRIPTOR, String(process.ppid)]);
+    case "parent-gone":
+      return served(["--horsies-child", "3", NOT_THE_PARENT]);
+    case "backstop": {
+      const line = await served(["--horsies-child", CLOSED_DESCRIPTOR, String(process.ppid)]);
+
+      process.stdout.write(`${line}\n`);
+      block(BLOCK_PAST_BACKSTOP_MS);
+
+      return "the backstop did not end the process";
+    }
+
+    case "second-serve": {
+      await served(["--horsies-child", CLOSED_DESCRIPTOR, String(process.ppid)]);
+
+      try {
+        await served(["--horsies-child", CLOSED_DESCRIPTOR, String(process.ppid)]);
+
+        return "no throw";
+      } catch (cause) {
+        return cause instanceof ClientDefect ? "ClientDefect" : String(cause);
+      }
+    }
+
+    case "marks-before-serve":
+      try {
+        loopTurned();
+
+        return "no throw";
+      } catch (cause) {
+        return cause instanceof ClientDefect ? "ClientDefect" : String(cause);
+      }
+
+    case "task-child-panic-after-read":
+      return panicAfterRead();
+
+    case undefined:
+    default:
+      return `unknown case ${String(name)}`;
+  }
+}
+
+const outcome = await runCase(process.argv[2]);
+
+process.stdout.write(`${outcome}\n`);
+
+// The JavaScript exit comes before the backstop of a served child.
+process.exit(0);

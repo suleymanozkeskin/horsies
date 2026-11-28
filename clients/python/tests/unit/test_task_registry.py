@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from horsies.core.errors import ErrorCode
+from horsies.core.errors import HorsiesErrorCode
 from horsies.core.registry.tasks import (
     DuplicateTaskNameError,
     NotRegistered,
@@ -24,7 +24,7 @@ class TestNotRegistered:
     def test_error_code(self) -> None:
         """Error code should be TASK_NOT_REGISTERED."""
         err = NotRegistered('my_task')
-        assert err.code == ErrorCode.TASK_NOT_REGISTERED
+        assert err.code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
     def test_task_name_attribute(self) -> None:
         """task_name attribute should be set on the exception."""
@@ -49,7 +49,7 @@ class TestDuplicateTaskNameError:
     def test_error_code(self) -> None:
         """Error code should be TASK_DUPLICATE_NAME."""
         err = DuplicateTaskNameError('dup_task')
-        assert err.code == ErrorCode.TASK_DUPLICATE_NAME
+        assert err.code == HorsiesErrorCode.TASK_DUPLICATE_NAME
 
     def test_task_name_attribute(self) -> None:
         """task_name attribute should be set on the exception."""
@@ -82,7 +82,7 @@ class TestTaskRegistryGetItem:
         reg: TaskRegistry[str] = TaskRegistry()
         with pytest.raises(NotRegistered) as exc_info:
             _ = reg['nonexistent']
-        assert exc_info.value.code == ErrorCode.TASK_NOT_REGISTERED
+        assert exc_info.value.code == HorsiesErrorCode.TASK_NOT_REGISTERED
         assert exc_info.value.task_name == 'nonexistent'
 
 
@@ -102,7 +102,7 @@ class TestTaskRegistrySetItem:
         reg['task_a'] = 'handler_a'
         with pytest.raises(DuplicateTaskNameError) as exc_info:
             reg['task_a'] = 'handler_b'
-        assert exc_info.value.code == ErrorCode.TASK_DUPLICATE_NAME
+        assert exc_info.value.code == HorsiesErrorCode.TASK_DUPLICATE_NAME
         assert 'direct assignment' in str(exc_info.value)
 
 
@@ -158,7 +158,7 @@ class TestTaskRegistryRegister:
         reg.register('handler_v1', name='my_task', source='mod_a.py:10')
         with pytest.raises(DuplicateTaskNameError) as exc_info:
             reg.register('handler_v2', name='my_task', source='mod_b.py:20')
-        assert exc_info.value.code == ErrorCode.TASK_DUPLICATE_NAME
+        assert exc_info.value.code == HorsiesErrorCode.TASK_DUPLICATE_NAME
 
     def test_duplicate_no_source_on_existing_raises(self) -> None:
         """Duplicate name when existing has no source should raise (can't confirm re-import)."""

@@ -12,12 +12,12 @@ pub const HISTORY_WINDOW_MAX: Duration = Duration::days(30);
 /// it again. A read takes the history rows whose `terminal_at` is in
 /// `[lower, upper)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HistoryWindow {
+pub struct MonitoringWindow {
     lower: DateTime<Utc>,
     upper: DateTime<Utc>,
 }
 
-impl HistoryWindow {
+impl MonitoringWindow {
     pub fn new(lower: DateTime<Utc>, upper: DateTime<Utc>) -> Result<Self, HistoryError> {
         if lower >= upper {
             return Err(HistoryError::contract(

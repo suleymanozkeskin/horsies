@@ -38,7 +38,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
-use crate::events::{Event, RecoveryAction};
+use crate::events::{AnyEvent, RecoveryAction};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::registry::SampleValue;
 use crate::telemetry::worker::WorkerTelemetry;
@@ -140,11 +140,11 @@ fn crash_retry_options() -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": 1,
-            "intervals": [5],
+            "intervals_seconds": [5],
             "backoff_strategy": "fixed",
             "jitter": false,
             "max_delay_seconds": null,
-            "auto_retry_for": ["WORKER_CRASHED"]
+            "retry_for": ["WORKER_CRASHED"]
         }
     })
     .to_string()
@@ -725,13 +725,13 @@ mod finish {
 /// the task name and the queue of each, sorted by task id. The events of
 /// other rows are left out.
 fn recoveries_of(
-    events: Vec<Event>,
+    events: Vec<AnyEvent>,
     task_ids: &[Uuid],
 ) -> Vec<(Uuid, RecoveryAction, String, String)> {
     let mut told: Vec<(Uuid, RecoveryAction, String, String)> = events
         .into_iter()
         .filter_map(|event| match event {
-            Event::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
+            AnyEvent::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
                 recovered.task_id,
                 recovered.action,
                 recovered.task_name.as_str().to_owned(),

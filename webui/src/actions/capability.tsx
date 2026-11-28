@@ -45,7 +45,7 @@ export function useCapability(): Capability {
 export function deriveCanAct(meta: MonitoringMeta, revoked: boolean): boolean {
   return (
     !revoked &&
-    meta.actions_enabled &&
+    meta.actions === 'ENABLED' &&
     meta.can_act &&
     meta.schema_compatible &&
     meta.actions_disabled_reason === null

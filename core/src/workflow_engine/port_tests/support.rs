@@ -29,11 +29,11 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::handle_types::HandleResult;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{
     AnyNode, OnError, OutcomeCode, RetrievalCode, SubWorkflowSummary, TaskError, TaskResult,
-    WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
+    WorkflowNodeStatus, WorkflowSpec, WorkflowStatus,
 };
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::TestChildSpecs;
@@ -51,8 +51,8 @@ use crate::workflow_engine::engine::{
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::resume_client_workflow;
 use crate::workflow_engine::query::{
-    wait_workflow_end, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult,
-    TerminalErrorStatus, WorkflowEnd, WorkflowWait,
+    wait_workflow_end, NodeResultRead, NodeResultsRead, NodesRead, StoredNode, TerminalErrorStatus,
+    WorkflowEnd, WorkflowWait,
 };
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
 use crate::workflow_engine::steps::{advance_parents, OwedParentAdvances, ParentAdvance};
@@ -359,7 +359,7 @@ pub(super) enum NodeKind {
     SubWorkflow {
         definition_key: String,
         child: Option<Uuid>,
-        params: SubWorkflowParams,
+        params: SubWorkflowParameters,
     },
 }
 
@@ -375,8 +375,8 @@ pub(super) struct NodeSeed {
     pub(super) input: String,
     pub(super) dependencies: Vec<i32>,
     pub(super) args_from: Option<serde_json::Value>,
-    pub(super) workflow_ctx_from: Option<Vec<String>>,
-    pub(super) allow_failed_deps: bool,
+    pub(super) workflow_context_from: Option<Vec<String>>,
+    pub(super) allow_failed_dependencies: bool,
     pub(super) join: JoinType,
     pub(super) min_success: Option<i32>,
     pub(super) task_options: Option<String>,
@@ -400,8 +400,8 @@ impl NodeSeed {
             input: "{}".to_owned(),
             dependencies: Vec::new(),
             args_from: None,
-            workflow_ctx_from: None,
-            allow_failed_deps: false,
+            workflow_context_from: None,
+            allow_failed_dependencies: false,
             join: JoinType::All,
             min_success: None,
             task_options: None,
@@ -432,7 +432,7 @@ impl NodeSeed {
             kind: NodeKind::SubWorkflow {
                 definition_key: definition_key.to_owned(),
                 child,
-                params: SubWorkflowParams::NotGiven,
+                params: SubWorkflowParameters::NotGiven,
             },
             ..Self::task(workflow_id, task_index, status)
         }
@@ -459,8 +459,8 @@ impl NodeSeed {
         self
     }
 
-    pub(super) fn allow_failed_deps(mut self) -> Self {
-        self.allow_failed_deps = true;
+    pub(super) fn allow_failed_dependencies(mut self) -> Self {
+        self.allow_failed_dependencies = true;
         self
     }
 
@@ -534,8 +534,8 @@ pub(super) async fn seed_node(pool: &TestPool, seed: &NodeSeed) -> Uuid {
     .bind(&seed.input)
     .bind(&seed.dependencies)
     .bind(&seed.args_from)
-    .bind(&seed.workflow_ctx_from)
-    .bind(seed.allow_failed_deps)
+    .bind(&seed.workflow_context_from)
+    .bind(seed.allow_failed_dependencies)
     .bind(seed.join.to_string())
     .bind(min_success)
     .bind(&seed.task_options)
@@ -670,10 +670,10 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         input_json: "{}".to_owned(),
         dependencies: Vec::new(),
         args_from: std::collections::HashMap::new(),
-        workflow_ctx_from: None,
+        workflow_context_from: None,
         queue: Some(PORT_QUEUE.to_owned()),
         priority: Some(100),
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         join: JoinType::All,
         min_success: None,
         good_until: None,
@@ -682,7 +682,7 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         task_options_json: None,
         is_subworkflow: false,
         sub_definition_key: None,
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
     }
 }
 
@@ -852,14 +852,11 @@ impl WorkflowOps {
         }
     }
 
-    /// The stored result of the node `node_id`
-    /// (`PostgresBroker::workflow_node_result`).
-    pub(super) async fn node_result(
-        &self,
-        node_id: &str,
-    ) -> HandleResult<Option<StoredNodeResult>> {
+    /// The result of the node `node_id`
+    /// (`PostgresBroker::workflow_node_result_read`).
+    pub(super) async fn node_result(&self, node_id: &str) -> HandleResult<NodeResultRead> {
         self.broker
-            .workflow_node_result(self.workflow_id, node_id)
+            .workflow_node_result_read(self.workflow_id, node_id)
             .await
     }
 
@@ -870,12 +867,12 @@ impl WorkflowOps {
         &self,
         node_id: &str,
     ) -> HandleResult<TaskResult<V>> {
-        let stored = self.node_result(node_id).await?.unwrap_or_else(|| {
+        let NodeResultRead::Stored(stored) = self.node_result(node_id).await? else {
             panic!(
                 "node {node_id} of workflow {} stores no result",
                 self.workflow_id
             )
-        });
+        };
         Ok(match stored_result(&stored.result) {
             TaskResult::Ok(value) => {
                 TaskResult::Ok(serde_json::from_value(value).unwrap_or_else(|error| {
@@ -918,8 +915,7 @@ impl WorkflowOps {
 }
 
 /// The result of the end of `workflow_id`, read as a client reads it: the
-/// stored result envelope of a COMPLETED workflow (of an outputless one, the
-/// `results_by_id` map of its envelope, each entry an envelope); the stored
+/// stored result envelope of a COMPLETED workflow; the stored
 /// error of a FAILED, CANCELLED or EXPIRED workflow, or the code of its
 /// status when it stores none; the code of a PAUSED, missing or unfinished
 /// workflow. The read is the clients'; the tests read the core's stored
@@ -929,22 +925,22 @@ pub(super) fn result_of_end(
     wait: WorkflowWait,
 ) -> TaskResult<serde_json::Value> {
     match wait {
-        WorkflowWait::NotFound => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::NotFound => TaskResult::Err(TaskError::built_in(
             RetrievalCode::WorkflowNotFound,
             format!("workflow {workflow_id} not found"),
         )),
-        WorkflowWait::TimedOut => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::TimedOut => TaskResult::Err(TaskError::built_in(
             RetrievalCode::WaitTimeout,
             format!("workflow {workflow_id} is not terminal"),
         )),
-        WorkflowWait::Ended(WorkflowEnd::Paused) => TaskResult::Err(TaskError::builtin(
+        WorkflowWait::Ended(WorkflowEnd::Paused) => TaskResult::Err(TaskError::built_in(
             OutcomeCode::WorkflowPaused,
             "workflow is paused awaiting intervention",
         )),
         WorkflowWait::Ended(WorkflowEnd::Ended {
             status,
             error: None,
-        }) => TaskResult::Err(TaskError::builtin(
+        }) => TaskResult::Err(TaskError::built_in(
             ended_code(status),
             format!("workflow {workflow_id} is {}", status.wire_value()),
         )),
@@ -954,7 +950,7 @@ pub(super) fn result_of_end(
         WorkflowWait::Ended(WorkflowEnd::Completed { result }) => {
             let text = result
                 .unwrap_or_else(|| panic!("COMPLETED workflow {workflow_id} stores no result"));
-            completed_result(&text)
+            stored_result(&text)
         }
     }
 }
@@ -968,24 +964,13 @@ fn ended_code(status: TerminalErrorStatus) -> OutcomeCode {
     }
 }
 
-/// The stored result of a COMPLETED workflow: its envelope, or for an
-/// outputless workflow the `results_by_id` map of its envelope.
-fn completed_result(text: &str) -> TaskResult<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("the stored result is not JSON: {error}: {text}"));
-    match value.get("__h_outputless_terminals__") {
-        Some(serde_json::Value::Bool(true)) => TaskResult::Ok(value["ok"]["results_by_id"].clone()),
-        Some(_) | None => stored_result(text),
-    }
-}
-
 /// One stored node, read as a client reads it (`tasks()`): its status, its
 /// result envelope and its sub-workflow summary.
 #[derive(Debug)]
 pub(super) struct NodeInfo {
     pub(super) index: i32,
     pub(super) name: String,
-    pub(super) status: WorkflowTaskStatus,
+    pub(super) status: WorkflowNodeStatus,
     pub(super) result: Option<TaskResult<serde_json::Value>>,
     pub(super) started_at: Option<DateTime<Utc>>,
     pub(super) completed_at: Option<DateTime<Utc>>,
@@ -1204,9 +1189,9 @@ async fn drive_parent_advances(
         });
 }
 
-/// A failure outcome with a user error code.
+/// A failure outcome with a custom error code.
 pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::new(error_code, message).expect("a user error code"))
+    TaskResult::Err(TaskError::custom(error_code, message).expect("a custom error code"))
 }
 
 /// A success outcome with `value`.

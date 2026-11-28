@@ -1136,8 +1136,8 @@ mod tests {
         let task_id = Uuid::new_v4();
         seed_workflow_task(&pool, workflow_id, task_id, false).await;
         let failure = serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(
-            crate::core::TaskError::new("NODE_FAILURE", "the node failed")
-                .expect("a user error code"),
+            crate::core::TaskError::custom("NODE_FAILURE", "the node failed")
+                .expect("a custom error code"),
         ))
         .expect("encode the failure result");
         let outcomes = terminal_writes::fail_running_task(
@@ -1843,11 +1843,12 @@ mod tests {
     #[tokio::test]
     async fn recovery_writes_the_stored_error_of_a_failed_task_into_its_node() {
         let pool = crate::test_support::migrated_pool().await;
-        let with_message =
-            crate::core::TaskError::new("NODE_FAILURE", "the real one").expect("a user error code");
+        let with_message = crate::core::TaskError::custom("NODE_FAILURE", "the real one")
+            .expect("a custom error code");
         let without_message = crate::core::TaskError {
             message: None,
-            ..crate::core::TaskError::new("RATE_LIMITED", "dropped").expect("a user error code")
+            ..crate::core::TaskError::custom("RATE_LIMITED", "dropped")
+                .expect("a custom error code")
         };
         for (code, message, error) in [
             ("NODE_FAILURE", Some("the real one"), with_message),

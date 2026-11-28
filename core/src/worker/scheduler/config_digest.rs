@@ -1,14 +1,20 @@
 //! The config digest of a schedule: the SHA-256 of its pattern and timezone
-//! in the text that Python's `Scheduler._compute_config_hash` hashes.
+//! in the digest text, which `horsies_schedule_state.config_hash` stores.
 //!
 //! The start write compares the stored digest with this one; a different
 //! digest moves `next_run_at` to the next slot after the database time. So
-//! the text is a contract, and Python is its specification:
-//! `dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone})`.
+//! the text is a contract. It is the core's own text, in the form that
+//! Python 0.8 hashed
+//! (`dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone})`),
+//! so a stored digest stays valid. It does not follow the names of the
+//! pattern text of the scheduler manifest (`kind`, `weekdays`,
+//! `day_of_month`, `every`):
 //! - Keys in this order: `pattern`, then `timezone`.
-//! - The pattern holds every field of its Python model in declaration order,
-//!   `type` first. An unset optional field is `null` (an interval of 60
-//!   seconds is `{"type":"interval","seconds":60,"minutes":null,"hours":null,"days":null}`).
+//! - The pattern holds its fields in the 0.8 order, the tag `type` first:
+//!   `days` of a weekly pattern, `day` of a monthly pattern, and the four
+//!   parts of an interval. The interval length is written largest unit
+//!   first, with `null` for a zero part: 90 seconds is
+//!   `{"type":"interval","seconds":30,"minutes":1,"hours":null,"days":null}`.
 //! - A time of day is `HH:MM:SS`, with `.ffffff` (six digits of
 //!   microseconds) when the microsecond is not zero. Python holds no finer
 //!   part: nanoseconds below one microsecond are not in the text, and a
@@ -17,10 +23,13 @@
 //!   (`ensure_ascii=False`). Python and `serde_json` escape the same
 //!   characters in a string.
 
+use std::time::Duration;
+
 use chrono::{NaiveTime, Timelike};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::core::config::schedule::{SECONDS_PER_DAY, SECONDS_PER_HOUR, SECONDS_PER_MINUTE};
 use crate::core::config::{CronSchedule, SchedulePattern, Weekday};
 
 /// The digest text of one schedule.
@@ -30,15 +39,17 @@ struct DigestText<'a> {
     timezone: &'a str,
 }
 
-/// A pattern in the form of Python's `model_dump(mode='json')`.
+/// A pattern in the form of Python 0.8's `model_dump(mode='json')`. The
+/// tag and the member names are this text's own: they do not follow the
+/// pattern types.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PatternText<'a> {
     Interval {
-        seconds: Option<u32>,
-        minutes: Option<u32>,
-        hours: Option<u32>,
-        days: Option<u32>,
+        seconds: Option<u64>,
+        minutes: Option<u64>,
+        hours: Option<u64>,
+        days: Option<u64>,
     },
     Hourly {
         minute: u32,
@@ -64,12 +75,7 @@ enum PatternText<'a> {
 impl<'a> PatternText<'a> {
     fn of(pattern: &'a SchedulePattern) -> Self {
         match pattern {
-            SchedulePattern::Interval(interval) => Self::Interval {
-                seconds: interval.seconds,
-                minutes: interval.minutes,
-                hours: interval.hours,
-                days: interval.days,
-            },
+            SchedulePattern::Interval(interval) => interval_digest_parts(interval.every),
             SchedulePattern::Hourly(hourly) => Self::Hourly {
                 minute: hourly.minute,
                 second: hourly.second,
@@ -78,15 +84,34 @@ impl<'a> PatternText<'a> {
                 time: python_time_text(daily.time),
             },
             SchedulePattern::Weekly(weekly) => Self::Weekly {
-                days: &weekly.days,
+                days: &weekly.weekdays,
                 time: python_time_text(weekly.time),
             },
             SchedulePattern::Monthly(monthly) => Self::Monthly {
-                day: monthly.day,
+                day: monthly.day_of_month,
                 time: python_time_text(monthly.time),
             },
             SchedulePattern::Cron(cron) => Self::Cron(cron),
         }
+    }
+}
+
+/// The four parts of `every`: days, hours, minutes and seconds, the largest
+/// unit first, `None` for a zero part. One length has one form. A fraction
+/// of a second is not in the text: the config refuses it. Pure.
+fn interval_digest_parts<'a>(every: Duration) -> PatternText<'a> {
+    let seconds = every.as_secs();
+    let part = |value: u64| -> Option<u64> {
+        match value {
+            0 => None,
+            _ => Some(value),
+        }
+    };
+    PatternText::Interval {
+        seconds: part(seconds % SECONDS_PER_MINUTE),
+        minutes: part(seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE),
+        hours: part(seconds % SECONDS_PER_DAY / SECONDS_PER_HOUR),
+        days: part(seconds / SECONDS_PER_DAY),
     }
 }
 
@@ -132,13 +157,15 @@ mod tests {
     use super::*;
     use crate::core::config::IntervalSchedule;
 
-    /// One row of `config_digest_vectors.json`: the text that Python's
-    /// `_compute_config_hash` hashes for one pattern and timezone, its
-    /// SHA-256 (lowercase hex), and what the schedule config does with the
-    /// pattern.
+    /// One row of `config_digest_vectors.json`: the pattern text of the
+    /// scheduler manifest and its timezone, the digest text of the pattern,
+    /// its SHA-256 (lowercase hex), and what the schedule config does with
+    /// the pattern.
     #[derive(serde::Deserialize)]
-    struct PythonVector {
+    struct DigestVector {
         name: String,
+        pattern_json: String,
+        timezone: String,
         text: String,
         digest_hex: String,
         config_check: ConfigCheck,
@@ -157,45 +184,31 @@ mod tests {
 
     /// The vector table.
     #[derive(serde::Deserialize)]
-    struct PythonVectors {
-        vectors: Vec<PythonVector>,
-    }
-
-    /// The pattern and the timezone of a digest text, read by serde alone:
-    /// a time of day with a fraction of a second reads too.
-    #[derive(serde::Deserialize)]
-    struct DigestInput {
-        pattern: SchedulePattern,
-        timezone: String,
+    struct DigestVectors {
+        vectors: Vec<DigestVector>,
     }
 
     /// Every pattern kind, every cron term kind and every day selector
     /// (`config_digest_vectors.json`; the Python test
     /// `clients/python/tests/unit/test_schedule_config_digest_vectors.py` pins the same
     /// table).
-    fn python_vectors() -> Vec<PythonVector> {
-        let table: PythonVectors = serde_json::from_str(include_str!("config_digest_vectors.json"))
+    fn digest_vectors() -> Vec<DigestVector> {
+        let table: DigestVectors = serde_json::from_str(include_str!("config_digest_vectors.json"))
             .expect("the vector table parses");
         assert!(!table.vectors.is_empty(), "the vector table has rows");
         table.vectors
     }
 
-    fn digest_input(vector: &PythonVector) -> DigestInput {
-        serde_json::from_str(&vector.text)
-            .unwrap_or_else(|error| panic!("{}: the digest text parses: {error}", vector.name))
+    /// The pattern of a vector, read by serde alone: a time of day with a
+    /// fraction of a second reads too.
+    fn vector_pattern(vector: &DigestVector) -> SchedulePattern {
+        serde_json::from_str(&vector.pattern_json)
+            .unwrap_or_else(|error| panic!("{}: the pattern text parses: {error}", vector.name))
     }
 
-    fn interval(
-        seconds: Option<u32>,
-        minutes: Option<u32>,
-        hours: Option<u32>,
-        days: Option<u32>,
-    ) -> SchedulePattern {
+    fn every_seconds(seconds: u64) -> SchedulePattern {
         SchedulePattern::Interval(IntervalSchedule {
-            seconds,
-            minutes,
-            hours,
-            days,
+            every: Duration::from_secs(seconds),
         })
     }
 
@@ -204,11 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_text_is_the_text_python_hashes_for_every_pattern_kind() {
-        for vector in python_vectors() {
-            let input = digest_input(&vector);
+    fn the_digest_text_of_each_vector_pattern_is_its_stored_text() {
+        for vector in digest_vectors() {
             assert_eq!(
-                config_digest_text(&input.pattern, &input.timezone),
+                config_digest_text(&vector_pattern(&vector), &vector.timezone),
                 vector.text,
                 "{}",
                 vector.name
@@ -217,11 +229,10 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_is_the_digest_python_stores_for_every_pattern_kind() {
-        for vector in python_vectors() {
-            let input = digest_input(&vector);
+    fn the_digest_of_each_vector_pattern_is_its_stored_digest() {
+        for vector in digest_vectors() {
             assert_eq!(
-                hex(&config_digest(&input.pattern, &input.timezone)),
+                hex(&config_digest(&vector_pattern(&vector), &vector.timezone)),
                 vector.digest_hex,
                 "{}",
                 vector.name
@@ -229,37 +240,24 @@ mod tests {
         }
     }
 
-    /// The pattern text inside a vector's digest text: the text of Python's
-    /// `pattern.model_dump(mode='json')`, the form of a scheduler manifest's
-    /// `pattern_json`.
-    fn pattern_text(vector: &PythonVector) -> &str {
-        let start = "{\"pattern\":".len();
-        let end = vector
-            .text
-            .rfind(",\"timezone\":")
-            .expect("a digest text ends with the timezone");
-        &vector.text[start..end]
-    }
-
     /// A manifest pattern text that Python wrote parses to the pattern whose
-    /// digest is the digest that Python stores, for every pattern kind. A
-    /// text whose time of day has a fraction of a second is refused.
+    /// digest is the stored digest, for every pattern kind. A text whose
+    /// time of day has a fraction of a second is refused.
     #[test]
-    fn the_pattern_text_of_each_vector_parses_to_a_pattern_with_the_python_digest() {
-        let vectors = python_vectors();
+    fn the_pattern_text_of_each_vector_parses_to_a_pattern_with_the_stored_digest() {
+        let vectors = digest_vectors();
         for vector in &vectors {
-            let text = pattern_text(vector);
-            let timezone = digest_input(vector).timezone;
-            let parsed = crate::scheduler_manifest::PatternJson::try_from(text.to_owned());
+            let parsed =
+                crate::scheduler_manifest::PatternJson::try_from(vector.pattern_json.clone());
             match (vector.config_check, parsed) {
                 (ConfigCheck::Accepted, Ok(parsed)) => assert_eq!(
-                    hex(&config_digest(parsed.pattern(), &timezone)),
+                    hex(&config_digest(parsed.pattern(), &vector.timezone)),
                     vector.digest_hex,
                     "{}",
                     vector.name
                 ),
                 (ConfigCheck::Accepted, Err(refused)) => {
-                    panic!("{}: {text} parses: {refused}", vector.name)
+                    panic!("{}: {} parses: {refused}", vector.name, vector.pattern_json)
                 }
                 (ConfigCheck::RefusedTimeWithFraction, Err(refused)) => assert!(
                     refused.contains("time must be a whole second"),
@@ -267,14 +265,50 @@ mod tests {
                     vector.name
                 ),
                 (ConfigCheck::RefusedTimeWithFraction, Ok(_parsed)) => panic!(
-                    "{}: {text} has a fraction of a second and parses",
-                    vector.name
+                    "{}: {} has a fraction of a second and parses",
+                    vector.name, vector.pattern_json
                 ),
             }
         }
         let checks: Vec<ConfigCheck> = vectors.iter().map(|vector| vector.config_check).collect();
         assert!(checks.contains(&ConfigCheck::Accepted));
         assert!(checks.contains(&ConfigCheck::RefusedTimeWithFraction));
+    }
+
+    /// The digest text writes an interval in one form: the largest unit
+    /// first, `null` for a zero part. Two splits of one length that 0.8
+    /// hashed apart (`seconds=90` and `minutes=1, seconds=30`) are one
+    /// length now, with one digest text.
+    #[test]
+    fn the_digest_text_writes_an_interval_largest_unit_first() {
+        let texts = [
+            (
+                30,
+                r#"{"type":"interval","seconds":30,"minutes":null,"hours":null,"days":null}"#,
+            ),
+            (
+                90,
+                r#"{"type":"interval","seconds":30,"minutes":1,"hours":null,"days":null}"#,
+            ),
+            (
+                90_061,
+                r#"{"type":"interval","seconds":1,"minutes":1,"hours":1,"days":1}"#,
+            ),
+            (
+                86_400,
+                r#"{"type":"interval","seconds":null,"minutes":null,"hours":null,"days":1}"#,
+            ),
+            (
+                31_536_000,
+                r#"{"type":"interval","seconds":null,"minutes":null,"hours":null,"days":365}"#,
+            ),
+        ];
+        for (seconds, pattern) in texts {
+            assert_eq!(
+                config_digest_text(&every_seconds(seconds), "UTC"),
+                format!(r#"{{"pattern":{pattern},"timezone":"UTC"}}"#),
+            );
+        }
     }
 
     #[test]
@@ -288,7 +322,7 @@ mod tests {
 
     #[test]
     fn text_outside_ascii_is_written_as_it_is() {
-        let pattern = interval(Some(1), None, None, None);
+        let pattern = every_seconds(1);
         assert_eq!(
             config_digest_text(&pattern, "Zone/Ä"),
             r#"{"pattern":{"type":"interval","seconds":1,"minutes":null,"hours":null,"days":null},"timezone":"Zone/Ä"}"#

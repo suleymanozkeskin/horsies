@@ -1,14 +1,190 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use chrono::{NaiveTime, Timelike};
 use chrono_tz::Tz;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::no_member_after_the_tag;
 use crate::core::codec::{JsonText, JsonTextRefused};
+use crate::manifest_schema::IntBound;
+
+// The bounds of the pattern fields. The rules of each pattern (`validate`)
+// and the schema of the pattern text (`manifest_schema::SCHEDULE_PATTERN`)
+// read them.
+
+/// The length of an interval, in whole seconds: 1 second to 365 days.
+pub const INTERVAL_EVERY_SECONDS: IntBound = IntBound {
+    name: "INTERVAL_EVERY_SECONDS",
+    min: 1,
+    max: 365 * SECONDS_PER_DAY,
+};
+
+/// The seconds of one day.
+pub(crate) const SECONDS_PER_DAY: u64 = 86_400;
+
+/// The seconds of one hour.
+pub(crate) const SECONDS_PER_HOUR: u64 = 3_600;
+
+/// The seconds of one minute.
+pub(crate) const SECONDS_PER_MINUTE: u64 = 60;
+
+/// The minute of an hourly pattern.
+pub const HOURLY_MINUTE: IntBound = IntBound {
+    name: "HOURLY_MINUTE",
+    min: 0,
+    max: 59,
+};
+
+/// The second of an hourly pattern.
+pub const HOURLY_SECOND: IntBound = IntBound {
+    name: "HOURLY_SECOND",
+    min: 0,
+    max: 59,
+};
+
+/// The day of the month of a monthly pattern.
+pub const MONTHLY_DAY: IntBound = IntBound {
+    name: "MONTHLY_DAY",
+    min: 1,
+    max: 31,
+};
+
+/// The minute field of a cron pattern.
+pub const CRON_MINUTE: IntBound = IntBound {
+    name: "CRON_MINUTE",
+    min: 0,
+    max: 59,
+};
+
+/// The hour field of a cron pattern.
+pub const CRON_HOUR: IntBound = IntBound {
+    name: "CRON_HOUR",
+    min: 0,
+    max: 23,
+};
+
+/// The day-of-month field of a cron pattern.
+pub const CRON_DAY_OF_MONTH: IntBound = IntBound {
+    name: "CRON_DAY_OF_MONTH",
+    min: 1,
+    max: 31,
+};
+
+/// The numeric fields of a cron pattern, which [`CronNumericTerm`] serves.
+const CRON_NUMERIC_FIELDS: [IntBound; 3] = [CRON_MINUTE, CRON_HOUR, CRON_DAY_OF_MONTH];
+
+/// The first ordinal of the month field of a cron pattern (January).
+pub const CRON_MONTH_FIRST: i64 = 1;
+
+/// The last ordinal of the month field of a cron pattern (December).
+pub const CRON_MONTH_LAST: i64 = 12;
+
+/// The first ordinal of the day-of-week field of a cron pattern (Monday).
+pub const CRON_WEEKDAY_FIRST: i64 = 0;
+
+/// The last ordinal of the day-of-week field of a cron pattern (Sunday).
+pub const CRON_WEEKDAY_LAST: i64 = 6;
+
+/// The ordinal span of the month field of a cron pattern.
+pub const CRON_MONTH_SPAN: i64 = CRON_MONTH_LAST - CRON_MONTH_FIRST;
+
+/// The ordinal span of the day-of-week field of a cron pattern.
+pub const CRON_WEEKDAY_SPAN: i64 = CRON_WEEKDAY_LAST - CRON_WEEKDAY_FIRST;
+
+/// A value, a range start or a range end of a [`CronNumericTerm`]: every
+/// value of a numeric field. [`CronSchedule::validate`] checks the domain of
+/// the field that holds the term.
+pub const CRON_NUMERIC_VALUE: IntBound = widest_domain("CRON_NUMERIC_VALUE", &CRON_NUMERIC_FIELDS);
+
+/// A step of a [`CronNumericTerm`]: 1 to the widest span of a numeric field.
+/// [`CronSchedule::validate`] checks the span of the field that holds the
+/// term.
+pub const CRON_NUMERIC_STEP: IntBound = IntBound {
+    name: "CRON_NUMERIC_STEP",
+    min: 1,
+    max: widest_span(&CRON_NUMERIC_FIELDS),
+};
+
+/// A step of a [`CronEnumTerm`]: 1 to the widest span of an enum field.
+pub const CRON_ENUM_STEP: IntBound = IntBound {
+    name: "CRON_ENUM_STEP",
+    min: 1,
+    max: larger_span(CRON_MONTH_SPAN, CRON_WEEKDAY_SPAN),
+};
+
+/// The bound that holds each of `bounds`: their least `min` and their
+/// greatest `max`. Pure.
+const fn widest_domain(name: &'static str, bounds: &[IntBound]) -> IntBound {
+    let mut min = u64::MAX;
+    let mut max = 0;
+    let mut index = 0;
+    while index < bounds.len() {
+        if bounds[index].min < min {
+            min = bounds[index].min;
+        }
+        if bounds[index].max > max {
+            max = bounds[index].max;
+        }
+        index += 1;
+    }
+    IntBound { name, min, max }
+}
+
+/// The greatest span (`max - min`) of `bounds`. Pure.
+const fn widest_span(bounds: &[IntBound]) -> u64 {
+    let mut widest = 0;
+    let mut index = 0;
+    while index < bounds.len() {
+        let span = bounds[index].max - bounds[index].min;
+        if span > widest {
+            widest = span;
+        }
+        index += 1;
+    }
+    widest
+}
+
+/// The larger of two ordinal spans, each 0 or more. Pure.
+const fn larger_span(first: i64, second: i64) -> u64 {
+    assert!(first >= 0 && second >= 0, "an ordinal span is 0 or more");
+    match first > second {
+        true => first as u64,
+        false => second as u64,
+    }
+}
+
+/// The domain of a cron field, signed as the terms hold their values. Each
+/// cron bound is below 60. Pure.
+pub const fn signed_domain(bound: IntBound) -> (i64, i64) {
+    (bound.min as i64, bound.max as i64)
+}
+
+/// Check that `value`, the `field` of `pattern`, is inside `bound`. Pure.
+///
+/// Errors: the pattern, the field, the bound and the value, as text.
+fn check_bound(pattern: &str, field: &str, bound: IntBound, value: u32) -> Result<(), String> {
+    match (bound.min..=bound.max).contains(&u64::from(value)) {
+        true => Ok(()),
+        false => Err(format!(
+            "{pattern} {field} must be between {} and {}, got {value}",
+            bound.min, bound.max,
+        )),
+    }
+}
 
 /// Days of the week.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::ManifestSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Weekday {
     Monday,
@@ -20,108 +196,309 @@ pub enum Weekday {
     Sunday,
 }
 
-/// Run task every N seconds/minutes/hours/days.
+/// Run a task every `every`: a length of time in whole seconds, 1 second to
+/// 365 days ([`INTERVAL_EVERY_SECONDS`]).
 ///
-/// At least one time unit must be specified.
-/// Total interval is the sum of all specified units.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The text form (a config file, the scheduler manifest) is
+/// `{"every": "<ISO 8601 duration>"}` with days, hours, minutes and seconds
+/// only: `PT30S`, `PT1M30S`, `P1DT2H`, `P365D`. The writer puts the largest
+/// unit first and writes no zero part. The reader refuses years, months,
+/// weeks, a fraction, a sign, a text without a part and an unknown member,
+/// with a refusal that names the field `every` and the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::ManifestSchema)]
 pub struct IntervalSchedule {
-    /// Seconds component (1–86400).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seconds: Option<u32>,
-    /// Minutes component (1–1440).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub minutes: Option<u32>,
-    /// Hours component (1–168).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hours: Option<u32>,
-    /// Days component (1–365).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub days: Option<u32>,
+    /// The length of the interval, in whole seconds (1 second to 365 days).
+    #[manifest_schema(int_bound = INTERVAL_EVERY_SECONDS)]
+    pub every: Duration,
 }
 
 impl IntervalSchedule {
-    /// Calculate total interval in seconds.
-    pub fn total_seconds(&self) -> u64 {
-        let mut total: u64 = 0;
-        if let Some(s) = self.seconds {
-            total += s as u64;
-        }
-        if let Some(m) = self.minutes {
-            total += m as u64 * 60;
-        }
-        if let Some(h) = self.hours {
-            total += h as u64 * 3600;
-        }
-        if let Some(d) = self.days {
-            total += d as u64 * 86400;
-        }
-        total
-    }
-
-    /// Validate that at least one time unit is specified and all values
-    /// are within acceptable upper bounds.
+    /// Check that `every` is a whole number of seconds inside
+    /// [`INTERVAL_EVERY_SECONDS`]. Pure.
     ///
-    /// Upper bounds match the Python implementation:
-    /// - seconds: 1–86400
-    /// - minutes: 1–1440
-    /// - hours: 1–168
-    /// - days: 1–365
+    /// Errors: the field, the cause and the value, as text.
     pub fn validate(&self) -> Result<(), String> {
-        if self.seconds.is_none()
-            && self.minutes.is_none()
-            && self.hours.is_none()
-            && self.days.is_none()
-        {
-            return Err("IntervalSchedule requires at least one time unit".to_owned());
+        let seconds = self.every.as_secs();
+        match (
+            self.every.subsec_nanos(),
+            (INTERVAL_EVERY_SECONDS.min..=INTERVAL_EVERY_SECONDS.max).contains(&seconds),
+        ) {
+            (0, true) => Ok(()),
+            (0, false) => Err(format!(
+                "IntervalSchedule every must be between {} and {} seconds (1 second to 365 \
+                 days), got {seconds} seconds",
+                INTERVAL_EVERY_SECONDS.min, INTERVAL_EVERY_SECONDS.max,
+            )),
+            (_, _) => Err(format!(
+                "IntervalSchedule every must be a whole number of seconds, got {}: schedules \
+                 fire at whole seconds",
+                interval_text(self.every),
+            )),
         }
-
-        if let Some(s) = self.seconds {
-            if s == 0 || s > 86400 {
-                return Err(format!(
-                    "IntervalSchedule seconds must be between 1 and 86400, got {}",
-                    s,
-                ));
-            }
-        }
-        if let Some(m) = self.minutes {
-            if m == 0 || m > 1440 {
-                return Err(format!(
-                    "IntervalSchedule minutes must be between 1 and 1440, got {}",
-                    m,
-                ));
-            }
-        }
-        if let Some(h) = self.hours {
-            if h == 0 || h > 168 {
-                return Err(format!(
-                    "IntervalSchedule hours must be between 1 and 168, got {}",
-                    h,
-                ));
-            }
-        }
-        if let Some(d) = self.days {
-            if d == 0 || d > 365 {
-                return Err(format!(
-                    "IntervalSchedule days must be between 1 and 365, got {}",
-                    d,
-                ));
-            }
-        }
-
-        Ok(())
     }
 }
 
+/// The text form of [`IntervalSchedule`]: one member, `every`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntervalScheduleText {
+    every: String,
+}
+
+impl Serialize for IntervalSchedule {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        IntervalScheduleText {
+            every: interval_text(self.every),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IntervalSchedule {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = IntervalScheduleText::deserialize(deserializer)?;
+        parse_interval_text(&text.every)
+            .map(|every| IntervalSchedule { every })
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// The most digits of one part of an interval text. Nine digits keep the
+/// sum of the four parts far below `u64::MAX`.
+const INTERVAL_TEXT_PART_DIGITS: usize = 9;
+
+/// Why a text is not the length of an interval. Each variant holds the
+/// text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum IntervalTextRefused {
+    /// The text holds no part (`P`, `PT`, an empty text).
+    #[error(
+        "IntervalSchedule every '{text}' has no part: give days (D), hours (H), minutes (M) \
+         or seconds (S), for example 'PT30S'"
+    )]
+    NoPart { text: String },
+    /// The text has a sign (`-PT5S`, `P-1D`).
+    #[error("IntervalSchedule every '{text}' has a sign: give a length without a sign")]
+    Sign { text: String },
+    /// A part has a fraction (`PT1.5S`).
+    #[error("IntervalSchedule every '{text}' has a fraction: give whole seconds")]
+    Fraction { text: String },
+    /// A part has a unit other than days, hours, minutes and seconds: years
+    /// (`Y`), months (`M` before `T`) or weeks (`W`).
+    #[error(
+        "IntervalSchedule every '{text}' has the unit '{unit}': give days (D), hours (H), \
+         minutes (M) and seconds (S) only"
+    )]
+    UnitNotTaken { text: String, unit: char },
+    /// A part has more than [`INTERVAL_TEXT_PART_DIGITS`] digits.
+    #[error(
+        "IntervalSchedule every '{text}' has a part of more than {INTERVAL_TEXT_PART_DIGITS} \
+         digits"
+    )]
+    PartTooLong { text: String },
+    /// The text breaks the form `P[nD][T[nH][nM][nS]]` in another way.
+    #[error(
+        "IntervalSchedule every '{text}' is not an ISO 8601 duration of the form \
+         P[nD][T[nH][nM][nS]]"
+    )]
+    NotDurationText { text: String },
+}
+
+/// A section of an interval text: the part before `T`, or the part after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntervalTextSection {
+    /// Days (`D`).
+    Date,
+    /// Hours (`H`), minutes (`M`) and seconds (`S`), in this order.
+    Time,
+}
+
+impl IntervalTextSection {
+    /// The unit letters of the section, in their order, with their seconds.
+    fn units(self) -> &'static [(char, u64)] {
+        match self {
+            IntervalTextSection::Date => &[('D', SECONDS_PER_DAY)],
+            IntervalTextSection::Time => {
+                &[('H', SECONDS_PER_HOUR), ('M', SECONDS_PER_MINUTE), ('S', 1)]
+            }
+        }
+    }
+
+    /// The refusal of `letter`, a letter that is not a next unit of the
+    /// section.
+    fn refusal(self, letter: char, text: &str) -> IntervalTextRefused {
+        let text = text.to_owned();
+        match (self, letter) {
+            (_, 'Y' | 'W') | (IntervalTextSection::Date, 'M') => {
+                IntervalTextRefused::UnitNotTaken { text, unit: letter }
+            }
+            (_, _) => IntervalTextRefused::NotDurationText { text },
+        }
+    }
+}
+
+/// The seconds of one section of an interval text, and its count of parts.
+/// Each part is whole digits and one unit letter; the units come in the
+/// order of the section, each one time at most. Pure.
+fn section_seconds(
+    section: &str,
+    kind: IntervalTextSection,
+    text: &str,
+) -> Result<(u64, usize), IntervalTextRefused> {
+    let units = kind.units();
+    let (mut total, mut parts, mut next_unit) = (0_u64, 0_usize, 0_usize);
+    let (mut number, mut digits) = (0_u64, 0_usize);
+    for character in section.chars() {
+        match character {
+            '0'..='9' => {
+                digits += 1;
+                if digits > INTERVAL_TEXT_PART_DIGITS {
+                    return Err(IntervalTextRefused::PartTooLong {
+                        text: text.to_owned(),
+                    });
+                }
+                number = number * 10 + u64::from(character as u8 - b'0');
+            }
+            '.' | ',' => {
+                return Err(IntervalTextRefused::Fraction {
+                    text: text.to_owned(),
+                })
+            }
+            '+' | '-' => {
+                return Err(IntervalTextRefused::Sign {
+                    text: text.to_owned(),
+                })
+            }
+            letter => {
+                let found = units[next_unit..]
+                    .iter()
+                    .position(|(unit, _seconds)| *unit == letter);
+                match (found, digits) {
+                    (Some(offset), 1..) => {
+                        total += number * units[next_unit + offset].1;
+                        parts += 1;
+                        next_unit += offset + 1;
+                        (number, digits) = (0, 0);
+                    }
+                    (Some(_offset), 0) => {
+                        return Err(IntervalTextRefused::NotDurationText {
+                            text: text.to_owned(),
+                        })
+                    }
+                    (None, _) => return Err(kind.refusal(letter, text)),
+                }
+            }
+        }
+    }
+    match digits {
+        0 => Ok((total, parts)),
+        _ => Err(IntervalTextRefused::NotDurationText {
+            text: text.to_owned(),
+        }),
+    }
+}
+
+/// The length that an interval text gives: `P[nD][T[nH][nM][nS]]` with
+/// whole numbers. Pure.
+///
+/// It checks the form only: a length of zero or above 365 days parses, and
+/// [`IntervalSchedule::validate`] refuses it.
+///
+/// Errors: [`IntervalTextRefused`], with the text.
+pub(crate) fn parse_interval_text(text: &str) -> Result<Duration, IntervalTextRefused> {
+    let body = match (text.strip_prefix('P'), text.chars().next()) {
+        (Some(body), _) => body,
+        (None, Some('+' | '-')) => {
+            return Err(IntervalTextRefused::Sign {
+                text: text.to_owned(),
+            })
+        }
+        (None, None) => {
+            return Err(IntervalTextRefused::NoPart {
+                text: text.to_owned(),
+            })
+        }
+        (None, Some(_first)) => {
+            return Err(IntervalTextRefused::NotDurationText {
+                text: text.to_owned(),
+            })
+        }
+    };
+    let (date, time) = match body.split_once('T') {
+        Some((date, time)) => (date, Some(time)),
+        None => (body, None),
+    };
+    let (date_seconds, date_parts) = section_seconds(date, IntervalTextSection::Date, text)?;
+    let (time_seconds, time_parts) = match time {
+        Some(time) => section_seconds(time, IntervalTextSection::Time, text)?,
+        None => (0, 0),
+    };
+    match (date_parts, time, time_parts) {
+        (0, None, _) | (0, Some(_), 0) => Err(IntervalTextRefused::NoPart {
+            text: text.to_owned(),
+        }),
+        (_, Some(_), 0) => Err(IntervalTextRefused::NotDurationText {
+            text: text.to_owned(),
+        }),
+        (_, _, _) => Ok(Duration::from_secs(date_seconds + time_seconds)),
+    }
+}
+
+/// The interval text of `every`: days, hours, minutes and seconds, the
+/// largest unit first, no zero part (`PT1M30S`, `P1DT2H`, `P365D`). A
+/// length of zero is `PT0S`. A fraction of a second is written as a
+/// decimal of the seconds part (`PT1.5S`), so the reader refuses it and the
+/// value is not cut. Pure.
+pub(crate) fn interval_text(every: Duration) -> String {
+    let seconds = every.as_secs();
+    let days = seconds / SECONDS_PER_DAY;
+    let hours = seconds % SECONDS_PER_DAY / SECONDS_PER_HOUR;
+    let minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
+    let whole_seconds = seconds % SECONDS_PER_MINUTE;
+    let date = match days {
+        0 => String::new(),
+        _ => format!("{days}D"),
+    };
+    let mut time = String::new();
+    for (value, unit) in [(hours, 'H'), (minutes, 'M')] {
+        match value {
+            0 => {}
+            _ => time.push_str(&format!("{value}{unit}")),
+        }
+    }
+    match (whole_seconds, every.subsec_nanos()) {
+        (0, 0) => {}
+        (_, 0) => time.push_str(&format!("{whole_seconds}S")),
+        (_, nanos) => {
+            let fraction = format!("{nanos:09}");
+            time.push_str(&format!(
+                "{whole_seconds}.{}S",
+                fraction.trim_end_matches('0')
+            ));
+        }
+    }
+    match (date.is_empty(), time.is_empty()) {
+        (true, true) => "PT0S".to_owned(),
+        (false, true) => format!("P{date}"),
+        (_, false) => format!("P{date}T{time}"),
+    }
+}
+
+/// The second of an hourly pattern that gives none.
+const fn default_hourly_second() -> u32 {
+    0
+}
+
 /// Run task every hour at a specific minute and second.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HourlySchedule {
     /// Minute of the hour (0–59).
+    #[manifest_schema(int_bound = HOURLY_MINUTE)]
     pub minute: u32,
     /// Second of the minute (0–59).
-    #[serde(default)]
+    #[serde(default = "default_hourly_second")]
+    #[manifest_schema(int_bound = HOURLY_SECOND)]
     pub second: u32,
 }
 
@@ -130,19 +507,8 @@ impl HourlySchedule {
     ///
     /// Matches Python's `Field(ge=0, le=59)` constraints.
     pub fn validate(&self) -> Result<(), String> {
-        if self.minute > 59 {
-            return Err(format!(
-                "HourlySchedule minute must be between 0 and 59, got {}",
-                self.minute,
-            ));
-        }
-        if self.second > 59 {
-            return Err(format!(
-                "HourlySchedule second must be between 0 and 59, got {}",
-                self.second,
-            ));
-        }
-        Ok(())
+        check_bound("HourlySchedule", "minute", HOURLY_MINUTE, self.minute)?;
+        check_bound("HourlySchedule", "second", HOURLY_SECOND, self.second)
     }
 }
 
@@ -164,7 +530,7 @@ fn validate_whole_second(pattern: &str, time: NaiveTime) -> Result<(), String> {
 }
 
 /// Run task every day at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DailySchedule {
     /// Time of day to run (HH:MM:SS), in whole seconds, in the schedule's
@@ -180,27 +546,27 @@ impl DailySchedule {
 }
 
 /// Run task on specific days of the week at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WeeklySchedule {
-    /// Days of week to run (at least one).
-    pub days: Vec<Weekday>,
+    /// Days of the week to run (at least one, each one time).
+    pub weekdays: Vec<Weekday>,
     /// Time of day to run, in whole seconds, in the schedule's timezone.
     pub time: NaiveTime,
 }
 
 impl WeeklySchedule {
-    /// Validate that the days list is non-empty and contains no duplicates,
-    /// and that the time is a whole second.
+    /// Validate that the weekdays list is non-empty and contains no
+    /// duplicates, and that the time is a whole second.
     pub fn validate(&self) -> Result<(), String> {
-        if self.days.is_empty() {
-            return Err("WeeklySchedule requires at least one day".to_owned());
+        if self.weekdays.is_empty() {
+            return Err("WeeklySchedule requires at least one weekday".to_owned());
         }
-        let unique: HashSet<&Weekday> = self.days.iter().collect();
-        if unique.len() != self.days.len() {
+        let unique: HashSet<&Weekday> = self.weekdays.iter().collect();
+        if unique.len() != self.weekdays.len() {
             return Err(format!(
-                "WeeklySchedule has duplicate days: {:?}",
-                self.days,
+                "WeeklySchedule has duplicate weekdays: {:?}",
+                self.weekdays,
             ));
         }
         validate_whole_second("WeeklySchedule", self.time)
@@ -208,26 +574,28 @@ impl WeeklySchedule {
 }
 
 /// Run task on a specific day of the month at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MonthlySchedule {
-    /// Day of month (1–31).
-    pub day: u32,
+    /// Day of the month (1–31). A month without this day has no slot.
+    #[manifest_schema(int_bound = MONTHLY_DAY)]
+    pub day_of_month: u32,
     /// Time of day to run, in whole seconds, in the schedule's timezone.
     pub time: NaiveTime,
 }
 
 impl MonthlySchedule {
-    /// Validate that day is 1–31 and that the time is a whole second.
+    /// Validate that `day_of_month` is 1–31 and that the time is a whole
+    /// second.
     ///
     /// Matches Python's `Field(ge=1, le=31)` constraint.
     pub fn validate(&self) -> Result<(), String> {
-        if self.day == 0 || self.day > 31 {
-            return Err(format!(
-                "MonthlySchedule day must be between 1 and 31, got {}",
-                self.day,
-            ));
-        }
+        check_bound(
+            "MonthlySchedule",
+            "day_of_month",
+            MONTHLY_DAY,
+            self.day_of_month,
+        )?;
         validate_whole_second("MonthlySchedule", self.time)
     }
 }
@@ -236,7 +604,17 @@ impl MonthlySchedule {
 ///
 /// Snake-case string values keep the serialized form stable, mirroring
 /// [`Weekday`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::ManifestSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Month {
     January,
@@ -307,7 +685,8 @@ fn month_max_days(month: i64) -> i64 {
     }
 }
 
-fn default_cron_step() -> u32 {
+/// The step of a cron range that gives none.
+const fn default_cron_step() -> u32 {
     1
 }
 
@@ -316,7 +695,9 @@ fn default_cron_step() -> u32 {
 /// Per-field domain bounds are enforced by [`CronSchedule::validate`], which
 /// names the offending field — the variants are domain-agnostic. Wire tags
 /// match the Python implementation (`every`/`step`/`values`/`range`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronNumericTerm {
     /// `*` — every value in the field's domain.
@@ -324,14 +705,23 @@ pub enum CronNumericTerm {
     Every,
     /// `*/n` — every nth value across the field's full domain (anchored at the
     /// domain start). `step` must be <= the field span.
-    Step { step: u32 },
+    Step {
+        #[manifest_schema(int_bound = CRON_NUMERIC_STEP)]
+        step: u32,
+    },
     /// `a,b,c` — an explicit set of integer values.
-    Values { values: Vec<i64> },
+    Values {
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
+        values: Vec<i64>,
+    },
     /// `a-b` or `a-b/n` — an inclusive integer range with an optional step.
     Range {
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
         start: i64,
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
         end: i64,
         #[serde(default = "default_cron_step")]
+        #[manifest_schema(int_bound = CRON_NUMERIC_STEP)]
         step: u32,
     },
 }
@@ -341,8 +731,11 @@ pub enum CronNumericTerm {
 ///
 /// Wire tags match the Python implementation
 /// (`every`/`enum_values`/`enum_range`/`enum_step`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[manifest_schema(uses(Weekday, Month))]
 pub enum CronEnumTerm<T> {
     /// `*` — every value in the field's domain.
     #[serde(deserialize_with = "no_member_after_the_tag")]
@@ -354,17 +747,23 @@ pub enum CronEnumTerm<T> {
         start: T,
         end: T,
         #[serde(default = "default_cron_step")]
+        #[manifest_schema(int_bound = CRON_ENUM_STEP)]
         step: u32,
     },
     /// `*/n` — every nth value across the field's full domain, by ordinal.
-    EnumStep { step: u32 },
+    EnumStep {
+        #[manifest_schema(int_bound = CRON_ENUM_STEP)]
+        step: u32,
+    },
 }
 
 /// Day dimension selector.
 ///
 /// A single sum type forces an explicit choice when both day-of-month and
 /// day-of-week are restricted, eliminating cron's silent OR ambiguity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DaySelector {
     /// Both day-of-month and day-of-week unrestricted.
@@ -394,7 +793,9 @@ pub enum DaySelector {
 /// can, through typed fields instead of a cron-expression string. Fires at
 /// second :00 (minute granularity). The `day` field collapses day-of-month and
 /// day-of-week into an explicit [`DaySelector`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct CronSchedule {
     /// Minute field terms (0–59).
@@ -412,13 +813,13 @@ fn invalid_cron_field(field: &str, detail: &str) -> String {
     format!("invalid cron '{}' field: {}", field, detail)
 }
 
-/// Validate integer-domain terms against `[lo, hi]`.
+/// Validate integer-domain terms against the field's `domain`.
 fn validate_numeric_terms(
     terms: &[CronNumericTerm],
     field: &str,
-    lo: i64,
-    hi: i64,
+    domain: IntBound,
 ) -> Result<(), String> {
+    let (lo, hi) = signed_domain(domain);
     let span = hi - lo;
     for term in terms {
         match term {
@@ -487,8 +888,8 @@ fn validate_numeric_terms(
 /// Validate enum-domain terms: range ordering (no wrap-around) and step span.
 ///
 /// Enum values are in-domain by construction, so only ordering and step bounds
-/// need checking. `span` is the field's ordinal span (11 for month, 6 for
-/// day-of-week).
+/// need checking. `span` is the field's ordinal span (`CRON_MONTH_SPAN` for month,
+/// `CRON_WEEKDAY_SPAN` for day-of-week).
 fn validate_enum_terms<T: CronOrdinal + std::fmt::Debug>(
     terms: &[CronEnumTerm<T>],
     field: &str,
@@ -550,7 +951,7 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)
+            validate_numeric_terms(day_of_month, "day_of_month", CRON_DAY_OF_MONTH)
         }
         DaySelector::ByWeekday { day_of_week } => {
             if day_of_week.is_empty() {
@@ -559,7 +960,7 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_enum_terms(day_of_week, "day_of_week", 6)
+            validate_enum_terms(day_of_week, "day_of_week", CRON_WEEKDAY_SPAN)
         }
         DaySelector::EitherDay {
             day_of_month,
@@ -581,8 +982,8 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)?;
-            validate_enum_terms(day_of_week, "day_of_week", 6)
+            validate_numeric_terms(day_of_month, "day_of_month", CRON_DAY_OF_MONTH)?;
+            validate_enum_terms(day_of_week, "day_of_week", CRON_WEEKDAY_SPAN)
         }
     }
 }
@@ -601,8 +1002,9 @@ fn validate_satisfiable(month: &[CronEnumTerm<Month>], day: &DaySelector) -> Res
             return Ok(())
         }
     };
-    let month_set = expand_enum_field(month, 1, 12);
-    let dom_set = expand_numeric_field(day_of_month, 1, 31);
+    let month_set = expand_enum_field(month, CRON_MONTH_FIRST, CRON_MONTH_LAST);
+    let (day_lo, day_hi) = signed_domain(CRON_DAY_OF_MONTH);
+    let dom_set = expand_numeric_field(day_of_month, day_lo, day_hi);
     let feasible = month_set
         .iter()
         .any(|m| dom_set.iter().any(|d| *d <= month_max_days(*m)));
@@ -660,7 +1062,8 @@ pub fn expand_numeric_field(terms: &[CronNumericTerm], lo: i64, hi: i64) -> Hash
 
 /// Expand enum terms into the concrete set of ordinals in `[lo, hi]`.
 ///
-/// Month ordinals are 1–12, weekday ordinals 0–6. Shared by validation and the
+/// Month ordinals run from `CRON_MONTH_FIRST` to `CRON_MONTH_LAST`, weekday
+/// ordinals from `CRON_WEEKDAY_FIRST` to `CRON_WEEKDAY_LAST`. Shared by validation and the
 /// scheduler matcher.
 pub fn expand_enum_field<T: CronOrdinal>(
     terms: &[CronEnumTerm<T>],
@@ -714,18 +1117,19 @@ impl CronSchedule {
         if self.month.is_empty() {
             return Err(invalid_cron_field("month", "must have at least one term"));
         }
-        validate_numeric_terms(&self.minute, "minute", 0, 59)?;
-        validate_numeric_terms(&self.hour, "hour", 0, 23)?;
-        validate_enum_terms(&self.month, "month", 11)?;
+        validate_numeric_terms(&self.minute, "minute", CRON_MINUTE)?;
+        validate_numeric_terms(&self.hour, "hour", CRON_HOUR)?;
+        validate_enum_terms(&self.month, "month", CRON_MONTH_SPAN)?;
         validate_day_selector(&self.day)?;
         validate_satisfiable(&self.month, &self.day)?;
         Ok(())
     }
 }
 
-/// Union of all schedule pattern types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+/// Union of all schedule pattern types. The text form names the pattern in
+/// the member `kind` (`{"kind": "interval", "every": "PT30S"}`).
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulePattern {
     Interval(IntervalSchedule),
     Hourly(HourlySchedule),
@@ -736,8 +1140,8 @@ pub enum SchedulePattern {
 }
 
 impl SchedulePattern {
-    /// Check the bounds and the rules of the pattern: interval units,
-    /// hourly and monthly ranges, unique weekly days, cron terms, and a
+    /// Check the bounds and the rules of the pattern: the interval length,
+    /// hourly and monthly ranges, unique weekly weekdays, cron terms, and a
     /// daily, weekly or monthly time of day in whole seconds. Pure.
     ///
     /// Errors: the first broken rule, as text.
@@ -777,11 +1181,11 @@ pub struct TaskSchedule {
         deserialize_with = "crate::core::codec::optional_json_text_of_any_format"
     )]
     pub input: Option<JsonText>,
-    /// Target queue name (None = default).
+    /// The queue of each slot (None = the task's queue).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue_name: Option<String>,
+    pub queue: Option<String>,
     /// Whether this schedule is active.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_schedule_enabled")]
     pub enabled: bool,
     /// Timezone for schedule evaluation.
     #[serde(default = "default_timezone")]
@@ -808,8 +1212,8 @@ impl TaskSchedule {
             task_name: task_name.into(),
             pattern,
             input: None,
-            queue_name: None,
-            enabled: default_true(),
+            queue: None,
+            enabled: default_schedule_enabled(),
             timezone: default_timezone(),
             catch_up_missed: false,
             max_catch_up_runs: default_max_catch_up_runs(),
@@ -832,8 +1236,9 @@ impl TaskSchedule {
         Ok(self)
     }
 
-    pub fn queue(mut self, queue_name: impl Into<String>) -> Self {
-        self.queue_name = Some(queue_name.into());
+    /// Send each slot to `queue` in place of the task's queue.
+    pub fn queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue = Some(queue.into());
         self
     }
 
@@ -858,15 +1263,31 @@ impl TaskSchedule {
     }
 }
 
+/// The default of [`TaskSchedule::max_catch_up_runs`].
+pub const DEFAULT_MAX_CATCH_UP_RUNS: u32 = 100;
+
+/// The default of [`TaskSchedule::enabled`].
+pub const DEFAULT_SCHEDULE_ENABLED: bool = true;
+
+/// The default of [`TaskSchedule::timezone`].
+pub const DEFAULT_SCHEDULE_TIMEZONE: &str = "UTC";
+
+/// The default of [`ScheduleConfig::check_interval_seconds`].
+pub const DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS: u32 = 1;
+
 fn default_max_catch_up_runs() -> u32 {
-    100
+    DEFAULT_MAX_CATCH_UP_RUNS
+}
+
+fn default_schedule_enabled() -> bool {
+    DEFAULT_SCHEDULE_ENABLED
 }
 
 fn default_true() -> bool {
     true
 }
 fn default_timezone() -> String {
-    "UTC".to_owned()
+    DEFAULT_SCHEDULE_TIMEZONE.to_owned()
 }
 
 /// Scheduler configuration.
@@ -929,8 +1350,8 @@ impl ScheduleConfig {
     /// Checks:
     /// - `check_interval_seconds` is between 1 and 60 (matching Python `Field(ge=1, le=60)`)
     /// - All schedule names are unique
-    /// - Individual schedule patterns are valid (interval bounds, hourly/monthly ranges,
-    ///   weekly day uniqueness)
+    /// - Individual schedule patterns are valid (interval length, hourly/monthly ranges,
+    ///   weekly weekday uniqueness)
     /// - Each timezone is an IANA name
     /// - Each `max_catch_up_runs` is between 1 and 10,000 (Python `Field(ge=1, le=10000)`)
     pub fn errors(&self) -> Vec<String> {
@@ -993,7 +1414,7 @@ pub const MAX_CATCH_UP_RUNS_MIN: u32 = 1;
 pub const MAX_CATCH_UP_RUNS_MAX: u32 = 10_000;
 
 fn default_check_interval() -> u32 {
-    1
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
 }
 
 #[cfg(test)]
@@ -1002,112 +1423,216 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn interval_total_seconds() {
-        let schedule = IntervalSchedule {
-            hours: Some(1),
-            minutes: Some(30),
-            seconds: None,
-            days: None,
-        };
-        assert_eq!(schedule.total_seconds(), 5400);
+    /// An interval of `seconds` whole seconds.
+    fn every_seconds(seconds: u64) -> IntervalSchedule {
+        IntervalSchedule {
+            every: Duration::from_secs(seconds),
+        }
     }
 
     #[test]
-    fn interval_default_is_empty() {
-        let schedule = IntervalSchedule::default();
-        assert!(schedule.seconds.is_none());
-        assert!(schedule.minutes.is_none());
-        assert!(schedule.hours.is_none());
-        assert!(schedule.days.is_none());
+    fn an_interval_inside_the_bound_is_valid() {
+        for seconds in [
+            INTERVAL_EVERY_SECONDS.min,
+            90,
+            SECONDS_PER_DAY,
+            INTERVAL_EVERY_SECONDS.max,
+        ] {
+            assert_eq!(every_seconds(seconds).validate(), Ok(()), "{seconds}");
+        }
+        assert_eq!(INTERVAL_EVERY_SECONDS.max, 31_536_000);
     }
 
     #[test]
-    fn interval_requires_at_least_one_unit() {
-        let empty = IntervalSchedule {
-            seconds: None,
-            minutes: None,
-            hours: None,
-            days: None,
-        };
-        assert!(empty.validate().is_err());
+    fn an_interval_of_zero_or_above_365_days_is_refused() {
+        for seconds in [0, INTERVAL_EVERY_SECONDS.max + 1] {
+            let error = every_seconds(seconds).validate().unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "IntervalSchedule every must be between 1 and 31536000 seconds (1 second to \
+                     365 days), got {seconds} seconds"
+                ),
+            );
+        }
     }
 
     #[test]
-    fn interval_upper_bound_seconds() {
-        let schedule = IntervalSchedule {
-            seconds: Some(86401),
-            minutes: None,
-            hours: None,
-            days: None,
-        };
-        let err = schedule.validate().unwrap_err();
-        assert!(err.contains("seconds"));
-        assert!(err.contains("86401"));
+    fn an_interval_with_a_fraction_of_a_second_is_refused() {
+        for every in [Duration::from_millis(1_500), Duration::from_nanos(1)] {
+            let error = IntervalSchedule { every }.validate().unwrap_err();
+            assert!(
+                error.starts_with("IntervalSchedule every must be a whole number of seconds"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
-    fn interval_upper_bound_minutes() {
-        let schedule = IntervalSchedule {
-            seconds: None,
-            minutes: Some(1441),
-            hours: None,
-            days: None,
-        };
-        let err = schedule.validate().unwrap_err();
-        assert!(err.contains("minutes"));
+    fn the_interval_text_puts_the_largest_unit_first_and_writes_no_zero_part() {
+        let texts = [
+            (1, "PT1S"),
+            (30, "PT30S"),
+            (60, "PT1M"),
+            (90, "PT1M30S"),
+            (5_400, "PT1H30M"),
+            (SECONDS_PER_DAY, "P1D"),
+            (SECONDS_PER_DAY + 7_200, "P1DT2H"),
+            (SECONDS_PER_DAY + 1, "P1DT1S"),
+            (INTERVAL_EVERY_SECONDS.max, "P365D"),
+            (0, "PT0S"),
+        ];
+        for (seconds, text) in texts {
+            assert_eq!(interval_text(Duration::from_secs(seconds)), text);
+        }
+        assert_eq!(interval_text(Duration::from_millis(1_500)), "PT1.5S");
+        assert_eq!(interval_text(Duration::from_nanos(1)), "PT0.000000001S");
     }
 
     #[test]
-    fn interval_upper_bound_hours() {
-        let schedule = IntervalSchedule {
-            seconds: None,
-            minutes: None,
-            hours: Some(169),
-            days: None,
-        };
-        let err = schedule.validate().unwrap_err();
-        assert!(err.contains("hours"));
+    fn the_interval_text_reads_back_to_its_length() {
+        for seconds in [1, 59, 61, 3_599, 3_661, 90_061, INTERVAL_EVERY_SECONDS.max] {
+            let every = Duration::from_secs(seconds);
+            assert_eq!(parse_interval_text(&interval_text(every)), Ok(every));
+        }
     }
 
     #[test]
-    fn interval_upper_bound_days() {
-        let schedule = IntervalSchedule {
-            seconds: None,
-            minutes: None,
-            hours: None,
-            days: Some(366),
-        };
-        let err = schedule.validate().unwrap_err();
-        assert!(err.contains("days"));
+    fn an_interval_text_in_another_split_reads_to_the_same_length() {
+        for text in ["PT90S", "PT1M30S", "PT0H1M30S", "P0DT90S"] {
+            assert_eq!(
+                parse_interval_text(text),
+                Ok(Duration::from_secs(90)),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            parse_interval_text("PT0S"),
+            Ok(Duration::ZERO),
+            "the parser checks the form; validate refuses zero"
+        );
     }
 
     #[test]
-    fn interval_zero_value_rejected() {
-        let schedule = IntervalSchedule {
-            seconds: Some(0),
-            minutes: None,
-            hours: None,
-            days: None,
-        };
-        assert!(schedule.validate().is_err());
+    fn an_interval_text_outside_the_form_is_refused_with_its_cause() {
+        let refused = |text: &str| parse_interval_text(text).unwrap_err();
+        for text in ["", "P", "PT"] {
+            assert_eq!(
+                refused(text),
+                IntervalTextRefused::NoPart {
+                    text: text.to_owned()
+                }
+            );
+        }
+        for text in ["-PT5S", "+PT5S", "P-1D", "PT+5S"] {
+            assert_eq!(
+                refused(text),
+                IntervalTextRefused::Sign {
+                    text: text.to_owned()
+                }
+            );
+        }
+        for text in ["PT1.5S", "PT1,5S", "P1.5D"] {
+            assert_eq!(
+                refused(text),
+                IntervalTextRefused::Fraction {
+                    text: text.to_owned()
+                }
+            );
+        }
+        for (text, unit) in [("P1Y", 'Y'), ("P1M", 'M'), ("P2W", 'W'), ("PT1Y", 'Y')] {
+            assert_eq!(
+                refused(text),
+                IntervalTextRefused::UnitNotTaken {
+                    text: text.to_owned(),
+                    unit,
+                }
+            );
+        }
+        assert_eq!(
+            refused("PT1234567890S"),
+            IntervalTextRefused::PartTooLong {
+                text: "PT1234567890S".to_owned()
+            }
+        );
+        for text in [
+            "30", "pt30s", "PT30", "PTS", "PT1S1H", "PT1H1H", "P1DT", "P1DT1D", "PT1HT2M", " PT1S",
+            "PT1S ",
+        ] {
+            assert_eq!(
+                refused(text),
+                IntervalTextRefused::NotDurationText {
+                    text: text.to_owned()
+                },
+                "{text}"
+            );
+        }
     }
 
     #[test]
-    fn interval_valid_bounds_accepted() {
-        let schedule = IntervalSchedule {
-            seconds: Some(86400),
-            minutes: Some(1440),
-            hours: Some(168),
-            days: Some(365),
-        };
-        assert!(schedule.validate().is_ok());
+    fn a_refusal_of_an_interval_text_names_the_field_and_the_text() {
+        let error = parse_interval_text("P1Y").unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "IntervalSchedule every 'P1Y' has the unit 'Y': give days (D), hours (H), minutes \
+             (M) and seconds (S) only"
+        );
+    }
+
+    #[test]
+    fn an_interval_is_one_member_of_its_text() {
+        let pattern = SchedulePattern::Interval(every_seconds(90));
+        let json = serde_json::to_string(&pattern).unwrap();
+        assert_eq!(json, r#"{"kind":"interval","every":"PT1M30S"}"#);
+        let back: SchedulePattern = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SchedulePattern::Interval(IntervalSchedule { every }) if every == Duration::from_secs(90)
+        ));
+    }
+
+    /// The four parts of the 0.8 text and a text that names no part are
+    /// refused as unknown members or as no text: no old form reads.
+    #[test]
+    fn an_interval_in_the_four_parts_is_refused() {
+        for text in [
+            r#"{"kind":"interval","seconds":30}"#,
+            r#"{"kind":"interval","every":"PT30S","minutes":null}"#,
+            r#"{"kind":"interval"}"#,
+            r#"{"kind":"interval","every":30}"#,
+        ] {
+            let refused = serde_json::from_str::<SchedulePattern>(text);
+            assert!(refused.is_err(), "{text}");
+        }
+        let error = serde_json::from_str::<SchedulePattern>(r#"{"kind":"interval","every":"P1Y"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("IntervalSchedule every 'P1Y' has the unit 'Y'"),
+            "{error}"
+        );
+    }
+
+    /// The pattern names its kind in `kind`; a text with the 0.8 tag `type`
+    /// is refused, for every pattern kind.
+    #[test]
+    fn a_pattern_with_the_tag_type_is_refused() {
+        for text in [
+            r#"{"type":"interval","every":"PT30S"}"#,
+            r#"{"type":"hourly","minute":15,"second":0}"#,
+            r#"{"type":"daily","time":"09:00:00"}"#,
+        ] {
+            let error = serde_json::from_str::<SchedulePattern>(text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("missing field `kind`"), "{text}: {error}");
+        }
     }
 
     #[test]
     fn weekly_validate_no_duplicates() {
         let schedule = WeeklySchedule {
-            days: vec![Weekday::Monday, Weekday::Friday],
+            weekdays: vec![Weekday::Monday, Weekday::Friday],
             time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
         };
         assert!(schedule.validate().is_ok());
@@ -1116,7 +1641,7 @@ mod tests {
     #[test]
     fn weekly_validate_rejects_duplicates() {
         let schedule = WeeklySchedule {
-            days: vec![Weekday::Monday, Weekday::Monday],
+            weekdays: vec![Weekday::Monday, Weekday::Monday],
             time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
         };
         let err = schedule.validate().unwrap_err();
@@ -1142,13 +1667,16 @@ mod tests {
                 (
                     "WeeklySchedule",
                     SchedulePattern::Weekly(WeeklySchedule {
-                        days: vec![Weekday::Monday],
+                        weekdays: vec![Weekday::Monday],
                         time,
                     }),
                 ),
                 (
                     "MonthlySchedule",
-                    SchedulePattern::Monthly(MonthlySchedule { day: 1, time }),
+                    SchedulePattern::Monthly(MonthlySchedule {
+                        day_of_month: 1,
+                        time,
+                    }),
                 ),
             ];
             for (name, pattern) in patterns {
@@ -1168,15 +1696,18 @@ mod tests {
         assert!(SchedulePattern::Daily(DailySchedule { time })
             .validate()
             .is_ok());
-        assert!(SchedulePattern::Monthly(MonthlySchedule { day: 31, time })
-            .validate()
-            .is_ok());
+        assert!(SchedulePattern::Monthly(MonthlySchedule {
+            day_of_month: 31,
+            time
+        })
+        .validate()
+        .is_ok());
     }
 
     #[test]
     fn weekly_validate_rejects_empty() {
         let schedule = WeeklySchedule {
-            days: vec![],
+            weekdays: vec![],
             time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
         };
         assert!(schedule.validate().is_err());
@@ -1191,13 +1722,10 @@ mod tests {
                     name: "job-a".to_owned(),
                     task_name: "my_task".to_owned(),
                     pattern: SchedulePattern::Interval(IntervalSchedule {
-                        seconds: Some(30),
-                        minutes: None,
-                        hours: None,
-                        days: None,
+                        every: Duration::from_secs(30),
                     }),
                     input: None,
-                    queue_name: None,
+                    queue: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
                     catch_up_missed: false,
@@ -1207,13 +1735,10 @@ mod tests {
                     name: "job-b".to_owned(),
                     task_name: "my_task".to_owned(),
                     pattern: SchedulePattern::Interval(IntervalSchedule {
-                        seconds: Some(60),
-                        minutes: None,
-                        hours: None,
-                        days: None,
+                        every: Duration::from_secs(60),
                     }),
                     input: None,
-                    queue_name: None,
+                    queue: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
                     catch_up_missed: false,
@@ -1234,13 +1759,10 @@ mod tests {
                     name: "same-name".to_owned(),
                     task_name: "task_a".to_owned(),
                     pattern: SchedulePattern::Interval(IntervalSchedule {
-                        seconds: Some(30),
-                        minutes: None,
-                        hours: None,
-                        days: None,
+                        every: Duration::from_secs(30),
                     }),
                     input: None,
-                    queue_name: None,
+                    queue: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
                     catch_up_missed: false,
@@ -1250,13 +1772,10 @@ mod tests {
                     name: "same-name".to_owned(),
                     task_name: "task_b".to_owned(),
                     pattern: SchedulePattern::Interval(IntervalSchedule {
-                        seconds: Some(60),
-                        minutes: None,
-                        hours: None,
-                        days: None,
+                        every: Duration::from_secs(60),
                     }),
                     input: None,
-                    queue_name: None,
+                    queue: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
                     catch_up_missed: false,
@@ -1278,11 +1797,11 @@ mod tests {
                 name: "bad-schedule".to_owned(),
                 task_name: "task_a".to_owned(),
                 pattern: SchedulePattern::Weekly(WeeklySchedule {
-                    days: vec![Weekday::Monday, Weekday::Monday],
+                    weekdays: vec![Weekday::Monday, Weekday::Monday],
                     time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -1296,13 +1815,10 @@ mod tests {
     #[test]
     fn schedule_pattern_tagged_serde() {
         let pattern = SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(30),
-            minutes: None,
-            hours: None,
-            days: None,
+            every: Duration::from_secs(30),
         });
         let json = serde_json::to_string(&pattern).unwrap();
-        assert!(json.contains("\"type\":\"interval\""));
+        assert!(json.contains("\"kind\":\"interval\""));
         let back: SchedulePattern = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, SchedulePattern::Interval(_)));
     }
@@ -1363,7 +1879,7 @@ mod tests {
     #[test]
     fn monthly_validate_ok() {
         let schedule = MonthlySchedule {
-            day: 15,
+            day_of_month: 15,
             time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
         };
         assert!(schedule.validate().is_ok());
@@ -1372,7 +1888,7 @@ mod tests {
     #[test]
     fn monthly_validate_day_1_ok() {
         let schedule = MonthlySchedule {
-            day: 1,
+            day_of_month: 1,
             time: NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         };
         assert!(schedule.validate().is_ok());
@@ -1381,7 +1897,7 @@ mod tests {
     #[test]
     fn monthly_validate_day_31_ok() {
         let schedule = MonthlySchedule {
-            day: 31,
+            day_of_month: 31,
             time: NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
         };
         assert!(schedule.validate().is_ok());
@@ -1390,7 +1906,7 @@ mod tests {
     #[test]
     fn monthly_validate_day_0_rejected() {
         let schedule = MonthlySchedule {
-            day: 0,
+            day_of_month: 0,
             time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
         };
         let err = schedule.validate().unwrap_err();
@@ -1401,7 +1917,7 @@ mod tests {
     #[test]
     fn monthly_validate_day_32_rejected() {
         let schedule = MonthlySchedule {
-            day: 32,
+            day_of_month: 32,
             time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
         };
         let err = schedule.validate().unwrap_err();
@@ -1481,7 +1997,7 @@ mod tests {
                     second: 0,
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -1500,11 +2016,11 @@ mod tests {
                 name: "bad-monthly".to_owned(),
                 task_name: "task_a".to_owned(),
                 pattern: SchedulePattern::Monthly(MonthlySchedule {
-                    day: 0,
+                    day_of_month: 0,
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -1526,7 +2042,7 @@ mod tests {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "Not/A_Timezone".to_owned(),
                 catch_up_missed: false,
@@ -1550,7 +2066,7 @@ mod tests {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "America/New_York".to_owned(),
                 catch_up_missed: false,
@@ -1569,7 +2085,7 @@ mod tests {
             r#"{
                 "name": "daily-task",
                 "task_name": "my_task",
-                "pattern": { "type": "interval", "seconds": 30 }
+                "pattern": { "kind": "interval", "every": "PT30S" }
             }"#,
         )
         .unwrap();
@@ -1579,8 +2095,30 @@ mod tests {
         assert_eq!(sched.timezone, "UTC");
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
-        assert!(sched.queue_name.is_none());
+        assert!(sched.queue.is_none());
         assert_eq!(sched.input, None);
+    }
+
+    #[test]
+    fn the_schedule_defaults_are_the_exported_constants() {
+        assert_eq!(DEFAULT_SCHEDULE_TIMEZONE, "UTC");
+        assert_eq!(DEFAULT_MAX_CATCH_UP_RUNS, 100);
+        assert_eq!(DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, 1);
+        assert_eq!(
+            ScheduleConfig::default().check_interval_seconds,
+            DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS
+        );
+        let built = TaskSchedule::new(
+            "daily-task",
+            "my_task",
+            SchedulePattern::Interval(IntervalSchedule {
+                every: Duration::from_secs(30),
+            }),
+        );
+        assert_eq!(built.enabled, DEFAULT_SCHEDULE_ENABLED);
+        assert!(built.enabled);
+        assert_eq!(built.timezone, DEFAULT_SCHEDULE_TIMEZONE);
+        assert_eq!(built.max_catch_up_runs, DEFAULT_MAX_CATCH_UP_RUNS);
     }
 
     #[test]
@@ -1589,8 +2127,7 @@ mod tests {
             "daily-task",
             "my_task",
             SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(30),
-                ..Default::default()
+                every: Duration::from_secs(30),
             }),
         );
         assert_eq!(sched.name, "daily-task");
@@ -1599,7 +2136,7 @@ mod tests {
         assert_eq!(sched.timezone, "UTC");
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
-        assert!(sched.queue_name.is_none());
+        assert!(sched.queue.is_none());
         assert_eq!(sched.input, None);
     }
 
@@ -1621,7 +2158,7 @@ mod tests {
         .catch_up_missed(true)
         .max_catch_up_runs(50);
 
-        assert_eq!(sched.queue_name.as_deref(), Some("high"));
+        assert_eq!(sched.queue.as_deref(), Some("high"));
         assert!(!sched.enabled);
         assert_eq!(sched.timezone, "Europe/London");
         assert!(sched.catch_up_missed);
@@ -1641,7 +2178,7 @@ mod tests {
             let mut raw = serde_json::json!({
                 "name": "s",
                 "task_name": "t",
-                "pattern": { "type": "interval", "seconds": 30 },
+                "pattern": { "kind": "interval", "every": "PT30S" },
             });
             raw[key] = serde_json::json!({"x": 1});
             let refused = serde_json::from_value::<TaskSchedule>(raw).unwrap_err();
@@ -1660,9 +2197,9 @@ mod tests {
             r#"{
                 "name": "full",
                 "task_name": "my_task",
-                "pattern": { "type": "hourly", "minute": 15 },
+                "pattern": { "kind": "hourly", "minute": 15 },
                 "input": { "key": "val" },
-                "queue_name": "high",
+                "queue": "high",
                 "enabled": false,
                 "timezone": "Europe/London",
                 "catch_up_missed": true,
@@ -1675,7 +2212,7 @@ mod tests {
         assert_eq!(sched.timezone, "Europe/London");
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
-        assert_eq!(sched.queue_name.as_deref(), Some("high"));
+        assert_eq!(sched.queue.as_deref(), Some("high"));
         assert_eq!(
             sched.input.as_ref().map(JsonText::get),
             Some(r#"{"key":"val"}"#)
@@ -1690,8 +2227,7 @@ mod tests {
     #[test]
     fn an_input_of_u128_max_keeps_every_digit() {
         let pattern = SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(30),
-            ..IntervalSchedule::default()
+            every: Duration::from_secs(30),
         });
         let built = TaskSchedule::new("wide", "my_task", pattern)
             .input(&BTreeMap::from([("n", u128::MAX)]))
@@ -1712,7 +2248,7 @@ mod tests {
     fn a_config_integer_outside_i64_and_u64_reads_as_a_float() {
         let read: TaskSchedule = serde_json::from_str(&format!(
             r#"{{"name": "wide", "task_name": "my_task",
-                "pattern": {{"type": "interval", "seconds": 30}},
+                "pattern": {{"kind": "interval", "every": "PT30S"}},
                 "input": {{"n": {U128_MAX_TEXT}}}}}"#
         ))
         .expect("a schedule with a wide input reads");
@@ -1729,7 +2265,7 @@ mod tests {
     fn a_json_schedule_input_reads_as_its_strict_json_text() {
         let config: ScheduleConfig = serde_json::from_str(
             r#"{"schedules": [{"name": "a", "task_name": "t",
-                "pattern": {"type": "interval", "seconds": 30},
+                "pattern": {"kind": "interval", "every": "PT30S"},
                 "input": {"region": "eu", "max": 18446744073709551615,
                           "min": -9223372036854775808,
                           "tags": ["a", null, true], "owner": {"id": 7}}}]}"#,
@@ -1748,7 +2284,7 @@ mod tests {
     fn a_config_input_of_null_is_no_input() {
         let read: TaskSchedule = serde_json::from_str(
             r#"{"name": "s", "task_name": "t",
-                "pattern": {"type": "interval", "seconds": 30}, "input": null}"#,
+                "pattern": {"kind": "interval", "every": "PT30S"}, "input": null}"#,
         )
         .expect("a schedule with a null input reads");
         assert_eq!(read.input, None);
@@ -1759,7 +2295,7 @@ mod tests {
     /// for the same value. A TOML config without `input` reads with no input.
     #[test]
     fn a_toml_schedule_input_reads_as_its_json_text() {
-        let without = one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#);
+        let without = one_schedule_toml(r#"{ kind = "interval", every = "PT30S" }"#);
         let config: ScheduleConfig =
             toml::from_str(&without).expect("a schedule without input reads");
         assert_eq!(config.schedules[0].input, None);
@@ -1800,7 +2336,7 @@ mod tests {
             "{}\n[schedules.input]\nmatrix = [[1, 2], [], [3]]\n\
              owner = {{ name = \"ops\", tags = [\"a\", \"b\"] }}\n\n\
              [schedules.input.window]\nhours = 2\n",
-            one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#)
+            one_schedule_toml(r#"{ kind = "interval", every = "PT30S" }"#)
         );
         let config: ScheduleConfig =
             toml::from_str(&text).expect("a schedule with a nested input reads");
@@ -1816,7 +2352,7 @@ mod tests {
     /// `inf` is refused with the cause.
     #[test]
     fn a_non_finite_toml_input_float_is_refused() {
-        let without = one_schedule_toml(r#"{ type = "interval", seconds = 30 }"#);
+        let without = one_schedule_toml(r#"{ kind = "interval", every = "PT30S" }"#);
         for value in ["nan", "inf", "-inf"] {
             let refused =
                 toml::from_str::<ScheduleConfig>(&format!("{without}input = {{ x = {value} }}\n"))
@@ -1840,7 +2376,7 @@ mod tests {
             serde_json::json!({
                 "name": "deep",
                 "task_name": "t",
-                "pattern": {"type": "interval", "seconds": 30},
+                "pattern": {"kind": "interval", "every": "PT30S"},
                 "input": input,
             })
         };
@@ -1871,8 +2407,7 @@ mod tests {
                 "s",
                 "t",
                 SchedulePattern::Interval(IntervalSchedule {
-                    seconds: Some(30),
-                    ..IntervalSchedule::default()
+                    every: Duration::from_secs(30),
                 }),
             )
         };
@@ -1896,13 +2431,10 @@ mod tests {
             name: "rt".to_owned(),
             task_name: "t".to_owned(),
             pattern: SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(60),
-                minutes: None,
-                hours: None,
-                days: None,
+                every: Duration::from_secs(60),
             }),
             input: Some(JsonText::parse(r#"{"k":"v"}"#).expect("a strict JSON text")),
-            queue_name: Some("q".to_owned()),
+            queue: Some("q".to_owned()),
             enabled: true,
             timezone: "UTC".to_owned(),
             catch_up_missed: true,
@@ -2347,7 +2879,7 @@ mod tests {
             }),
         );
         let json = serde_json::to_string(&sched).unwrap();
-        assert!(json.contains(r#""type":"cron""#));
+        assert!(json.contains(r#""kind":"cron""#));
         let back: TaskSchedule = serde_json::from_str(&json).unwrap();
         assert!(matches!(back.pattern, SchedulePattern::Cron(_)));
     }
@@ -2366,7 +2898,7 @@ mod tests {
                     day: DaySelector::EveryDay,
                 }),
                 input: None,
-                queue_name: None,
+                queue: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
                 catch_up_missed: false,
@@ -2384,8 +2916,7 @@ mod tests {
             name,
             "my_task",
             SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(10),
-                ..IntervalSchedule::default()
+                every: Duration::from_secs(10),
             }),
         )
     }
@@ -2425,9 +2956,11 @@ mod tests {
                 interval_schedule("bad_tz").timezone("Not/A_Timezone"),
                 interval_schedule("no_catch_up").max_catch_up_runs(0),
                 TaskSchedule::new(
-                    "empty_interval",
+                    "zero_interval",
                     "my_task",
-                    SchedulePattern::Interval(IntervalSchedule::default()),
+                    SchedulePattern::Interval(IntervalSchedule {
+                        every: Duration::ZERO,
+                    }),
                 ),
             ],
             check_interval_seconds: 0,
@@ -2438,7 +2971,7 @@ mod tests {
         assert!(errors[1].contains("duplicate schedule name 'twice'"));
         assert!(errors[2].contains("invalid timezone 'Not/A_Timezone'"));
         assert!(errors[3].contains("schedule 'no_catch_up': max_catch_up_runs"));
-        assert!(errors[4].contains("schedule 'empty_interval'"));
+        assert!(errors[4].contains("schedule 'zero_interval'"));
         assert_eq!(config.validate(), Err(errors[0].clone()));
     }
 
@@ -2449,13 +2982,16 @@ mod tests {
         let refused = [
             r#"{"enabled": true, "check_intervals": 5}"#,
             r#"{"schedules": [{"name": "a", "task_name": "t",
-                "pattern": {"type": "interval", "seconds": 5}, "queue": "q"}]}"#,
+                "pattern": {"kind": "interval", "every": "PT5S"}, "queue_name": "q"}]}"#,
             r#"{"schedules": [{"name": "a", "task_name": "t",
-                "pattern": {"type": "interval", "second": 5}}]}"#,
+                "pattern": {"kind": "interval", "every": "PT5S", "seconds": 5}}]}"#,
             r#"{"schedules": [{"name": "a", "task_name": "t",
-                "pattern": {"type": "monthly", "day": 1, "time": "00:00:00", "days": 2}}]}"#,
+                "pattern": {"kind": "weekly", "weekdays": ["monday"], "time": "00:00:00",
+                "days": ["monday"]}}]}"#,
             r#"{"schedules": [{"name": "a", "task_name": "t",
-                "pattern": {"type": "cron", "minute": [{"kind": "step", "step": 5, "steps": 1}],
+                "pattern": {"kind": "monthly", "day_of_month": 1, "time": "00:00:00", "day": 2}}]}"#,
+            r#"{"schedules": [{"name": "a", "task_name": "t",
+                "pattern": {"kind": "cron", "minute": [{"kind": "step", "step": 5, "steps": 1}],
                 "hour": [{"kind": "every"}], "month": [{"kind": "every"}],
                 "day": {"kind": "every_day"}}}]}"#,
         ];
@@ -2469,7 +3005,7 @@ mod tests {
         }
 
         let accepted = r#"{"schedules": [{"name": "a", "task_name": "t",
-            "pattern": {"type": "cron", "minute": [{"kind": "step", "step": 5}],
+            "pattern": {"kind": "cron", "minute": [{"kind": "step", "step": 5}],
             "hour": [{"kind": "every"}], "month": [{"kind": "every"}],
             "day": {"kind": "every_day"}}}]}"#;
         let config = serde_json::from_str::<ScheduleConfig>(accepted).expect("known keys only");
@@ -2484,7 +3020,7 @@ mod tests {
     /// A TOML cron pattern with `minute`, every hour, `month` and `day`.
     fn cron_toml(minute: &str, month: &str, day: &str) -> String {
         format!(
-            "{{ type = \"cron\", minute = [{minute}], hour = [{{ kind = \"every\" }}], \
+            "{{ kind = \"cron\", minute = [{minute}], hour = [{{ kind = \"every\" }}], \
              month = [{month}], day = {day} }}"
         )
     }
@@ -2509,28 +3045,28 @@ mod tests {
         let rows: Vec<(&str, String)> = vec![
             (
                 "extra_interval",
-                r#"{ type = "interval", seconds = 5 EXTRA}"#.to_owned(),
+                r#"{ kind = "interval", every = "PT5S" EXTRA}"#.to_owned(),
             ),
             (
                 "extra_hourly",
-                r#"{ type = "hourly", minute = 0 EXTRA}"#.to_owned(),
+                r#"{ kind = "hourly", minute = 0 EXTRA}"#.to_owned(),
             ),
             (
                 "extra_daily",
-                r#"{ type = "daily", time = "09:00:00" EXTRA}"#.to_owned(),
+                r#"{ kind = "daily", time = "09:00:00" EXTRA}"#.to_owned(),
             ),
             (
                 "extra_weekly",
-                r#"{ type = "weekly", days = ["monday"], time = "09:00:00" EXTRA}"#.to_owned(),
+                r#"{ kind = "weekly", weekdays = ["monday"], time = "09:00:00" EXTRA}"#.to_owned(),
             ),
             (
                 "extra_monthly",
-                r#"{ type = "monthly", day = 1, time = "09:00:00" EXTRA}"#.to_owned(),
+                r#"{ kind = "monthly", day_of_month = 1, time = "09:00:00" EXTRA}"#.to_owned(),
             ),
             (
                 "extra_cron",
                 format!(
-                    "{{ type = \"cron\", minute = [{every}], hour = [{every}], \
+                    "{{ kind = \"cron\", minute = [{every}], hour = [{every}], \
                      month = [{every}], day = {every_day} EXTRA}}"
                 ),
             ),

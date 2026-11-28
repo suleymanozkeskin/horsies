@@ -12,15 +12,15 @@ tags: [rust, configuration, AppConfig, Horsies, SchemaMode]
 ## Build the App
 
 ```rust
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 ```
 
-`Horsies::new` does no I/O. It validates the config, builds the core's producer manifest, and returns an app whose handle connects at the first operation (a send, a read). A config that does not validate is refused with every refusal of the validation in one `HorsiesError`.
+`Horsies::new` does no I/O. It validates the config, builds the core's producer manifest, and returns an app whose handle connects at the first operation (a send, a read). A config that does not validate is refused with a `ValidationReport` of the phase `config`: `refusals()` holds every refusal of the validation. `ValidationReport` converts into one `HorsiesError`, so `?` works in a function that returns `HorsiesError`.
 
 ## Schema Modes
 
@@ -29,20 +29,20 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 | `Horsies::new(config)` | `SchemaMode::MigrateAndValidate` | Installs the schema at the first operation, or checks it |
 | `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` | `ObserveOnly` | Runs no schema DDL. For monitoring tools |
 | `Horsies::with_schema_mode(config, SchemaMode::AssumeInitialized)` | `AssumeInitialized` | Runs no schema DDL and uses no listener |
-| `Horsies::with_handle(config, handle)` | the mode of `handle` | Uses an `Arc<CoreHandle>` that another app or the caller shares. The connection settings are those of `handle` |
+| `Horsies::with_core_connection(config, connection)` | the mode of `connection` | Uses an `Arc<CoreConnection>` that another app or the caller shares. The connection settings are those of `connection` |
 
-See [Broker Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
+See [Database Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
 
 ## AppConfig
 
-`AppConfig` is the core's one config schema, which the Python client reads too. `AppConfig::for_database_url(url)` builds it with every default. The meaning, the default and the range of each field are on the shared pages.
+`AppConfig` is the core's one config schema, which the Python client reads too. `AppConfig::from_database_url(url)` builds it with every default. The meaning, the default and the range of each field are on the shared pages.
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | [Queue Modes](/horsies/concepts/queue-modes/) |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | [Queue Modes](/horsies/concepts/queue-modes/) |
-| `broker` | `PostgresConfig` | [Broker Config](/horsies/configuration/broker-config/) |
-| `cluster_wide_cap` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
+| `database` | `PostgresConfig` | [Database Config](/horsies/configuration/broker-config/) |
+| `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | [Concurrency](/horsies/workers/concurrency/) |
 | `prefetch_buffer` | `u32` | [Concurrency](/horsies/workers/concurrency/) |
 | `claim_lease_ms` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
 | `max_claim_renew_age_ms` | `u32` | [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/) |
@@ -52,19 +52,19 @@ See [Broker Config](/horsies/configuration/broker-config/#schema-initialization)
 | `resilience` | `WorkerResilienceConfig` | [Worker Architecture](/horsies/workers/worker-architecture/) |
 | `worker_profiles` | `BTreeMap<String, WorkerProfile>` | [Concurrency](/horsies/workers/concurrency/) |
 | `schedule` | `Option<ScheduleConfig>` | [Scheduler Overview](/horsies/scheduling/scheduler-overview/) |
-| `resend_on_transient_err` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
+| `resend_on_transient_error` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
 
 ```rust
-use horsies::{AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode};
+use horsies::{AppConfig, CustomQueueConfig, Horsies, QueueMode, ValidationReport};
 
-fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig { name: "critical".to_owned(), priority: 1, max_concurrency: None },
             CustomQueueConfig { name: "standard".to_owned(), priority: 50, max_concurrency: Some(10) },
         ]),
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -72,15 +72,18 @@ fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 
 ### PostgresConfig
 
-`PostgresConfig::from_url(url)` builds the broker config with every default. Three fields have Rust types where the Python client has numbers:
+`PostgresConfig::from_database_url(url)` builds the database config with every default. Four fields are enums, as the Python classes:
 
-| Field | Type | Python field |
-|-------|------|--------------|
-| `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` | `pool_recycle` (`-1` or seconds) |
-| `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` | `tcp_keepalives`, `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count` |
-| `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` | `tcp_user_timeout_ms` (`0` or milliseconds) |
+| Field | Type | Python classes |
+|-------|------|----------------|
+| `session_database` | `SessionDatabase::SameAsDatabaseUrl` (default) or `SessionDatabase::Separate { url }` | `SessionDatabaseSameAsDatabaseUrl`, `SessionDatabaseSeparate` |
+| `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` | `PoolRecycleNever`, `PoolRecycleAfterSeconds` |
+| `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` | `TcpKeepalivesOff`, `TcpKeepalivesOn` |
+| `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` | `TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter` |
 
-The other fields have the names and the meanings of the [Broker Config](/horsies/configuration/broker-config/) table.
+The keepalive and user timeout values are plain `u32` numbers. `Horsies::new` refuses a value outside its bound with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`), and the message names the field, for example `tcp_keepalives.probes`. In a TOML file, a separate session database is `session_database = { kind = "SEPARATE", url = "postgresql://..." }`.
+
+The other fields have the names and the meanings of the [Database Config](/horsies/configuration/broker-config/) table.
 
 #### Pool Size
 
@@ -98,16 +101,16 @@ The other fields have the names and the meanings of the [Broker Config](/horsies
 Raise both values for a producer that sends at a high rate:
 
 ```rust
-use horsies::{AppConfig, Horsies, HorsiesError, PostgresConfig};
+use horsies::{AppConfig, Horsies, PostgresConfig, ValidationReport};
 
-fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
-        broker: PostgresConfig {
+        database: PostgresConfig {
             pool_size: 20,
             max_overflow: 40,
-            ..PostgresConfig::from_url(database_url)
+            ..PostgresConfig::from_database_url(database_url)
         },
-        ..AppConfig::for_database_url(database_url)
+        ..AppConfig::from_database_url(database_url)
     };
     Horsies::new(config)
 }
@@ -119,7 +122,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 
 | Config | Refusal |
 |--------|---------|
-| `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
+| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` `HRS-213` (`ConfigInvalidDatabasePool`) "invalid database config: database.<field>: ...", one refusal for each value |
 | A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` (`ConfigInvalidWorkerProfile`) with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary, so there is nothing to preload. A profile that does not set `preload` (`..WorkerProfile::default()`, or a config file without the key) has `ChildPreload::NoPreload` |
 
 ## Queues
@@ -127,7 +130,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 | Method | Returns |
 |--------|---------|
 | `get_valid_queue_names()` | `Vec<String>`: `default` in `Default` mode, the configured queues in `Custom` mode |
-| `validate_queue(queue_name)` | `Result<(), HorsiesError>`: refuses with `HRS-103` (`TaskInvalidQueue`) and the valid names |
+| `validate_queue(queue)` | `Result<(), HorsiesError>`: refuses with `HRS-103` (`TaskInvalidQueue`) and the valid names |
 | `effective_priority(queue_name, task_priority)` | `u32`: `task_priority` when given, else the queue's configured priority, else 100 |
 
 A task registration follows the queue rules of the Python client:
@@ -139,13 +142,17 @@ A task registration follows the queue rules of the Python client:
 
 | Method | Does |
 |--------|------|
-| `register(name, task)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!`, on the queue that its options name. The `#[horsies::task]` attribute generates a `register` function that calls it. Refuses an empty or repeated name, a definition-time `good_until`, and a queue that the queue mode does not admit; after a refusal nothing is registered |
+| `register(name, task)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!`, on the queue that its options name. The `#[horsies::task]` attribute generates a `register` function that calls it. Refuses an empty or repeated name, a definition-time `good_until`, a `cancel_grace_ms` outside 100 to 10,000 ms (`HRS-111`), and a queue that the queue mode does not admit; after a refusal nothing is registered |
 | `register_with_queue(name, task, queue)` | Registers on `queue` in place of the queue of the options |
 | `provide(value)` | Provides a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()`. Refuses a second value of one type (wrap it in a newtype) and a value provided after a body read the state |
 | `discover(registrars)` | Runs each registrar function on the app in order and stops at the first refusal |
 | `task_runtime()` | The `TaskRuntime` that task bodies take as their first parameter |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
+| `start_workflow::<D>()`, `start_workflow_with::<D>(params)` | Starts the definition `D` through its registration on this app. `VALIDATION_FAILED` when this app does not register `D`. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
 
 Each process builds its own state: every worker child runs `main` again. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/).
+
+The registrations belong to the app. The generated sends (`name::send(&app, ...)`) and the workflow builders of an app find a task only in that app, so two apps in one process share no registration.
 
 ## Role and Send Suppression
 
@@ -155,8 +162,8 @@ Each process builds its own state: every worker child runs `main` again. See [De
 | `suppress_sends(bool)` | Suppresses the sends of this process (`true`) or stops suppressing them (`false`) |
 | `are_sends_suppressed()` | `true` when `suppress_sends(true)` was called, or when the environment variable `HORSIES_SUPPRESS_SENDS` (`SUPPRESS_SENDS_ENV`) is `1`. The variable is read at each call |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing.
+A suppressed send returns `TaskSendError::Suppressed` and writes nothing.
 
 ## Refusals
 
-A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `ErrorCode` (`HRS-xxx`) and its `ErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).
+A refusal of the config, of a registration or of `provide` is a `HorsiesError`: an `HorsiesErrorCode` (`HRS-xxx`) and its `HorsiesErrorCategory` where the refusal has one, the message, notes and help text. A `ValidationReport` collects the refusals of one phase. Both clients print the same codes; the codes are in the [Errors Reference](/horsies/tasks/errors/#config-error-codes-horsieserror).

@@ -12,6 +12,10 @@ permissions: {}
 # repository root uses its pyproject.toml, uv.lock and .venv.
 env:
   UV_PROJECT: ${{ github.workspace }}/clients/python
+  # The runtimes of the TypeScript jobs, from the minimum runtime lines of the
+  # client: Node 26 and Bun 1.4. Bun 1.4.4 wrote clients/typescript/bun.lock.
+  TYPESCRIPT_NODE_VERSION: "26.13.1"
+  TYPESCRIPT_BUN_VERSION: "1.4.4"
 
 jobs:
   unit:
@@ -19,9 +23,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -66,9 +70,9 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -101,9 +105,9 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -126,9 +130,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -197,11 +201,11 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -271,7 +275,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -389,7 +393,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -440,7 +444,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -449,7 +453,7 @@ jobs:
           rustup toolchain install
           rustc --version
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: 0.11.14
           enable-cache: true
@@ -472,12 +476,13 @@ jobs:
         run: cargo build -p horsies-parity-tests
 
       # crossclient/parity/snapshot holds the unit and integration tests of the
-      # snapshot tool; tests.yml runs them.
+      # snapshot tool; tests.yml runs them. This job builds no TypeScript
+      # side, so it deselects the TypeScript parity tests.
       - name: Parity runs
         env:
           HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
           HORSIES_PARITY_RUST_BIN: ${{ github.workspace }}/target/debug/horsies-parity
-        run: uv run pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity --ignore=crossclient/parity/snapshot -v --tb=short
+        run: uv run pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity --ignore=crossclient/parity/snapshot -k "not typescript" -v --tb=short
 
   # The Rust lane through the PgBouncer fixture of the Python client
   # (clients/python/tests/fixtures/pgbouncer/: PostgreSQL 18 on 15432, pools
@@ -493,7 +498,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -547,7 +552,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -563,3 +568,29 @@ jobs:
 
       - name: Test the client with the flag on
         run: cargo test -p horsies -p horsies-arbitrary-precision-tests
+
+  # The checks of the TypeScript client on Node 26 and Bun 1.4: the steps of
+  # the `typescript` job of tests.yml, from the same script. The release
+  # calls this workflow, not tests.yml.
+  ts-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No npm step runs, so the action caches no npm folder.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Run the checks of the TypeScript client
+        run: clients/typescript/ci/unit.sh

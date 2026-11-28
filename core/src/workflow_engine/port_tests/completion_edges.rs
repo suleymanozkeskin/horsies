@@ -7,9 +7,9 @@
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, broker, code, complete_workflow, err, node, ok, required, seed_node,
-    seed_workflow, shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed,
-    ParentLink, WorkflowSeed,
+    advance_parent_of, broker, code, complete_workflow, err, error_of, node, ok, required,
+    seed_node, seed_workflow, shared_pool, stored_error, stored_result, workflow, IsolatedDatabase,
+    NodeSeed, ParentLink, WorkflowSeed,
 };
 use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
@@ -175,10 +175,10 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
         let summary = parent_summary(&pool, parent_id).await;
         assert_eq!(
             (
-                summary.total_tasks,
-                summary.completed_tasks,
-                summary.failed_tasks,
-                summary.skipped_tasks,
+                summary.total_nodes,
+                summary.completed_nodes,
+                summary.failed_nodes,
+                summary.skipped_nodes,
             ),
             (
                 i32::try_from(node_count).expect("a small count"),
@@ -191,13 +191,11 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
     }
 }
 
-/// `test_terminal_two_step_handles_zero_task_workflow`: a workflow with no
-/// node has an empty terminal set, and its completion reads no row and fails
-/// on nothing. It has no output node, so it stores Python's outputless result
-/// with three empty maps (`clients/python/horsies/core/workflows/engine.py:3935-3983`; the
-/// baseline `horsies_workflow_outputless_result`).
+/// A workflow with no node completes and fails on nothing. It has no output
+/// node, so it stores the plain envelope with `ok` and `err` null
+/// (`horsies_workflow_try_complete`).
 #[tokio::test]
-async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
+async fn a_workflow_with_no_node_completes_with_the_plain_envelope() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
 
@@ -210,13 +208,29 @@ async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
         serde_json::from_str(&stored).expect("the stored result is JSON");
     assert_eq!(
         result,
-        serde_json::json!({
-            "__h_task_result__": true,
-            "__h_outputless_terminals__": true,
-            "ok": {"results_by_id": {}, "task_name_by_id": {}, "definition_key_by_id": {}},
-            "err": null,
-        })
+        PLAIN_ENVELOPE
+            .parse::<serde_json::Value>()
+            .expect("the plain envelope is JSON")
     );
+}
+
+/// The stored result of a COMPLETED workflow with no output node.
+const PLAIN_ENVELOPE: &str = r#"{"__h_task_result__":true,"ok":null,"err":null}"#;
+
+/// The result that migrations before 1009 stored for a COMPLETED workflow
+/// with no output node: the marker `__h_outputless_terminals__` and a map of
+/// the terminal nodes in the `ok` slot.
+fn old_outputless_envelope() -> serde_json::Value {
+    serde_json::json!({
+        "__h_task_result__": true,
+        "__h_outputless_terminals__": true,
+        "ok": {
+            "results_by_id": {"node_0": {"__h_task_result__": true, "ok": 42, "err": null}},
+            "task_name_by_id": {"node_0": "port_task"},
+            "definition_key_by_id": {"node_0": null},
+        },
+        "err": null,
+    })
 }
 
 /// `test_child_info_counts_zero_for_taskless_workflow`: a child with no node
@@ -232,38 +246,26 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
     let summary = parent_summary(&pool, parent_id).await;
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (0, 0, 0, 0)
     );
 }
 
-/// An outputless child (no output node) that COMPLETED stores the outputless
-/// result; its parent node COMPLETES with `Ok(null)`, not with the child's
-/// terminal map, and the summary has no output (Python `_parse_child_output`
-/// and `_completed_child_node`, `clients/python/horsies/core/workflows/engine.py`; the baseline
-/// `horsies_workflow_child_node_result`).
+/// An outputless child (no output node) that COMPLETED stores the plain
+/// envelope; its parent node COMPLETES with the same text (`Ok(null)`), and
+/// the summary has no output (`horsies_workflow_child_node_result`).
 #[tokio::test]
 async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
     let pool = shared_pool().await;
-    let outputless = serde_json::json!({
-        "__h_task_result__": true,
-        "__h_outputless_terminals__": true,
-        "ok": {
-            "results_by_id": {"node_0": {"__h_task_result__": true, "ok": 42, "err": null}},
-            "task_name_by_id": {"node_0": "port_task"},
-            "definition_key_by_id": {"node_0": null},
-        },
-        "err": null,
-    });
     let (parent_id, child_id) = seed_parent_and_child(
         &pool,
         WorkflowSeed::running()
             .status("COMPLETED")
-            .result(outputless.to_string()),
+            .result(PLAIN_ENVELOPE.to_owned()),
     )
     .await;
 
@@ -280,6 +282,38 @@ async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
         TaskResult::Ok(value) => assert!(value.is_null(), "{value}"),
         TaskResult::Err(error) => panic!("the parent node failed: {error:?}"),
     }
+    assert_eq!(parent_summary(&pool, parent_id).await.output, None);
+}
+
+/// A child that COMPLETED before migration 1009 holds the old outputless
+/// envelope. It is not a valid envelope: its parent node FAILS with
+/// `RESULT_DESERIALIZATION_ERROR`, and the parent node is not written with
+/// the old text.
+#[tokio::test]
+async fn a_child_with_the_old_outputless_envelope_fails_its_parent_node_closed() {
+    let pool = shared_pool().await;
+    let (parent_id, child_id) = seed_parent_and_child(
+        &pool,
+        WorkflowSeed::running()
+            .status("COMPLETED")
+            .result(old_outputless_envelope().to_string()),
+    )
+    .await;
+
+    advance_parent_of(&pool, child_id, &TestChildSpecs::empty()).await;
+
+    let parent_node = node(&pool, parent_id, 0).await;
+    assert_eq!(parent_node.status, "FAILED");
+    let text = parent_node
+        .result
+        .as_deref()
+        .expect("the parent node stores a result");
+    let result = stored_result(text);
+    assert_eq!(
+        code(error_of(&result)).as_deref(),
+        Some("RESULT_DESERIALIZATION_ERROR"),
+        "{text}"
+    );
     assert_eq!(parent_summary(&pool, parent_id).await.output, None);
 }
 
@@ -386,7 +420,7 @@ async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
 async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
     let pool = shared_pool().await;
     let first_error =
-        serde_json::to_string(&TaskError::new("FIRST", "first failure").expect("a user code"))
+        serde_json::to_string(&TaskError::custom("FIRST", "first failure").expect("a custom code"))
             .expect("encode the error");
     let workflow_id =
         seed_workflow(&pool, &WorkflowSeed::running().error(first_error.clone())).await;
@@ -405,8 +439,8 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
 }
 
 /// A workflow with eight terminal
-/// nodes completes with its explicit output copied unchanged, or with
-/// Python's outputless result (`clients/python/horsies/core/workflows/engine.py:3973-3983`), for a
+/// nodes completes with its explicit output copied unchanged, or with the
+/// plain envelope when it has no output node, for a
 /// small and a 64 KiB result; with a FAILED node it fails and stores no
 /// result. Each completion sends one `workflow_done` notification with the
 /// workflow id.
@@ -447,36 +481,7 @@ async fn finalization_preserves_explicit_and_default_outputs() {
                 match (success, output) {
                     (false, _) => assert_eq!(row.result, None),
                     (true, Some(_)) => assert_eq!(row.result, Some(result.clone())),
-                    (true, None) => {
-                        let entry: serde_json::Value =
-                            serde_json::from_str(&result).expect("the node result is JSON");
-                        let per_node = |value: serde_json::Value| {
-                            (0..8)
-                                .map(|index| (format!("node_{index}"), value.clone()))
-                                .collect::<serde_json::Map<_, _>>()
-                        };
-                        let stored: serde_json::Value = serde_json::from_str(
-                            row.result
-                                .as_deref()
-                                .expect("a COMPLETED workflow stores its result"),
-                        )
-                        .expect("the stored result is JSON");
-                        assert_eq!(
-                            stored,
-                            serde_json::json!({
-                                "__h_task_result__": true,
-                                "__h_outputless_terminals__": true,
-                                "ok": {
-                                    "results_by_id": per_node(entry),
-                                    "task_name_by_id": per_node(serde_json::json!(
-                                        "finalization_contract"
-                                    )),
-                                    "definition_key_by_id": per_node(serde_json::Value::Null),
-                                },
-                                "err": null,
-                            })
-                        );
-                    }
+                    (true, None) => assert_eq!(row.result.as_deref(), Some(PLAIN_ENVELOPE)),
                 }
                 let notification =
                     tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
@@ -738,16 +743,13 @@ async fn a_first_failed_node_with_an_ok_envelope_gives_no_failure_error() {
     assert_eq!(row.error, None);
 }
 
-/// `TestGetWorkflowFinalResult::test_non_string_node_id_skipped`,
-/// `test_task_result_parse_fails_stores_none`: the outputless result has no
-/// entry for a terminal node with no node id, and a null entry for a
-/// terminal node whose stored text is not a result envelope; it is still
-/// built.
+/// The plain envelope of a workflow with no output node does not depend on
+/// its terminal nodes: a node with no node id and a node whose stored text is
+/// not a result envelope change nothing.
 #[tokio::test]
-async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_as_null() {
+async fn the_plain_envelope_does_not_depend_on_the_terminal_nodes() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
-    let two = serde_json::to_string(&ok(serde_json::json!(2))).expect("encode the result");
     seed_node(
         &pool,
         &NodeSeed::task(workflow_id, 0, "COMPLETED")
@@ -757,11 +759,6 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
     seed_node(
         &pool,
         &NodeSeed::task(workflow_id, 1, "COMPLETED").result("not an envelope".to_owned()),
-    )
-    .await;
-    seed_node(
-        &pool,
-        &NodeSeed::task(workflow_id, 2, "COMPLETED").result(two.clone()),
     )
     .await;
     sql::query(
@@ -776,21 +773,7 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
 
     let row = workflow(&pool, workflow_id).await;
     assert_eq!(row.status, "COMPLETED");
-    let stored: serde_json::Value = serde_json::from_str(
-        row.result
-            .as_deref()
-            .expect("a COMPLETED workflow stores its result"),
-    )
-    .expect("the stored result is JSON");
-    let two: serde_json::Value = serde_json::from_str(&two).expect("the result is JSON");
-    assert_eq!(
-        stored["ok"]["results_by_id"],
-        serde_json::json!({"node_1": null, "node_2": two})
-    );
-    assert_eq!(
-        stored["ok"]["task_name_by_id"],
-        serde_json::json!({"node_1": "port_task", "node_2": "port_task"})
-    );
+    assert_eq!(row.result.as_deref(), Some(PLAIN_ENVELOPE));
 }
 
 /// The completion check reads the parent link under the workflow row lock and

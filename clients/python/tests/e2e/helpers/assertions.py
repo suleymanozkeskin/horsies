@@ -1,4 +1,11 @@
-"""Assertion helpers for e2e tests."""
+"""Assertion helpers for e2e tests.
+
+A read of a task or a workflow (``handle.get``, ``app.get_result``,
+``result_for``) is a ``ReadResult``: ``Ok(Succeeded(value))``,
+``Ok(Failed(task_error))`` or ``Err(read_error)``. The helpers below take
+one read and return the part that the test expects, or fail the test with
+the read that came instead.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +14,18 @@ from typing import Any
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerResult
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import (
+    Failed,
+    ReadError,
+    ReadResult,
+    Succeeded,
+    TaskOutcome,
+)
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.models.workflow import WorkflowHandle, WorkflowSpec
 from horsies.core.task_decorator import TaskHandle
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err
 
 
 async def start_ok_in_thread(
@@ -38,37 +51,105 @@ def unwrap_send(result: TaskSendResult[TaskHandle[Any]]) -> TaskHandle[Any]:
     return result.ok_value
 
 
-def unwrap_get_result(
-    result: BrokerResult[TaskResult[Any, TaskError]],
-) -> TaskResult[Any, TaskError]:
-    """Unwrap the outer BrokerResult from app.get_result; fail-fast on outer Err.
-
-    Strict-serde retrieval surfaces infrastructure decode failures as
-    Err(BrokerOperationError). Tests that expect a domain-level
-    TaskResult (ok/err) use this helper to peel the outer envelope and
-    fail loudly if the broker layer itself errored.
-    """
-    if is_err(result):
-        pytest.fail(f'app.get_result outer Err: {result.err_value}')
-    return result.ok_value
+def read_succeeded(read: ReadResult[Any, TaskError]) -> bool:
+    """Whether ``read`` is ``Ok(Succeeded(...))``. A readiness probe polls
+    with it: a failed task and a read failure are both "not yet"."""
+    match read:
+        case Ok(Succeeded()):
+            return True
+        case _:
+            return False
 
 
-def assert_ok(
-    result: TaskResult[Any, TaskError],
-    expected_value: Any | None = None,
+def succeeded_value[T](read: ReadResult[T, TaskError]) -> T:
+    """The value of ``Ok(Succeeded(value))``. Any other read fails the test."""
+    match read:
+        case Ok(Succeeded(value)):
+            return value
+        case _:
+            pytest.fail(f'expected Ok(Succeeded(...)), got {read!r}')
+
+
+async def node_outcomes_of(
+    handle: WorkflowHandle[Any],
+) -> dict[str, TaskOutcome[Any, TaskError[Any]]]:
+    """The outcome of every node that has a stored result, by node id, from
+    ``handle.results()``. A failed read fails the test."""
+    read = await asyncio.to_thread(handle.results)
+    match read:
+        case Ok(ok_value=outcomes):
+            return outcomes
+        case Err(err_value=error):
+            pytest.fail(f'handle.results() failed: {error!r}')
+
+
+def failed_error(read: ReadResult[Any, TaskError]) -> TaskError:
+    """The task error of ``Ok(Failed(task_error))``. Any other read fails the
+    test."""
+    match read:
+        case Ok(Failed(task_error)):
+            return task_error
+        case _:
+            pytest.fail(f'expected Ok(Failed(...)), got {read!r}')
+
+
+def outcome_of[T](read: ReadResult[T, TaskError]) -> TaskOutcome[T, TaskError]:
+    """The outcome of ``Ok(outcome)``. ``Err(read_error)`` fails the test."""
+    match read:
+        case Ok(ok_value=outcome):
+            return outcome
+        case Err(err_value=error):
+            pytest.fail(f'expected an outcome, got Err({error!r})')
+
+
+def read_error(read: ReadResult[Any, TaskError]) -> ReadError:
+    """The read failure of ``Err(read_error)``. An outcome fails the test."""
+    match read:
+        case Err(err_value=error):
+            return error
+        case _:
+            pytest.fail(f'expected Err(<read error>), got {read!r}')
+
+
+def assert_succeeded(
+    read: ReadResult[Any, TaskError],
+    expected_value: object | None = None,
 ) -> None:
-    """Assert result is Ok and optionally check value."""
-    assert result.is_ok(), f'Expected Ok, got Err: {result.err}'
+    """Assert ``read`` is ``Ok(Succeeded(...))``; check the value when
+    ``expected_value`` is not None."""
+    value = succeeded_value(read)
     if expected_value is not None:
-        assert result.unwrap() == expected_value
+        assert value == expected_value, f'expected {expected_value!r}, got {value!r}'
 
 
-def assert_err(
-    result: TaskResult[Any, TaskError],
+def assert_failed(
+    read: ReadResult[Any, TaskError],
     expected_code: str | None = None,
 ) -> None:
-    """Assert result is Err and optionally check error code."""
-    assert result.is_err(), f'Expected Err, got Ok: {result.ok}'
+    """Assert ``read`` is ``Ok(Failed(task_error))``; check the error code
+    when ``expected_code`` is not None."""
+    task_error = failed_error(read)
     if expected_code is not None:
-        assert result.err is not None
-        assert result.err.error_code == expected_code
+        assert task_error.code == expected_code, (
+            f'expected error code {expected_code!r}, got {task_error!r}'
+        )
+
+
+def outcome_value[T](outcome: TaskOutcome[T, TaskError] | None) -> T:
+    """The value of ``Succeeded(value)``. ``Failed`` or no outcome fails the
+    test."""
+    match outcome:
+        case Succeeded(value):
+            return value
+        case _:
+            pytest.fail(f'expected Succeeded(...), got {outcome!r}')
+
+
+def outcome_error(outcome: TaskOutcome[Any, TaskError] | None) -> TaskError:
+    """The task error of ``Failed(task_error)``. ``Succeeded`` or no outcome
+    fails the test."""
+    match outcome:
+        case Failed(task_error):
+            return task_error
+        case _:
+            pytest.fail(f'expected Failed(...), got {outcome!r}')

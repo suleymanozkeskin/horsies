@@ -135,7 +135,7 @@ mod untraced {
     use horsies_core::telemetry::trace_carrier::SendTrace;
     use horsies_core::worker_manifest::WorkerEndedSpans;
     use horsies_core::{
-        BodyOutcome, BodyRun, BodyScope, BodySpans, EndedSpanScope, TaskSendErrorCode,
+        BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans, EndedSpanScope, TaskSendErrorCode,
         WorkflowStartErrorCode,
     };
 
@@ -208,7 +208,7 @@ mod untraced {
             body_span(run)
         }
 
-        fn close(&self, _span: &tracing::Span, _end: &BodyOutcome<'_>) {}
+        fn close(&self, _run: BodyRunKey, _span: &tracing::Span, _end: &BodyOutcome<'_>) {}
     }
 }
 
@@ -217,7 +217,9 @@ mod untraced {
 #[cfg(all(test, not(feature = "otel")))]
 mod tests {
     use horsies_core::telemetry::trace_carrier::SendTrace;
-    use horsies_core::{BodyScope, TaskSendErrorCode, WorkflowStartErrorCode};
+    #[cfg(feature = "cli")]
+    use horsies_core::BodyScope;
+    use horsies_core::{TaskSendErrorCode, WorkflowStartErrorCode};
 
     use super::*;
 
@@ -306,7 +308,7 @@ mod tests {
         tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
             let span = spans.open(&run);
             span.in_scope(|| tracing::warn!("the card was declined"));
-            spans.close(&span, &horsies_core::BodyOutcome::Returned);
+            spans.close(run.key(), &span, &horsies_core::BodyOutcome::Returned);
         });
         let text = String::from_utf8(
             buffer

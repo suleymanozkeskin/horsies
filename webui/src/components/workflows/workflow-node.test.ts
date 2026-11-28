@@ -125,7 +125,7 @@ describe('cardFacts', () => {
         {
           phase: { kind: 'running' as const },
           started_at: at(12),
-          end: { kind: 'ended' as const, at: at(15) },
+          end: { kind: 'closed' as const, at: at(15) },
           source: { kind: 'attempt' as const, generation: 1, task_id: 't', attempt: 2 },
         },
       ],

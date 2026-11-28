@@ -2,10 +2,12 @@
 //! core's spec data, the start forms and the workflow handle.
 //!
 //! The DSL builds a spec as data, in the client: the nodes of registered
-//! tasks ([`TaskNode`], from `TaskFunction::node`), sub-workflow nodes
-//! ([`SubWorkflowNode`], from a definition), their links, and the output.
-//! `WorkflowSpecBuilder::build` checks the spec with Python's rules and
-//! codes before anything is written.
+//! tasks ([`TaskNode`], from the generated `name::node()`), sub-workflow
+//! nodes ([`SubWorkflowNode`], from a definition), their links, and the
+//! output. A builder comes from an app (`Horsies::workflow_builder`) and
+//! resolves each task node against the tasks of that app when the node is
+//! added. `WorkflowSpecBuilder::build` checks the spec with Python's rules
+//! and codes before anything is written.
 
 mod context;
 mod definition;
@@ -21,23 +23,22 @@ mod start;
 mod sub_workflow;
 
 pub use context::{WorkflowContext, WorkflowContextError};
-pub use definition::{WorkflowDefConfig, WorkflowDefinition};
-pub use dependency::OutputlessResults;
-pub use function::{
-    start_workflow, start_workflow_with, WorkflowCheckBuilderRegistration, WorkflowFunction,
-    WorkflowTemplate,
-};
-pub(crate) use function::{start_workflow_as, start_workflow_with_as};
+pub use definition::{WorkflowDefinition, WorkflowDefinitionConfig};
+pub use dependency::NoWorkflowOutput;
+pub use function::{WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowTemplate};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
-pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
+pub use sub_workflow::{SubWorkflowNode, SubWorkflowParameters};
 
+pub(crate) use node::NodeRegistration;
 pub(crate) use registry::WorkflowRegistry;
 
-/// Nodes for the tests of other modules of the crate.
+/// Nodes and builders for the tests of other modules of the crate.
 #[cfg(test)]
 pub(crate) mod tests_support {
+    pub(crate) use super::node::tests::{add, test_builder};
+
     /// A task node of `task_name` with no parameters and the output `u32`.
     pub(crate) fn unit_task_node(task_name: &str) -> crate::TaskNode<u32, ()> {
         super::node::tests::task_node::<u32, ()>(task_name)
@@ -51,20 +52,23 @@ mod stored_form_vector_tests;
 // vectors (`crate::stored_form_vectors::task_options`).
 #[cfg(test)]
 pub(crate) use node::NodeDeadline;
+// The body of a built node, for the tests of the node resolution.
+#[cfg(test)]
+pub(crate) use spec::SpecBody;
 #[cfg(test)]
 pub(crate) use spec_data::task_options_text;
 
 /// The start errors and the handle errors of the core's catalogs, with
 /// Python's codes.
 pub use horsies_core::{
-    HandleErrorCode, HandleOperationError, HandleResult, StartRefusalCause, WorkflowStartError,
-    WorkflowStartErrorCode,
+    HandleResult, StartRefusalCause, WorkflowHandleError, WorkflowHandleErrorCode,
+    WorkflowStartError, WorkflowStartErrorCode,
 };
 
 /// The workflow types of the core: the error policy, the statuses, the
 /// summary of a child workflow and the workflow meta of a task.
 pub use horsies_core::{
-    OnError, SubWorkflowSummary, WorkflowMeta, WorkflowStatus, WorkflowTaskStatus,
+    OnError, SubWorkflowSummary, WorkflowMetadata, WorkflowNodeStatus, WorkflowStatus,
 };
 
 /// A JSON value kept as its stored text: the `output` of a

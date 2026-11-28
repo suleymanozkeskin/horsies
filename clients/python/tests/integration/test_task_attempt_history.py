@@ -22,10 +22,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
-    TaskResult,
+    OperationalCode,
 )
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from tests.integration.terminal_writes import complete_plain_task
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
@@ -137,7 +136,7 @@ async def _insert_retried_attempts(
             {
                 'task_id': task_id,
                 'attempt': attempt,
-                'error_code': OperationalErrorCode.TASK_EXCEPTION.value,
+                'error_code': OperationalCode.TASK_EXCEPTION.value,
                 'worker_id': worker_id,
                 'worker_hostname': worker_hostname,
                 'worker_pid': worker_pid,
@@ -195,7 +194,7 @@ async def _get_task_error_code(
 
 def _serialize_ok(value: object) -> str:
     """Build the strict ``__h_task_result__`` envelope for a seeded ok value."""
-    envelope = encode_task_result(TaskResult(ok=value), JsonValue)
+    envelope = encode_task_result(Ok(value), JsonValue)
     r = dumps_json(envelope)
     assert not is_err(r)
     return r.ok_value
@@ -215,7 +214,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
@@ -286,10 +285,10 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for.
+    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in retry_for.
 
     No worker runs here, so no reaper runs the stale RUNNING pass, as with
-    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    ``fail_stale_running=False``: the call runs the pass on demand.
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')
@@ -299,10 +298,10 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
             'task_name': 'stale_retry_test',
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [60, 300, 900],
+                'intervals_seconds': [60, 300, 900],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
-                'auto_retry_for': ['WORKER_CRASHED'],
+                'retry_for': ['WORKER_CRASHED'],
             },
         }
     )

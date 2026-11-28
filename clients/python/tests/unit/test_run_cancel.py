@@ -35,7 +35,8 @@ from horsies import (
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, child_runner
 from horsies.core.worker.child_frames import (
     CancelFiredFrame,
@@ -89,7 +90,7 @@ WAIT_S: Final = 10.0
 
 APP = Horsies(
     AppConfig(
-        broker=PostgresConfig(
+        database=PostgresConfig(
             database_url=SecretStr('postgresql://user:password@localhost/unused'),
         ),
     ),
@@ -103,7 +104,7 @@ SEEN: list[RunCancelState] = []
 
 
 @APP.task('cancel.sync_polls')
-def sync_polls(runtime: TaskRuntime) -> TaskResult[str, TaskError]:
+def sync_polls(runtime: TaskRuntime) -> Result[str, TaskError]:
     """Runs until its cancel state turns, then returns a value, which the
     cancel drops."""
     BODY_STARTED.set()
@@ -111,14 +112,14 @@ def sync_polls(runtime: TaskRuntime) -> TaskResult[str, TaskError]:
         match runtime.cancel_state():
             case CancelRequested() as requested:
                 SEEN.append(requested)
-                return TaskResult(ok='stopped early')
+                return Ok('stopped early')
             case CancelNotRequested():
                 threading.Event().wait(0.005)
-    return TaskResult(ok='never cancelled')
+    return Ok('never cancelled')
 
 
 @APP.task('cancel.async_waits')
-async def async_waits(runtime: TaskRuntime) -> TaskResult[str, TaskError]:
+async def async_waits(runtime: TaskRuntime) -> Result[str, TaskError]:
     """Waits until the cancel reaches it at its ``await``."""
     BODY_STARTED.set()
     try:
@@ -126,13 +127,13 @@ async def async_waits(runtime: TaskRuntime) -> TaskResult[str, TaskError]:
     except asyncio.CancelledError:
         SEEN.append(runtime.cancel_state())
         raise
-    return TaskResult(ok='never cancelled')
+    return Ok('never cancelled')
 
 
 @APP.task('cancel.quick')
-def quick() -> TaskResult[int, TaskError]:
+def quick() -> Result[int, TaskError]:
     BODY_STARTED.set()
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 @pytest.fixture(autouse=True)
@@ -176,6 +177,7 @@ def _run(
             orphan_self_heal=True,
             queue_name='default',
             attempt=1,
+            max_retries=0,
             trace=NoTraceCarrier(),
             cancel=cancel,
         )

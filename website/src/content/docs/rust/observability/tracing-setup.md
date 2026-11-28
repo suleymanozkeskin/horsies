@@ -26,13 +26,13 @@ The worker starts the app's binary again for each child, and every line of `main
 ```rust
 use std::process::ExitCode;
 
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 use opentelemetry::global;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanExporter};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
-    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+fn build_app() -> Result<Horsies, ValidationReport> {
+    let config = AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 
@@ -71,7 +71,7 @@ Call `run_with_tracing` from `main` with the span exporter of your backend, for 
 
 Each attempt span is a `tracing` span `run` (target `horsies::attempt`, `horsies::ATTEMPT_SPAN_TARGET`). Its OpenTelemetry parent is set through the layer of `horsies::otel`:
 
-- `horsies::cli::run` adds `horsies::otel::layer()` to the subscriber that it installs, and its filter passes the attempt span at every `--loglevel`.
+- `horsies::cli::run` adds `horsies::otel::layer()` to the subscriber that it installs, and its filter passes the attempt span at every `--log-level`.
 - A binary that installs its own subscriber adds the layer, and lets its filter pass the target `horsies::attempt` at `INFO`:
 
 <!-- rust-check: skip partial -- the docs check builds the crate without the feature otel -->

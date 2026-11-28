@@ -32,10 +32,13 @@ impl CallerTransaction for SqlxCaller<'_, '_> {
         // An unnamed statement: no prepared statement outlives the call, so
         // a PgBouncer transaction pool with `max_prepared_statements = 0`
         // serves it.
+        // The text is the statement text of the library with positional
+        // parameters; every value is bound, none is spliced into the text.
+        let text = sqlx::AssertSqlSafe(statement.sql().to_owned());
         let query = statement
             .parameters()
             .iter()
-            .fold(sqlx::query(statement.sql()).persistent(false), bind);
+            .fold(sqlx::query(text).persistent(false), bind);
         let row = query.fetch_one(&mut **self.transaction).await?;
         statement
             .columns()

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::vector_file;
-use crate::core::{JoinType, OnError, SubWorkflowParams};
+use crate::core::{JoinType, OnError, SubWorkflowParameters};
 use crate::workflow_engine::spec_data::parse_workflow_spec_data;
 
 #[derive(Deserialize)]
@@ -145,13 +145,13 @@ fn each_python_text_reads_as_its_document() {
                 .collect();
             assert_eq!(task.args_from, args_from, "{at}");
             assert_eq!(
-                task.workflow_ctx_from.clone().unwrap_or_default(),
-                texts(&node["workflow_ctx_from"]),
+                task.workflow_context_from.clone().unwrap_or_default(),
+                texts(&node["workflow_context_from"]),
                 "{at}"
             );
             assert_eq!(
-                task.allow_failed_deps,
-                node["allow_failed_deps"].as_bool().expect("a bool"),
+                task.allow_failed_dependencies,
+                node["allow_failed_dependencies"].as_bool().expect("a bool"),
                 "{at}"
             );
             let join = &node["join"];
@@ -189,8 +189,8 @@ fn each_python_text_reads_as_its_document() {
                         "{at}"
                     );
                     let params = match body["params"].as_str() {
-                        Some("GIVEN") => SubWorkflowParams::Given,
-                        Some("NOT_GIVEN") => SubWorkflowParams::NotGiven,
+                        Some("GIVEN") => SubWorkflowParameters::Given,
+                        Some("NOT_GIVEN") => SubWorkflowParameters::NotGiven,
                         other => panic!("{at}: params {other:?}"),
                     };
                     assert_eq!(task.sub_workflow_params, params, "{at}");

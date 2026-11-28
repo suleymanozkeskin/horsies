@@ -13,12 +13,13 @@ The app has the health reads of the Python app. Each read connects the app's han
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::{BrokerOperationError, Horsies, PingTarget};
+use horsies::{DatabaseOperationError, Horsies, MinResponses, PingTarget};
 
-async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
+async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
     let ping = app.ping_database().await?;
+    let one_reply = MinResponses::AtLeast(NonZeroUsize::MIN);
     let pongs = app
-        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), NonZeroUsize::new(1))
+        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), one_reply)
         .await?;
     println!("{ping:?}, {} workers answered", pongs.len());
     Ok(())
@@ -29,17 +30,19 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 
 | Method | Returns | Failure code |
 |--------|---------|--------------|
-| `ping_database()` | `DatabasePing`: the latency of a timed `SELECT 1` round trip | `DB_PING_FAILED` |
-| `ping_workers(target, timeout, min_responses)` | `Vec<WorkerPong>`: the distinct replies by worker id | `INVALID_INPUT` for a zero `timeout`, with no statement; `LISTENER_DISABLED` for an app whose schema mode has no listener; `WORKER_PING_FAILED` |
+| `ping_database()` | `DatabasePing`: the latency of a timed `SELECT 1` round trip | `DATABASE_PING_FAILED` |
+| `ping_workers(target, wait, min_responses)` | `Vec<WorkerPong>`: the distinct replies by worker id | `INVALID_INPUT` for a zero `wait`, with no statement; `LISTENER_DISABLED` for an app whose schema mode has no listener; `WORKER_PING_FAILED` |
 | `list_worker_states()` | `Vec<WorkerStateSnapshot>`: the latest snapshot of every worker that reported one, idle workers included | `MONITORING_QUERY_FAILED` |
 | `get_worker_state(worker_id)` | `Option<WorkerStateSnapshot>`: `None` when the worker never reported one | `MONITORING_QUERY_FAILED` |
 | `get_worker_state_history(worker_id, limit)` | `Vec<WorkerStateSnapshot>`, newest first | `MONITORING_QUERY_FAILED` |
 | `get_stale_tasks(threshold)` | `BoundedTaskList<StaleTaskRow>` | `MONITORING_QUERY_FAILED` |
 | `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>` | `MONITORING_QUERY_FAILED` |
-| `get_class_coverage()` | `ClassCoverage`: for each pending stream of an execution class, whether a live worker can run it | `MONITORING_QUERY_FAILED` |
-| `get_class_report()` | `ClassReport`: the load of each execution class over the live workers | `MONITORING_QUERY_FAILED` |
+| `get_execution_class_coverage()` | `ExecutionClassCoverage`: for each pending stream of an execution class, whether a live worker can run it | `MONITORING_QUERY_FAILED` |
+| `get_execution_class_report()` | `ExecutionClassReport`: the load of each execution class over the live workers | `MONITORING_QUERY_FAILED` |
 
-Every read returns `Result<_, BrokerOperationError>`, an enum with one variant per state and the methods `code()`, `message()` and `retryable()`. A failed read is `OperationFailed` with the `BrokerOperationFailedCode` of the read, a refused argument is `InvalidInput`, and an app with no listener is `ListenerDisabled`. A failed connect or schema install has the code of the read. The message is Python's: `ping_database failed: <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`. `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the `BrokerError`, a refused class read, a snapshot that does not read, a refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`. A stored worker snapshot of another shape is `MONITORING_QUERY_FAILED`, and the message names the worker and the column.
+Every read returns `Result<_, DatabaseOperationError>`, an enum with one variant per state and the methods `code()`, `message()` and `retryable()`. A failed read is `OperationFailed` with the `DatabaseOperationFailedCode` of the read, a refused argument is `InvalidInput`, and an app with no listener is `ListenerDisabled`. A failed connect or schema install has the code of the read. The message is Python's: `ping_database failed: <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`. `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the `BrokerError`, a refused class read, a snapshot that does not read, a refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`. A stored worker snapshot of another shape is `MONITORING_QUERY_FAILED`, and the message names the worker and the column.
+
+A `WorkerStateSnapshot` holds `child_count`, `claim_limits` (a `ClaimLimits`; `claimed_per_worker` is `NoTaskLimit` when the profile sets none; the effective limit is then the seat count, the sum of the capacities in `execution_class_budgets`), `slot_health` (`SlotHealth::AllServing` or `SlotHealth::SlotsDown { slots }`) and `execution_class_budgets` (`ExecutionClassBudgets`). The monitoring routes answer with the same types: `horsies::monitoring` exports `WorkerPong`, `DownSlot`, `SlotHealth`, `SnapshotProfile`, `ExecutionClassReport`, `PendingStream`, `StreamCoverageState`, `StreamWait`, `WorkerExecutionClassLoad` and `BudgetLoad`, one type per record.
 
 ## Arguments
 
@@ -48,16 +51,16 @@ Every read returns `Result<_, BrokerOperationError>`, an enum with one variant p
 | Argument | Stop condition |
 |----------|----------------|
 | `target: PingTarget::Worker(worker_id)` | That worker replied |
-| `min_responses: Some(n)` | `n` distinct workers replied |
-| `timeout` | The time passed. With `PingTarget::EveryWorker` and no `min_responses`, the read waits the whole `timeout` and lists every worker that replied |
+| `min_responses: MinResponses::AtLeast(n)` | `n` distinct workers replied |
+| `wait` | The time passed (at most 60 s, `WORKER_PING_WAIT_BOUND`; a zero or longer `wait` is `InvalidInput`). With `PingTarget::EveryWorker` and `MinResponses::FullWindow`, the read waits the whole `wait` and lists every worker that replied |
 
 A worker that `list_worker_states` lists and `ping_workers` does not return did not answer.
 
-`get_worker_state_history` takes a `WorkerHistoryLimit`: `AllRetained` (every retained snapshot) or `Newest(NonZeroU32)` (the newest `n`).
+`get_worker_state_history` takes a `WorkerHistoryLimit`: `AllRetained` (every retained snapshot) or `Newest(NonZeroU32)` (the newest `n`). A read returns at most `WORKER_HISTORY_ROW_BOUND` (10,000) snapshots. `Newest(n)` with `n` above the bound is `InvalidInput`. `AllRetained` is `InvalidInput` for a worker that holds more than the bound; no snapshots are returned in part.
 
-`get_stale_tasks` takes a `StaleMinutes`. `StaleMinutes::parse(minutes)` accepts 0 to `MAX_STALE_THRESHOLD_MINUTES` (525,600, one year) whole minutes and refuses another value with `StaleThresholdRefusal`. A RUNNING task is stale when its latest runner beat since its start, or its start when it has no such beat, is older than the threshold. `StaleTaskRow.last_heartbeat` is that beat, `None` when the task has none: the start writes no beat, and a beat of an earlier attempt of a retried task does not count. The read does not recover the task: the reaper does.
+`get_stale_tasks` takes a `StaleMinutes`. `StaleMinutes::parse(minutes)` accepts 0 to `MAX_STALE_THRESHOLD_MINUTES` (525,600, one year) whole minutes and refuses another value with `StaleThresholdRefusal`. A RUNNING task is stale when its latest runner beat since its start, or its start when it has no such beat, is older than the threshold. `StaleTaskRow.last_heartbeat_at` is that beat, `None` when the task has none: the start writes no beat, and a beat of an earlier attempt of a retried task does not count. The read does not recover the task: the reaper does.
 
-`get_expired_tasks` lists PENDING tasks past their `good_until`, oldest deadline first. No worker claims them.
+`get_expired_tasks` lists PENDING tasks past their `good_until`, oldest deadline first. No worker claims them. `ExpiredTaskRow.expired_for` is a `Duration`: how long ago `good_until` passed, on the database clock. Each row of both lists names its task in `task_id`.
 
 ## Bounded Task Lists
 

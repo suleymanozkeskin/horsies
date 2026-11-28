@@ -1,0 +1,4 @@
+# Outputs of `napi build` in this folder.
+*.node
+/index.js
+/index.d.ts

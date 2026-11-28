@@ -1,8 +1,8 @@
 //! The blocking views of the Rust client on PostgreSQL: each view method
 //! runs its async method on the core's process runtime and returns its
-//! answer (Python's sync calls: `send`, `schedule`, `retry_send`,
+//! answer (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
-//! reads, `check(live=True)`, the workflow starts and `retry_start`, and the
+//! reads, `check(live=True)`, the workflow starts and `resend_start`, and the
 //! sync methods of `WorkflowHandle`). One test per outcome of the database.
 //!
 //! The blocking calls run on an OS thread of their own that runs no tokio
@@ -23,13 +23,12 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use horsies::blocking::{start_workflow, start_workflow_with};
 use horsies::{
-    task, AppConfig, HandleOperationError, HandleResult, Horsies, HorsiesError, NodeKey,
-    NodeResult, PingTarget, ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome,
-    TaskSendErrorCode, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefConfig,
-    WorkflowDefinition, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowStartErrorCode, WorkflowStatus,
+    task, AppConfig, HandleResult, Horsies, HorsiesError, NodeKey, NodeResult, PingTarget,
+    ReadError, ResultSlot, TaskError, TaskFunction, TaskInfoParts, TaskOutcome, TaskSendErrorCode,
+    TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefinition,
+    WorkflowDefinitionConfig, WorkflowHandleError, WorkflowReadError, WorkflowSpec,
+    WorkflowSpecBuilder, WorkflowStartErrorCode, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome};
 use horsies_core::{
@@ -105,8 +104,8 @@ const ENDED_WAIT: Duration = Duration::from_secs(10);
 /// The window of a worker ping with no worker on the database.
 const PING_WINDOW: Duration = Duration::from_millis(300);
 
-/// The delay of a scheduled send.
-const SCHEDULE_DELAY_SECS: u32 = 3_600;
+/// The delay of a delayed send (`TaskSendOptions::delay`).
+const SEND_DELAY_SECS: u32 = 3_600;
 
 /// A worker id that never reported a state.
 const ABSENT_WORKER: &str = "blocking-views-absent-worker";
@@ -126,10 +125,12 @@ async fn answer() -> Result<u32, TaskError<Infallible>> {
 const TEMPLATE_PARAMS: u32 = 1;
 
 /// One node, the task `answer` with the node id [`ANSWER_NODE`], which is
-/// the output. `answer` is registered in this process before any build.
-fn answer_output(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-    let output = builder.task(answer::node()?.node_id(ANSWER_NODE));
-    Ok(WorkflowDefConfig::new().output(output))
+/// the output. The app of the builder registers `answer` before any build.
+fn answer_output(
+    builder: &mut WorkflowSpecBuilder,
+) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+    let output = builder.task(answer::node().node_id(ANSWER_NODE))?;
+    Ok(WorkflowDefinitionConfig::new().output(output))
 }
 
 /// A definition without params, for the views of a workflow function.
@@ -137,7 +138,7 @@ struct Nightly;
 
 impl WorkflowDefinition for Nightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "blocking_views_nightly"
@@ -147,7 +148,7 @@ impl WorkflowDefinition for Nightly {
         "tests.blocking_views.nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -157,7 +158,7 @@ struct Regional;
 
 impl WorkflowDefinition for Regional {
     type Output = u32;
-    type Params = u32;
+    type Parameters = u32;
 
     fn name() -> &'static str {
         "blocking_views_regional"
@@ -167,50 +168,47 @@ impl WorkflowDefinition for Regional {
         "tests.blocking_views.regional.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
 
-/// A definition without params for the process-wide start. Only one test
-/// registers it: the process keeps the first registration of each type,
-/// with the app and the database of that registration.
-struct ProcessNightly;
+/// A definition without params for the start by type on the app.
+struct ByTypeNightly;
 
-impl WorkflowDefinition for ProcessNightly {
+impl WorkflowDefinition for ByTypeNightly {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
-        "blocking_views_process_nightly"
+        "blocking_views_by_type_nightly"
     }
 
     fn definition_key() -> &'static str {
-        "tests.blocking_views.process_nightly.v1"
+        "tests.blocking_views.by_type_nightly.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
 
-/// A definition with params for the process-wide start. Only one test
-/// registers it, as [`ProcessNightly`].
-struct ProcessRegional;
+/// A definition with params for the start by type on the app.
+struct ByTypeRegional;
 
-impl WorkflowDefinition for ProcessRegional {
+impl WorkflowDefinition for ByTypeRegional {
     type Output = u32;
-    type Params = u32;
+    type Parameters = u32;
 
     fn name() -> &'static str {
-        "blocking_views_process_regional"
+        "blocking_views_by_type_regional"
     }
 
     fn definition_key() -> &'static str {
-        "tests.blocking_views.process_regional.v1"
+        "tests.blocking_views.by_type_regional.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         answer_output(builder)
     }
 }
@@ -236,7 +234,7 @@ where
 /// An app on the database of `url` with the tasks `echo` and `answer`, and
 /// the function of `echo`. No I/O.
 fn app_on(url: &str) -> (Horsies, TaskFunction<echo::Input, u32, Infallible>) {
-    let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
+    let mut app = Horsies::new(AppConfig::from_database_url(url)).expect("the app");
     let echo_function = echo::register(&mut app).expect("register echo");
     let _answer_function = answer::register(&mut app).expect("register answer");
     (app, echo_function)
@@ -249,7 +247,7 @@ fn echo_input() -> echo::Input {
 
 /// A wait limit of `limit`.
 fn wait_of(limit: Duration) -> WaitLimit {
-    WaitLimit::parse(Some(limit)).expect("a wait limit in bounds")
+    WaitLimit::Within(limit)
 }
 
 /// A thread runtime for a call that must run on a runtime thread: the
@@ -261,21 +259,19 @@ fn thread_runtime() -> tokio::runtime::Runtime {
 }
 
 /// The spec of a workflow `name` of one node, the task `answer`, which is
-/// its output. `answer` is registered in this process before the call.
-fn one_node_spec(name: &str) -> WorkflowSpec {
-    one_node_spec_with_node_id(name, ANSWER_NODE)
+/// its output, built on a builder of `app`, which registers `answer`.
+fn one_node_spec(app: &Horsies, name: &str) -> WorkflowSpec {
+    one_node_spec_with_node_id(app, name, ANSWER_NODE)
 }
 
 /// [`one_node_spec`] whose node has the id `node_id`: with another id, a
 /// start command of the same name that differs from [`one_node_spec`].
-fn one_node_spec_with_node_id(name: &str, node_id: &str) -> WorkflowSpec {
-    let mut builder = WorkflowSpecBuilder::new(name);
+fn one_node_spec_with_node_id(app: &Horsies, name: &str, node_id: &str) -> WorkflowSpec {
+    let mut builder = app.workflow_builder(name);
     builder.definition_key(format!("tests.blocking_views.{name}.v1"));
-    let output = builder.task(
-        answer::node()
-            .expect("answer is registered in this process")
-            .node_id(node_id),
-    );
+    let output = builder
+        .task(answer::node().node_id(node_id))
+        .expect("the app registers answer");
     builder.output(output);
     builder.build().expect("the spec builds")
 }
@@ -296,7 +292,7 @@ fn send_echo(url: &str) -> Uuid {
 fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
     let (app, _echo_function) = app_on(url);
     app.blocking()
-        .start::<u32>(&one_node_spec(name))
+        .start::<u32>(&one_node_spec(&app, name))
         .expect("the blocking start")
         .workflow_id()
 }
@@ -482,7 +478,7 @@ fn assert_task_not_found<V: Debug>(read: Result<V, ReadError>, task_id: Uuid) {
 /// `answer` is `WORKFLOW_NOT_FOUND` of `workflow_id`.
 fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uuid) {
     match answer {
-        Err(HandleOperationError::WorkflowNotFound {
+        Err(WorkflowHandleError::NotFound {
             workflow_id: missing,
             ..
         }) => assert_eq!(missing, workflow_id),
@@ -490,24 +486,26 @@ fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uui
     }
 }
 
-/// `send` and `schedule` write PENDING tasks with the sent input; the
-/// scheduled one is due after its delay. `retry_send` of a send refused on
-/// a runtime thread writes the task id of the refused send.
+/// A send now and a send with a delay write PENDING tasks with the sent
+/// input; the delayed one is due after its delay. `resend` of a send
+/// refused on a runtime thread writes the task id of the refused send.
 #[tokio::test]
 async fn blocking_sends_write_their_tasks() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
-    let (sent, scheduled, retried) = off_the_runtime(move || {
+    let (sent, delayed, resent) = off_the_runtime(move || {
         let (_app, echo_function) = app_on(&url);
         let sent = echo_function
             .blocking()
             .send(echo_input())
             .expect("the blocking send")
             .task_id();
-        let scheduled = echo_function
+        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SEND_DELAY_SECS));
+        let delayed_id = echo_function
             .blocking()
-            .schedule(WholeSeconds::from_secs(SCHEDULE_DELAY_SECS), echo_input())
-            .expect("the blocking schedule")
+            .with_options(delayed)
+            .send(echo_input())
+            .expect("the blocking send with a delay")
             .task_id();
         let refused = thread_runtime()
             .block_on(async { echo_function.blocking().send(echo_input()) })
@@ -516,17 +514,17 @@ async fn blocking_sends_write_their_tasks() {
         let refused_id = refused
             .task_id()
             .expect("the refused send keeps its task id");
-        let retried = echo_function
+        let resent = echo_function
             .blocking()
-            .retry_send(&refused)
-            .expect("the blocking retry of the refused send")
+            .resend(&refused)
+            .expect("the blocking resend of the refused send")
             .task_id();
-        assert_eq!(retried, refused_id);
-        (sent, scheduled, retried)
+        assert_eq!(resent, refused_id);
+        (sent, delayed_id, resent)
     })
     .await;
 
-    for (task_id, due_later) in [(sent, false), (scheduled, true), (retried, false)] {
+    for (task_id, due_later) in [(sent, false), (delayed, true), (resent, false)] {
         let row = database
             .client()
             .query_one(
@@ -564,7 +562,7 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
 
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let with_result = TaskInfoParts {
             result: true,
             ..TaskInfoParts::default()
@@ -600,10 +598,21 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
             assert_eq!(info.task_id, task_id);
             assert_eq!(info.status, TaskStatus::Completed);
             match &info.result {
-                Some(TaskResult::Ok(text)) => assert_eq!(text.get(), SENT_VALUE.to_string()),
+                ResultSlot::Stored(TaskResult::Ok(text)) => {
+                    assert_eq!(text.get(), SENT_VALUE.to_string());
+                }
                 other => panic!("expected the stored value {SENT_VALUE}, got {other:?}"),
             }
         }
+        let without_result = handle
+            .blocking()
+            .info(TaskInfoParts::default())
+            .expect("the info of the completed task, without the result");
+        assert!(
+            matches!(without_result.result, ResultSlot::NotRequested),
+            "{:?}",
+            without_result.result
+        );
     })
     .await;
     worker.close().await;
@@ -625,7 +634,7 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
             .expect("the blocking send");
         let task_id = handle.task_id();
         let timed_out = |read: Result<(), ReadError>| match read {
-            Err(ReadError::WaitTimedOut {
+            Err(ReadError::WaitTimeout {
                 task_id: waited,
                 status: TaskStatus::Pending,
             }) => assert_eq!(waited, task_id),
@@ -657,22 +666,25 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
 
         let coverage = app
             .blocking()
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .expect("the class coverage");
         assert_eq!(coverage.live_workers, 0);
         match coverage.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
-        let report = app.blocking().get_class_report().expect("the class report");
+        let report = app
+            .blocking()
+            .get_execution_class_report()
+            .expect("the class report");
         assert!(report.workers.is_empty(), "{report:?}");
         match report.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
@@ -690,7 +702,7 @@ async fn blocking_reads_of_an_unknown_task_are_task_not_found() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         let task_id = Uuid::new_v4();
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
 
         assert_task_not_found(handle.blocking().get(wait_of(SHORT_WAIT)), task_id);
         assert_task_not_found(handle.blocking().info(TaskInfoParts::default()), task_id);
@@ -743,11 +755,11 @@ async fn blocking_reads_of_a_cancelled_task_answer_task_cancelled() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         match app
-            .task_handle_of::<u32, Infallible>(task_id)
+            .task_handle::<u32, Infallible>(task_id)
             .blocking()
             .get(wait_of(ENDED_WAIT))
         {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "TASK_CANCELLED"),
             other => panic!("expected TASK_CANCELLED, got {other:?}"),
         }
         match app.blocking().get_raw_result(task_id, wait_of(ENDED_WAIT)) {
@@ -797,7 +809,11 @@ async fn blocking_health_reads_and_the_live_check_answer_from_the_database() {
         assert!(history.is_empty(), "{history:?}");
         let pongs = app
             .blocking()
-            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, None)
+            .ping_workers(
+                PingTarget::EveryWorker,
+                PING_WINDOW,
+                horsies::MinResponses::FullWindow,
+            )
             .expect("the worker ping");
         assert!(pongs.is_empty(), "{pongs:?}");
         let passed = app.blocking().check_live().expect("the live check passes");
@@ -819,7 +835,7 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
     let url = database.url().to_owned();
     let started = off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
-        let spec = one_node_spec("blocking_views_app_start");
+        let spec = one_node_spec(&app, "blocking_views_app_start");
         let started = app
             .blocking()
             .start::<u32>(&spec)
@@ -831,7 +847,7 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
             .expect("a start again with the same id and name")
             .workflow_id();
         assert_eq!(found, started);
-        let other_name = one_node_spec("blocking_views_other_name");
+        let other_name = one_node_spec(&app, "blocking_views_other_name");
         match app.blocking().start_with_id::<u32>(&other_name, started) {
             Err(refused) => {
                 assert_eq!(
@@ -846,7 +862,8 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
                 handle.workflow_id()
             ),
         }
-        let other_command = one_node_spec_with_node_id("blocking_views_app_start", "other_node");
+        let other_command =
+            one_node_spec_with_node_id(&app, "blocking_views_app_start", "other_node");
         match app.blocking().start_with_id::<u32>(&other_command, started) {
             Err(refused) => {
                 assert_eq!(
@@ -891,8 +908,8 @@ async fn two_concurrent_starts_with_one_id_and_two_commands_write_one_workflow()
     let (database, worker) = covered_database().await;
     let (app, _echo_function) = app_on(database.url());
     let workflow_id = Uuid::new_v4();
-    let first = one_node_spec("start_once_race");
-    let second = one_node_spec_with_node_id("start_once_race", "other_node");
+    let first = one_node_spec(&app, "start_once_race");
+    let second = one_node_spec_with_node_id(&app, "start_once_race", "other_node");
 
     let (first_start, second_start) = tokio::join!(
         app.start_with_id::<u32>(&first, workflow_id),
@@ -943,7 +960,7 @@ async fn a_run_with_no_stored_start_command_is_returned_to_a_start_with_its_id()
         .expect("insert a run with no stored start command");
 
     let found = app
-        .start_with_id::<u32>(&one_node_spec("start_once_unrecorded"), workflow_id)
+        .start_with_id::<u32>(&one_node_spec(&app, "start_once_unrecorded"), workflow_id)
         .await
         .expect("the start returns the run")
         .workflow_id();
@@ -980,7 +997,7 @@ async fn blocking_function_and_template_starts_write_their_workflows() {
             .workflow_id();
         assert_eq!(found, nightly);
         let template = app
-            .workflow_template::<Regional>()
+            .register_workflow_definition_with::<Regional>()
             .expect("register the template");
         let regional = template
             .blocking()
@@ -1010,26 +1027,30 @@ async fn blocking_function_and_template_starts_write_their_workflows() {
     database.drop().await;
 }
 
-/// `start_workflow` and `start_workflow_with`: each starts its definition
-/// through its first registration in this process, on the database of that
-/// registration.
+/// The blocking `start_workflow` and `start_workflow_with` of the app view:
+/// each starts its definition through its registration on the app, on the
+/// database of that app.
 #[tokio::test]
-async fn blocking_process_wide_starts_write_their_workflows() {
+async fn blocking_starts_by_type_write_their_workflows() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
     let (nightly, regional) = off_the_runtime(move || {
         let (mut app, _echo_function) = app_on(&url);
         let _function = app
-            .register_workflow_definition::<ProcessNightly>()
+            .register_workflow_definition::<ByTypeNightly>()
             .expect("register the definition");
         let _template = app
-            .workflow_template::<ProcessRegional>()
+            .register_workflow_definition_with::<ByTypeRegional>()
             .expect("register the template");
-        let nightly = start_workflow::<ProcessNightly>()
-            .expect("the process-wide start")
+        let nightly = app
+            .blocking()
+            .start_workflow::<ByTypeNightly>()
+            .expect("the start by type")
             .workflow_id();
-        let regional = start_workflow_with::<ProcessRegional>(TEMPLATE_PARAMS)
-            .expect("the process-wide start with params")
+        let regional = app
+            .blocking()
+            .start_workflow_with::<ByTypeRegional>(TEMPLATE_PARAMS)
+            .expect("the start by type with params")
             .workflow_id();
         (nightly, regional)
     })
@@ -1038,12 +1059,12 @@ async fn blocking_process_wide_starts_write_their_workflows() {
     let mut expected = vec![
         (
             nightly,
-            ProcessNightly::name().to_owned(),
+            ByTypeNightly::name().to_owned(),
             "RUNNING".to_owned(),
         ),
         (
             regional,
-            ProcessRegional::name().to_owned(),
+            ByTypeRegional::name().to_owned(),
             "RUNNING".to_owned(),
         ),
     ];
@@ -1055,11 +1076,11 @@ async fn blocking_process_wide_starts_write_their_workflows() {
     database.drop().await;
 }
 
-/// `retry_start`: a start on a runtime thread answers `ASYNC_CONTEXT` with
+/// `resend_start`: a start on a runtime thread answers `ASYNC_CONTEXT` with
 /// its workflow id and writes nothing; the retry of that error on a thread
 /// without a runtime writes the workflow with that id.
 #[tokio::test]
-async fn a_blocking_retry_start_writes_the_refused_start_with_its_workflow_id() {
+async fn a_blocking_resend_start_writes_the_refused_start_with_its_workflow_id() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
     let refused_id = off_the_runtime(move || {
@@ -1077,7 +1098,7 @@ async fn a_blocking_retry_start_writes_the_refused_start_with_its_workflow_id() 
         );
         let started = function
             .blocking()
-            .retry_start(&refused)
+            .resend_start(&refused)
             .expect("the blocking retry of the refused start")
             .workflow_id();
         assert_eq!(started, refused.workflow_id());
@@ -1104,14 +1125,14 @@ async fn blocking_handle_reads_of_a_running_workflow() {
         let (app, _echo_function) = app_on(&url);
         let handle = app
             .blocking()
-            .start::<u32>(&one_node_spec("blocking_views_running"))
+            .start::<u32>(&one_node_spec(&app, "blocking_views_running"))
             .expect("the blocking start");
         let workflow_id = handle.workflow_id();
         let view = handle.blocking();
 
         let status = view.status();
         assert!(matches!(status, Ok(WorkflowStatus::Running)), "{status:?}");
-        let nodes = view.tasks().expect("the nodes of the workflow");
+        let nodes = view.nodes().expect("the nodes of the workflow");
         match nodes.as_slice() {
             [node] => {
                 assert_eq!(node.node_id.as_deref(), Some(ANSWER_NODE));
@@ -1133,8 +1154,18 @@ async fn blocking_handle_reads_of_a_running_workflow() {
             }
             other => panic!("expected RESULT_NOT_READY, got {other:?}"),
         }
+        match view.result_for::<u32, Infallible>(&NodeKey::new("no_such_node")) {
+            Err(WorkflowReadError::NodeNotFound {
+                workflow_id: read,
+                node_id,
+            }) => {
+                assert_eq!(read, workflow_id);
+                assert_eq!(node_id, "no_such_node");
+            }
+            other => panic!("expected NODE_NOT_FOUND, got {other:?}"),
+        }
         match view.get(wait_of(SHORT_WAIT)) {
-            Err(WorkflowReadError::WaitTimedOut {
+            Err(WorkflowReadError::WaitTimeout {
                 workflow_id: waited,
             }) => assert_eq!(waited, workflow_id),
             other => panic!("expected WAIT_TIMEOUT, got {other:?}"),
@@ -1166,7 +1197,7 @@ async fn blocking_pause_and_resume_move_the_workflow_between_running_and_paused(
         let paused_again = view.pause();
         assert!(matches!(paused_again, Ok(false)), "{paused_again:?}");
         match view.get(wait_of(ENDED_WAIT)) {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "WORKFLOW_PAUSED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "WORKFLOW_PAUSED"),
             other => panic!("expected WORKFLOW_PAUSED, got {other:?}"),
         }
         let resumed = view.resume();
@@ -1201,7 +1232,7 @@ async fn a_blocking_cancel_ends_the_workflow_as_cancelled() {
         );
         match view.get(wait_of(ENDED_WAIT)) {
             Ok(TaskOutcome::Failed(error)) => {
-                assert_eq!(error.code().text(), "WORKFLOW_CANCELLED");
+                assert_eq!(error.code().as_str(), "WORKFLOW_CANCELLED");
             }
             other => panic!("expected WORKFLOW_CANCELLED, got {other:?}"),
         }
@@ -1277,12 +1308,18 @@ async fn blocking_handle_methods_of_an_unknown_workflow_are_workflow_not_found()
         let view = handle.blocking();
 
         assert_workflow_not_found(view.status(), workflow_id);
-        assert_workflow_not_found(view.tasks(), workflow_id);
+        assert_workflow_not_found(view.nodes(), workflow_id);
         assert_workflow_not_found(view.results(), workflow_id);
         assert_workflow_not_found(view.pause(), workflow_id);
         assert_workflow_not_found(view.resume(), workflow_id);
         assert_workflow_not_found(view.cancel(), workflow_id);
         match view.get(wait_of(SHORT_WAIT)) {
+            Err(WorkflowReadError::WorkflowNotFound {
+                workflow_id: missing,
+            }) => assert_eq!(missing, workflow_id),
+            other => panic!("expected WORKFLOW_NOT_FOUND, got {other:?}"),
+        }
+        match view.result_for::<u32, Infallible>(&NodeKey::new(ANSWER_NODE)) {
             Err(WorkflowReadError::WorkflowNotFound {
                 workflow_id: missing,
             }) => assert_eq!(missing, workflow_id),

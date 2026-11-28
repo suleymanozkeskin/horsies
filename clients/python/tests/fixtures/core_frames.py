@@ -63,6 +63,7 @@ def run_meta(
     task_name: str = 'task',
     queue_name: str = QUEUE_NAME,
     attempt: int = 1,
+    max_retries: int = 0,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -77,6 +78,7 @@ def run_meta(
         'task_name': task_name,
         'queue_name': queue_name,
         'attempt': attempt,
+        'max_retries': max_retries,
         'worker_id': worker_id,
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
@@ -91,6 +93,7 @@ def run_frame(
     task_name: str = 'task',
     queue_name: str = QUEUE_NAME,
     attempt: int = 1,
+    max_retries: int = 0,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -105,6 +108,7 @@ def run_frame(
             task_name=task_name,
             queue_name=queue_name,
             attempt=attempt,
+            max_retries=max_retries,
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
@@ -135,6 +139,7 @@ def shared_run_meta(
     task_name: str = 'task',
     queue_name: str = QUEUE_NAME,
     attempt: int = 1,
+    max_retries: int = 0,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -149,6 +154,7 @@ def shared_run_meta(
         'task_name': task_name,
         'queue_name': queue_name,
         'attempt': attempt,
+        'max_retries': max_retries,
         'worker_id': worker_id,
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
@@ -165,6 +171,7 @@ def shared_run_frame(
     task_name: str = 'task',
     queue_name: str = QUEUE_NAME,
     attempt: int = 1,
+    max_retries: int = 0,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -180,6 +187,7 @@ def shared_run_frame(
             task_name=task_name,
             queue_name=queue_name,
             attempt=attempt,
+            max_retries=max_retries,
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
@@ -247,7 +255,13 @@ def shared_async_kind(seats: int = 2, executor_threads: int = 2) -> dict[str, ob
 
 
 def shared_thread_kind(seats: int = 2) -> dict[str, object]:
-    return {'kind': 'shared_thread', 'seats': seats, 'pool': pool(), 'task_send_pool': 1}
+    return {
+        'kind': 'shared_thread',
+        'seats': seats,
+        'pool': pool(),
+        'task_send_pool': 1,
+        'recycle_above': {'kind': 'off'},
+    }
 
 
 def handler_kind(task_send_pool: int = 1) -> dict[str, object]:

@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::subworkflow_matrix::{
-    after, assert_ok_value, assert_subworkflow_error, drive, fail_child, get, given_params_node,
-    mark, matrix_children, nested_slow_middle, node_result, ok_child, outputless_entry,
-    outputless_parent, parent, success_surface_parent, SLOW_KEY,
+    after, assert_no_workflow_output, assert_ok_value, assert_subworkflow_error, drive, fail_child,
+    get, given_params_node, mark, matrix_children, nested_slow_middle, node_entry, node_result,
+    ok_child, outputless_parent, parent, success_surface_parent, SLOW_KEY,
 };
 use super::support::{
     child_of, code, err, error_of, finish_phase1, handle, node, node_status, ok, shared_pool, spec,
@@ -386,10 +386,11 @@ async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
     db.drop().await;
 }
 
-/// `test_subworkflow_recovery_outputless_recovery`: recovery rebuilds the
-/// outputless map with the failed child's error.
+/// `test_subworkflow_recovery_outputless_recovery`: recovery completes a
+/// workflow with no output node with the plain envelope, and the node of the
+/// failed child keeps its error.
 #[tokio::test]
-async fn recovery_rebuilds_an_outputless_map_with_the_failed_child_error() {
+async fn recovery_completes_an_outputless_workflow_and_keeps_the_failed_child_error() {
     let db = IsolatedDatabase::create().await;
     let child_specs = matrix_children();
     let workflow_id = start(&db.pool, &outputless_parent(), &child_specs).await;
@@ -400,12 +401,13 @@ async fn recovery_rebuilds_an_outputless_map_with_the_failed_child_error() {
     assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
-    let got = get(&db.pool, workflow_id).await;
+    assert_no_workflow_output(&db.pool, workflow_id).await;
     assert_ok_value(
-        &outputless_entry(&got, "node_0"),
+        &node_entry(&db.pool, workflow_id, "node_0").await,
         &serde_json::json!("required_ok"),
     );
-    let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), None);
+    let _summary =
+        assert_subworkflow_error(&node_entry(&db.pool, workflow_id, "node_1").await, None);
     db.drop().await;
 }
 

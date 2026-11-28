@@ -8,7 +8,7 @@
 //!   and the per-task writes.
 //! - The session URL has its own [`PoolRole::Session`] pool when it differs
 //!   from the main URL; otherwise session work uses the main pool.
-//! - Every pool: `pool_size + max_overflow` connections, `pool_timeout` as the
+//! - Every pool: `pool_size + max_overflow` connections, `pool_timeout_seconds` as the
 //!   checkout wait, `pool_recycle` as the connection age limit, the 1 s idle
 //!   ping when `pool_pre_ping` is on, and the TCP keepalives and TCP user
 //!   timeout of the config ([`PostgresConfig::socket_settings`]) on each
@@ -65,10 +65,10 @@ pub enum PoolProfile {
 
 /// The pool that session work (schema work, partition maintenance) uses.
 pub(crate) enum SessionPool {
-    /// `session_database_url` is absent or equal to `database_url`: session
-    /// work uses the main pool.
+    /// The session database is `database_url`, or a separate URL equal to
+    /// it: session work uses the main pool.
     SameAsMain,
-    /// A pool of its own on `session_database_url`.
+    /// A pool of its own on the URL of a separate session database.
     Separate { pool: CorePool },
 }
 
@@ -431,7 +431,7 @@ pub(crate) fn pool_plan(
     Ok(PoolPlan {
         role,
         sizing: PoolSizing::new(size, reserve)?,
-        checkout_wait: Duration::from_secs(u64::from(config.pool_timeout)),
+        checkout_wait: Duration::from_secs(u64::from(config.pool_timeout_seconds)),
         idle_ping: match config.pool_pre_ping {
             true => IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER),
             false => IdlePing::Off,
@@ -474,7 +474,7 @@ fn open_pool(
 #[cfg(test)]
 pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
     CoreHandle::open_with_environment(
-        &PostgresConfig::from_url(url),
+        &PostgresConfig::from_database_url(url),
         PoolProfile::Producer,
         ConnectionEnvironment::isolated(),
     )
@@ -487,7 +487,7 @@ pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
 /// checkout.
 #[cfg(test)]
 pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
-    let config = PostgresConfig::from_url(url);
+    let config = PostgresConfig::from_database_url(url);
     let plan = pool_plan(
         &config,
         PoolRole::Main,
@@ -510,7 +510,7 @@ pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
 /// checkout.
 #[cfg(test)]
 pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(url);
+    let mut config = PostgresConfig::from_database_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -534,7 +534,7 @@ pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
 /// of a broker. Connects to nothing until the first checkout.
 #[cfg(test)]
 pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(url);
+    let mut config = PostgresConfig::from_database_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -595,10 +595,10 @@ mod tests {
 
     fn config() -> PostgresConfig {
         let mut config =
-            PostgresConfig::from_url("postgresql://horsies:secret@db.example:5432/app");
+            PostgresConfig::from_database_url("postgresql://horsies:secret@db.example:5432/app");
         config.pool_size = 5;
         config.max_overflow = 3;
-        config.pool_timeout = 7;
+        config.pool_timeout_seconds = 7;
         config.pool_recycle = PoolRecycle::after_seconds(1800);
         config.pool_pre_ping = true;
         config
@@ -823,8 +823,9 @@ mod tests {
         assert_eq!(pools.session_work().role(), PoolRole::WorkerProfile);
 
         let mut separate = config();
-        separate.session_database_url =
-            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        separate.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies:secret@direct.example:5432/app".to_owned(),
+        };
         let pools = BrokerPools::open_with_environment(
             &separate,
             PoolProfile::Worker,
@@ -837,8 +838,9 @@ mod tests {
     #[test]
     fn a_distinct_session_url_gets_its_own_pool() {
         let mut config = config();
-        config.session_database_url =
-            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies:secret@direct.example:5432/app".to_owned(),
+        };
         let pools = BrokerPools::open_with_environment(
             &config,
             PoolProfile::Worker,
@@ -859,8 +861,9 @@ mod tests {
     #[test]
     fn a_url_the_statement_layer_refuses_names_its_pool() {
         let mut config = config();
-        config.session_database_url =
-            Some("postgresql://horsies@direct.example/app?keepalives=0".to_owned());
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies@direct.example/app?keepalives=0".to_owned(),
+        };
         let refused = BrokerPools::open_with_environment(
             &config,
             PoolProfile::Producer,
@@ -882,10 +885,11 @@ mod tests {
         tcp_user_timeout: TcpUserTimeoutConfig,
     ) -> PostgresConfig {
         let mut config = config();
-        config.session_database_url =
-            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
-        config.tcp_keepalives = tcp_keepalives;
-        config.tcp_user_timeout = tcp_user_timeout;
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies:secret@direct.example:5432/app".to_owned(),
+        };
+        config.tcp_keepalives = tcp_keepalives.into();
+        config.tcp_user_timeout = tcp_user_timeout.into();
         config
     }
 
@@ -1096,7 +1100,7 @@ mod kept_session_tests {
 
     /// A config of the test database whose pools hold one connection each.
     fn one_connection_config(database_url: &str) -> PostgresConfig {
-        let mut config = PostgresConfig::from_url(database_url);
+        let mut config = PostgresConfig::from_database_url(database_url);
         config.pool_size = 1;
         config.max_overflow = 0;
         config
@@ -1156,8 +1160,9 @@ mod kept_session_tests {
         let url = migrated_database_url().await;
         let separator = if url.contains('?') { '&' } else { '?' };
         let mut config = one_connection_config(&url);
-        config.session_database_url =
-            Some(format!("{url}{separator}application_name=horsies_session"));
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: format!("{url}{separator}application_name=horsies_session"),
+        };
         config.pgbouncer_transaction_mode = true;
         let pools = open_test_pools(&config);
         let SessionPool::Separate { pool: session, .. } = &pools.session else {
@@ -1193,7 +1198,7 @@ mod kept_session_tests {
     #[tokio::test]
     async fn a_child_pool_opens_its_kept_connections_without_a_checkout() {
         let url = migrated_database_url().await;
-        let mut config = PostgresConfig::from_url(&url);
+        let mut config = PostgresConfig::from_database_url(&url);
         config.pool_size = 3;
         config.max_overflow = 0;
         let pools = BrokerPools::open_with_environment(

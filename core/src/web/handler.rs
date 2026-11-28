@@ -19,6 +19,7 @@ use axum::response::IntoResponse;
 use axum::Router;
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue, Method, StatusCode};
+use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
@@ -26,9 +27,11 @@ use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
-use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER};
+use super::auth::{
+    MonitoringAuthorizationPolicy, MonitoringRequest, INTENT_HEADER, NOT_AUTHORIZED,
+};
 use super::common::ApiError;
-use super::events::{EventBroadcaster, EventFrames};
+use super::events::{EventBroadcaster, EventFrames, EventStreamsRefused};
 use super::fleet_metrics::WebFleetMetrics;
 use super::schema::SchemaProbe;
 use super::spa::{EmbeddedAssets, MonitoringUiConfig};
@@ -40,10 +43,11 @@ use super::task_stats_cache::{ReadCache, TaskStatsCache};
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The largest request body that [`MonitoringHandler::handle`] takes: 1 MiB.
-/// The one route that reads a body (the task cancel) takes a JSON object of
-/// one flag. A host reads at most one byte more than this bound and passes
-/// what it read; a body over the bound is refused with 413 before any
-/// route reads it.
+/// The action routes read a body: the task cancel takes a JSON object of
+/// one flag, and a workflow action takes a JSON object with no keys. A host
+/// reads at most one byte more than this bound and passes what it read; a
+/// body over the bound is refused with 413 before any route reads it, so
+/// before a route refuses an unknown key.
 pub const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 /// Which verdicts of the user's policy a request needs, in the order that
@@ -129,7 +133,7 @@ impl AccessGrant {
 pub(crate) struct GrantedAccess;
 
 #[async_trait]
-impl MonitoringAuthPolicy for GrantedAccess {
+impl MonitoringAuthorizationPolicy for GrantedAccess {
     async fn can_view(&self, request: MonitoringRequest<'_>) -> bool {
         request
             .extensions
@@ -173,10 +177,21 @@ pub struct ResponseParts {
     pub body: Bytes,
 }
 
+/// Whether the action routes (task cancel, workflow pause, resume and
+/// cancel) run. Disabled actions answer 403 without asking the policy's
+/// `can_act`. `/api/meta` reports the value as `"ENABLED"` or
+/// `"DISABLED"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Actions {
+    Enabled,
+    Disabled,
+}
+
 /// The settings of a monitoring handler.
 #[derive(Debug, Clone)]
 pub struct MonitoringHandlerConfig {
-    pub actions_enabled: bool,
+    pub actions: Actions,
     pub ui: MonitoringUiConfig,
     /// The version that `/api/meta` reports: the package version of the
     /// client that mounts the handler.
@@ -194,7 +209,7 @@ pub struct MonitoringHandlerConfig {
 pub struct MonitoringHandler {
     router: Router,
     events: Arc<EventBroadcaster>,
-    actions_enabled: bool,
+    actions: Actions,
     heartbeat: Duration,
 }
 
@@ -220,8 +235,8 @@ impl MonitoringHandler {
             task_breakdown_cache: Arc::new(ReadCache::new()),
             events: EventBroadcaster::new(Arc::clone(&broker)),
             broker,
-            auth_policy: Arc::new(GrantedAccess),
-            actions_enabled: config.actions_enabled,
+            authorization_policy: Arc::new(GrantedAccess),
+            actions: config.actions,
             ui_config: config.ui,
             assets: Arc::new(EmbeddedAssets),
             children,
@@ -232,12 +247,12 @@ impl MonitoringHandler {
         Self::from_state(state)
     }
 
-    /// The handler of a built state, whose auth policy must be
+    /// The handler of a built state, whose authorization policy must be
     /// [`GrantedAccess`]-like: it reads the grant of each request.
     pub(crate) fn from_state(state: WebState) -> Self {
         Self {
             events: Arc::clone(&state.events),
-            actions_enabled: state.actions_enabled,
+            actions: state.actions,
             heartbeat: state.heartbeat,
             router: build_router(state),
         }
@@ -254,14 +269,39 @@ impl MonitoringHandler {
     /// answer. The first subscriber starts the broadcaster's subscriptions
     /// on the broker's listener; a broker without a listener, or a listener
     /// that stopped, answers the degraded frame and the end.
+    ///
+    /// A handler with [`MAX_OPEN_EVENT_STREAMS`] open streams answers the
+    /// same: the degraded frame and the end, with a warning in the log. A
+    /// host that tells the refusal apart calls
+    /// [`try_subscribe_events`](Self::try_subscribe_events).
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
     pub async fn subscribe_events(&self) -> EventFrames {
-        EventFrames::new(self.events.subscribe().await, self.heartbeat)
+        match self.try_subscribe_events().await {
+            Ok(frames) => frames,
+            Err(refused) => {
+                tracing::warn!("the monitoring handler refused an event stream: {refused}");
+                EventFrames::degraded(self.heartbeat)
+            }
+        }
+    }
+
+    /// [`subscribe_events`](Self::subscribe_events), with the refusal of a
+    /// handler at its bound of open streams.
+    ///
+    /// Errors: [`EventStreamsRefused`] when [`MAX_OPEN_EVENT_STREAMS`]
+    /// streams are open. Nothing is subscribed.
+    ///
+    /// [`MAX_OPEN_EVENT_STREAMS`]: super::events::MAX_OPEN_EVENT_STREAMS
+    pub async fn try_subscribe_events(&self) -> Result<EventFrames, EventStreamsRefused> {
+        let subscription = self.events.subscribe().await?;
+        Ok(EventFrames::new(subscription, self.heartbeat))
     }
 
     /// The access that a request needs: [`route_access`] with the actions
     /// switch of this handler. Pure.
     pub fn route_access(&self, method: &Method, path: &str) -> RouteAccess {
-        route_access(self.actions_enabled, method, path)
+        route_access(self.actions, method, path)
     }
 
     /// Serve one request with the verdicts of `grant`.
@@ -314,17 +354,56 @@ impl MonitoringHandler {
     }
 }
 
+/// The answer to a request that the user's policy refused: 403
+/// `Not authorized.`, the answer of the router's guards. `None` when the
+/// policy did not refuse the request.
+///
+/// `need` is the access of the request ([`route_access`]). A refused view
+/// refuses every request that asks it. A refused act refuses an action
+/// route ([`AccessNeed::ViewAndAct`]); `/api/meta`
+/// ([`AccessNeed::ViewReportAct`]) reports the act verdict and answers 200.
+///
+/// A host that builds its [`MonitoringHandler`] on demand (a broker that
+/// connects at the first request) calls it before the build: a refused
+/// caller gets this answer and learns nothing about the database. Pure: it
+/// reads no request body and no broker.
+pub async fn refusal_by_policy(need: AccessNeed, grant: AccessGrant) -> Option<ResponseParts> {
+    let refused = match (need, grant.view, grant.act) {
+        (AccessNeed::Public, _, _) => false,
+        (_, Verdict::Refused, _) => true,
+        (AccessNeed::ViewAndAct, _, Verdict::Refused) => true,
+        (
+            AccessNeed::View | AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+            Verdict::Allowed | Verdict::NotAsked,
+            Verdict::Allowed | Verdict::NotAsked | Verdict::Refused,
+        ) => false,
+    };
+    match refused {
+        false => None,
+        true => {
+            let refusal = ApiError::detail(StatusCode::FORBIDDEN, NOT_AUTHORIZED);
+            let mut answer = response_parts(refusal.into_response()).await;
+            // The router's answer carries its length; so does this one.
+            answer.headers.push((
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from(answer.body.len()),
+            ));
+            Some(answer)
+        }
+    }
+}
+
 /// The access that a request needs, from its method and its path inside the
 /// mount, as the routes of the Python app guard them: every read route,
 /// `/metrics` and the event stream need `can_view`; `/api/meta` asks
 /// `can_act` to report it; an action route needs `can_view` and `can_act`,
-/// or only `can_view` while actions are disabled (`actions_enabled` false:
+/// or only `can_view` while actions are disabled ([`Actions::Disabled`]:
 /// the act guard refuses without asking). Every other path is public. Pure.
-pub fn route_access(actions_enabled: bool, method: &Method, path: &str) -> RouteAccess {
+pub fn route_access(actions: Actions, method: &Method, path: &str) -> RouteAccess {
     let segments: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
-    let action = match actions_enabled {
-        true => AccessNeed::ViewAndAct,
-        false => AccessNeed::View,
+    let action = match actions {
+        Actions::Enabled => AccessNeed::ViewAndAct,
+        Actions::Disabled => AccessNeed::View,
     };
     // A HEAD request is served by the GET route, with its guards.
     let verb = match method.as_str() {

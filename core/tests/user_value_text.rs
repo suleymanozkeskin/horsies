@@ -343,6 +343,15 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
+        file: "core/src/web/request_body.rs",
+        item: "parse_action_body",
+        kind: SiteKind::TurbofishValue,
+        count: 1,
+        allowed: Allowed::NotUserValue(
+            "a web action request body; read as a JSON object only to name an unknown key before the typed parse",
+        ),
+    },
+    Known {
         file: "core/src/worker/executor/protocol/metadata.rs",
         item: "parse_metadata",
         kind: SiteKind::TurbofishValue,
@@ -364,13 +373,6 @@ const KNOWN_SITES: &[Known] = &[
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the args_from map of a node: kwarg name to node index"),
-    },
-    Known {
-        file: "clients/rust/horsies/src/config.rs",
-        item: "core_database_url",
-        kind: SiteKind::FromValue,
-        count: 1,
-        allowed: Allowed::NotUserValue("a database URL text"),
     },
     Known {
         file: "clients/rust/horsies/src/workflow/handle.rs",
@@ -1365,7 +1367,7 @@ impl<'de> Deserialize<'de> for Code {
 
 mod inline {
     fn decode(bytes: &[u8]) {
-        let members = BTreeMap::<String, TaskOutcome<serde_json::Value, UserCode>>::deserialize(d);
+        let members = BTreeMap::<String, TaskOutcome<serde_json::Value, CustomCode>>::deserialize(d);
     }
     mod declared;
 }

@@ -11,7 +11,7 @@ use super::support::{
     node_status, node_task_input, ok, shared_pool, spec, start, stored_result, stored_result_error,
     sub_workflow_node, task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::{
     AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec, WorkflowStatus,
 };
@@ -65,7 +65,7 @@ fn dynamic_node(
 ) -> AnyNode {
     AnyNode {
         input_json: input.to_string(),
-        sub_workflow_params: SubWorkflowParams::Given,
+        sub_workflow_params: SubWorkflowParameters::Given,
         sub_definition_key: Some(definition_key.to_owned()),
         ..sub_workflow_node(index, &spec(name, Vec::new()))
     }
@@ -166,11 +166,11 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         let child_error = match child_status {
             "FAILED" => Some(
                 serde_json::to_string(
-                    &TaskError::new(
+                    &TaskError::custom(
                         "SUBWORKFLOW_REPLAY_PROBE",
                         "child failed for replay-guard test",
                     )
-                    .expect("a user error code"),
+                    .expect("a custom error code"),
                 )
                 .expect("encode"),
             ),
@@ -658,8 +658,8 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
     let mut post = after(task_node(1, "summary_fail_post"), &[0]);
-    post.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    post.allow_failed_deps = true;
+    post.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    post.allow_failed_dependencies = true;
     let parent_id = start(
         &pool,
         &spec(
@@ -688,8 +688,8 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     )
     .expect("the summary decodes");
     assert_eq!(summary.status, WorkflowStatus::Failed);
-    assert!(summary.failed_tasks >= 1);
-    assert!(summary.total_tasks >= 1);
+    assert!(summary.failed_nodes >= 1);
+    assert!(summary.total_nodes >= 1);
     assert!(summary.error_summary.is_some_and(|text| !text.is_empty()));
     assert_eq!(node_status(&pool, parent_id, 1).await, "ENQUEUED");
 }

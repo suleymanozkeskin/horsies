@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::{SuccessCase, SuccessPolicy};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::test_support::sql;
@@ -36,10 +36,10 @@ fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
         input_json: "{}".to_owned(),
         dependencies,
         args_from: HashMap::new(),
-        workflow_ctx_from: None,
+        workflow_context_from: None,
         queue: Some("default".to_owned()),
         priority: Some(100),
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         join: JoinType::All,
         min_success: None,
         good_until: None,
@@ -48,7 +48,7 @@ fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
         task_options_json: None,
         is_subworkflow: false,
         sub_definition_key: None,
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
     }
 }
 
@@ -141,23 +141,23 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
     assert!(arguments.failed_workflow_ids.is_empty());
 }
 
-/// A node defined with an empty `workflow_ctx_from` takes no context: its row stores NULL, as for
-/// no list (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`). The task
-/// input of the baseline mint adds the context member for any stored array
-/// (`horsies_workflow_task_input`).
+/// A node defined with an empty `workflow_context_from` takes no context: its row stores NULL,
+/// as for no list (Python `_graph_columns`,
+/// `clients/python/horsies/core/workflows/child_build.py:479-485`). The task input of the
+/// baseline mint adds the context member for any stored array (`horsies_workflow_task_input`).
 #[test]
 fn an_empty_context_list_is_stored_as_null() {
     let workflow_id = Uuid::new_v4();
     let mut empty = task_node(1, vec![0]);
-    empty.workflow_ctx_from = Some(Vec::new());
+    empty.workflow_context_from = Some(Vec::new());
     let mut named = task_node(2, vec![0]);
-    named.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    named.workflow_context_from = Some(vec!["node_0".to_owned()]);
     let spec = spec_of("ctx_lists", vec![task_node(0, vec![]), empty, named]);
 
     let arguments = arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
 
     assert_eq!(
-        arguments.node_workflow_ctx_from,
+        arguments.node_workflow_context_from,
         vec![None, None, Some(r#"["node_0"]"#.to_owned())]
     );
 }
@@ -234,7 +234,7 @@ fn the_start_command_holds_the_top_row_and_its_nodes_only() {
     let workflow_id = Uuid::new_v4();
     let mut dependent = task_node(1, vec![0]);
     dependent.args_from = HashMap::from([("value".to_owned(), 0)]);
-    dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    dependent.workflow_context_from = Some(vec!["node_0".to_owned()]);
     let spec = spec_of(
         "command_rows",
         vec![dependent, task_node(0, vec![]), subworkflow_root(2)],
@@ -256,7 +256,7 @@ fn the_start_command_holds_the_top_row_and_its_nodes_only() {
     assert_eq!(dependent.task_name, "task_1");
     assert_eq!(dependent.dependencies, "[0]");
     assert_eq!(dependent.args_from, Some(r#"{"value":0}"#));
-    assert_eq!(dependent.workflow_ctx_from, Some(r#"["node_0"]"#));
+    assert_eq!(dependent.workflow_context_from, Some(r#"["node_0"]"#));
     assert_eq!(dependent.queue_name, "default");
     assert_eq!(dependent.priority, 100);
     assert!(dependent.retention_class_key.is_some());
@@ -409,8 +409,8 @@ fn the_arguments_hold_one_aligned_element_per_row() {
         arguments.node_priorities.len(),
         arguments.node_dependencies.len(),
         arguments.node_args_from.len(),
-        arguments.node_workflow_ctx_from.len(),
-        arguments.node_allow_failed_deps.len(),
+        arguments.node_workflow_context_from.len(),
+        arguments.node_allow_failed_dependencies.len(),
         arguments.node_join_types.len(),
         arguments.node_min_successes.len(),
         arguments.node_task_options.len(),
@@ -606,8 +606,8 @@ fn client_node(index: u32, body: &serde_json::Value) -> serde_json::Value {
         "input_json": "{}",
         "dependencies": [],
         "args_from": {},
-        "workflow_ctx_from": [],
-        "allow_failed_deps": false,
+        "workflow_context_from": [],
+        "allow_failed_dependencies": false,
         "join": {"kind": "ALL"},
         "body": body,
     })
@@ -723,7 +723,7 @@ fn a_client_spec_takes_its_children_and_queue_classes_from_the_client() {
             task_index: 0,
             child_depth: 1,
             definition_key: Some(CLIENT_CHILD_KEY.to_owned()),
-            params: SubWorkflowParams::NotGiven,
+            params: SubWorkflowParameters::NotGiven,
             node_input: "{}".to_owned(),
             args_from: None,
             sources: vec![],

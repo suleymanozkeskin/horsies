@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, scalar, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::{OperationalErrorCode, TaskError, TaskResult};
+use crate::core::{OperationalCode, TaskError, TaskResult};
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::child_spec::ChildSpecUnavailable;
 use crate::workflow_engine::error::WorkflowError;
@@ -540,7 +540,7 @@ pub(crate) fn recovery_limit_error(
 ) -> TaskError {
     let error_type = stored_error_type(failure.error_type());
     TaskError {
-        error_code: OperationalErrorCode::WorkflowRecoveryLimitReached.into(),
+        error_code: OperationalCode::WorkflowRecoveryLimitReached.into(),
         message: Some(format!(
             "Workflow recovery raised a persistent error in {failed_passes} passes. \
              Last case: {}. Last raise: {error_type}: {}",
@@ -1085,7 +1085,7 @@ mod tests {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let first_error =
-            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
+            serde_json::to_string(&TaskError::custom("FIRST", "first failure").unwrap()).unwrap();
         seed_workflow(&pool, workflow_id, "RUNNING", Some(&first_error)).await;
         seed_node(&pool, workflow_id, 0, "RUNNING").await;
         seed_node(&pool, workflow_id, 1, "PENDING").await;

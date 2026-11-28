@@ -1,0 +1,68 @@
+Hi agent! If you need to work with the horsies npm package, consider using the docs locally.
+> To get the TypeScript pages and the shared pages locally as markdown files, run:
+>   npx horsies get-docs
+> This creates a .horsies-docs/ directory. Read those files instead of fetching web docs.
+
+# Horsies (TypeScript)
+> The TypeScript client of the horsies core, for Node and Bun: a PostgreSQL-backed background task queue and workflow engine.
+> Docs: https://suleymanozkeskin.github.io/horsies/typescript/
+> Source: https://github.com/suleymanozkeskin/horsies/tree/main/clients/typescript/horsies
+> Package: horsies (ES modules only); entry points horsies, horsies/zod, horsies/rerun/pg, horsies/rerun/postgres; native addon @horsies/native-<platform>
+
+The Python client, the Rust client and the TypeScript client run on one core, written in Rust. Behaviour and guarantees are on the shared pages, for every client. The TypeScript pages state the API of the package. A database belongs to one client: the core refuses a database that another client installed.
+
+## Agent Skills
+- The package ships one skill folder: `node_modules/horsies/.agents/skills/horsies/`
+- `npx horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
+- `SKILL.md` -> orientation and routing (the only file with frontmatter); `tasks.md`, `workflows.md`, `configs.md`, `monitoring.md`
+
+## TypeScript API pages
+- Overview -> /horsies/typescript/
+- Installation -- Node 26+, Bun 1.4+, TypeScript 6.0+ (the declarations reference the lib esnext.temporal; no lib setting); platform packages linux-x64-gnu (glibc 2.17+), linux-arm64-gnu (glibc 2.28+), darwin-arm64; no musl, macOS x86_64 or Windows package; RuntimeStartFailed on a host with no package; optional peers zod, pg, postgres, @opentelemetry/api; AddonOutsideMainThread -> /horsies/typescript/installation/
+- Getting Started -- one entry file is the producer, the worker and each child; defineTask, Horsies.create, app.implement, app.send, handle.get({ waitMs }), `process.exitCode = await cli.run(app)`; `node main.ts worker --profile default` -> /horsies/typescript/quick-start/getting-started/
+- Wire Types -- the h.* kinds, modifiers (optional, default, nullable), objects, records, unions, value and sent types (ValueOf, SentOf), h.taskOutcome, h.lazy and recursive types, h.tuple with a rest item, Decimal, JsonValue, zod 4 schemas and the hz codecs of horsies/zod, refused zod forms, refusals at Horsies.create -> /horsies/typescript/tasks/wire-types/
+- Defining Tasks -- defineTask (name, queue, input, output, errorCodes, execution, timeoutMs, cancelGraceMs, retryPolicy, workflowContext), app.implement with ok and err of the body's second argument, execution classes ISOLATED, SHARED_ASYNC, SHARED_THREAD, custom queues, retry policy and retryFor, the task list of Horsies.create, TaskRuntime (signal, cancelState, spawn, state, taskId, fencingToken) -> /horsies/typescript/tasks/defining-tasks/
+- Task Errors -- declared errorCodes, err of the body's second argument, error data, the two-level code { kind: "builtIn" | "custom", code }, BuiltInTaskCode, thrown errors and exceptionMapper, UNHANDLED_EXCEPTION, WORKER_SERIALIZATION_ERROR -> /horsies/typescript/tasks/errors/
+- Sending Tasks -- app.send(contract, input, options), TaskSendOptions (idempotencyKey, goodUntil, delaySeconds, retention), TaskSendError by kind and code (ENQUEUE_FAILED, IDEMPOTENCY_KEY_CONFLICT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, PAYLOAD_MISMATCH, SEND_SUPPRESSED, SEAT_RELAY_FULL), retryable, app.resend, resendOnTransientError, payload size, HORSIES_SUPPRESS_SENDS -> /horsies/typescript/tasks/sending-tasks/
+- Retrieving Results -- handle.get({ waitMs }) -> Result<TaskOutcome<O, E>, ReadError>, ReadError by kind and code, kept reads, handle.info(), TaskId.parse, app.taskHandle(contract, taskId) -> /horsies/typescript/tasks/retrieving-results/
+- Cancellation -- runtime.signal (an operator cancel and the deadline), runtime.cancelState(), pass the signal to each library call; a SHARED_ASYNC body stops at its deadline only where it passes the signal (a body whose libraries take no signal belongs in ISOLATED); a body that does not stop; cancelGraceMs; runtime.spawn tracked work -> /horsies/typescript/tasks/cancellation/
+- Workflow API -- defineWorkflow(definition, build) with parameters and an optional outputType, the builder w (w.task with a value or an upstream node per parameter, nodeId, node options), a workflow with no output (NoWorkflowOutput), node checks, joins, the success policy, check cases, the workflows list of Horsies.create, app.start, WorkflowStartError, app.resendStart, WorkflowHandle, get({ waitMs }), nodes() with WorkflowNodeInfo and WorkflowNodeStatus, app.workflowHandle(workflow, workflowId), resultFor by node id, WorkflowReadError, HandleCoreError, statuses -> /horsies/typescript/concepts/workflows/workflow-api/
+- Subworkflows -- w.subWorkflow, SubWorkflowNodeOptions, child parameters as values or upstream nodes, SubWorkflowSummary, a child built from a dependency's result, the bounded wait for the build (5,000 ms), the read of a child's result, the nesting limit -> /horsies/typescript/concepts/workflows/subworkflows/
+- App Config -- Horsies.create(config) -> Result<Horsies, CreateRefused>, refusals, HorsiesConfig (database, queueMode, customQueues, claim, workerProfiles, payload, recovery, retention and its bounds, resilience, schedule with taskSchedule, schemaMode, logFormat textLogs or jsonLogs, tasks, workflows), Secret ({ kind: "fromEnv" } | { kind: "value" }), PgBouncer and the session URL check, refusal codes -> /horsies/typescript/configuration/app-config/
+- Worker Setup -- WorkerProfileInput (children with a kind, recycling, task and memory limits, pools, claim limits, drain), bounds, execution classes on Node and Bun, child mode (every line before cli.run runs in each child), app.provide and runtime.state, app.onChildStart, `<entry> worker --profile NAME` -> /horsies/typescript/workers/worker-setup/
+- Thread Seats -- SHARED_THREAD children on Node (the sharedThread field of WorkerProfileInput: SharedThreadChildren count 1 to 1,024, seats 1 to 256), one worker_threads isolate per seat with no addon, a provider per seat, onChildStart on the main thread, Bun refuses the profile with sharedThreadUnavailable, ThreadTaskRuntime and cancelState(), the seat relay (taskSendPool calls at the database per seat, 10,000 waiting, SEAT_RELAY_FULL), the heap cap of a seat (the heap limit of the child's main isolate, --max-old-space-size), recycle.above for the whole child and exit code 81 -> /horsies/typescript/workers/thread-seats/
+- Schedule Config -- the schedule section of Horsies.create (schedules, enabled default true, checkIntervalSeconds 1 to 60 default 1), taskSchedule (name, task, input, pattern, timezone default UTC, catchUpMissed, maxCatchUpRuns 1 to 10,000 default 100, queue, enabled), SchedulePattern (interval, hourly, daily, weekly, monthly, cron), CronSchedule, CronNumericTerm, CronEnumTerm, DaySelector and the cron bounds, the checks (HRS-205, HRS-300), the scheduler command -> /horsies/typescript/scheduling/schedule-config/
+- Health Reads -- app.pingDatabase, app.pingWorkers({ waitMs }), listWorkerStates, getWorkerState, getWorkerStateHistory, getStaleTasks, getExpiredTasks, getExecutionClassCoverage and getExecutionClassReport on app.monitoring, their errors by kind and code -> /horsies/typescript/monitoring/health-reads/
+- Monitoring Queries -- the reads of app.monitoring (taskStatusCounts, task lists, getTaskDetail, workflows, nodes by nodeIndex, schedules), the query fields and their bounds, the window, the phase timing of attempts, nodes and runs, MonitoringReadError, app.monitoring.cancelTask -> /horsies/typescript/monitoring/monitoring-queries/
+- Web UI Mount -- createMonitoringHandler(app, options) -> a Fetch-API handler with close(), MonitoringHandlerOptions (authorizationPolicy, actions, ui, basePath), TraceLinkTemplate, MonitoringAuthorizationPolicy, allowAll, viewOnly, trustedHeader; mounts in Bun.serve, node:http, Hono and a Next.js route -> /horsies/typescript/monitoring/web-ui-mount/
+- Event Handlers -- app.onEvent(eventType, { name }, handler) with EventHandler<T> and EventOf<T>, the 11 event types (AnyEvent, EventTypeName), AttemptEnded and AttemptEnd, the refusals HRS-222 to HRS-226, delivery (10,000 events per handler, one at a time, at most once), all handlers of a handler child share one event loop, app.onHandlerChildStart (10 s per hook, exit code 173, HRS-214) -> /horsies/typescript/monitoring/event-handlers/
+- Tracing Setup -- tracing: { kind: "otelTracing", parentage, workerEndedSpans } or { kind: "noTracing" }, AttemptParentage (childOfSend, linkedToSend), WorkerEndedSpans (makeSpans, noSpans), @opentelemetry/api and HRS-220, the global context manager, propagator and tracer provider of each process and seat isolate, the send, start and attempt spans and their status, the spans of attempts that the worker ended, currentTask() for logs, the flush at the exit of a child, the producer metrics -> /horsies/typescript/observability/tracing-setup/
+- Rerun -- app.rerunTask(command, policy) in a transaction of the app, app.rerunTaskIn(transaction, command, policy) in the caller's transaction through horsies/rerun/pg or horsies/rerun/postgres, RerunCommand, RerunEnqueuePolicy, RerunOutcome, RerunError and CallerRerunError -> /horsies/typescript/operations/rerun/
+- Frameworks -- an HTTP server on Bun or Node imports the contracts and the app, never the implementations; send from a handler; read a result by its id -> /horsies/typescript/guides/frameworks/
+- Testing -- implementation.run(input, runtime), TaskRuntime.forTest, app state in a test, Horsies.create and the check command with no database, HORSIES_SUPPRESS_SENDS -> /horsies/typescript/operations/testing/
+- CLI Reference -- cli.run(app) at the end of the app's entry: `<entry> worker --profile NAME [--metrics-listen HOST:PORT]`, `check [--live]`, `scheduler`, `web`, `metrics --metrics-listen HOST:PORT`, `--log-level`; child mode; exit codes; the package's bin: `horsies skills install --target DIR [--force]`, `horsies get-docs [--output DIR] [--ref main]`, `horsies --version` -> /horsies/typescript/cli/
+
+## Shared pages (behaviour, every client)
+- Architecture -> /horsies/concepts/architecture/
+- Task Lifecycle -> /horsies/concepts/task-lifecycle/
+- Fencing Token (conditional writes to other systems, limits) -> /horsies/concepts/fencing-token/
+- Queue Modes -> /horsies/concepts/queue-modes/
+- Errors Reference (library codes, HRS config codes) -> /horsies/tasks/errors/
+- Retry Policy -> /horsies/tasks/retry-policy/
+- Workflow Semantics -> /horsies/concepts/workflows/workflow-semantics/
+- Worker Architecture -> /horsies/workers/worker-architecture/
+- Choosing an Execution Mode -> /horsies/workers/execution-modes/
+- Shared Async Tasks (timeout, cancel grace, an operator cancel) -> /horsies/workers/shared-async-tasks/
+- Shared Thread Tasks -> /horsies/workers/shared-thread-tasks/
+- Concurrency -> /horsies/workers/concurrency/
+- Heartbeats & Recovery -> /horsies/workers/heartbeats-recovery/
+- Broker Config (field meanings and ranges) -> /horsies/configuration/broker-config/
+- Remote PostgreSQL -> /horsies/configuration/remote-postgres/
+- Recovery Config -> /horsies/configuration/recovery-config/
+- Retention Config -> /horsies/configuration/retention-config/
+- Serialization (the stored form of each value) -> /horsies/internals/serialization/
+- Worker & Database Health -> /horsies/monitoring/worker-health/
+- Web UI Overview -> /horsies/monitoring/web-ui-overview/
+- Action Semantics -> /horsies/monitoring/action-semantics/
+- Observability Overview -> /horsies/observability/overview/
+- Metrics -> /horsies/observability/metrics/

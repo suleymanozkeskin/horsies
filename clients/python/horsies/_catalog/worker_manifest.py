@@ -113,7 +113,7 @@ __all__ = [
     'PreloadLaunchNoPreloadProgram',
     'PreloadLaunch',
     'ChildProgramPython',
-    'ChildProgramRust',
+    'ChildProgramHost',
     'ChildProgram',
     'WorkerLogLevel',
     'ChildLaunchManifest',
@@ -368,7 +368,7 @@ type SessionDatabase = SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparat
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PoolRecycleNever:
-    """A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`)."""
+    """A connection is never replaced by age."""
 
     kind: Literal['NEVER'] = 'NEVER'
 
@@ -385,9 +385,7 @@ class PoolRecycleAfterSeconds:
 
 
 type PoolRecycle = PoolRecycleNever | PoolRecycleAfterSeconds
-"""When the pool replaces a connection by its age (SQLAlchemy's
-`pool_recycle`).
-"""
+"""When the pool replaces a connection by its age."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -410,9 +408,7 @@ class TcpKeepalivesConfigOn:
 
 
 type TcpKeepalivesConfig = TcpKeepalivesConfigOff | TcpKeepalivesConfigOn
-"""TCP keepalives of every core connection. Python's
-`tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
-"""
+"""TCP keepalives of every core connection, checked form."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -434,9 +430,7 @@ class TcpUserTimeoutConfigAfter:
 
 
 type TcpUserTimeoutConfig = TcpUserTimeoutConfigSystemDefault | TcpUserTimeoutConfigAfter
-"""The TCP user timeout of every core connection. Python's
-`tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
-"""
+"""The TCP user timeout of every core connection, checked form."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -465,7 +459,7 @@ class WorkerDatabaseManifest:
     (`PostgresConfig.worker_pool_pre_ping`).
     """
 
-    pool_timeout: int
+    pool_timeout_seconds: int
     """The longest a checkout waits for a free connection; 0 does not wait."""
 
     pool_recycle: PoolRecycle
@@ -474,14 +468,10 @@ class WorkerDatabaseManifest:
     """Log every statement through the log bridge."""
 
     tcp_keepalives: TcpKeepalivesConfig
-    """TCP keepalives of every core connection (Python `tcp_keepalives` and
-    its three values).
-    """
+    """TCP keepalives of every core connection."""
 
     tcp_user_timeout: TcpUserTimeoutConfig
-    """TCP user timeout of every core connection (Python
-    `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
-    """
+    """TCP user timeout of every core connection."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -607,7 +597,7 @@ class IsolatedPoolManifest:
     max_size: int
     """The most connections of the pool."""
 
-    check: bool
+    pre_ping: bool
     """Check each connection when a write takes it from the pool."""
 
 
@@ -620,7 +610,7 @@ class SharedPoolManifest:
 
     max_size: PoolMaxSize
 
-    check: bool
+    pre_ping: bool
     """Check each connection when a write takes it from the pool."""
 
 
@@ -755,7 +745,7 @@ type ParentCpu = Literal['SHARED', 'OWN_CORE']
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WorkerProfileManifest:
-    """The settings of one worker (Python `WorkerProfile`), every value given."""
+    """The settings of one worker, every value given."""
 
     isolated: Isolated
 
@@ -845,7 +835,7 @@ type QueueConcurrency = QueueConcurrencyTasks | QueueConcurrencyNoLimit
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CustomQueueManifest:
-    """One custom queue of the app (Python `CustomQueueConfig`)."""
+    """One custom queue of the app."""
 
     name: str
 
@@ -871,7 +861,7 @@ class QueuesDefault:
 
 
 type Queues = QueuesCustom | QueuesDefault
-"""The queues of the app (Python `AppConfig.queue_mode`). A worker serves
+"""The queues of the app. A worker serves
 every queue of the app.
 """
 
@@ -893,7 +883,7 @@ class ClaimLeaseMilliseconds:
 
 
 type ClaimLease = ClaimLeaseWorkerDefault | ClaimLeaseMilliseconds
-"""The lease of a claim (Python `AppConfig.claim_lease_ms`)."""
+"""The lease of a claim."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -913,7 +903,7 @@ class ClusterWideCapNoLimit:
 
 
 type ClusterWideCap = ClusterWideCapTasks | ClusterWideCapNoLimit
-"""The most RUNNING tasks of the cluster (Python `AppConfig.cluster_wide_cap`)."""
+"""The most RUNNING tasks of the cluster."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -939,15 +929,15 @@ class WorkerClaimManifest:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RecoveryManifest:
-    """Stale task detection and crash recovery (Python `RecoveryConfig`)."""
+    """Stale task detection and crash recovery."""
 
-    auto_requeue_stale_claimed: bool
+    requeue_stale_claimed: bool
 
     claimed_stale_threshold_ms: int
 
-    auto_terminate_orphaned_workflow_tasks: bool
+    terminate_orphaned_workflow_tasks: bool
 
-    auto_fail_stale_running: bool
+    fail_stale_running: bool
 
     running_stale_threshold_ms: int
 
@@ -955,7 +945,7 @@ class RecoveryManifest:
 
     crashed_worker_recovery_grace_ms: int
 
-    phase2_quarantine_after_attempts: int
+    finalization_quarantine_after_attempts: int
 
     workflow_recovery_failure_limit: int
 
@@ -1052,15 +1042,13 @@ type QueueRetention = QueueRetentionDays | QueueRetentionForever
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RetentionManifest:
-    """How long records live and how their storage is kept ahead (Python
-    `RetentionConfig`).
-    """
+    """How long records live and how their storage is kept ahead."""
 
     worker_state_retention: WorkerStateRetention
 
     terminal_record_retention: TerminalRecordRetention
 
-    paused_workflow_auto_cancel_after: PausedWorkflowExpiry
+    paused_workflow_cancel_after: PausedWorkflowExpiry
 
     history_leaf_horizon_days: int
 
@@ -1074,9 +1062,9 @@ class RetentionManifest:
     queue_retention: dict[str, QueueRetention]
     """The retention of each mapped queue, by queue name."""
 
-    partition_maintenance_interval_s: int
+    partition_maintenance_interval_seconds: int
 
-    retention_sweep_interval_s: int
+    retention_sweep_interval_seconds: int
 
     retention_delete_batch_size: int
 
@@ -1092,7 +1080,7 @@ class RetryAttemptLimitAttempts:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RetryAttemptLimitNoLimit:
-    """No limit on the attempts (Python `db_retry_max_attempts=0`)."""
+    """No limit on the attempts."""
 
     kind: Literal['NO_LIMIT'] = 'NO_LIMIT'
 
@@ -1103,15 +1091,13 @@ type RetryAttemptLimit = RetryAttemptLimitAttempts | RetryAttemptLimitNoLimit
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResilienceManifest:
-    """Retry and backoff after database errors, and the poll interval (Python
-    `WorkerResilienceConfig`).
-    """
+    """Retry and backoff after database errors, and the poll interval."""
 
-    db_retry_initial_ms: int
+    database_retry_initial_ms: int
 
-    db_retry_max_ms: int
+    database_retry_max_ms: int
 
-    db_retry_max_attempts: RetryAttemptLimit
+    database_retry_max_attempts: RetryAttemptLimit
 
     notify_poll_interval_ms: int
 
@@ -1127,7 +1113,7 @@ class PayloadLimitBytes:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PayloadLimitNoLimit:
-    """No threshold (Python `None`)."""
+    """No threshold."""
 
     kind: Literal['NO_LIMIT'] = 'NO_LIMIT'
 
@@ -1138,7 +1124,7 @@ type PayloadLimit = PayloadLimitBytes | PayloadLimitNoLimit
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PayloadManifest:
-    """The size guard of serialized payloads (Python `PayloadPolicy`)."""
+    """The size guard of serialized payloads."""
 
     warn_bytes: PayloadLimit
     """Log a warning for a payload above this size."""
@@ -1153,7 +1139,7 @@ The executor of the worker uses this type too (`ExecutionClass` there):
 the class of a row, the budget of a claim and the kind of a child are
 one set of values.
 
-The order is the order of Python's `Execution` members: `ISOLATED`,
+The order is `ISOLATED`,
 `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
 serializes as its stored value.
 
@@ -1173,7 +1159,7 @@ class TaskManifest:
     """How a worker runs the task."""
 
     error_codes: tuple[str, ...]
-    """The user error codes that the task declares, each once: the values
+    """The custom error codes that the task declares, each once: the values
     of its `error_code` metric label besides the built-in codes and
     `undeclared` (`error_code_label`). Empty when it declares none. The
     parser refuses a code that fails the code-text rule, the name of a
@@ -1214,8 +1200,7 @@ class HandlerManifest:
 
     name: str
     """The name of the handler: the value of the `handler` label of
-    `horsies.telemetry.handler.errors` and
-    `horsies.telemetry.handler.dropped`. Each name is once in the
+    the handler errors and handler dropped metrics. Each name is once in the
     manifest.
     """
 
@@ -1321,18 +1306,18 @@ class ChildProgramPython:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ChildProgramRust:
-    """The worker binary in child mode; its tasks are compiled in."""
+class ChildProgramHost:
+    """The app program started again in child mode; its tasks are compiled in."""
 
-    kind: Literal['RUST'] = 'RUST'
+    kind: Literal['HOST'] = 'HOST'
 
 
-type ChildProgram = ChildProgramPython | ChildProgramRust
+type ChildProgram = ChildProgramPython | ChildProgramHost
 """What a child runs."""
 
 
 type WorkerLogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-"""The log level of the worker and its children (`horsies worker --loglevel`)."""
+"""The log level of the worker and its children (`horsies worker --log-level`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -32,11 +32,12 @@ use super::seats::ServeEnd;
 use crate::broker::claims::{RunWorkflow, WorkflowNodeIndex};
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
-use crate::core::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode};
+use crate::core::{BuiltInTaskCode, OperationalCode, OutcomeCode};
 use crate::events::{
-    AttemptEnd, AttemptEnded, AttemptStart, ChildResult, Event, RunTrace, SlotRecovered,
+    AnyEvent, AttemptEnd, AttemptEnded, AttemptStart, ChildResult, RunTrace, SlotRecovered,
     WorkerDecision, WorkflowPlace,
 };
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     BoundedText, EventBatch, EventsFrame, ParentFrame, ProcessId, SpanReadCounts, WireEvent,
 };
@@ -188,7 +189,7 @@ fn decided(reason: WorkerDecision, workflow: WorkflowPlace) -> AttemptEnd {
             text: BoundedText::new(format!(r#"{{"traceparent":"{TRACEPARENT}"}}"#)).unwrap(),
         },
         placed_at: placed_at(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         worker_id: BoundedText::new(WORKER_ID.to_owned()).unwrap(),
         workflow,
     }
@@ -208,8 +209,8 @@ fn not_known() -> AttemptEnd {
 }
 
 /// Attempt 2 of a task of the class `SHARED_THREAD`, which ended with `end`.
-fn attempt_ended(end: AttemptEnd) -> Event {
-    Event::from(AttemptEnded {
+fn attempt_ended(end: AttemptEnd) -> AnyEvent {
+    AnyEvent::from(AttemptEnded {
         at: ended_at(),
         task_id: Uuid::from_u128(7),
         task_name: BoundedText::new(TASK_NAME.to_owned()).unwrap(),
@@ -221,10 +222,10 @@ fn attempt_ended(end: AttemptEnd) -> Event {
     })
 }
 
-fn slot_recovered() -> Event {
-    Event::from(SlotRecovered {
+fn slot_recovered() -> AnyEvent {
+    AnyEvent::from(SlotRecovered {
         at: ended_at(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         slot: BoundedU32::try_from(0).unwrap(),
     })
 }
@@ -333,7 +334,7 @@ fn end_kind(end: &AttemptEnd) -> &'static str {
 }
 
 /// The events frame of `events`, in order.
-fn events_frame(events: &[Event]) -> EventsFrame {
+fn events_frame(events: &[AnyEvent]) -> EventsFrame {
     let wire: Vec<WireEvent> = events
         .iter()
         .map(|event| WireEvent::of(event).unwrap())
@@ -368,7 +369,7 @@ struct Serving {
 impl Serving {
     fn start(spans: EndedSpans, seen_tx: Sender<Seen>) -> Serving {
         let (ours, peer) = UnixStream::pair().unwrap();
-        let writer = FrameWriter::start(ours, 8).unwrap();
+        let writer = FrameWriter::start(ours, 8, ProcessExit::Standard).unwrap();
         let handler_seen = Mutex::new(seen_tx);
         let mut set = EventHandlerSet::new();
         set.add_blocking::<AttemptEnded>("ends".to_owned(), move |event| {
@@ -396,7 +397,7 @@ impl Serving {
         }
     }
 
-    async fn send(&self, events: &[Event]) {
+    async fn send(&self, events: &[AnyEvent]) {
         self.parent
             .send(ParentFrame::Events(events_frame(events)))
             .await
@@ -416,7 +417,7 @@ async fn serve_and_see(
     spans: EndedSpans,
     seen_tx: Sender<Seen>,
     seen: &Receiver<Seen>,
-    events: &[Event],
+    events: &[AnyEvent],
     count: usize,
 ) -> Vec<Seen> {
     let serving = Serving::start(spans, seen_tx);
@@ -518,15 +519,15 @@ async fn each_reason_gives_one_span_with_its_code_and_the_node_that_was_read() {
         ),
         (
             WorkerDecision::TaskBlockedLoop,
-            OperationalErrorCode::TaskBlockedLoop.into(),
+            OperationalCode::TaskBlockedLoop.into(),
         ),
         (
             WorkerDecision::NeighbourBlockedLoop,
-            OperationalErrorCode::NeighbourBlockedLoop.into(),
+            OperationalCode::NeighbourBlockedLoop.into(),
         ),
         (
             WorkerDecision::ChildLost,
-            OperationalErrorCode::WorkerCrashed.into(),
+            OperationalCode::WorkerCrashed.into(),
         ),
     ];
     for (reason, code) in &cases {

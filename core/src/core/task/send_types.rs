@@ -1,4 +1,4 @@
-/// Typed error types for task send/schedule operations.
+/// Typed error types for task send operations.
 ///
 /// Mirrors Python's `clients/python/horsies/core/models/task_send_types.py`: one variant per
 /// code, and the core maps every enqueue error to its variant once
@@ -6,39 +6,39 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::BrokerError;
+use crate::broker::{BrokerError, BrokerRefusalCause};
 use crate::core::config::EnqueueRetention;
-use crate::error_catalog::{ErrorEnum, RecordFieldValue, RecordValue};
+use crate::error_catalog::{
+    ErrorEnum, ExceptionCause, ExceptionValue, RecordFieldValue, RecordValue,
+};
 use crate::FailureCause;
 
 /// Categorized task send failure codes.
 ///
-/// The members are Python's, in Python's order
-/// (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
-/// one variant per member.
+/// [`TaskSendError`] has one variant per member.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
-#[code_catalog(module = "task_send", base = "str_enum")]
+#[code_catalog(module = "task_send", values = "equal_text")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
     SendSuppressed,
-    /// A sync (Python) or blocking (Rust) send, schedule or retry was called
-    /// on a thread that runs an event loop (Python) or a tokio runtime
-    /// (Rust); the blocking enqueue would stall it, so nothing was written.
-    /// A blocking retry on the same thread returns this code again; the
+    /// A sync or blocking send or resend was called
+    /// on a thread that runs an event loop or a tokio runtime;
+    /// the blocking enqueue would stall it, so nothing was written.
+    /// A blocking resend on the same thread returns this code again; the
     /// async forms complete the dispatch with the same task id.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
     /// Programmer error (bad args, serialization failure, unresolved queue).
     ValidationFailed,
     /// Infrastructure error (schema init, DB transaction). Conditionally retryable.
     EnqueueFailed,
     /// The task id exists with a different command or idempotency key.
-    /// Nothing was written. The retry methods refuse it.
+    /// Nothing was written. The resend methods refuse it.
     PayloadMismatch,
     /// The idempotency key is reserved by another task with a different
-    /// command. Nothing was written. The retry methods accept it: a retry
-    /// after the reservation ends is accepted, one before returns the same
-    /// error.
+    /// command. Nothing was written. Non-retryable: send the same command, or
+    /// use another key. The resend methods refuse it.
     IdempotencyKeyConflict,
     /// Serialized payload exceeded `payload.reject_bytes`; nothing was
     /// written. Non-retryable — shrink the payload (pass a reference to
@@ -60,10 +60,10 @@ impl std::fmt::Display for TaskSendErrorCode {
     }
 }
 
-/// Serialized envelope for idempotent retry.
+/// Serialized envelope for an idempotent resend.
 ///
 /// All value fields are pre-serialized to avoid round-trip issues.
-/// The retry methods extract this payload directly — no user input needed.
+/// The resend methods extract this payload directly — no user input needed.
 /// A replay carries the same command and `sent_at`, so the exact-id resend
 /// check accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +127,7 @@ impl TaskSendPayload {
     }
 }
 
-/// Error from task send/schedule operations: one variant per
+/// Error from task send operations: one variant per
 /// [`TaskSendErrorCode`] that the core or a client's blocking form
 /// produces, each with only the facts of its state (Python
 /// `clients/python/horsies/core/models/task_send_types.py`).
@@ -135,122 +135,131 @@ impl TaskSendPayload {
 /// The `///` lines of each variant are the docstring of its generated
 /// Python class (`horsies._catalog.task_send_errors`); Rust notes are `//`
 /// comments.
-#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[derive(
+    Debug, Clone, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues,
+)]
 #[error_catalog(
     module = "task_send_errors",
     code = "TaskSendErrorCode",
     union = "TaskSendCoreError",
-    union_doc = "Every failure of a send or schedule that the core records."
+    union_doc = "Every failure of a send that the core records."
 )]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or written.
     ///
     /// Suppression is active during the worker and scheduler import phase,
-    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
+    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The resend
     /// methods refuse this error.
     #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
-    SendSuppressed {
-        #[error_slot(python = "Str", hidden)]
+    Suppressed {
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
-    /// A sync send or schedule ran inside a running event loop. Nothing was written.
+    /// A sync send ran inside a running event loop. Nothing was written.
     ///
-    /// The payload is prepared. ``retry_send_async(err)`` or
-    /// ``retry_schedule_async(err)`` completes the same dispatch with the same
-    /// task id. A sync retry from the same loop returns this error again.
+    /// The payload is prepared. the async resend completes the same
+    /// dispatch with the same task id. A sync resend from the same loop returns
+    /// this error again.
     // The Rust client's blocking forms give it on a thread that runs a tokio
     // runtime; the core's enqueue never does.
-    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext")]
+    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The input was refused before anything was written.
     ///
-    /// ``exception`` is the cause, or ``NoCause()`` when a check refused the
-    /// input without a Python exception. The retry methods refuse this error.
+    /// ``cause`` is the exception of the cause, or ``NoCause`` when a check refused the
+    /// input without an exception. The resend methods refuse this error.
     // `cause` is what refused it.
     #[error_class(
         class = "TaskSendValidationFailed",
         code = "ValidationFailed",
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     ValidationFailed {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// What refused the input: a rule, a text that does not read as JSON,
+        /// or a check of the core.
+        #[error_slot(cause)]
+        cause: BrokerRefusalCause,
     },
     /// The broker or the database failed during enqueue. The row may or may not exist.
     ///
-    /// ``retryable`` is the core's classification of the cause. ``retry_send(err)``
+    /// ``retryable`` is the core's classification of the cause. ``resend(err)``
     /// sends the same task id and payload again; the broker returns the existing
-    /// task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    /// task for a duplicate. ``cause`` is ``NoCause`` when the broker found
     /// the failure by a data check.
     // `cause` is what the enqueue met.
     #[error_class(
         class = "TaskSendEnqueueFailed",
         code = "EnqueueFailed",
-        exception = "BaseException | NoCause"
+        cause = "optional"
     )]
     EnqueueFailed {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Bool")]
+        #[error_slot(slot_type = "Bool")]
         retryable: bool,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The exception of the failure.
+        #[error_slot(cause)]
+        cause: Box<EnqueueFailureCause>,
     },
     /// The task id exists with a different command or idempotency key. Nothing was written.
     ///
-    /// The message names which one differs. The retry methods refuse this error.
+    /// The message names which one differs. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
     PayloadMismatch {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
     },
     /// The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
     ///
     /// ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
-    /// the configured limit. The retry methods refuse this error.
+    /// the configured limit. The resend methods refuse this error.
     #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
     PayloadTooLarge {
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Int")]
+        #[error_slot(slot_type = "Int")]
         size_bytes: u64,
-        #[error_slot(python = "Int")]
+        #[error_slot(slot_type = "Int")]
         limit_bytes: u64,
     },
     /// The idempotency key is reserved by another task with a different command.
     ///
     /// Nothing was written. ``owner_task_id`` names the task that holds the key.
-    /// The retry methods accept this error: a retry after the reservation ends
-    /// is accepted, and a retry before that returns the same error.
+    /// ``retryable`` is ``False``: a repeat of the same send does not complete
+    /// it. While the owner task is live, the repeat meets the same conflict.
+    /// After the reservation ends, the repeat starts a second task under the
+    /// key. To complete the send, send the same command as the owner task, or
+    /// use another key. The resend methods refuse this error.
     #[error_class(
         class = "TaskSendIdempotencyKeyConflict",
-        code = "IdempotencyKeyConflict"
+        code = "IdempotencyKeyConflict",
+        never_retryable
     )]
     IdempotencyKeyConflict {
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         task_id: Uuid,
-        #[error_slot(python = "TaskSendPayload", hidden)]
+        #[error_slot(slot_type = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
-        #[error_slot(python = "Str", hidden)]
+        #[error_slot(slot_type = "Str", hidden)]
         message: String,
-        #[error_slot(python = "Uuid")]
+        #[error_slot(slot_type = "Uuid")]
         owner_task_id: Uuid,
     },
 }
@@ -270,17 +279,16 @@ impl TaskSendError {
     }
 
     /// Whether the condition may clear, so the same send can succeed later.
-    /// Only an enqueue failure carries a driver classification; a key
-    /// conflict clears when the reservation ends; every refusal stays. An
-    /// async context does not clear on its thread (Python
-    /// `TaskSendAsyncContext`, which carries no retry flag): the async forms
-    /// complete the send.
+    /// Only an enqueue failure carries a driver classification; every
+    /// refusal, the key conflict included, stays. An async context does
+    /// not clear on its thread (its class has `retryable = False`): the
+    /// async forms complete the send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
-            Self::IdempotencyKeyConflict { .. } => true,
             Self::AsyncContext { .. }
-            | Self::SendSuppressed { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. } => false,
@@ -290,7 +298,7 @@ impl TaskSendError {
     /// The human-readable description. It never holds input values.
     pub fn message(&self) -> &str {
         match self {
-            Self::SendSuppressed { message }
+            Self::Suppressed { message }
             | Self::AsyncContext { message, .. }
             | Self::ValidationFailed { message, .. }
             | Self::EnqueueFailed { message, .. }
@@ -305,10 +313,9 @@ impl TaskSendError {
     /// failed precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
-                cause.clone()
-            }
-            Self::SendSuppressed { .. }
+            Self::EnqueueFailed { cause, .. } => cause.failure_cause(),
+            Self::Suppressed { .. }
+            | Self::ValidationFailed { .. }
             | Self::AsyncContext { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. }
@@ -323,17 +330,19 @@ impl TaskSendError {
             | Self::EnqueueFailed { task_id, .. }
             | Self::PayloadMismatch { task_id, .. }
             | Self::IdempotencyKeyConflict { task_id, .. } => Some(*task_id),
-            Self::SendSuppressed { .. }
+            Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadTooLarge { .. } => None,
         }
     }
 
-    /// The task id and payload when the retry methods accept this error,
-    /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `clients/python/horsies/core/models/task_send_types.py`): an async context, an
-    /// enqueue failure and a key conflict. A refusal is never replayed,
-    /// because the same input meets the same refusal.
+    /// The task id and payload when the resend methods accept this error,
+    /// else `None`. Python's accepted set (`TaskSendResendable`,
+    /// `clients/python/horsies/core/models/task_send_types.py`): an async context
+    /// and an enqueue failure. A refusal is never replayed, because the same
+    /// input meets the same refusal. A key conflict is a refusal: a repeat of
+    /// the same send meets the same conflict, or starts a second task under
+    /// the key once the reservation ends.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
             Self::AsyncContext {
@@ -341,17 +350,15 @@ impl TaskSendError {
             }
             | Self::EnqueueFailed {
                 task_id, payload, ..
-            }
-            | Self::IdempotencyKeyConflict {
-                task_id, payload, ..
             } => Some(ResendTarget {
                 task_id: *task_id,
                 payload: payload.as_ref(),
             }),
-            Self::SendSuppressed { .. }
+            Self::Suppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
-            | Self::PayloadTooLarge { .. } => None,
+            | Self::PayloadTooLarge { .. }
+            | Self::IdempotencyKeyConflict { .. } => None,
         }
     }
 }
@@ -371,6 +378,68 @@ impl std::fmt::Display for TaskSendError {
 
 impl std::error::Error for TaskSendError {}
 
+/// The cause of `ENQUEUE_FAILED`: the `exception` of the generated class
+/// `TaskSendEnqueueFailed`.
+///
+/// Python stores the exception of the broker class of the failure
+/// ([`crate::DatabaseOperationError::enqueue_error`]). Its two forms are the
+/// core's class of the error and `NoCause()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnqueueFailureCause {
+    /// An error of the enqueue: the core's class of what it met, with the
+    /// error's own text and retry rule. [`send_error_from_enqueue`] sets
+    /// `text` to the `message` of the send error and `retryable` to its
+    /// `retryable`.
+    Error {
+        text: String,
+        retryable: bool,
+        failure: FailureCause,
+    },
+    /// A check of the core found the failure; no error was raised: a
+    /// conflict whose row was gone before the compare
+    /// ([`BrokerError::EnqueueConflictUnverifiable`]).
+    Check,
+}
+
+impl EnqueueFailureCause {
+    /// What the enqueue met; a check is a failed precondition. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::Error { failure, .. } => failure.clone(),
+            Self::Check => FailureCause::PreconditionFailed,
+        }
+    }
+
+    /// The cause of the failed enqueue `error`: its text, its retry rule and
+    /// its [`BrokerError::failure_cause`]. Pure.
+    fn of_error(error: &BrokerError) -> Self {
+        Self::Error {
+            text: error.to_string(),
+            retryable: error.is_retryable(),
+            failure: error.failure_cause(),
+        }
+    }
+}
+
+/// An error of the enqueue is the core's class of its cause, with its text
+/// and its retry rule; a check of the core is `NoCause()`.
+impl ExceptionCause for EnqueueFailureCause {
+    fn exception_value(&self) -> ExceptionValue {
+        match self {
+            Self::Error {
+                text,
+                retryable,
+                failure,
+            } => ExceptionValue::CoreFailure {
+                text: text.clone(),
+                retryable: *retryable,
+                cause: failure.clone(),
+            },
+            Self::Check => ExceptionValue::NoCause,
+        }
+    }
+}
+
 /// The send error for a failed enqueue, by Python's rule
 /// (`clients/python/horsies/core/task_decorator.py:1248-1310`):
 /// - a refusal of the input, the options or the call (`EnqueueContract`,
@@ -384,8 +453,10 @@ impl std::error::Error for TaskSendError {}
 ///   flag; a conflict whose row vanished before the compare and a retention
 ///   class key that no class derives are not retryable.
 ///
-/// `cause` of `VALIDATION_FAILED` and `ENQUEUE_FAILED` is the cause of
-/// `error` ([`BrokerError::failure_cause`]).
+/// `cause` of `VALIDATION_FAILED` is the form of Python's `exception`
+/// ([`BrokerRefusalCause`]); `cause` of `ENQUEUE_FAILED` is
+/// [`EnqueueFailureCause`]. A payload mismatch and a key conflict have no
+/// `cause`.
 pub fn send_error_from_enqueue(
     task_id: Uuid,
     payload: TaskSendPayload,
@@ -393,11 +464,22 @@ pub fn send_error_from_enqueue(
 ) -> TaskSendError {
     let message = error.to_string();
     match error {
-        BrokerError::EnqueueContract(_)
-        | BrokerError::Serialization(_)
-        | BrokerError::InvalidIdempotencyReservationWindow(_) => TaskSendError::ValidationFailed {
+        BrokerError::EnqueueContract(refusal) => TaskSendError::ValidationFailed {
             message,
-            cause: error.failure_cause(),
+            cause: BrokerRefusalCause::of_enqueue_refusal(&refusal.cause),
+        },
+        BrokerError::Serialization(_) | BrokerError::InvalidIdempotencyReservationWindow(_) => {
+            TaskSendError::ValidationFailed {
+                message,
+                cause: BrokerRefusalCause::Check,
+            }
+        }
+        BrokerError::EnqueueConflictUnverifiable { .. } => TaskSendError::EnqueueFailed {
+            task_id,
+            payload: Box::new(payload),
+            message,
+            retryable: error.is_retryable(),
+            cause: Box::new(EnqueueFailureCause::Check),
         },
         BrokerError::PayloadMismatch { .. } => TaskSendError::PayloadMismatch {
             task_id,
@@ -420,7 +502,6 @@ pub fn send_error_from_enqueue(
         | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
-        | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::RetentionClassKey(_)
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
@@ -439,12 +520,12 @@ pub fn send_error_from_enqueue(
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
-            cause: error.failure_cause(),
+            cause: Box::new(EnqueueFailureCause::of_error(error)),
         },
     }
 }
 
-/// Result type for task send/schedule operations.
+/// Result type for task send operations.
 ///
 /// `Ok(T)` on success (typically a client's task handle),
 /// `Err(TaskSendError)` on failure.
@@ -453,6 +534,7 @@ pub type TaskSendResult<T> = Result<T, TaskSendError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_catalog::{ErrorClassValues, ErrorEnum, SlotData};
 
     #[test]
     fn error_code_display() {
@@ -488,7 +570,11 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "connection refused".to_owned(),
             retryable: true,
-            cause: FailureCause::Connection,
+            cause: Box::new(EnqueueFailureCause::Error {
+                text: "connection refused".to_owned(),
+                retryable: true,
+                failure: FailureCause::Connection,
+            }),
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive input
@@ -505,10 +591,12 @@ mod tests {
         );
     }
 
-    /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-    /// test_conflict_names_the_owner_and_retry_is_accepted`.
+    /// A key conflict names the owner, is not retryable and is refused for a
+    /// resend. Reverting `Self::IdempotencyKeyConflict { .. } => false` in
+    /// `retryable()` fails the `retryable` assertion; reverting the `None` arm
+    /// in `resend_target()` fails the `resend_target` assertion.
     #[test]
-    fn a_key_conflict_names_the_owner_and_is_accepted_for_a_resend() {
+    fn a_key_conflict_names_the_owner_is_not_retryable_and_is_refused_for_a_resend() {
         let task_id = Uuid::from_u128(1);
         let owner = Uuid::from_u128(2);
         let error = send_error_from_enqueue(
@@ -525,8 +613,56 @@ mod tests {
             error,
             TaskSendError::IdempotencyKeyConflict { owner_task_id, .. } if owner_task_id == owner
         ));
-        let target = error.resend_target().expect("a key conflict is accepted");
-        assert_eq!(target.task_id, task_id);
+        assert!(error.resend_target().is_none());
+        assert!(!error.retryable());
+    }
+
+    /// The fixed `retryable` of a class in the catalog is the value of
+    /// `retryable()` for a value of that class: the key conflict and the
+    /// async context are the only classes with a fixed value, and neither
+    /// clears.
+    #[test]
+    fn the_fixed_retry_slot_of_a_class_is_the_retry_rule_of_its_value() {
+        use crate::error_catalog::ErrorSlot;
+
+        let conflict = TaskSendError::IdempotencyKeyConflict {
+            task_id: Uuid::from_u128(1),
+            payload: Box::new(sample_payload()),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(2),
+        };
+        let async_context = TaskSendError::AsyncContext {
+            task_id: Uuid::from_u128(3),
+            payload: Box::new(sample_payload()),
+            message: "blocking send on a runtime thread".to_owned(),
+        };
+        let fixed: Vec<(&str, &ErrorSlot)> = TaskSendError::ERROR_CATALOG
+            .classes
+            .iter()
+            .flat_map(|class| {
+                class
+                    .slots
+                    .iter()
+                    .filter(|slot| match slot {
+                        ErrorSlot::NeverRetryable | ErrorSlot::AlwaysRetryable => true,
+                        ErrorSlot::CodeMember { .. }
+                        | ErrorSlot::CodeSubset { .. }
+                        | ErrorSlot::Field { .. }
+                        | ErrorSlot::Exception { .. } => false,
+                    })
+                    .map(|slot| (class.type_name, slot))
+            })
+            .collect();
+
+        assert_eq!(
+            fixed,
+            [
+                (async_context.type_name(), &ErrorSlot::NeverRetryable),
+                (conflict.type_name(), &ErrorSlot::NeverRetryable),
+            ]
+        );
+        assert!(!conflict.retryable());
+        assert!(!async_context.retryable());
     }
 
     /// A refused input is never replayed: the same input meets the same
@@ -570,9 +706,9 @@ mod tests {
         }
     }
 
-    /// Python `TaskSendRetryable` holds `TaskSendAsyncContext`: a blocking
+    /// Python `TaskSendResendable` holds `TaskSendAsyncContext`: a blocking
     /// send on a runtime thread keeps its prepared task id and payload, and
-    /// an async retry sends them.
+    /// an async resend sends them.
     #[test]
     fn an_async_context_keeps_its_payload_and_is_accepted_for_a_resend() {
         let task_id = Uuid::from_u128(3);
@@ -617,7 +753,7 @@ mod tests {
         })
     }
 
-    /// Python `test_task_decorator.py::test_retry_send_reuses_task_id_and_payload`:
+    /// Python `test_task_decorator.py::test_resend_reuses_task_id_and_payload`:
     /// a resend carries the first send's task id and payload.
     #[test]
     fn a_database_failure_keeps_its_flag_and_is_accepted_for_a_resend() {
@@ -741,5 +877,498 @@ mod tests {
 
         assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
         assert!(!error.retryable());
+    }
+
+    /// The instance slot names of the class `class` in the catalog, in
+    /// order. The class values (`code` of one member, the fixed
+    /// `retryable` of a class) are not instance slots.
+    fn catalog_slot_names(class: &str) -> Vec<&'static str> {
+        use crate::error_catalog::ErrorSlot;
+
+        let found = TaskSendError::ERROR_CATALOG
+            .classes
+            .iter()
+            .find(|candidate| candidate.type_name == class)
+            .expect("the class is in the catalog");
+        found
+            .slots
+            .iter()
+            .filter_map(|slot| match slot {
+                ErrorSlot::CodeMember { .. }
+                | ErrorSlot::NeverRetryable
+                | ErrorSlot::AlwaysRetryable => None,
+                ErrorSlot::CodeSubset { .. } => Some("code"),
+                ErrorSlot::Field { name, .. } => Some(*name),
+                ErrorSlot::Exception { .. } => Some("cause"),
+            })
+            .collect()
+    }
+
+    /// The slot values of `error` by name, after a check that the names
+    /// and their order are the catalog's slots of its class.
+    fn named_slots(error: &TaskSendError) -> Vec<(&'static str, SlotData<'_>)> {
+        let named: Vec<(&'static str, SlotData<'_>)> = error
+            .slot_values()
+            .into_iter()
+            .map(|slot| (slot.name, slot.value))
+            .collect();
+        let names: Vec<&'static str> = named.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, catalog_slot_names(error.type_name()));
+        named
+    }
+
+    /// The `cause` slot of `error`.
+    fn exception_of(error: &TaskSendError) -> ExceptionValue {
+        let slot = error
+            .slot_values()
+            .into_iter()
+            .find(|slot| slot.name == "cause")
+            .expect("the class has a cause slot");
+        let SlotData::Exception(exception) = slot.value else {
+            panic!("the cause slot holds {:?}", slot.value);
+        };
+        exception
+    }
+
+    /// The `exception` that Python stores for the failed enqueue of
+    /// `error`: the broker's class of the failure
+    /// (`DatabaseOperationError::enqueue_error`), whose `exception`
+    /// `_map_broker_err` copies into the send error.
+    fn python_exception(error: BrokerError) -> ExceptionValue {
+        let broker = crate::DatabaseOperationError::enqueue_error("my_task", error);
+        let slot = crate::error_catalog::ErrorClassValues::slot_values(&broker)
+            .into_iter()
+            .find(|slot| slot.name == "cause")
+            .expect("the broker class has a cause slot");
+        let SlotData::Exception(exception) = slot.value else {
+            panic!("the cause slot holds {:?}", slot.value);
+        };
+        exception
+    }
+
+    /// A server error: the cause that no broker error of these tests gives.
+    fn server_cause() -> FailureCause {
+        FailureCause::Server(crate::ServerErrorFacts::of_code(
+            "40001",
+            "could not serialize access".to_owned(),
+        ))
+    }
+
+    #[test]
+    fn a_suppressed_send_has_its_message() {
+        let error = TaskSendError::Suppressed {
+            message: "sends are suppressed".to_owned(),
+        };
+
+        assert_eq!(
+            named_slots(&error),
+            [("message", SlotData::Str("sends are suppressed"))]
+        );
+    }
+
+    #[test]
+    fn an_async_context_has_its_task_id_payload_and_message() {
+        let payload = sample_payload();
+        let error = TaskSendError::AsyncContext {
+            task_id: Uuid::from_u128(3),
+            payload: Box::new(payload.clone()),
+            message: "inside a runtime".to_owned(),
+        };
+
+        assert_eq!(
+            named_slots(&error),
+            [
+                ("task_id", SlotData::Uuid(Uuid::from_u128(3))),
+                ("payload", SlotData::TaskSendPayload(&payload)),
+                ("message", SlotData::Str("inside a runtime")),
+            ]
+        );
+    }
+
+    /// The cause of a refusal is the form of Python's `exception`: `NoCause()`
+    /// for a check, the client's `SerializationError` with the reader's text,
+    /// the client's `ValueError` with the rule's text.
+    #[test]
+    fn a_validation_failure_has_the_exception_of_its_refusal_cause() {
+        for (cause, exception) in [
+            (BrokerRefusalCause::Check, ExceptionValue::NoCause),
+            (
+                BrokerRefusalCause::JsonUnreadable("EOF at 1".to_owned()),
+                ExceptionValue::ClientClass {
+                    class: crate::error_catalog::ClientExceptionClass::SerializationError,
+                    text: "EOF at 1".to_owned(),
+                },
+            ),
+            (
+                BrokerRefusalCause::ValueRule("a rule".to_owned()),
+                ExceptionValue::ClientClass {
+                    class: crate::error_catalog::ClientExceptionClass::ValueError,
+                    text: "a rule".to_owned(),
+                },
+            ),
+        ] {
+            let error = TaskSendError::ValidationFailed {
+                message: "refused".to_owned(),
+                cause: cause.clone(),
+            };
+            assert_eq!(
+                named_slots(&error),
+                [
+                    ("message", SlotData::Str("refused")),
+                    ("cause", SlotData::Exception(exception)),
+                ],
+                "{cause:?}"
+            );
+            assert_eq!(error.failure_cause(), FailureCause::PreconditionFailed);
+        }
+    }
+
+    /// The exception of a validation failure that the core makes of a broker
+    /// error is Python's form for the same error.
+    #[test]
+    fn a_validation_failure_of_a_broker_error_has_pythons_exception() {
+        use crate::broker::{EnqueueRefusal, EnqueueRefusalCause};
+        use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
+        use crate::core::history::identity::keys::IdempotencyKeyError;
+
+        let errors: [fn() -> BrokerError; 6] = [
+            || BrokerError::Serialization(serde_json::from_str::<u8>("x").expect_err("not JSON")),
+            || BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
+            || {
+                BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+                    SendPart::TaskOptions,
+                    "bad options".to_owned(),
+                ))
+            },
+            || BrokerError::EnqueueContract(EnqueueRefusal::empty_retention_class_key()),
+            || {
+                BrokerError::EnqueueContract(EnqueueRefusal::from(
+                    EnqueuePreparationError::Idempotency(IdempotencyKeyError::Empty {
+                        label: "idempotency key",
+                    }),
+                ))
+            },
+            || {
+                BrokerError::EnqueueContract(EnqueueRefusal {
+                    part: SendPart::Input,
+                    message: "the input does not read".to_owned(),
+                    cause: EnqueueRefusalCause::JsonUnreadable("EOF at 1".to_owned()),
+                })
+            },
+        ];
+        for broker_error in errors {
+            let error =
+                send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &broker_error());
+            assert_eq!(error.code(), TaskSendErrorCode::ValidationFailed);
+            assert_eq!(exception_of(&error), python_exception(broker_error()));
+        }
+    }
+
+    /// An error of the enqueue is the core's class of what it met, with the
+    /// cause's text and retry rule; a check is `NoCause()`.
+    #[test]
+    fn an_enqueue_failure_has_the_exception_of_its_cause() {
+        let payload = sample_payload();
+        for (cause, exception, failure_cause) in [
+            (
+                EnqueueFailureCause::Error {
+                    text: "the write failed".to_owned(),
+                    retryable: true,
+                    failure: server_cause(),
+                },
+                ExceptionValue::CoreFailure {
+                    text: "the write failed".to_owned(),
+                    retryable: true,
+                    cause: server_cause(),
+                },
+                server_cause(),
+            ),
+            (
+                EnqueueFailureCause::Error {
+                    text: "the row is wrong".to_owned(),
+                    retryable: false,
+                    failure: FailureCause::ContractViolation,
+                },
+                ExceptionValue::CoreFailure {
+                    text: "the row is wrong".to_owned(),
+                    retryable: false,
+                    cause: FailureCause::ContractViolation,
+                },
+                FailureCause::ContractViolation,
+            ),
+            (
+                EnqueueFailureCause::Check,
+                ExceptionValue::NoCause,
+                FailureCause::PreconditionFailed,
+            ),
+        ] {
+            let error = TaskSendError::EnqueueFailed {
+                task_id: Uuid::from_u128(4),
+                payload: Box::new(payload.clone()),
+                message: "the write failed".to_owned(),
+                retryable: true,
+                cause: Box::new(cause.clone()),
+            };
+            assert_eq!(
+                named_slots(&error),
+                [
+                    ("task_id", SlotData::Uuid(Uuid::from_u128(4))),
+                    ("payload", SlotData::TaskSendPayload(&payload)),
+                    ("message", SlotData::Str("the write failed")),
+                    ("retryable", SlotData::Bool(true)),
+                    ("cause", SlotData::Exception(exception)),
+                ],
+                "{cause:?}"
+            );
+            assert_eq!(error.failure_cause(), failure_cause, "{cause:?}");
+        }
+    }
+
+    /// The exception of an enqueue failure that the core makes of a broker
+    /// error is Python's form for the same error, the conflict whose row was
+    /// gone included.
+    #[test]
+    fn an_enqueue_failure_of_a_broker_error_has_pythons_exception() {
+        let errors: [fn() -> BrokerError; 5] = [
+            || not_sent(crate::db::NotSentCause::ConnectionClosed),
+            || BrokerError::ConnectionFailed("connection refused".to_owned()),
+            || BrokerError::InvalidStatus("BOGUS".to_owned()),
+            || BrokerError::InvalidWorkflowNodeStatus,
+            || BrokerError::EnqueueConflictUnverifiable {
+                task_id: Uuid::from_u128(1),
+                task_name: "my_task".to_owned(),
+            },
+        ];
+        for broker_error in errors {
+            let error =
+                send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &broker_error());
+            assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
+            assert_eq!(exception_of(&error), python_exception(broker_error()));
+        }
+    }
+
+    #[test]
+    fn a_payload_mismatch_has_its_task_id_payload_and_message() {
+        let payload = sample_payload();
+        let error = TaskSendError::PayloadMismatch {
+            task_id: Uuid::from_u128(5),
+            payload: Box::new(payload.clone()),
+            message: "another command".to_owned(),
+        };
+
+        assert_eq!(
+            named_slots(&error),
+            [
+                ("task_id", SlotData::Uuid(Uuid::from_u128(5))),
+                ("payload", SlotData::TaskSendPayload(&payload)),
+                ("message", SlotData::Str("another command")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_payload_too_large_has_its_two_byte_counts() {
+        let error = TaskSendError::PayloadTooLarge {
+            message: "too large".to_owned(),
+            size_bytes: u64::MAX,
+            limit_bytes: 100,
+        };
+
+        assert_eq!(
+            named_slots(&error),
+            [
+                ("message", SlotData::Str("too large")),
+                ("size_bytes", SlotData::Int(i128::from(u64::MAX))),
+                ("limit_bytes", SlotData::Int(100)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_conflict_has_its_task_id_payload_message_and_owner() {
+        let payload = sample_payload();
+        let error = TaskSendError::IdempotencyKeyConflict {
+            task_id: Uuid::from_u128(6),
+            payload: Box::new(payload.clone()),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(7),
+        };
+
+        assert_eq!(
+            named_slots(&error),
+            [
+                ("task_id", SlotData::Uuid(Uuid::from_u128(6))),
+                ("payload", SlotData::TaskSendPayload(&payload)),
+                ("message", SlotData::Str("the key is held")),
+                ("owner_task_id", SlotData::Uuid(Uuid::from_u128(7))),
+            ]
+        );
+    }
+
+    /// A refusal of the core before any statement, of the input part.
+    fn input_refusal(cause: crate::broker::EnqueueRefusalCause) -> BrokerError {
+        BrokerError::EnqueueContract(crate::broker::EnqueueRefusal {
+            part: crate::core::history::enqueue::SendPart::Input,
+            message: "the input is refused".to_owned(),
+            cause,
+        })
+    }
+
+    /// The exception of the send error that [`send_error_from_enqueue`] makes
+    /// of `error`, after a check that it is Python's form for the same error.
+    fn exact_exception(error: fn() -> BrokerError) -> ExceptionValue {
+        let send_error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error());
+        let exception = exception_of(&send_error);
+        assert_eq!(exception, python_exception(error()));
+        exception
+    }
+
+    /// Python: `EnqueueCommandV1` raises the rule as a `ValueError`.
+    #[test]
+    fn a_command_rule_refusal_is_a_value_error_with_the_rule() {
+        let error = || {
+            input_refusal(crate::broker::EnqueueRefusalCause::CommandRuleRefused(
+                "retention_class_key must be non-empty".to_owned(),
+            ))
+        };
+
+        assert_eq!(
+            send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+            TaskSendErrorCode::ValidationFailed
+        );
+        assert_eq!(
+            exact_exception(error),
+            ExceptionValue::ClientClass {
+                class: crate::error_catalog::ClientExceptionClass::ValueError,
+                text: "retention_class_key must be non-empty".to_owned(),
+            }
+        );
+    }
+
+    /// Python: `ScopedIdempotencyKey` raises the rule as a `ValueError`.
+    #[test]
+    fn a_key_rule_refusal_is_a_value_error_with_the_rule() {
+        let error = || {
+            input_refusal(crate::broker::EnqueueRefusalCause::KeyRuleRefused(
+                "idempotency key must be non-empty".to_owned(),
+            ))
+        };
+
+        assert_eq!(
+            send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+            TaskSendErrorCode::ValidationFailed
+        );
+        assert_eq!(
+            exact_exception(error),
+            ExceptionValue::ClientClass {
+                class: crate::error_catalog::ClientExceptionClass::ValueError,
+                text: "idempotency key must be non-empty".to_owned(),
+            }
+        );
+    }
+
+    /// Python: the JSON reader's `SerializationError` with its text.
+    #[test]
+    fn an_unreadable_json_text_is_a_serialization_error_with_the_reader_text() {
+        let error = || {
+            input_refusal(crate::broker::EnqueueRefusalCause::JsonUnreadable(
+                "EOF while parsing a value at line 1 column 0".to_owned(),
+            ))
+        };
+
+        assert_eq!(
+            send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+            TaskSendErrorCode::ValidationFailed
+        );
+        assert_eq!(
+            exact_exception(error),
+            ExceptionValue::ClientClass {
+                class: crate::error_catalog::ClientExceptionClass::SerializationError,
+                text: "EOF while parsing a value at line 1 column 0".to_owned(),
+            }
+        );
+    }
+
+    /// Python: `NoCause()` for a check of the core: a rule that refused a
+    /// value that reads, a value that does not serialize, a reservation
+    /// window out of range.
+    #[test]
+    fn a_check_of_the_core_is_no_cause() {
+        let checks: [fn() -> BrokerError; 3] = [
+            || {
+                BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
+                    crate::core::history::enqueue::SendPart::TaskOptions,
+                    "bad options".to_owned(),
+                ))
+            },
+            || BrokerError::Serialization(serde_json::from_str::<u8>("x").expect_err("not JSON")),
+            || BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
+        ];
+        for error in checks {
+            assert_eq!(
+                send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+                TaskSendErrorCode::ValidationFailed
+            );
+            assert_eq!(exact_exception(error), ExceptionValue::NoCause);
+        }
+    }
+
+    /// Python: `NoCause()`; the broker found the gone row by a data check.
+    #[test]
+    fn an_unverifiable_conflict_is_no_cause() {
+        let error = || BrokerError::EnqueueConflictUnverifiable {
+            task_id: Uuid::from_u128(1),
+            task_name: "my_task".to_owned(),
+        };
+
+        assert_eq!(
+            send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+            TaskSendErrorCode::EnqueueFailed
+        );
+        assert_eq!(exact_exception(error), ExceptionValue::NoCause);
+    }
+
+    /// Python: the core's class of the error, with its text and its retry
+    /// rule.
+    #[test]
+    fn a_connection_failure_is_the_core_class_of_the_error() {
+        let error = || BrokerError::ConnectionFailed("connection refused".to_owned());
+
+        assert_eq!(
+            send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error()).code(),
+            TaskSendErrorCode::EnqueueFailed
+        );
+        assert_eq!(
+            exact_exception(error),
+            ExceptionValue::CoreFailure {
+                text: "connection failed: connection refused".to_owned(),
+                retryable: true,
+                cause: FailureCause::Connection,
+            }
+        );
+    }
+
+    /// The classes of a task id with another command and of a key that
+    /// another task holds have no `cause` slot.
+    #[test]
+    fn a_payload_mismatch_and_a_key_conflict_have_no_exception_slot() {
+        for error in [
+            BrokerError::PayloadMismatch {
+                task_id: Uuid::from_u128(1),
+            },
+            BrokerError::IdempotencyKeyConflict {
+                task_name: "my_task".to_owned(),
+                task_id: Uuid::from_u128(2),
+            },
+        ] {
+            let send_error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error);
+            assert!(
+                send_error
+                    .slot_values()
+                    .iter()
+                    .all(|slot| slot.name != "cause"),
+                "{error}"
+            );
+        }
     }
 }

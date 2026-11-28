@@ -1,5 +1,5 @@
 //! Failure handling of the engine: failure marks, pause, resume no-ops,
-//! `allow_failed_deps` chains, and start refusals. Python:
+//! `allow_failed_dependencies` chains, and start refusals. Python:
 //! `clients/python/tests/integration/test_workflow_error_handling.py`.
 
 use std::sync::Arc;
@@ -30,7 +30,7 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
 fn recovery(index: usize, task_name: &str, source: usize) -> AnyNode {
     let mut node = after(index, task_name, &[source]);
     node.args_from.insert("input_result".to_owned(), source);
-    node.allow_failed_deps = true;
+    node.allow_failed_dependencies = true;
     node
 }
 
@@ -256,7 +256,7 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
             .args_from("input_result", 0)
-            .allow_failed_deps()
+            .allow_failed_dependencies()
             .input(r#"{"input_result": 123}"#),
     )
     .await;
@@ -497,7 +497,7 @@ async fn resume_of_a_completed_or_failed_workflow_returns_false() {
 
 /// `test_allow_failed_deps_chain`
 #[tokio::test]
-async fn a_chain_of_allow_failed_deps_nodes_is_enqueued() {
+async fn a_chain_of_allow_failed_dependencies_nodes_is_enqueued() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
@@ -526,7 +526,7 @@ async fn a_node_with_one_failed_and_one_ok_dependency_is_enqueued() {
     let mut receiver = after(2, "partial_receiver", &[0, 1]);
     receiver.args_from.insert("failed_input".to_owned(), 0);
     receiver.args_from.insert("success_input".to_owned(), 1);
-    receiver.allow_failed_deps = true;
+    receiver.allow_failed_dependencies = true;
     let workflow_id = start(
         &pool,
         &spec(
@@ -558,7 +558,7 @@ async fn a_node_with_one_failed_and_one_ok_dependency_is_enqueued() {
 
 /// `test_allow_failed_deps_receives_upstream_skipped`
 #[tokio::test]
-async fn an_allow_failed_deps_node_receives_upstream_skipped_for_a_skipped_dependency() {
+async fn an_allow_failed_dependencies_node_receives_upstream_skipped_for_a_skipped_dependency() {
     let pool = shared_pool().await;
     let workflow_id = start(
         &pool,
@@ -793,7 +793,7 @@ async fn a_chain_that_succeeds_under_on_error_fail_completes_with_no_error() {
 }
 
 /// `TestOnErrorFail.test_fail_stores_error_keeps_running`: a failed node whose
-/// dependent has `allow_failed_deps` stores its error on the workflow; the
+/// dependent has `allow_failed_dependencies` stores its error on the workflow; the
 /// workflow stays RUNNING, and the dependent is ENQUEUED.
 #[tokio::test]
 async fn a_failure_with_a_dependent_that_still_runs_stores_the_error_and_keeps_running() {
@@ -823,7 +823,7 @@ async fn a_failure_with_a_dependent_that_still_runs_stores_the_error_and_keeps_r
 }
 
 /// `TestOnErrorFail.test_fail_allow_failed_deps_false_skipped` and
-/// `.test_fail_final_status_failed`: a dependent without `allow_failed_deps`
+/// `.test_fail_final_status_failed`: a dependent without `allow_failed_dependencies`
 /// is SKIPPED when its dependency fails, and the resolved workflow ends
 /// FAILED.
 #[tokio::test]
@@ -873,12 +873,12 @@ async fn two_failed_roots_end_the_workflow_failed_with_the_first_error() {
 
 /// `TestOnErrorPause.test_pause_stops_propagation`: under `on_error = pause`,
 /// the dependent of the failed node stays PENDING, though it has
-/// `allow_failed_deps` and would run under `on_error = fail`.
+/// `allow_failed_dependencies` and would run under `on_error = fail`.
 #[tokio::test]
-async fn a_pause_on_error_leaves_an_allow_failed_deps_dependent_pending() {
+async fn a_pause_on_error_leaves_an_allow_failed_dependencies_dependent_pending() {
     let pool = shared_pool().await;
     let mut dependent = after(1, "pause_stop_b", &[0]);
-    dependent.allow_failed_deps = true;
+    dependent.allow_failed_dependencies = true;
     let mut workflow_spec = spec(
         "pause_stops",
         vec![after(0, "pause_stop_a", &[]), dependent],
@@ -1100,8 +1100,8 @@ async fn one_met_case_of_several_completes_the_workflow() {
 #[tokio::test]
 async fn the_promotion_refuses_a_negative_retry_limit_with_python_s_text() {
     let pool = shared_pool().await;
-    let options = r#"{"retry_policy": {"max_retries": -1, "intervals": [5],
-        "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["TRANSIENT"]}}"#;
+    let options = r#"{"retry_policy": {"max_retries": -1, "intervals_seconds": [5],
+        "backoff_strategy": "exponential", "jitter": true, "retry_for": ["TRANSIENT"]}}"#;
 
     let refusal: Option<String> =
         sql::query_scalar("SELECT horsies_workflow_task_options_refusal($1, 3)")

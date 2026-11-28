@@ -48,19 +48,19 @@ class FraudReview(WorkflowDefinition[PaymentRefund]):
     ) -> WorkflowSpec[PaymentRefund]:
         """Build a fresh spec for one disputed order."""
         reconcile = TaskNode(
-            fn=reconcile_payments,
+            function=reconcile_payments,
             kwargs={'window': f'dispute-{order_id}'},
             node_id='reconcile_payments',
         )
         refund = TaskNode(
-            fn=refund_payment,
+            function=refund_payment,
             kwargs={'order_id': order_id, 'amount_cents': amount_cents},
             waits_for=[reconcile],
             node_id='refund_payment',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[reconcile, refund],
+            nodes=[reconcile, refund],
             on_error=OnError.PAUSE,
             output=refund,
         )
@@ -69,7 +69,7 @@ class FraudReview(WorkflowDefinition[PaymentRefund]):
 _CHECK_ORDER: Final[str] = 'ACME-CHECK-0001'
 
 
-@app.workflow_builder(cases=[{'order_id': _CHECK_ORDER, 'amount_cents': 4_900}])
+@app.check_workflow_builder(cases=[{'order_id': _CHECK_ORDER, 'amount_cents': 4_900}])
 def build_fraud_review(
     *,
     order_id: str,

@@ -57,7 +57,7 @@ read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 | `sqlx` | off | `horsies::rerun::SqlxCaller` |
 | `otel` | off | `horsies::otel`: OpenTelemetry spans of the sends, the workflow starts and the task bodies, and the producer metrics, with the global providers of `opentelemetry` 0.33 |
 
-Minimum Rust version: 1.91.
+Minimum Rust version: 1.95.
 
 ## Define a Task
 
@@ -75,7 +75,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 - A task is an `async fn` with `#[horsies::task]`, or a `fn` with
   `#[horsies::blocking_task]`.
 - It returns `Result<T, TaskError<E>>`. `T` is the output type. `E` is the
-  code type of the task's own errors (`#[derive(horsies::UserErrorCode)]`),
+  code type of the task's own errors (`#[derive(horsies::CustomErrorCode)]`),
   or `std::convert::Infallible` when the task has no codes of its own.
 - Every parameter is stored under its name, as Python stores keyword
   arguments: `add_numbers` stores `{"a": 2, "b": 3}`, and a single
@@ -97,10 +97,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::process::ExitCode;
 
-use horsies::{
-    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
-    IsolatedSetting, TaskError, WorkerProfile,
-};
+use horsies::{task, AppConfig, Horsies, IsolatedChildren, TaskError, WorkerProfile};
 
 #[task("add_numbers")]
 async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
@@ -109,14 +106,12 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     let profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-            IsolatedChildCount::try_from(4)?,
-        )),
+        isolated: IsolatedChildren::new(4).into(),
         ..WorkerProfile::default()
     };
     let config = AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
-        ..AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies")
+        ..AppConfig::from_database_url("postgresql://app:secret@db.example.com:5432/horsies")
     };
     let mut app = Horsies::new(config)?;
     let _add = add_numbers::register(&mut app)?;
@@ -168,16 +163,17 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
 
     let handle = add.send(add_numbers::Input { a: 2, b: 3 }).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
-    match handle.get(limit).await? {
+    let also = add_numbers::send(&app, 4, 5).await?;
+    println!("sent {} and {}", handle.task_id(), also.task_id());
+    match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -188,8 +184,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   the read that failed (the wait limit passed, the task is held nowhere,
   the stored data does not read, the database failed). The inner value is
   what the task ended with.
-- The generated `add_numbers::send(2, 3)` takes the parameters and sends
-  through the function of the first `register` in the process.
+- The generated `add_numbers::send(&app, 4, 5)` takes the app and the
+  parameters. It sends through that app. The generated module holds no
+  state, so two apps in one process share no registration. A send through
+  an app that does not register the task is `ValidationFailed`.
+- `WaitLimit::Within(duration)` waits at most `duration`;
+  `WaitLimit::NoLimit` waits until the task ends. A `Within` limit above
+  `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput`, as
+  the first check of the read.
 - A result wait in a worker child, the process that runs task bodies, is
   refused with `WaitInsideTask` before any statement. Compose tasks with a
   workflow.
@@ -210,7 +212,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url(
+    let mut app = Horsies::new(AppConfig::from_database_url(
         "postgresql://app:secret@db.example.com:5432/horsies",
     ))?;
     let add = add_numbers::register(&mut app)?;
@@ -218,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -234,7 +236,7 @@ returns `ASYNC_CONTEXT` (`TaskSendError::AsyncContext`,
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, TaskError, TaskOutcome, WorkflowDefConfig, WorkflowDefinition,
+    task, HorsiesError, TaskError, TaskOutcome, WorkflowDefinitionConfig, WorkflowDefinition,
     WorkflowSpecBuilder,
 };
 
@@ -257,7 +259,7 @@ struct DailyReport;
 
 impl WorkflowDefinition for DailyReport {
     type Output = usize;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily_report"
@@ -267,14 +269,14 @@ impl WorkflowDefinition for DailyReport {
         "reports.daily_report.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node()?.set(fetch_report::params::region(), "eu".to_owned())?,
-        );
+            fetch_report::node().set(fetch_report::fields::region(), "eu".to_owned())?,
+        )?;
         let published = builder.task(
-            publish_report::node()?.arg_from(publish_report::params::report(), fetched),
-        );
-        Ok(WorkflowDefConfig::new().output(published))
+            publish_report::node().arg_from(publish_report::fields::report(), fetched),
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(published))
     }
 }
 ```
@@ -283,23 +285,27 @@ impl WorkflowDefinition for DailyReport {
   `TaskOutcome<S, E>`, and the node waits for the dependency.
 - Register the definition in `build_app` with
   `app.register_workflow_definition::<DailyReport>()?`, after the tasks.
+  The app gives `define` a builder of the app. `builder.task(node)`
+  resolves each node against the tasks of that app. A task that the app
+  does not register is `HRS-302`.
 - Start it with `function.start().await` or
-  `horsies::start_workflow::<DailyReport>().await`. See `workflows.md`.
+  `app.start_workflow::<DailyReport>().await`. A start names its app, as a
+  send does. See `workflows.md`.
 
 ## Result Types
 
 | Operation | Returns |
 |---|---|
 | Task body | `Result<T, TaskError<E>>` |
-| `send`, `schedule`, `retry_send`, `retry_schedule` | `Result<TaskHandle<T, E>, TaskSendError>` |
+| `send`, `send_with_options`, `resend` | `Result<TaskHandle<T, E>, TaskSendError>` |
 | `TaskHandle::get`, `Horsies::get_result` | `Result<TaskOutcome<T, E>, ReadError>` |
 | `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
 | Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |
-| `WorkflowHandle::get` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>` |
-| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, HandleOperationError>`) |
-| Health reads on the app | `Result<_, BrokerOperationError>` |
+| `WorkflowHandle::get` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>` |
+| `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, WorkflowHandleError>`) |
+| Health reads on the app | `Result<_, DatabaseOperationError>` |
 | Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
-| `check`, `check_live` | `Result<CheckPassed, CheckReport>` |
+| `check`, `check_live` | `Result<CheckPassed, ValidationReport>` |
 
 Every error type is a closed catalog. Match on the variant or on the code.
 `retryable: true` means the cause may clear; it does not mean that a repeat
@@ -327,10 +333,10 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ## CLI
 
 ```bash
-./myapp worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
-./myapp scheduler [--loglevel LEVEL]
-./myapp check [--live] [--loglevel LEVEL]
-./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
+./myapp worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
+./myapp scheduler [--log-level LEVEL]
+./myapp check [--live] [--log-level LEVEL]
+./myapp metrics --metrics-listen HOST:PORT [--log-level LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/

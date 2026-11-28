@@ -15,13 +15,14 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
-from horsies.core.models.workflow import WorkflowTaskStatus
+from horsies.core.models.tasks import OperationalCode, OutcomeCode
+from horsies.core.models.workflow import WorkflowNodeStatus
 from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.outcome import TaskOutcome
+    from horsies.core.models.tasks import TaskError
 
 logger = get_logger('workflow.engine')
 
@@ -32,7 +33,7 @@ def _missing_result_entry(
     node_id: str | None,
     task_name: str,
     status: str,
-) -> 'TaskResult[Any, TaskError]':
+) -> 'TaskOutcome[Any, TaskError]':
     """The entry of a COMPLETED or FAILED dependency with no stored result.
 
     No library writer leaves such a node, so it is stored data that does not
@@ -41,12 +42,13 @@ def _missing_result_entry(
     baseline function ``horsies_workflow_source_value`` builds the same
     entry.
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
+    from horsies.core.models.outcome import Failed
+    from horsies.core.models.tasks import TaskError
 
     node_label = node_id if node_id is not None else '-'
-    return TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    return Failed(
+        TaskError(
+            code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
             message=(
                 f'Dependency node {node_label} (index {task_index}, task '
                 f'{task_name}) is {status} with no stored result'
@@ -63,16 +65,16 @@ def _decode_stored_task_result(
     task_name: str,
     context: dict[str, Any],
     sub_definition_key: str | None = None,
-) -> 'TaskResult[Any, TaskError]':
-    """Decode a stored TaskResult JSON payload using the local task's OkT.
+) -> 'TaskOutcome[Any, TaskError]':
+    """Decode a stored task result JSON payload using the local task's OkT.
 
     Strict-serde phase 6+7: every engine-side decode of a worker-emitted
-    TaskResult routes through ``decode_task_result`` (no legacy
+    result routes through ``decode_task_result`` (no legacy
     rehydration). The expected ``ok_type`` is derived from
     ``app.tasks[task_name].task_ok_type``; when ``app`` is unavailable
     (legacy callers) or the task isn't registered, the failure becomes a
-    sentinel ``TaskError`` so the upstream caller still sees a
-    TaskResult shape.
+    sentinel ``Failed(TaskError)`` so the upstream caller still sees a
+    ``TaskOutcome``.
 
     Args:
         stored_result: The raw JSON text from the result column.
@@ -82,27 +84,28 @@ def _decode_stored_task_result(
             (workflow_id, task_index, status, etc.).
 
     Returns:
-        The decoded TaskResult; a ``RESULT_DESERIALIZATION_ERROR``
-        TaskResult on any failure.
+        The decoded outcome; a ``Failed`` with ``RESULT_DESERIALIZATION_ERROR``
+        on any failure.
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
+    from horsies.core.models.outcome import Failed
+    from horsies.core.models.tasks import TaskError
 
     deser = _deser_json(stored_result, 'task result json')
     if deser is None:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        return Failed(
+            TaskError(
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
-                    f'Stored TaskResult JSON corrupt for task '
+                    f'Stored task result JSON corrupt for task '
                     f'{task_name!r}'
                 ),
                 data={**context, 'stage': 'json_parse'},
             ),
         )
     if app is None:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        return Failed(
+            TaskError(
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'No app context available to decode result for '
                     f'task {task_name!r}'
@@ -118,13 +121,13 @@ def _decode_stored_task_result(
         app, task_name, sub_definition_key=sub_definition_key,
     )
     if ok_type is None:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        return Failed(
+            TaskError(
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'Source {task_name!r} is not registered in this '
                     f'process (not a known task or workflow definition); '
-                    f'cannot decode stored TaskResult'
+                    f'cannot decode stored task result'
                 ),
                 data={**context, 'stage': 'source_not_registered'},
             ),
@@ -132,9 +135,9 @@ def _decode_stored_task_result(
     try:
         return decode_task_result(deser, ok_type)
     except (StrictJsonError, ValueValidationError) as exc:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        return Failed(
+            TaskError(
+                code=OperationalCode.RESULT_DESERIALIZATION_ERROR,
                 message=(
                     f'decode_task_result failed for task {task_name!r}: '
                     f'{exc}'
@@ -166,23 +169,24 @@ def terminal_dependency_result(
     stored_result: str | None,
     task_name: str,
     sub_definition_key: str | None,
-) -> 'TaskResult[Any, TaskError]':
-    """The result that a terminal dependency gives a node that it promotes.
+) -> 'TaskOutcome[Any, TaskError]':
+    """The outcome that a terminal dependency gives a node that it promotes.
 
-    - SKIPPED: an ``UPSTREAM_SKIPPED`` error naming the dependency index.
-    - COMPLETED or FAILED with a stored result: the result decoded with the
+    - SKIPPED: a ``Failed`` with ``UPSTREAM_SKIPPED`` naming the dependency index.
+    - COMPLETED or FAILED with a stored result: the outcome decoded with the
       source's ok type (``_decode_stored_task_result``).
     - COMPLETED or FAILED with no stored result: ``RESULT_DESERIALIZATION_ERROR``
       naming the node (``_missing_result_entry``).
 
     Does no I/O.
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
+    from horsies.core.models.outcome import Failed
+    from horsies.core.models.tasks import TaskError
 
-    if status == WorkflowTaskStatus.SKIPPED.value:
-        return TaskResult(
-            err=TaskError(
-                error_code=OutcomeCode.UPSTREAM_SKIPPED,
+    if status == WorkflowNodeStatus.SKIPPED.value:
+        return Failed(
+            TaskError(
+                code=OutcomeCode.UPSTREAM_SKIPPED,
                 message='Upstream dependency was SKIPPED',
                 data={'dependency_index': task_index},
             )
@@ -208,11 +212,11 @@ def terminal_dependency_result(
 
 
 # --- Backward-compat barrel re-exports from lifecycle.py ---
-from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
-
-start_workflow_async = _lifecycle.start_workflow_async
-start_workflow = _lifecycle.start_workflow
-pause_workflow = _lifecycle.pause_workflow
-pause_workflow_sync = _lifecycle.pause_workflow_sync
-resume_workflow = _lifecycle.resume_workflow
-resume_workflow_sync = _lifecycle.resume_workflow_sync
+from horsies.core.workflows.lifecycle import (  # noqa: E402
+    pause_workflow as pause_workflow,
+    pause_workflow_async as pause_workflow_async,
+    resume_workflow as resume_workflow,
+    resume_workflow_async as resume_workflow_async,
+    start_workflow as start_workflow,
+    start_workflow_async as start_workflow_async,
+)

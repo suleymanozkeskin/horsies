@@ -15,7 +15,8 @@ use uuid::Uuid;
 use super::{task_error_of, vector_file};
 use crate::core::codec::{task_result_from_json_str, task_result_to_json_string};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
-use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::node::SubWorkflowParameters;
+use crate::core::TaskRegistry;
 use crate::core::TaskResult;
 use crate::worker::execution::build_task_input;
 use crate::workflow_engine::child_spec::ChildSpecRequest;
@@ -153,13 +154,13 @@ fn the_child_host_passes_each_envelope_as_stored() {
             args_from_entry(envelope),
         );
 
-        let built = build_task_input(&input, true)
+        let built = build_task_input(&input, true, &TaskRegistry::new())
             .unwrap_or_else(|refused| panic!("{}: the child host refused: {refused}", vector.name));
 
         assert_eq!(
             String::from_utf8(built).expect("the task input is UTF-8"),
             format!(
-                r#"{{"dep":{envelope},"workflow_ctx":{{"workflow_id":"{workflow_id}","task_index":1,"task_name":"consume","results_by_id":{{"source":{envelope}}},"summaries_by_id":{{}}}}}}"#
+                r#"{{"dep":{envelope},"workflow_context":{{"workflow_id":"{workflow_id}","task_index":1,"task_name":"consume","results_by_id":{{"source":{envelope}}},"summaries_by_id":{{}}}}}}"#
             ),
             "{}",
             vector.name
@@ -178,7 +179,7 @@ fn the_child_build_passes_each_envelope_as_stored() {
             task_index: 1,
             child_depth: 1,
             definition_key: Some("app.child".to_owned()),
-            params: SubWorkflowParams::Given,
+            params: SubWorkflowParameters::Given,
             node_input: "{}".to_owned(),
             args_from: Some(r#"{"dep": 0}"#.to_owned()),
             sources: vec![ChildStartSource {

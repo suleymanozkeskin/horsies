@@ -1,14 +1,14 @@
 //! Acme domain rows, task payloads, and the error codes of the Acme tasks.
 
 use chrono::{DateTime, Utc};
-use horsies::UserErrorCode;
+use horsies::CustomErrorCode;
 use serde::{Deserialize, Serialize};
 
 /// The codes of the Acme tasks' own errors. Each code is the variant name in
 /// UPPER_SNAKE_CASE (`CardDeclined` is `CARD_DECLINED`). Every Acme task
 /// returns `TaskError<AcmeCode>`, so a node can read the result of any other
 /// Acme node with this code type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, UserErrorCode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CustomErrorCode)]
 pub enum AcmeCode {
     CardDeclined,
     PspUnavailable,
@@ -27,6 +27,9 @@ pub enum AcmeCode {
     DataCorruption,
     LoyaltyEngineBug,
     StoreUnavailable,
+    /// The builder of the `restock` workflow refused the spec, so no workflow
+    /// was started. The refusal text is the error message.
+    RestockRefused,
 }
 
 pub type OrderStatus = String;

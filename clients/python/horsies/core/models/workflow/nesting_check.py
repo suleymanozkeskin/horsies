@@ -9,6 +9,9 @@ At each ``SubWorkflowNode`` the walk does one of three things:
 - it stops and reports a finding, when the nesting reaches the depth limit for
   certain.
 
+The walk of one root spec builds at most ``MAX_CHECK_SUBWORKFLOW_BUILDS``
+children (``ChildBuildBudget``); at the bound it stops and reports ``HRS-039``.
+
 A check error stops a worker at boot. So the check reports only a nesting that
 fails for certain, and never one that results at run time can end.
 """
@@ -19,7 +22,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies._catalog.workflow_bounds import MAX_CHECK_SUBWORKFLOW_BUILDS
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import SubWorkflowNode
 
@@ -76,6 +80,52 @@ class StopWithFinding:
 
 
 NestingDecision = WalkChild | StopWithoutFinding | StopWithFinding
+
+
+@dataclass(frozen=True, slots=True)
+class BuildGranted:
+    """The walk may build one more child."""
+
+
+@dataclass(frozen=True, slots=True)
+class BuildRefusedFirst:
+    """The bound is reached, and this is the first refusal. The walk stops and
+    reports ``finding``."""
+
+    finding: WorkflowValidationError
+
+
+@dataclass(frozen=True, slots=True)
+class BuildRefusedAgain:
+    """The bound is reached, and the walk reported it already. The walk stops
+    with no further finding."""
+
+
+BuildDecision = BuildGranted | BuildRefusedFirst | BuildRefusedAgain
+
+
+class ChildBuildBudget:
+    """The builds of child specs in the walk of one root spec.
+
+    One budget belongs to one root spec. ``take`` is called before each build.
+    ``bound`` is the most builds; the check gives ``MAX_CHECK_SUBWORKFLOW_BUILDS``.
+    """
+
+    def __init__(self, bound: int = MAX_CHECK_SUBWORKFLOW_BUILDS) -> None:
+        self._bound = bound
+        self._builds = 0
+        self._reported = False
+
+    def take(self, node_name: str) -> BuildDecision:
+        """Count one build of the child of ``node_name`` and say whether it may
+        go on. Changes only the counts of this budget."""
+        if self._builds < self._bound:
+            self._builds += 1
+            return BuildGranted()
+        if self._reported:
+            return BuildRefusedAgain()
+        self._reported = True
+        return BuildRefusedFirst(_build_limit_finding(node_name, self._bound))
 
 
 def child_start(node: SubWorkflowNode[Any]) -> ChildStart:
@@ -142,7 +192,7 @@ def _self_nesting_finding(
 ) -> WorkflowValidationError:
     return WorkflowValidationError(
         message='a subworkflow includes itself with the same kwargs',
-        code=ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
+        code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
         notes=[
             f"node '{node_name}': definition '{definition_key}' with these "
             'kwargs is already on the path from the root, and no node between '
@@ -155,7 +205,7 @@ def _self_nesting_finding(
 def _depth_limit_finding(node_name: str, child_depth: int) -> WorkflowValidationError:
     return WorkflowValidationError(
         message='subworkflow nesting passes the depth limit',
-        code=ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
+        code=HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
         notes=[
             f"node '{node_name}': its child workflow would have depth "
             f'{child_depth}; the limit is {MAX_SUBWORKFLOW_DEPTH}, and no node '
@@ -165,4 +215,17 @@ def _depth_limit_finding(node_name: str, child_depth: int) -> WorkflowValidation
             'nest fewer levels; at run time this node fails with '
             'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
         ),
+    )
+
+
+def _build_limit_finding(node_name: str, bound: int) -> WorkflowValidationError:
+    return WorkflowValidationError(
+        message='the subworkflow nesting walk reached its bound of builds',
+        code=HorsiesErrorCode.WORKFLOW_CHECK_BUILD_LIMIT,
+        notes=[
+            f"node '{node_name}': the walk of this workflow built "
+            f'{bound} child workflows and stopped; '
+            'the rest of its nesting is not checked',
+        ],
+        help_text='nest fewer child workflows in this workflow',
     )

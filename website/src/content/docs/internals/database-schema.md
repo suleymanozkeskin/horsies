@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1006).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1009).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -19,6 +19,9 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
 | 1005 | `core/migrations/1005_claim_generation_by_status.sql` | The claim generation of a held task row: one `CHECK` on `horsies_tasks` (`horsies_tasks_claim_generation_by_status`) |
 | 1006 | `core/migrations/1006_typescript_client_family.sql` | The client family `TYPESCRIPT`: the `CHECK` `horsies_client_family_family_known` admits `PYTHON`, `RUST` and `TYPESCRIPT` |
+| 1007 | `core/migrations/1007_sub_workflow_failed_code.sql` | The code text `SUB_WORKFLOW_FAILED` in the two functions that write the error of a failed sub-workflow node (`horsies_task_error_envelope`, `horsies_workflow_child_node_result`) |
+| 1008 | `core/migrations/1008_retry_policy_keys_and_custom_category.sql` | The retry policy keys `intervals_seconds` and `retry_for`: the four validation functions of the retry policy of a workflow node (`horsies_workflow_retry_interval_entries`, `horsies_workflow_retry_code_entries`, `horsies_workflow_retry_policy_entries`, `horsies_workflow_retry_policy_value_error`). The code category `CUSTOM`: the five monitoring functions that hold the category text (`horsies_monitoring_check_scope`, `horsies_monitoring_task_list`, `horsies_monitoring_task_facets`, `horsies_monitoring_task_stats`, `horsies_monitoring_task_breakdown`) |
+| 1009 | `core/migrations/1009_outputless_plain_result.sql` | The stored result of a `COMPLETED` workflow with no output node: the plain envelope `{"__h_task_result__":true,"ok":null,"err":null}` (`horsies_workflow_try_complete`). The function `horsies_workflow_outputless_result` is dropped, and the result kind `OUTPUTLESS` is removed from `horsies_workflow_result_kind`, `horsies_workflow_err_slot` and `horsies_workflow_child_node_result` |
 
 The files of migration 1000:
 
@@ -38,16 +41,23 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 
 1. It reads the state of the current schema, with no lock.
 2. A database with no `horsies_` table: it takes the schema advisory lock on a direct connection to the
-   session URL, reads the state again, and runs the migration with its bookkeeping row in
-   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. Then it
-   publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
-   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`)
-   from the leaf catalog, in a second transaction, before it returns.
+   session URL, reads the state again, and runs migration 1000 with its bookkeeping row in
+   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. The same
+   transaction publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
+   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`) from the
+   leaf catalog. Then it runs each later migration in its own transaction, with its bookkeeping row. The family
+   row is written in the transaction of the first migration whose `CHECK` `horsies_client_family_family_known`
+   admits the value: migration 1000 for `PYTHON` and `RUST`, migration 1006 for `TYPESCRIPT`. A `TYPESCRIPT`
+   install writes its row in the transaction of migration 1006, after the text of the migration.
 3. A database that holds the whole chain with this build's checksums, the `PYTHON` family row and every
-   history reader: nothing to do, no lock. A database that holds the start of the chain (version 1000 only)
-   gets the rest of the chain under the lock, each migration in its own transaction. A missing family row or a missing reader (an install that
-   stopped between its two transactions): it takes the lock, publishes the readers and writes the family
-   row.
+   history reader: nothing to do, no lock. A database that holds the start of the chain gets the rest of the
+   chain under the lock, each migration in its own transaction. A `PYTHON` or `RUST` install that stops after
+   migration 1000 commits leaves the database to the family that started it: the install of another family is
+   refused. A `TYPESCRIPT` install that stops before migration 1006 commits leaves no family row. No handle writes
+   into a database with no family row; the next install, of any client family, applies the rest of the chain and
+   records its own family. A database that holds the whole chain with no family row or a missing reader (removed
+   out of band, or an install that stopped before the publication): it takes the lock, publishes the readers and
+   writes the family row.
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
@@ -138,8 +148,54 @@ Upgrade from version 1005 to version 1006 (also from an earlier version, after t
   `RUST` and `TYPESCRIPT`, also when the database held no `CHECK` of that name or one with another predicate. The
   new `CHECK` reads the one family row, under `ACCESS EXCLUSIVE` until the migration commits. A family row that
   the new `CHECK` refuses stops the migration, and nothing changes.
-- The migration does not change the family row. `TYPESCRIPT` is reserved for a TypeScript client; the Python and
-  Rust clients never write it, and refuse a database that records it.
+- The text of the migration does not change the family row. In the install of a `TYPESCRIPT` client, its
+  transaction writes the row `TYPESCRIPT` when the database has none. `TYPESCRIPT` is reserved for a TypeScript
+  client; the Python and Rust clients never write it, and refuse a database that records it.
+
+Upgrade from version 1006 to version 1007 (also from an earlier version, after the migrations before it):
+
+- Drain the workflows before the upgrade: let every workflow end, and start no workflow until every process runs
+  this build.
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1007. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version.
+- A database at version 1007 does not go back to an earlier build.
+- The migration replaces `horsies_task_error_envelope` and `horsies_workflow_child_node_result` in place. It takes
+  no table lock, rewrites no table and writes no row.
+- A row that holds the text `SUBWORKFLOW_FAILED` from before the upgrade keeps it. A read of such a stored result,
+  node result or workflow error fails closed (`RESULT_DESERIALIZATION_ERROR`; the monitoring node detail gives
+  `HISTORY_CONTRACT_VIOLATION`). Lists, counts and facets show the old text as a `CUSTOM` code.
+
+Upgrade from version 1007 to version 1008 (also from an earlier version, after the migrations before it):
+
+- Drain the tasks and the workflows, stop every process of an earlier build before the first start of this build,
+  and upgrade every process together. The first start applies migration 1008. A process of an earlier build that
+  starts after it is refused, because the database holds a newer version.
+- A database at version 1008 does not go back to an earlier build.
+- The migration replaces nine functions in place. It adds no column, builds no index, changes no `CHECK` and writes
+  no row.
+- A stored retry policy keeps the keys that its writer wrote. A live task or a workflow node whose stored
+  `task_options` hold the keys `intervals` or `auto_retry_for` does not validate after the upgrade: the worker
+  refuses the task before its body runs (`WORKER_SERIALIZATION_ERROR`), and a node with such options fails at its
+  promotion.
+- A monitoring call with the code category `DOMAIN` is refused (`22023` from `horsies_monitoring_check_scope`); the
+  category of a custom code is `CUSTOM`.
+
+Upgrade from version 1008 to version 1009 (also from an earlier version, after the migrations before it):
+
+- Drain the workflows that have no output node before the upgrade: let every such workflow end, and start none
+  until every process runs this build.
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1009. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version.
+- A database at version 1009 does not go back to an earlier build.
+- The migration replaces four functions in place and drops `horsies_workflow_outputless_result`. It adds no
+  column, builds no index, changes no `CHECK` and writes no row.
+- A `COMPLETED` workflow with no output node that was written before the upgrade keeps its old result: an object
+  with the extra key `__h_outputless_terminals__` and a map of the terminal nodes in its `ok` slot. Such a result
+  is not a valid envelope. A parent node that takes it as the result of a child fails with
+  `RESULT_DESERIALIZATION_ERROR`, and a handle read of it gives `ResultDeserializationError` in every client. The
+  node rows of that workflow still read with `results()`, `nodes()` and `result_for()`.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
@@ -147,7 +203,7 @@ changes: a database that holds another checksum for a version is refused. `horsi
 version 1000 only so that a 0.x process that runs migrations stops with "database schema is newer than this build
 supports".
 
-A broker with `run_schema_migrations=False` runs no schema statement. The monitoring tool never runs one; it
+A broker of `SchemaMode.OBSERVE_ONLY` or `SchemaMode.ASSUME_INITIALIZED` runs no schema statement. The monitoring tool never runs one; it
 reads the highest successful version in `horsies_migrations`.
 
 The schema has no database defaults: every insert names every value.
@@ -404,7 +460,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `snapshot_at` | `timestamptz` | Snapshot time |
 | `hostname`, `pid` | | Main process identity |
 | `processes` | `integer` | Worker process count |
-| `max_claim_batch`, `max_claim_per_worker`, `cluster_wide_cap` | `integer` | Claim limits |
+| `max_claim_batch`, `max_claim_per_worker`, `cluster_wide_cap` | `integer` | Claim limits of the profile; 0 is no limit. `max_claim_per_worker` is 0 when the profile sets no claimed limit |
 | `queues` | `varchar(100)[]` | Subscribed queues |
 | `queue_priorities`, `queue_max_concurrency`, `recovery_config` | `jsonb` | Configuration snapshot |
 | `tasks_running`, `tasks_claimed` | `integer` | Current counts |

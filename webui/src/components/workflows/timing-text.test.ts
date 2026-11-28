@@ -29,7 +29,7 @@ const claimed = (startAt: number, placedAt: number, endAt: number | null): Timin
     claim: { kind: 'recorded', placement: { kind: 'placed', placed_at: at(placedAt) } },
   },
   started_at: at(startAt),
-  end: endAt === null ? { kind: 'open' } : { kind: 'ended', at: at(endAt) },
+  end: endAt === null ? { kind: 'open' } : { kind: 'closed', at: at(endAt) },
   source: { kind: 'attempt', generation: 1, task_id: 't', attempt: 1 },
 });
 

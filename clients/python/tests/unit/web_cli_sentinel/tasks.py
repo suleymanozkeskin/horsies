@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.unit.web_cli_sentinel import app
 
 
-@app.task(task_name='web_cli_sentinel_task')
-def web_cli_sentinel_task(*, value: int) -> TaskResult[int, TaskError]:
+@app.task(name='web_cli_sentinel_task')
+def web_cli_sentinel_task(*, value: int) -> Result[int, TaskError]:
     """Echo the value; its registration is the whole point."""
-    return TaskResult(ok=value)
+    return Ok(value)

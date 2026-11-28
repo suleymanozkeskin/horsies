@@ -1,0 +1,103 @@
+// Helpers of the zod adapter tests: the kind of a schema that the adapter accepts, and its texts.
+
+import assert from "node:assert/strict";
+
+import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
+import { type DecodeForm, decodeValue } from "../../../horsies/src/codec/reader.ts";
+import type { DecodeRefused, EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
+import { encodeValue } from "../../../horsies/src/codec/writer.ts";
+import type { Kind, MemberPresence } from "../../../horsies/src/wire/kinds.ts";
+import type { Result } from "../../../horsies/src/wire/result.ts";
+import { compileMember, compileValue, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
+import { readDefinition, type ZodSchema } from "../../../horsies/src/zod/definition.ts";
+import { type CodecRuns, codecRuns } from "../../../horsies/src/zod/runs.ts";
+import { zodRefusalText } from "../../../horsies/src/zod/rules.ts";
+
+/** The kind of a schema that the adapter accepts as a whole value; a refusal fails the test with its texts. */
+export function acceptedKind(schema: ZodSchema): Kind {
+  const compiled = compileValue(schema);
+
+  assert.ok(compiled.ok, compiled.ok ? "" : compiled.error.map(zodRefusalText).join("\n"));
+
+  return compiled.value;
+}
+
+/** The kind and presence of a schema that the adapter accepts as a member. */
+export function acceptedMember(schema: ZodSchema): ZodMemberKind {
+  const compiled = compileMember(schema);
+
+  assert.ok(compiled.ok, compiled.ok ? "" : compiled.error.map(zodRefusalText).join("\n"));
+
+  return compiled.value;
+}
+
+/** The stored text of a value under a kind; a refusal fails the test. */
+export function storedText<V>(kind: Kind, value: V): string {
+  const written = encodeValue(kind, value);
+
+  assert.ok(written.ok, written.ok ? "" : `refused ${JSON.stringify(written.error)}`);
+
+  return written.value;
+}
+
+/** The refusal of a value under a kind, which the test expects. */
+export function encodeRefusal<V>(kind: Kind, value: V): EncodeRefused {
+  const written = encodeValue(kind, value);
+
+  assert.ok(!written.ok, `expected a refusal, got ${written.ok ? written.value : ""}`);
+
+  return written.error;
+}
+
+/** The decode of a stored text that the core's strict rule accepts. */
+export function decoded(kind: Kind, text: string, form: DecodeForm): Result<unknown, DecodeRefused> {
+  return decodeValue(kind, jsonTextCheckedByCore(text), form);
+}
+
+/** The value of a stored text in the worker form; a refusal fails the test. */
+export function workerValue(kind: Kind, text: string): unknown {
+  const read = decoded(kind, text, "worker");
+
+  assert.ok(read.ok, read.ok ? "" : `refused ${JSON.stringify(read.error)}`);
+
+  return read.value;
+}
+
+/** The refusal of a stored value in a form, which the test expects. */
+export function decodeRefusal(kind: Kind, text: string, form: DecodeForm): ValueRefused {
+  const read = decoded(kind, text, form);
+
+  assert.ok(!read.ok, "expected a refusal");
+  assert.ok(read.error.kind === "decodeRefused", `expected a value refusal: ${JSON.stringify(read.error)}`);
+
+  return read.error;
+}
+
+/**
+ * A stub of a schema with another definition: the schema that a zod with renamed or new definition fields would
+ * build. The adapter reads `_zod.def`, `_zod.traits` and `_zod.values` only.
+ */
+export function withDefinition(schema: ZodSchema, def: object): ZodSchema {
+  // SAFETY: a test stub: the schema's own `_zod` fields, with the given definition in place of its own.
+  return { ...schema, _zod: { ...schema._zod, def } } as unknown as ZodSchema;
+}
+
+/** The runs of a `z.codec()`, from its definition; another schema fails the test. */
+export function runsOfCodec(schema: ZodSchema): CodecRuns {
+  const definition = readDefinition(schema);
+
+  assert.equal(definition.form, "codec");
+
+  return definition.form === "codec"
+    ? codecRuns(definition.output, definition.decode, definition.encode)
+    : { decode: () => assert.fail("not a codec"), encode: () => assert.fail("not a codec") };
+}
+
+/** The text of one read of a computed default: its stored text, or the refusal kind; another presence fails the test. */
+export function computedDefaultText(presence: MemberPresence): string {
+  assert.ok(presence.mode === "defaulted" && presence.fallback.state === "computed", "expected a computed default");
+
+  const text = presence.fallback.compute();
+
+  return text.ok ? text.value : text.error.refusal;
+}

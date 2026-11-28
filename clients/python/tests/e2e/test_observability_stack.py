@@ -41,6 +41,7 @@ import pytest
 
 from horsies.core.types.result import is_err
 
+from tests.e2e.helpers.assertions import read_succeeded
 from tests.e2e.helpers.worker import REPO_ROOT, run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.metric_catalog import CatalogMetric, MetricKind, read_catalog
@@ -459,8 +460,8 @@ def _run_fleet_metrics(
             'horsies',
             'metrics',
             instance_path,
-            f'--listen={listen}',
-            '--loglevel=warning',
+            f'--metrics-listen={listen}',
+            '--log-level=warning',
         ],
         stdout=log_handle,
         stderr=subprocess.STDOUT,
@@ -484,7 +485,7 @@ def _healthcheck_completes() -> bool:
     sent = basic_tasks.healthcheck.send()
     if is_err(sent):
         return False
-    return sent.ok_value.get(timeout_ms=2000).is_ok()
+    return read_succeeded(sent.ok_value.get(wait_ms=2000))
 
 
 def _otlp_output_path() -> Path:

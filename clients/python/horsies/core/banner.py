@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, TextIO
 
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.utils.url import mask_database_url
 
 if TYPE_CHECKING:
@@ -171,30 +172,33 @@ def print_banner(
         queues_str = 'default'
     _write_kv(lines, 'queues', queues_str)
 
-    # Broker info (mask password)
+    # Database info (mask password)
     _write_kv(
         lines,
-        'broker',
-        mask_database_url(app.config.broker.database_url.get_secret_value()),
+        'database',
+        mask_database_url(app.config.database.database_url.get_secret_value()),
     )
     if (
-        app.config.broker.session_database_url is not None
-        and app.config.broker.session_database_url != app.config.broker.database_url
-    ) or app.config.broker.pgbouncer_transaction_mode:
+        app.config.database.session_url_differs()
+        or app.config.database.pgbouncer_transaction_mode
+    ):
         _write_kv(
             lines,
             'broker_session',
-            mask_database_url(app.config.broker.effective_session_database_url),
+            mask_database_url(app.config.database.effective_session_database_url),
         )
     _write_kv(
         lines,
         'pgbouncer_tx',
-        _format_bool(app.config.broker.pgbouncer_transaction_mode),
+        _format_bool(app.config.database.pgbouncer_transaction_mode),
     )
 
     # Cluster-wide cap
-    if app.config.cluster_wide_cap is not None:
-        _write_kv(lines, 'cluster_cap', f'{app.config.cluster_wide_cap} (cluster-wide)')
+    match app.config.cluster_wide_cap:
+        case ClusterCap(tasks=tasks):
+            _write_kv(lines, 'cluster_cap', f'{tasks} (cluster-wide)')
+        case NoClusterCap():
+            pass
 
     # Prefetch buffer
     if app.config.prefetch_buffer > 0:
@@ -208,12 +212,12 @@ def print_banner(
     _write_kv(
         lines,
         'requeue_stale_claimed',
-        _format_bool(recovery.auto_requeue_stale_claimed),
+        _format_bool(recovery.requeue_stale_claimed),
     )
     _write_kv(
         lines,
         'fail_stale_running',
-        _format_bool(recovery.auto_fail_stale_running),
+        _format_bool(recovery.fail_stale_running),
     )
     _write_kv(
         lines,
@@ -234,7 +238,7 @@ def print_banner(
 
     # [tasks] section
     if show_tasks:
-        task_names = app.list_tasks()
+        task_names = app.registered_task_names()
         tasks_header = _color('tasks', Colors.BRIGHT_CYAN, Colors.BOLD)
         lines.append(f'[{tasks_header}] ({len(task_names)} registered)')
         for task_name in sorted(task_names):

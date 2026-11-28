@@ -44,7 +44,7 @@ async fn tick(nothing: ()) -> Result<(), TaskError<Infallible>> {
 
 fn main() {
     let _ = double::Input { x: 2 };
-    let _ = double::params::x();
+    let _ = double::fields::x();
     let _ = double::register
         as fn(
             &mut horsies::Horsies,
@@ -53,7 +53,7 @@ fn main() {
     let _ = price::Input {
         order: Order { total: 1.5 },
     };
-    let _ = price::params::order();
+    let _ = price::fields::order();
     let _ = price::register
         as fn(
             &mut horsies::Horsies,
@@ -62,7 +62,7 @@ fn main() {
     let _ = route::Input {
         kind: OrderKind::Standard,
     };
-    let _ = route::params::kind();
+    let _ = route::fields::kind();
     let _ = route::register
         as fn(
             &mut horsies::Horsies,

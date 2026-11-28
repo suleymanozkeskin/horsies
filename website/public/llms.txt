@@ -15,7 +15,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - `horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
 - `SKILL.md` -> quick orientation and routing (the only file with frontmatter)
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling, the cancel of a running task
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-038 validation
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-039 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
 - `monitoring.md` -> `horsies.monitoring` query API (with the phase timing of a run and its nodes, and the phase record of each attempt), task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, `horsies metrics` and `GET /metrics`, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
@@ -23,19 +23,19 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ## Quick Reference
 
 ### Horsies (app instance)
-- app = Horsies(config=AppConfig(...))
+- app = Horsies(config=AppConfig(...), schema_mode=SchemaMode.MIGRATE_AND_VALIDATE) (SchemaMode: MIGRATE_AND_VALIDATE, OBSERVE_ONLY, ASSUME_INITIALIZED)
 - @app.task("name", retry_policy=...) -> decorator (DEFAULT mode)
-- @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
+- @app.task("name", queue="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
-- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; the values of the task's exception_mapper and of AppConfig.exception_mapper are added with no second declaration; task_function.task_error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
-- app.workflow(name, tasks, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
-- @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
+- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; the values of the task's exception_mapper and of AppConfig.exception_mapper are added with no second declaration; task_function.error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
+- app.workflow(name, nodes, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
+- @app.check_workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
 - app.expand_module_globs(["src/**/*_tasks.py"]) -> list[str] (resolve glob patterns)
 - app.import_task_modules() -> list[str] (import discovered modules)
-- app.list_tasks() -> list[str]
-- app.check(live=False) -> list[HorsiesError] (phased validation)
+- app.registered_task_names() -> list[str]
+- app.check(live=False) -> ValidationReport (phased validation; .refusals is empty when all passed)
 - app.get_broker() -> PostgresBroker
 - @app.on_event(AttemptEnded) -> registers a def or an async def handler of one event type of horsies.telemetry; the worker runs it in its handler child (refusals HRS-222 to HRS-226)
 - @app.on_handler_child_start -> sync hook, once at the boot of the handler child (HRS-214 for an async hook)
@@ -43,8 +43,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### AppConfig
 - queue_mode: QueueMode (DEFAULT or CUSTOM)
 - custom_queues: list[CustomQueueConfig] | None (required for CUSTOM)
-- broker: PostgresConfig
-- cluster_wide_cap: int | None (max RUNNING tasks across cluster)
+- database: PostgresConfig
+- cluster_wide_cap: ClusterCap(tasks) | NoClusterCap (default NoClusterCap(); max RUNNING tasks across cluster)
 - prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
 - claim_lease_ms: int | None (required when prefetch_buffer > 0)
 - max_claim_renew_age_ms: int
@@ -55,9 +55,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
-- resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- resend_on_transient_error: bool (default False, auto-resend transient ENQUEUE_FAILED for both task send and workflow start)
 - tracing: OtelTracing(parentage: ChildOfSend() | LinkedToSend()) | NoTracing() (default NoTracing(); OtelTracing() traces the sends and each attempt that a worker runs with the OpenTelemetry API and records the producer metrics with its meter; the attempt span is a child of the send span with ChildOfSend() (default), or a new trace with a link to it with LinkedToSend(); needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
-- log_format: TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
+- log_format: LogFormat = TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
 
 ### WorkerProfile
@@ -68,8 +68,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - shared_thread: SharedThreadChildren(count: int 1-1024, seats: int 1-256, recycle: SharedRecycle, pool: SharedPool, task_send_pool: PoolSize) | NoSharedThreadChildren (default NoSharedThreadChildren())
 - task_send_pool: PoolSize (default PoolSize(connections=2) for every kind): task code that sends through the app opens the app's broker in its child with exactly this many connections, no overflow, for each event loop that it sends from; PostgresConfig pool_size/max_overflow do not apply in a child
 - pool: ParentPool(max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats()): the pool of the worker process, which writes the outcome of each task; no overflow (pool_size = max_size, max_overflow = 0); derived from the seats of the whole profile: min(20, max(5, ceil(seat_count() / 10))); WorkerProfile.resolved_parent_pool() returns it
-- IsolatedPool(min_size: int 0-1000 = 0, max_size: PoolSize = PoolSize(connections=1), check: bool = False): the sync connection pool of each isolated child; it writes one statement at a time, so 1 is enough
-- SharedPool(min_size: int 0-1000 = 0, max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats(), check: bool = False): the pool of each shared child, shared by its seats
+- IsolatedPool(min_size: int 0-1000 = 0, max_size: PoolSize = PoolSize(connections=1), pre_ping: bool = False): the sync connection pool of each isolated child; it writes one statement at a time, so 1 is enough
+- SharedPool(min_size: int 0-1000 = 0, max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats(), pre_ping: bool = False): the pool of each shared child, shared by its seats
 - PoolSize(connections: int 1-1000); ExecutorThreads(threads: int 1-256): the threads of the default executor of the loop of each shared async child (default ExecutorThreadsFromSeats(); a start hook that sets its own default executor wins)
 - Derived from the seats: min(cap, max(floor, ceil(seats / seats_per_unit))); shared async pool 10 seats per connection, cap 40; shared thread pool 10 seats per connection, cap 26; pool floor 2; shared async executor 1 seat per thread, floor 2, cap 32; the pool sizes are the measured knees at 3.5 ms RTT (a child pool keeps about 2 x tasks per second x (RTT + server time) connections busy)
 - A pool min_size above its resolved max_size is refused (HRS-218), and so is a PoolSize below 3 (PARENT_POOL_MIN_CONNECTIONS) for the pool of the worker process (ParentPool.max_size); the worker start log line states the resolved pool and task_send_pool of each kind, the executor threads, and the resolved pool of the worker process
@@ -92,7 +92,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Shared modes: a crash or a kill of the child ends every task in it (WORKER_CRASHED, or a retry by policy); the task named as the cause of a kill or a stuck stop retries in an isolated child; in every mode the outcome is written after the attempt ended, so a retry never runs next to the attempt it replaces
 - Choose: waits on network/database/API with an async client -> SHARED_ASYNC; waits in a sync client -> SHARED_THREAD (not measured); C code that releases the GIL (zlib, hashlib) -> SHARED_THREAD (Linux, 4 CPUs, CPython 3.13/3.14: 4 threads 2.6-3.8x one thread, 0.89-1.13x 4 processes); pure-Python CPU work -> SHARED_THREAD only on free-threaded CPython 3.13t/3.14t (4 threads 1.9-3.6x one), else ISOLATED (standard build: 4 threads 0.56-1.02x one); more thread seats than CPUs added nothing; needs isolation or an exact kill at timeout_ms -> ISOLATED
 - Measured cancel (one shared async child, CPython 3.13, local network): healthy server: httpx, aiohttp, psycopg, asyncpg, SQLAlchemy ended within 16 ms of the first cancel; psycopg >= 3.3.6 against a server that stops answering: 10.0 s, or within 5 ms of the second cancel; asyncio.to_thread() and DNS lookup threads are never stopped by a cancel
-- Operator cancel of a RUNNING task (cancel_task(broker, task_id, include_running=True), or the web UI): one statement writes the attempt row with outcome CANCELLED (recorded_by CANCEL, finished_at = the cancel time), moves the task to history as CANCELLED (TASK_CANCELLED) and sends NOTIFY horsies_task_cancel; the worker that holds the run gives the cancel to the task code: async def body -> asyncio.CancelledError at the next await; def body -> runtime.cancel_state() (first parameter runtime: TaskRuntime) returns CancelRequested(cause=CancelCause.OPERATOR); a cancel before the body starts: the body does not run; what the task returns after the cancel is dropped; code that does not stop: ISOLATED runs until it returns or its timeout_ms kill (with cancel_grace_ms: killed that long after the cancel), SHARED_ASYNC gets the second cancel after cancel_grace_ms, SHARED_THREAD runs until it returns; a lost notice is found by one read after a listener reconnect or a runner heartbeat that does not land (at most runner_heartbeat_interval_ms, default 30 s)
+- Operator cancel of a RUNNING task (cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING), or the web UI): one statement writes the attempt row with outcome CANCELLED (recorded_by CANCEL, finished_at = the cancel time), moves the task to history as CANCELLED (TASK_CANCELLED) and sends NOTIFY horsies_task_cancel; the worker that holds the run gives the cancel to the task code: async def body -> asyncio.CancelledError at the next await; def body -> runtime.cancel_state() (first parameter runtime: TaskRuntime) returns CancelRequested(cause=CancelCause.OPERATOR); a cancel before the body starts: the body does not run; what the task returns after the cancel is dropped; code that does not stop: ISOLATED runs until it returns or its timeout_ms kill (with cancel_grace_ms: killed that long after the cancel), SHARED_ASYNC gets the second cancel after cancel_grace_ms, SHARED_THREAD runs until it returns; a lost notice is found by one read after a listener reconnect or a runner heartbeat that does not land (at most runner_heartbeat_interval_ms, default 30 s)
 - SHARED_ASYNC author rules: let CancelledError propagate; a client timeout below timeout_ms on each call; open long-lived clients in @app.on_shared_async_child_start (async def hook, runs on the loop of each shared async child before its first task, 10 s bound); never block the loop; await what you start; send with send_async()
 - SHARED_THREAD author rules: lock module state that a task changes; a timeout below timeout_ms on each blocking call; no threads that outlive the task
 - Connections: each child opens one pool, sized by the pool of its kind (IsolatedChildren.pool, SharedAsyncChildren.pool, SharedThreadChildren.pool); the seats share it for the RUNNING update and the finalizing marker and wait up to 30 s for a connection (none in 30 s: the task is not run and its claim lease returns it); average connections in use = tasks per second of the child x 2 writes x time of one write; HRS-219 counts the resolved WorkerProfile.pool max_size + 2 listener + 1 runner heartbeat + children x resolved pool max_size, per mode; it states, not compares, children x task_send_pool per mode for task code that sends
@@ -100,29 +100,26 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### PostgresConfig
 - database_url: SecretStr (must start with "postgresql://")
-- session_database_url: str | None (direct/session-capable URL for schema setup and LISTEN/NOTIFY)
+- session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate(url: SecretStr) (default same as database_url; a separate direct/session-capable URL for schema setup and LISTEN/NOTIFY)
 - pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
 - pool_size: int (default 5; 1 to 10,000, else HRS-213)
 - max_overflow: int (default 10; 0 to 10,000, else HRS-213)
 - worker_pool_size, worker_max_overflow: removed in 0.7.0; setting one fails with HRS-213 and names WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); task code in a child opens the task_send_pool of its kind
 - worker_child_pool_min_size, worker_child_pool_max_size, worker_child_pool_check: removed in 0.7.0; setting one fails with HRS-213 and names the pool field of each child kind (IsolatedPool, SharedPool)
-- tcp_keepalives: bool (default True)
-- tcp_keepalives_idle: int (default 30; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_interval: int (default 10; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_count: int (default 3; 1 to 127 while tcp_keepalives is True, else HRS-215)
-- tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default, or 1 to 2,147,483,647 ms; else HRS-215)
+- tcp_keepalives: TcpKeepalivesOn(idle_seconds, interval_seconds, probes) | TcpKeepalivesOff (default TcpKeepalivesOn(): 30 s, 10 s, 3 probes; idle_seconds and interval_seconds 1 to 32,767 s, probes 1 to 127, else HRS-215)
+- tcp_user_timeout: TcpUserTimeoutAfter(milliseconds) | TcpUserTimeoutSystemDefault (default 30000 ms; milliseconds 1 to 2,147,483,647, else HRS-215)
 - psycopg >= 3.3.7 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
 - retain_rerun_input_default: bool (default False)
-- pool_timeout: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
-- pool_recycle: int (default 1800; -1 never, or 0 to 4,294,967,295 s; else HRS-213)
+- pool_timeout_seconds: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
+- pool_recycle: PoolRecycleAfterSeconds(seconds) | PoolRecycleNever (default 1800 s; seconds 0 to 4,294,967,295, else HRS-213)
 - pool_pre_ping: bool (default True)
 - echo: bool (default False)
-- PgBouncer pattern: database_url -> pooled transaction URL, session_database_url -> direct/session-capable URL, pgbouncer_transaction_mode=True
-- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to session_database_url); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
+- PgBouncer pattern: database_url -> pooled transaction URL, session_database=SessionDatabaseSeparate(url=...) -> direct/session-capable URL, pgbouncer_transaction_mode=True
+- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to the session database URL); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
 - PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
-- QueueMode.DEFAULT — single "default" queue, no queue_name on tasks
+- QueueMode.DEFAULT — single "default" queue, no queue on tasks
 - QueueMode.CUSTOM — named queues with priorities and per-queue concurrency
 
 ### CustomQueueConfig
@@ -130,78 +127,88 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - priority: int (1=highest, 100=lowest, default 1)
 - max_concurrency: int (default 5)
 
-### TaskResult[T, TaskError]
-- TaskResult(ok=value) | TaskResult(err=TaskError(...))
-- .is_ok() -> bool, .is_err() -> bool
-- .ok -> T | None, .err -> E | None
-- .ok_value -> T (raises on err), .err_value -> E (raises on ok)
+### Result[T, TaskError] (task body) and ReadResult[T, TaskError] (reads)
+- A task body returns Result[T, TaskError]: Ok(value) | Err(TaskError(...)); a direct call returns the same Result
+- TaskOutcome[T, E] = Succeeded[T] | Failed[E] (frozen dataclasses; match Succeeded(value) / Failed(error)): how a task ended; the type of an args_from input and of WorkflowContext.result_for
+- ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]: TaskHandle.get/get_async, WorkflowHandle.get/get_async/result_for/result_for_async, app.get_result/get_result_async
+- Read with one match: case Ok(Succeeded(value)) / case Ok(Failed(task_error)) / case Err(read_error)
+- Ok(Failed(task_error)): the task returned the error, or the library recorded it (TASK_CANCELLED, TASK_TIMEOUT, WORKER_CRASHED, TASK_EXPIRED, WORKFLOW_FAILED, WORKFLOW_PAUSED, UPSTREAM_SKIPPED, RETURN_TYPE_MISMATCH, ...)
+- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotAvailable, ReadResultNotReady, ReadWaitInsideTask, ReadAsyncContext, ReadInvalidInput, ReadResultDeserializationError, ReadUnknownCustomCode (UNKNOWN_CUSTOM_CODE; a stored custom code that the declared Enum does not name; adds custom_code: str), ReadDatabaseError (adds retryable: bool and cause: BaseException | NoCause), ReadNoTypeAvailable, ReadWorkflowContextMissingId
+- TaskError[C]: generic in its custom code type, default str. error_codes=E with -> Result[T, TaskError[E]]: the body passes members of E; TaskHandle.get and args_from parameters annotated TaskOutcome[T, TaskError[E]] give members of E, and so do WorkflowHandle.result_for(node) and WorkflowContext.result_for(node) for a TaskNode[T, E] (task.node()(...)), the entries of results() and tasks(), and app.get_result (typed TaskError[Any]); the error of a workflow from WorkflowHandle.get and a SubWorkflowNode keep text, because the failed node can be any task. TaskError[E] without error_codes=E is HRS-105; a mapper or default code that E does not name is HRS-209
+- A later read can give an outcome after ReadWaitTimeout, ReadTaskNotFound or ReadDatabaseError; a TaskHandle keeps the final answers (an outcome, ReadResultNotAvailable, ReadResultDeserializationError, ReadUnknownCustomCode, ReadNoTypeAvailable) and not the others
+- read.unwrap() on a ReadResult gives the TaskOutcome, not the value
 
 ### TaskError
-- error_code: str | BuiltInTaskCode (required, not null)
+- code: str | BuiltInTaskCode (required, not null; stored under the key error_code)
 - message: str | None
 - data: takes JsonInput, gives JsonValue. No check runs at construction. A value that cannot cross the wire becomes {'data_refused': <cause>}, and the code stays
 - exception: dict[str, Any] | BaseException | None
 - Unknown keys are refused, at construction and at decode
 
-### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
-- OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
-- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CTX_MISSING_ID, NO_TYPE_AVAILABLE
-- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK
-- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns WAIT_INSIDE_TASK at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(BrokerWaitInsideTask); compose tasks with a workflow instead
-- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
-- All built-in code string values are globally reserved; user-defined error codes must not collide
+### BuiltInTaskCode (type alias = OperationalCode | ContractCode | RetrievalCode | OutcomeCode)
+- OperationalCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, DATABASE_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
+- ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CONTEXT_MISSING_ID, NODE_NOT_IN_CONTEXT, NO_TYPE_AVAILABLE
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, NODE_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK, UNKNOWN_CUSTOM_CODE
+- A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(ReadWaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
+- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(ReadWaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(DatabaseWaitInsideTask); compose tasks with a workflow instead
+- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUB_WORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
+- All built-in code string values are globally reserved; custom error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
-- User-defined error codes are plain str only (foreign str,Enum types rejected)
-- Strict construction: TaskError(error_code="BROKER_ERROR", message="...") raises ValueError (reserved string)
-- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
-- Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
-- Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
+- Custom error codes are plain str only (foreign str,Enum types rejected)
+- Strict construction: TaskError(code="DATABASE_ERROR", message="...") raises ValueError (reserved string)
+- Use enum members: TaskError(code=OperationalCode.DATABASE_ERROR, message="...") — accepted
+- Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, custom codes as-is
+- Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models; the stored form has the key error_code in place of code (encode_task_error writes it, decode_task_error reads it)
 
-### SubWorkflowError (extends TaskError)
+### SubWorkflowFailure (extends TaskError)
 - sub_workflow_id: str
 - sub_workflow_summary: SubWorkflowSummary[Any]
-- Pattern match to distinguish: case SubWorkflowError() vs case TaskError()
+- Pattern match to distinguish: case SubWorkflowFailure() vs case TaskError()
 
-### BrokerResult[T] (infrastructure Result type)
-- PostgresBroker methods return BrokerResult[T] = Ok[T] | Err[BrokerOperationError]; enqueue_async, enqueue and ensure_schema_initialized return a subset of BrokerOperationError (see "Broker methods" below)
+### DatabaseResult[T] (infrastructure Result type)
+- PostgresBroker methods return DatabaseResult[T] = Ok[T] | Err[DatabaseOperationError]; enqueue_async, enqueue and ensure_schema_initialized return a subset of DatabaseOperationError (see "Broker methods" below)
 - Ok(value): operation succeeded
-- Err(BrokerOperationError): operation failed
+- Err(DatabaseOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- BrokerOperationError is a union of frozen variants; every variant has code (BrokerErrorCode), message (str), retryable (bool). BrokerOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; exception: BaseException), BrokerEnqueueFailed (ENQUEUE_FAILED; exception: BaseException | NoCause; the row may or may not exist), BrokerPayloadMismatch, BrokerIdempotencyKeyConflict (owner_task_id), BrokerNotAttached (NO_BROKER), BrokerNoTypeAvailable, BrokerInvalidJsonPayload (exception), BrokerInvalidTaskOptions (exception), BrokerInvalidInput (INVALID_INPUT; exception; a refused argument, nothing written), BrokerAsyncContext, BrokerListenerDisabled (LISTENER_DISABLED; broker built with assume_initialized=True has no listener), BrokerWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; broker_error_cause(err) gives the cause or NoCause() before raise ... from
-- BrokerEnqueueError = BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput (every failure of enqueue_async); BrokerSyncCallError = BrokerAsyncContext (the failure that the sync enqueue adds; nothing ran)
+- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; cause: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; cause: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (cause), DatabaseInvalidTaskOptions (cause), DatabaseInvalidInput (INVALID_INPUT; cause; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; a broker with the schema mode SchemaMode.ASSUME_INITIALIZED has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; err.failure_cause() gives the exception of the cause or NoCause() before raise ... from
+- DatabaseEnqueueError = DatabaseEnqueueFailed | DatabasePayloadMismatch | DatabaseIdempotencyKeyConflict | DatabaseInvalidTaskOptions | DatabaseInvalidInput (every failure of enqueue_async); DatabaseSyncCallError = DatabaseAsyncContext (the failure that the sync enqueue adds; nothing ran)
 - enqueue_async and enqueue require sent_at and send_kind (from horsies import SendKind): SendKind.FIRST for the first send of a task id, SendKind.REPEAT for a resend (reads history first, so a finished task does not run again)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
-- ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
+- DatabaseErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DATABASE_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_DATABASE, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
+- ASYNC_CONTEXT (DatabaseErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, WorkflowHandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; a read returns Err(ReadAsyncContext(...)), which a TaskHandle does not keep)
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
-- Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
-  ensure_schema_initialized -> Result[None, BrokerOperationFailed], get_stale_tasks -> BrokerResult[list[dict]],
-  get_expired_tasks -> BrokerResult[list[dict]],
-  mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
-  terminate_orphaned_workflow_tasks -> BrokerResult[int],
-  close_async -> BrokerResult[None]
+- Broker methods: enqueue_async -> Result[str, DatabaseEnqueueError], enqueue (sync) -> Result[str, DatabaseEnqueueError | DatabaseSyncCallError], get_task_info_async -> DatabaseResult[TaskInfo[dict[str, Json]] | None],
+  ensure_schema_initialized -> Result[None, DatabaseOperationFailed], get_stale_tasks(threshold_minutes=2) -> DatabaseResult[BoundedTaskList[StaleTaskRow]],
+  get_expired_tasks -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]],
+  mark_stale_tasks_as_failed -> DatabaseResult[int], requeue_stale_claimed -> DatabaseResult[int],
+  terminate_orphaned_workflow_tasks -> DatabaseResult[int],
+  close_async -> DatabaseResult[None]
 - Health/liveness API (app-level, async + sync; broker exposes the async forms):
-  ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
-  ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; min_responses=1 returns on first reply = fast liveness gate),
-  list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
-  get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
-  get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
+  ping_database_async -> DatabaseResult[DatabasePing] (SELECT 1 + latency via live pool),
+  ping_workers_async(target=PingTargetEveryWorker() | PingTargetWorker(worker_id), wait_ms=2000, min_responses=MinResponsesFullWindow() | MinResponsesAtLeast(count)) -> DatabaseResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; MinResponsesAtLeast(1) returns on first reply = fast liveness gate),
+  list_worker_states_async -> DatabaseResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
+  get_worker_state_async(worker_id) -> DatabaseResult[WorkerStateSnapshot | None],
+  get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained() | WorkerHistoryLimitNewest(count)) -> DatabaseResult[list[WorkerStateSnapshot]],
+  get_stale_tasks_async(threshold_minutes) -> DatabaseResult[BoundedTaskList[StaleTaskRow]] (RUNNING tasks with no runner heartbeat within the threshold; StaleTaskRow: task_id, task_name, worker_hostname, worker_pid, worker_process_name, started_at, last_heartbeat_at),
+  get_expired_tasks_async -> DatabaseResult[BoundedTaskList[ExpiredTaskRow]] (PENDING tasks past good_until; ExpiredTaskRow: task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until, expired_for: timedelta),
+  BoundedTaskList = BoundedTaskListComplete(rows) | BoundedTaskListTruncated(rows, bound) (at most TASK_LIST_ROW_BOUND = 10,000 rows)
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
-- Note: app.get_result_async / app.get_result return BrokerResult[TaskResult[Any, TaskError]]: unwrap the outer Result first
+- Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a DatabaseResult: a database failure is Err(ReadDatabaseError(...)), a stored value that does not decode Err(ReadResultDeserializationError(...)), a task that is not registered in this process Err(ReadNoTypeAvailable(...)), a sync call in a running event loop Err(ReadAsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep DatabaseResult
 
 ### Result[T, E] (vendored Ok/Err type)
 - from horsies import Result, Ok, Err, is_ok, is_err
 - .ok_value / .err_value properties, .is_ok() / .is_err() methods
 - is_ok(result) / is_err(result) are TypeIs type guards for narrowing
+- A task read is a ReadResult: read it with match (see "Result[T, TaskError] (task body) and ReadResult[T, TaskError] (reads)")
 
 ### @app.task Decorator
-- Decorated function must return TaskResult[T, TaskError]
+- Decorated function must be annotated -> Result[T, TaskError] (or Ok[T] | Err[TaskError]) and return Ok(value) or Err(TaskError(...)); another annotation raises HRS-101 or HRS-105
 - Decorated function is def or async def; a function that yields raises HRS-101 at definition time
 - In an isolated child (Execution.ISOLATED, the default), an async def task runs on the one event loop that the child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
 - An async def task in an isolated child must await the work it starts: when its body returns with asyncio tasks of it still on the loop, the child waits up to 1 s for them, then cancels what is alive in three rounds 0.1 s apart; the worker writes what the task returned (then the retry and the workflow step) only after that work ended, and replaces the child; the return ends the deadline, so the outcome is never TASK_TIMEOUT here; the child marks the row finalizing only after that work ended (never for stuck work), so runner heartbeats cover the row while the work runs; work alive after the rounds, or no report within 26.3 s of the return: the worker kills the child and writes what the task returned after the exit; a client that keeps its own background tasks on the loop delays each outcome by about 1 s and causes a replacement after each async task; an asyncio.to_thread() thread is not a task: it is not waited for and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await is not waited for, causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); one worker log line per such task names the coroutine of each task left (up to 10) and how that work ended
 - A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; that cause can clear, so only that slot is down and boots again after a growing wait (1 s, 2 s, 4 s, up to 60 s); when every slot is down, the worker exits non-zero after three failed starts so its supervisor restarts it
-- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
+- Options: name, queue, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
 - execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
 - cancel_grace_ms: 100 to 10000 ms; SHARED_ASYNC: the time to the second cancel, default 1000 ms; ISOLATED: the time from an operator cancel to the kill of the child, no default (no kill); SHARED_THREAD: refused (HRS-110); the stored options hold the value in effect at send
 - A task reads the cancel of its run through its first parameter runtime: TaskRuntime: runtime.cancel_state() -> CancelNotRequested() | CancelRequested(cause: CancelCause); CancelCause: OPERATOR (an operator cancel of the running task), DEADLINE (the deadline of a SHARED_ASYNC or SHARED_THREAD run); the first cause stays; TaskRuntime.for_test(task_id=..., cancel_state=...) gives a runtime with a fixed cancel state for a direct call
@@ -209,75 +216,73 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function; with a first parameter runtime: TaskRuntime, RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] (P = the parameters after the runtime)
 
 ### TaskRuntime (first task parameter) and FencingToken
-- def f(runtime: TaskRuntime, *, x: int) -> TaskResult[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
+- def f(runtime: TaskRuntime, *, x: int) -> Result[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives task_id, attempt (AttemptNumber, 1 = first run), max_retries (MaxRetries, 0 to 20), retries_left (RetriesLeft = max_retries - (attempt - 1), 0 past the budget), fencing_token and cancel_state()
 - Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
-- Not part of the wire contract: .send(), .schedule(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
+- Not part of the wire contract: .send(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
 - runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
 - Direct call in a test: f(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), x=1); attempt is an AttemptNumber (default the first attempt); cancel_state is a RunCancelState (default CancelNotRequested()); AttemptNumber.parse(2) -> Ok(AttemptNumber) | Err(AttemptNumberRefused) outside 1 to 2**31; for_test cannot fail
 - Limits: a rerun or a workflow node started again after a pause gets a new task id (value from 1); a stale attempt with no later attempt is not refused
 
 ### TaskFunction[P, T] (decorated task)
-- .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
-- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of TaskResult[T, TaskError]
+- .__call__(*args, **kwargs) -> Result[T, TaskError] (sync direct call)
+- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of Result[T, TaskError]
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
-- .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
-- .with_options(*, good_until=None, idempotency_key=None, retention=<unset>) -> TaskSendOptions[P, T] (per-send options builder; retention: timedelta in whole days, or None for forever)
-- .retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
-- .retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (async retry)
-- .retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
+- .with_options(*, good_until=None, idempotency_key=None, retention=<unset>, delay_seconds=None) -> TaskFunctionWithOptions[P, T] (per-send options builder; retention: SendRetention, a timedelta in whole days, or None for forever; delay_seconds: whole seconds, 0 or more, None sends now)
+- .resend(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]] (send a failed send again with its stored payload, its delay included)
+- .resend_async(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]] (async resend)
 - .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
 - .task_name -> str
 
-### TaskSendOptions[P, T] (per-send options)
-- Returned by task.with_options(good_until=None, idempotency_key=None, retention=<unset>)
+### TaskFunctionWithOptions[P, T] (per-send options)
+- Returned by task.with_options(good_until=None, idempotency_key=None, retention=<unset>, delay_seconds=None)
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
-- .schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]
+- Delayed send: task.with_options(delay_seconds=60).send(**kwargs); delay_seconds=0 sends now; a negative value, a bool, a float or a str returns Err(VALIDATION_FAILED)
 - good_until must be timezone-aware datetime; naive datetimes return Err(VALIDATION_FAILED)
 - Passing good_until=None explicitly clears any inherited deadline
 - For workflow nodes, use .node(good_until=...) instead
 
 ### TaskHandle[T]
 - .task_id -> str
-- .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
-- .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (async blocking)
-- .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
-- .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
+- .get(wait_ms=None) -> ReadResult[T, TaskError] (blocking)
+- .get_async(wait_ms=None) -> ReadResult[T, TaskError] (async blocking)
+- .info(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
+- .info_async(include_result=False, include_failed_reason=False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
 
-### TaskSendResult[T] (send/schedule Result type)
+### TaskSendResult[T] (send Result type)
 - type TaskSendResult[T] = Result[T, TaskSendError]
-- .send() / .send_async() / .schedule() return TaskSendResult[TaskHandle[T]]
+- .send() / .send_async() / .resend() / .resend_async() return TaskSendResult[TaskHandle[T]]
 - Ok(TaskHandle): task enqueued successfully
 - Err(TaskSendError): enqueue failed with categorized error
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
+- .resend(error) / .resend_async(error): replay stored payload (same task id, sent_at and delay)
 
 ### TaskSendError (union, one frozen variant per TaskSendErrorCode member)
-- Match on the variant; err.code (class variable) names its member; payload, message and exception are not in the repr
+- Match on the variant; err.code (class variable) names its member; payload, message and cause are not in the repr
 - TaskSendSuppressed: message
 - TaskSendAsyncContext: task_id, payload, message
-- TaskSendValidationFailed: message, exception
-- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), exception
+- TaskSendValidationFailed: message, cause
+- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), cause
 - TaskSendPayloadMismatch: task_id, payload, message
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
-- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
-- exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
+- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is False (a class variable: a repeat of the same send does not complete it)
+- cause (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
-- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
+- TaskSendResendable = TaskSendEnqueueFailed | TaskSendAsyncContext: the resend methods' parameter type; another variant is a type error and fails an assertion at run time
 
 ### TaskSendErrorCode (enum)
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (cause is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; RuntimeStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
-- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; not retryable (send the same command as the owner task, or use another key); the resend methods refuse it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
-- ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
+- ASYNC_CONTEXT: sync send (or sync resend) called inside a running event loop; nothing was enqueued; the error keeps the payload for resend_async
 
 ### Raised, never returned: ForkedAfterCoreStart, CoreStopped (from horsies)
-- Both are states of the process: the core refuses every later call in it. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, PostgresBroker.enqueue, the task, result and health reads, the broker's task lists and recovery passes, ensure_schema_initialized, close, check(live=True), the workflow start, WorkflowHandle, pause_workflow / resume_workflow, horsies.monitoring and the horsies web schema probe. No call returns them as a result; no result type has a variant for them. Nothing ran; a retry in the same process raises again
+- Both are states of the process: the core refuses every later call in it. Every call that runs on the core raises them, sync and async forms alike: the sends and their resend methods, PostgresBroker.enqueue, the task, result and health reads, the broker's task lists and recovery passes, ensure_schema_initialized, close, check(live=True), the workflow start, WorkflowHandle, pause_workflow_async / resume_workflow_async, horsies.monitoring and the horsies web schema probe. No call returns them as a result; no result type has a variant for them. Nothing ran; a retry in the same process raises again
 - ForkedAfterCoreStart: the process was forked without exec after the core started in its parent (for example a fork-start multiprocessing pool inside a task). Fix: start child processes that call horsies with the spawn or forkserver start method, or fork before the parent's first call
 - CoreStopped: a background task of the core panicked (a defect in horsies, not a database failure); args are the (subject, cause) of the first panic. Fix: restart the process; report the panic's subject and cause as a defect
 
@@ -289,11 +294,13 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskInfo
 - .task_id -> uuid.UUID, .task_name -> str, .status -> TaskStatus
-- .queue_name -> str, .priority -> int
+- .queue -> str, .priority -> int
 - .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
-- .sent_at/enqueued_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
+- .due_at -> datetime (a worker may claim the task from this time)
+- .sent_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
 - .worker_hostname/worker_pid/worker_process_name -> str | int | None
-- .result -> TaskResult[Any, TaskError] | None (opt-in via include_result)
+- .result -> ResultSlot: ResultSlotNotRequested() (the read did not pass include_result), ResultSlotNotStored() (include_result, and the task stored no result), ResultSlotStored(value) (include_result, and the task stored one)
+- ResultSlotStored.value -> dict[str, Json] (the stored envelope) for a broker-level read, TaskOutcome[Any, TaskError] for an app-level read (an ok value of a task that is not registered in this process stays plain JSON)
 - .failed_reason -> str | None (opt-in via include_failed_reason)
 
 ### TaskStatus (enum)
@@ -306,107 +313,108 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Called with task arguments: node_factory(**kwargs) -> TaskNode[T]
 - Two-step pattern: step 1 sets workflow options, step 2 sets task arguments
 - Example: my_task.node(waits_for=[dep], args_from={"x": dep})(extra_arg="val")
-- Workflow options: waits_for, workflow_ctx_from, args_from, queue, priority,
-  allow_failed_deps, join, min_success, good_until, node_id
+- Workflow options: waits_for, workflow_context_from, args_from, queue, priority,
+  allow_failed_dependencies, join, min_success, good_until, node_id
 
 ### TaskNode[T]
-- T = ok type of the task's TaskResult
-- fn: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
+- T = ok type of the task's Result
+- function: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
-- args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
-- workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
+- args_from: dict[str, TaskNode | SubWorkflowNode] (inject the upstream TaskOutcome as kwarg; the parameter is typed TaskOutcome[T, TaskError])
+- workflow_context_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
 - queue: str | None (override task decorator queue)
 - priority: int | None (override task decorator priority)
-- allow_failed_deps: bool (False=SKIP on dep failure, True=run with failed TaskResult)
+- allow_failed_dependencies: bool (False=SKIP on dep failure, True=run with Failed(task_error))
 - join: "all" (default) | "any" | "quorum"
 - min_success: int | None (required when join="quorum")
 - good_until: datetime | None (task expiry deadline)
-- node_id: str | None (auto-assigned as "{slugify(name)}:{index}" if None)
-- .name -> str, .key() -> NodeKey[T]
+- node_id: str | None (auto-assigned as "{node_id_from_text(name)}:{index}" if None)
+- .task_name -> str, .key() -> NodeKey[T]
 
 ### SubWorkflowNode[T]
 - T = child workflow's output type (from WorkflowDefinition[T])
-- workflow_def: type[WorkflowDefinition[T]]
-- kwargs: passed to workflow_def.build_with(app, **kwargs)
-- waits_for, args_from, workflow_ctx_from: same semantics as TaskNode
-- join, min_success, allow_failed_deps: same as TaskNode
+- workflow_definition: type[WorkflowDefinition[T]]
+- kwargs: passed to workflow_definition.build_with(app, **kwargs)
+- waits_for, args_from, workflow_context_from: same semantics as TaskNode
+- join, min_success, allow_failed_dependencies: same as TaskNode
 - node_id: str | None (auto-assigned if None)
-- .name -> str, .key() -> NodeKey[T]
+- .workflow_name -> str, .key() -> NodeKey[T]
 
 ### WorkflowSpec
 - .name -> str
-- .tasks -> list[TaskNode | SubWorkflowNode]
+- .nodes -> list[TaskNode | SubWorkflowNode]
 - .on_error -> OnError (FAIL or PAUSE)
 - .output -> TaskNode | SubWorkflowNode | None
 - .success_policy -> SuccessPolicy | None
-- .resend_on_transient_err -> bool (auto-retry transient start errors, default False)
+- .resend_on_transient_error -> bool (auto-retry transient start errors, default False)
 - .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
-- .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
-- .retry_start_async(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
-- retry_start: builds the same spec again and starts with the error's workflow_id; a committed first attempt comes back as the existing handle; WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
+- .resend_start(error: WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]] (start again after a failed start, sync)
+- .resend_start_async(error: WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]] (start again after a failed start, async)
+- resend_start: builds the same spec again and starts with the error's workflow_id; a committed first attempt comes back as the existing handle; WorkflowStartResendable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
 - Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
 - .workflow_id -> str
 - .status() / .status_async() -> HandleResult[WorkflowStatus]
-- .get(timeout_ms=None) / .get_async(...) -> TaskResult[T, TaskError] (blocking)
-- .results() / .results_async() -> HandleResult[dict[str, TaskResult[Any, TaskError]]] (keyed by node_id)
-- .result_for(node) / .result_for_async(node) -> TaskResult[T, TaskError] (non-blocking query)
-- .tasks() / .tasks_async() -> HandleResult[list[WorkflowTaskInfo]]
+- .get(wait_ms=None) / .get_async(...) -> ReadResult[T, TaskError] (blocking; an outputless workflow gives Ok(Succeeded(NoWorkflowOutput())); results(), nodes() and result_for() give the node values)
+- .results() / .results_async() -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]] (keyed by node_id)
+- .result_for(node) / .result_for_async(node) -> ReadResult[T, TaskError] (non-blocking query; Err(ReadWorkflowNotFound(...)) for an id that no workflow has, Err(ReadNodeNotFound(...)) for a node id that the workflow does not have, Err(ReadResultNotReady(...)) before the node has a result)
+- get and result_for put a read failure in Err(ReadError) (ReadWaitTimeout, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotReady, ReadResultDeserializationError, ReadDatabaseError, ReadAsyncContext, ...); the workflow's or the node's error is Ok(Failed(task_error)); the other methods return HandleResult
+- .nodes() / .nodes_async() -> HandleResult[list[WorkflowNodeInfo]]
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
-- `HandleResult[T]` = Result[T, HandleOperationError]; HandleOperationError is a union of frozen variants, one per HandleErrorCode member; every variant has code, message, retryable, workflow_id. HandleWorkflowNotFound, HandleDbOperationFailed (exception: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), HandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), HandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), HandleAsyncContext. Match on the variant. A defect in pause or resume propagates
-- HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
+- `HandleResult[T]` = Result[T, WorkflowHandleError]; WorkflowHandleError is a union of frozen variants, one per WorkflowHandleErrorCode member other than INVALID_WORKFLOW_ID; every variant has code, message, retryable, workflow_id. WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed (cause: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), WorkflowHandleStoredDataInvalid (cause; a stored status or subworkflow summary does not parse; nothing changed), WorkflowHandleResumeRecoveryFailed (cause; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), WorkflowHandleAsyncContext. Match on the variant. A defect in pause or resume propagates
+- WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT, INVALID_WORKFLOW_ID
 
 ### WorkflowStatus (enum)
-- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_auto_cancel_after elapses
+- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_cancel_after elapses
 - .is_terminal -> bool
 - WORKFLOW_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 
-### WorkflowTaskStatus (enum)
+### WorkflowNodeStatus (enum)
 - PENDING -> READY -> ENQUEUED -> RUNNING -> COMPLETED | FAILED | SKIPPED
 - .is_terminal -> bool
-- WORKFLOW_TASK_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, SKIPPED}
+- WORKFLOW_NODE_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, SKIPPED}
 
-### WorkflowTaskInfo
-- .node_id -> str | None, .index -> int, .name -> str, .status -> WorkflowTaskStatus
-- .result -> TaskResult[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
+### WorkflowNodeInfo
+- .node_id -> str | None, .index -> int, .name -> str, .status -> WorkflowNodeStatus
+- .result -> TaskOutcome[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
 - .started_at -> datetime | None, .completed_at -> datetime | None
 
 ### OnError (enum)
 <!-- members: OnError -->
-- FAIL — continue DAG, skip tasks without allow_failed_deps, mark workflow FAILED
+- FAIL — continue DAG, skip tasks without allow_failed_dependencies, mark workflow FAILED
 - PAUSE — pause workflow immediately, block new enqueues, await resume() or cancel()
 
 ### WorkflowContext
-- Injected when task declares workflow_ctx: WorkflowContext | None = None
-- Requires workflow_ctx_from on the TaskNode
-- .workflow_id -> str, .task_index -> int, .task_name -> str
-- .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
+- Injected when task declares workflow_context: WorkflowContext | None = None
+- Requires workflow_context_from on the TaskNode
+- .workflow_id -> str, .node_index -> int, .task_name -> str
+- .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskOutcome[T, TaskError] (Succeeded(value) or Failed(error))
 - .has_result(node: TaskNode | SubWorkflowNode) -> bool
 - .summary_for(node: SubWorkflowNode[T]) -> SubWorkflowSummary[T]
 - .has_summary(node: SubWorkflowNode) -> bool
-- Only nodes in workflow_ctx_from are accessible (KeyError otherwise)
+- Only nodes in workflow_context_from are accessible (NodeNotInContext, code NODE_NOT_IN_CONTEXT, otherwise; WorkflowContextMissingId, code WORKFLOW_CONTEXT_MISSING_ID, for a node with no node_id)
 
-### WorkflowMeta
-- Auto-injected when task declares workflow_meta: WorkflowMeta | None = None
-- .workflow_id -> str, .task_index -> int, .task_name -> str
+### WorkflowMetadata
+- Auto-injected when task declares workflow_meta: WorkflowMetadata | None = None
+- .workflow_id -> str, .node_index -> int, .task_name -> str
 - Metadata only, no result access (lighter than WorkflowContext)
 
 ### SubWorkflowSummary[T]
 - Accessible via WorkflowContext.summary_for(subworkflow_node)
 - .status -> WorkflowStatus (child's final status)
 - .output -> T | None (child's output value, typed via generic)
-- .total_tasks -> int, .completed_tasks -> int
-- .failed_tasks -> int, .skipped_tasks -> int
+- .total_nodes -> int, .completed_nodes -> int
+- .failed_nodes -> int, .skipped_nodes -> int
 - .error_summary -> str | None
 
 ### NodeKey[T]
 - NodeKey("string_id") for dynamic/string-based lookup
 - node.key() to get NodeKey from a TaskNode or SubWorkflowNode
-- Used with workflow_ctx.result_for() and handle.result_for()
+- Used with workflow_context.result_for() and handle.result_for()
 
 ### SuccessPolicy / SuccessCase
 - SuccessPolicy(cases=[SuccessCase(required=[...])], optional=[...])
@@ -422,26 +430,26 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - config = WorkflowDefinitionConfig(output=..., on_error=..., success_policy=...) (frozen; the class body can name its own nodes; a subclass inherits the parent's config)
 - A Meta attribute, or a config that is not a WorkflowDefinitionConfig, raises HRS-033 at class creation
 - .build(app) -> WorkflowSpec
-- .build_with(app, **params) -> WorkflowSpec (with runtime parameters; kwargs-only)
+- .build_with(app, **parameters) -> WorkflowSpec (with runtime parameters; kwargs-only)
 - .get_workflow_nodes() -> list[tuple[str, TaskNode | SubWorkflowNode]]
 - Node IDs auto-assigned from attribute names
 
-### @app.workflow_builder (check-phase validation)
-- @app.workflow_builder() -> decorator; registers a WorkflowSpec builder for `horsies check`
-- @app.workflow_builder(cases=[{"region": "us-east"}, ...]) -> for parameterized builders
+### @app.check_workflow_builder (check-phase validation)
+- @app.check_workflow_builder() -> decorator; registers a WorkflowSpec builder for `horsies check`
+- @app.check_workflow_builder(cases=[{"region": "us-east"}, ...]) -> for parameterized builders
 - Zero-arg builders: auto-invoked during check with no arguments
 - Parameterized builders: requires cases= kwarg dicts covering each required parameter
 - Builders run under send suppression (no tasks enqueued); returned WorkflowSpec is fully validated
 - HRS-027: parameterized builder missing cases=
 - HRS-029: builder raised exception or returned non-WorkflowSpec, or build_with() returned a spec that this call did not build
-- HRS-030: function returns WorkflowSpec but lacks @app.workflow_builder
+- HRS-030: function returns WorkflowSpec but lacks @app.check_workflow_builder
 
 ### start_workflow / start_workflow_async
-- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
-- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
 - Standalone functions (alternative to spec.start())
 - Returns Ok(WorkflowHandle) on success, Err(WorkflowStartError) on failure
-- resend_on_transient_err: auto-retry up to 3 times on transient infra errors with exponential backoff
+- resend_on_transient_error: auto-retry up to 3 times on transient infra errors with exponential backoff
 
 ### WorkflowStartResult[T] (workflow start Result type)
 - spec.start() / start_async() / start_workflow() / start_workflow_async() return WorkflowStartResult[WorkflowHandle[T]]
@@ -449,10 +457,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed; match on the variant
 - WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
-- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (cause: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, cause: BaseException); WorkflowStartAsyncContext
 - WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, WORKFLOW_COMMAND_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
 - WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
-- WORKFLOW_COMMAND_CONFLICT: the workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written; never retryable; retry_start refuses it; send the same start command or use another id
+- WORKFLOW_COMMAND_CONFLICT: the workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written; never retryable; resend_start refuses it; send the same start command or use another id
 - A start with an existing workflow_id: same name and same start command returns the existing handle; runs started before this release have no stored start command and are not checked
 - ENQUEUE_FAILED: schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
@@ -467,50 +475,51 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
 
 ### RetryPolicy
-- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...]); the length of intervals is the retry count
-- RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter, max_delay_seconds=None)
-- auto_retry_for: required list of error codes that trigger retries
+- RetryPolicy.fixed(intervals_seconds, *, retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], retry_for=[OperationalCode.WORKER_CRASHED, MyCode.RATE_LIMITED]); the length of intervals_seconds is the retry count
+- RetryPolicy.exponential(base_seconds, *, max_retries, retry_for, jitter, max_delay_seconds=None)
+- retry_for: required list of code members that trigger retries: built-in code members, or members of the Enum class that the task declares with error_codes= (error_codes=MyCode)
+- @app.task refuses a plain str entry, a member of another Enum class, or a custom member of a task that declares a tuple or no error_codes: TaskDefinitionError TASK_INVALID_OPTIONS (HRS-102), the notes name the task and the entry; pyright refuses a plain str
 - jitter: bool (default True, adds a random 0-25% to each delay; never shortens)
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
 ### RecoveryConfig
-- auto_requeue_stale_claimed: bool (default True)
+- requeue_stale_claimed: bool (default True)
 - claimed_stale_threshold_ms: int (default 120_000, range 1s-1hr)
-- auto_fail_stale_running: bool (default True)
+- fail_stale_running: bool (default True)
 - running_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - check_interval_ms: int (default 30_000, range 1s-10min)
 - runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
 - claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
-- auto_terminate_orphaned_workflow_tasks: bool (default True)
+- terminate_orphaned_workflow_tasks: bool (default True)
 - finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
 - orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
-- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_S, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
-- phase2_quarantine_after_attempts: int (default 25, range 3-1000)
+- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_SECONDS, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
+- finalization_quarantine_after_attempts: int (default 25, range 3-1000)
 - workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
-- Constraint: stale thresholds must be >= 2x heartbeat intervals; with auto_fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
+- Constraint: stale thresholds must be >= 2x heartbeat intervals; with fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
 - Retention fields are not on RecoveryConfig; setting heartbeat_retention_hours (removed in 0.5.0) or a retention field here fails at construction
 
 ### RetentionConfig
 - Reached as AppConfig.retention
-- paused_workflow_auto_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
+- paused_workflow_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
 - worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
 - terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning; applies to terminal workflow rows)
 - history_leaf_horizon_days: int (default 3, range 2-14)
 - heartbeat_leaf_horizon_hours: int (default 6, range 2-48)
-- partition_maintenance_interval_s: int (default 900, range 60-3600)
-- retention_sweep_interval_s: int (default 300, range 30s-24h)
+- partition_maintenance_interval_seconds: int (default 900, range 60-3600)
+- retention_sweep_interval_seconds: int (default 300, range 30s-24h)
 - retention_delete_batch_size: int (default 500, range 50-10000)
 - retention_periods: tuple[timedelta, ...] (default (); whole days 1-1825; periods a send may choose explicitly)
 - queue_retention: dict[str, timedelta | None] (default {}; whole days 1-1825, or None for forever; the class key is standard_<days>d)
 - Terminal task records are removed by partition drop, not by row delete
 
 ### WorkerResilienceConfig
-- db_retry_initial_ms: int (default 500, range 100ms-60s)
-- db_retry_max_ms: int (default 30_000, range 500ms-5min)
-- db_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
+- database_retry_initial_ms: int (default 500, range 100ms-60s)
+- database_retry_max_ms: int (default 30_000, range 500ms-5min)
+- database_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
 - notify_poll_interval_ms: int (default 5_000, range 1s-5min)
-- Constraint: db_retry_max_ms >= db_retry_initial_ms
+- Constraint: database_retry_max_ms >= database_retry_initial_ms
 
 ### discover_tasks
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"])
@@ -523,8 +532,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
 
 #### IntervalSchedule
-- IntervalSchedule(seconds=30) | IntervalSchedule(hours=1, minutes=30)
-- At least one of: seconds, minutes, hours, days
+- IntervalSchedule(every=timedelta(seconds=30)) | IntervalSchedule(every=timedelta(hours=1, minutes=30))
+- every: timedelta, whole seconds, 1 second to 365 days (microseconds, zero or less, above 365 days -> ConfigurationError)
 
 #### HourlySchedule
 - HourlySchedule(minute=30, second=0) -> every hour at XX:30:00
@@ -533,10 +542,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - DailySchedule(time=time(3, 0, 0)) -> daily at 03:00:00
 
 #### WeeklySchedule
-- WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
+- WeeklySchedule(weekdays=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
 
 #### MonthlySchedule
-- MonthlySchedule(day=15, time=time(15, 0)) -> 15th at 15:00
+- MonthlySchedule(day_of_month=15, time=time(15, 0)) -> 15th at 15:00
 
 #### CronSchedule
 - Typed 5-field cron-style schedule (minute hour day-of-month month day-of-week); fires at second :00
@@ -551,13 +560,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 #### SchedulePattern
 - Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule
+- Each pattern names its kind in the field `kind` ('interval', 'hourly', 'daily', 'weekly', 'monthly', 'cron')
 
 #### TaskSchedule
 - name: str (unique schedule identifier)
 - task_name: str (registered task name)
 - pattern: SchedulePattern
 - kwargs: dict (task keyword arguments; schedules are kwargs-only)
-- queue_name: str | None
+- queue: str | None (None = the task's queue)
 - enabled: bool (default True)
 - timezone: str (default "UTC")
 - catch_up_missed: bool (default False)
@@ -577,16 +587,16 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - Phase 2: Task module imports — imports each module, collects import/definition errors
   - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
   - Phase 3.1: WorkflowDefinition class validation — imported definitions must declare definition_key
-  - Phase 3.2: Workflow builders — executes @app.workflow_builder functions under send suppression and validates returned specs
+  - Phase 3.2: Workflow builders — executes @app.check_workflow_builder functions under send suppression and validates returned specs
   - Phase 3.3: Undecorated builder detection (HRS-030)
   - Phase 3.5: Runtime policy safety — validates retry/exception-mapper policy metadata
   - Phase 3.6: Schedule validation — validates timezone, task registration, queue, and the kwargs wire contract of each enabled schedule; skipped for the worker role
   - Phase 4 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
   - Phase 4.1 (--live only): Worker connections — each worker profile against max_connections less reserved slots (HRS-219); skipped with no profiles or with pgbouncer_transaction_mode=True
 - Guarantee model:
-  - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
+  - Strong: @app.check_workflow_builder decorated functions are fully executed and validated for exercised builder cases
   - Best-effort: undecorated builder detection (HRS-030) is heuristic — only scans directly discovered modules
-- Returns list[HorsiesError]; empty = all passed
+- Returns ValidationReport (phase_name 'check'); .refusals empty = all passed
 - Errors are collected within each phase; check returns early before later phases when earlier phases fail
 - Worker and scheduler also run check() at startup before accepting work
 - On success: prints "ok: all validations passed" with task count, then "declared error codes:" with one line per declaring task ("<task>: CODE, CODE"), or "declared error codes: none"
@@ -594,9 +604,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### Error Types and Reporting
 
-#### ErrorCode (enum, startup/validation errors HRS-001-HRS-399)
+#### HorsiesErrorCode (enum, startup/validation errors HRS-001-HRS-399)
 Workflow validation (HRS-001-HRS-099):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-001 WORKFLOW_NO_NAME
 - HRS-002 WORKFLOW_NO_NODES
 - HRS-003 WORKFLOW_INVALID_NODE_ID
@@ -605,8 +615,8 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-006 WORKFLOW_INVALID_DEPENDENCY
 - HRS-007 WORKFLOW_CYCLE_DETECTED
 - HRS-008 WORKFLOW_INVALID_ARGS_FROM
-- HRS-009 WORKFLOW_INVALID_CTX_FROM
-- HRS-010 WORKFLOW_CTX_PARAM_MISSING
+- HRS-009 WORKFLOW_INVALID_CONTEXT_FROM
+- HRS-010 WORKFLOW_CONTEXT_PARAMETER_MISSING
 - HRS-011 WORKFLOW_INVALID_OUTPUT
 - HRS-012 WORKFLOW_INVALID_SUCCESS_POLICY
 - HRS-013 WORKFLOW_INVALID_JOIN
@@ -634,8 +644,9 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-036 WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
 - HRS-037 WORKFLOW_SUBWORKFLOW_SELF_NESTING
 - HRS-038 WORKFLOW_TOO_MANY_NODES
+- HRS-039 WORKFLOW_CHECK_BUILD_LIMIT
 Task definition (HRS-100-HRS-199):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-100 TASK_NO_RETURN_TYPE
 - HRS-101 TASK_INVALID_RETURN_TYPE
 - HRS-102 TASK_INVALID_OPTIONS
@@ -650,21 +661,21 @@ Task definition (HRS-100-HRS-199):
 - HRS-112 TASK_INVALID_ERROR_CODE (an error_codes entry is empty, not UPPER_SNAKE_CASE, or an exception class name)
 - HRS-113 TASK_DUPLICATE_ERROR_CODE (an error_codes entry is given twice)
 Config/broker (HRS-200-HRS-299):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE
 - HRS-201 CONFIG_INVALID_CLUSTER_CAP
 - HRS-202 CONFIG_INVALID_PREFETCH
-- HRS-203 BROKER_INVALID_URL
+- HRS-203 DATABASE_INVALID_URL
 - HRS-204 CONFIG_INVALID_RECOVERY
 - HRS-205 CONFIG_INVALID_SCHEDULE
 - HRS-206 CLI_INVALID_ARGS
 - HRS-207 WORKER_INVALID_LOCATOR
 - HRS-208 CONFIG_INVALID_RESILIENCE
 - HRS-209 CONFIG_INVALID_EXCEPTION_MAPPER
-- HRS-210 MODULE_EXEC_ERROR
-- HRS-211 BROKER_INIT_FAILED
+- HRS-210 MODULE_IMPORT_ERROR
+- HRS-211 DATABASE_INIT_FAILED
 - HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code; an error_codes entry is a built-in code or WORKFLOW_STOPPED)
-- HRS-213 CONFIG_INVALID_BROKER_POOL
+- HRS-213 CONFIG_INVALID_DATABASE_POOL
 - HRS-214 CONFIG_INVALID_CHILD_HOOK
 - HRS-215 CONFIG_INVALID_KEEPALIVE
 - HRS-216 CONFIG_INVALID_RETENTION
@@ -678,16 +689,17 @@ Config/broker (HRS-200-HRS-299):
 - HRS-224 EVENT_HANDLER_DUPLICATE_NAME (an earlier handler has the same name, module.qualname of its function)
 - HRS-225 EVENT_HANDLER_INVALID_NAME (the function has no module name, or its name is longer than 255 characters)
 - HRS-226 EVENT_HANDLER_LIMIT (the app has 32 event handlers already)
+- HRS-227 CONFIG_INVALID_PAYLOAD (a payload size bound, warn_bytes or reject_bytes, is not valid; only the Rust and TypeScript clients raise it, Python's PayloadPolicy refuses the value through its field bounds)
 Registry (HRS-300-HRS-399):
-<!-- members: ErrorCode part -->
+<!-- members: HorsiesErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
 - HRS-301 TASK_DUPLICATE_NAME
-- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that is not registered in this process; only the Rust client raises it)
+- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that the app of its workflow builder does not register; the Rust client raises it at builder.task(node), and the node is not added)
 
 #### HorsiesError (base exception)
 - Rust-style formatted error display (like rustc compiler errors)
-- Fields: message, code (ErrorCode | None), location (SourceLocation | None), notes (list[str]), help_text (str | None)
-- .format_rust_style(use_colors=None) -> str (ANSI-colored for TTY)
+- Fields: message, code (HorsiesErrorCode | None), location (SourceLocation | None), notes (list[str]), help_text (str | None)
+- .format_diagnostic(use_colors=None) -> str (ANSI-colored for TTY)
 - Auto-detects source location from call stack (first frame outside horsies internals)
 - Subclasses: WorkflowValidationError, ConfigurationError, TaskDefinitionError, RegistryError
 - Environment variables:
@@ -698,14 +710,14 @@ Registry (HRS-300-HRS-399):
 - .file -> str, .line -> int, .column -> int | None
 - .get_source_line() -> str | None (reads actual source for display)
 - .format_short() -> str ("file:line" or "file:line:col")
-- SourceLocation.from_function(fn) -> SourceLocation | None
+- SourceLocation.from_function(function) -> SourceLocation | None
 
 #### ValidationReport
 - Collects multiple HorsiesError instances within a validation phase
 - ValidationReport(phase_name: str)
-- .add(error: HorsiesError), .has_errors() -> bool, .errors -> list[HorsiesError]
-- .format_rust_style() -> str (formats all errors with "aborting due to N errors" summary)
-- Used by WorkflowSpec construction, AppConfig validation, and app.check()
+- .add(error: HorsiesError), .has_errors() -> bool, .refusals -> list[HorsiesError]
+- .format_diagnostic() -> str (formats all errors with "aborting due to N errors" summary)
+- Used by WorkflowSpec construction, AppConfig validation, and app.check() (its return value)
 
 #### raise_collected(report: ValidationReport) -> None
 - 0 errors: no-op (returns normally)
@@ -715,9 +727,9 @@ Registry (HRS-300-HRS-399):
 #### MultipleValidationErrors (extends HorsiesError)
 - Wraps a ValidationReport with 2+ errors
 - .report -> ValidationReport
-- .format_rust_style() delegates to report
+- .format_diagnostic() delegates to report
 
-#### WorkflowContextMissingIdError (RuntimeError)
+#### WorkflowContextMissingId (RuntimeError)
 - Raised when TaskNode/NodeKey has no node_id for WorkflowContext.result_for()
 
 ### Serialization
@@ -728,39 +740,39 @@ Registry (HRS-300-HRS-399):
 - Unsupported: custom classes, __main__-defined classes, lambdas, file handles
 
 ### Failure Semantics
-- Default (join="all", allow_failed_deps=False): downstream SKIPPED when any dep fails/skips
-- allow_failed_deps=True: downstream runs, receives failed TaskResult
+- Default (join="all", allow_failed_dependencies=False): downstream SKIPPED when any dep fails/skips
+- allow_failed_dependencies=True: downstream runs, receives Failed(task_error)
 - join="any"/"quorum": downstream can still run if success threshold met
-- SKIPPED cascades for join="all" with allow_failed_deps=False
+- SKIPPED cascades for join="all" with allow_failed_dependencies=False
 - OnError.FAIL (default): store error, continue DAG, mark FAILED when all terminal
 - OnError.PAUSE: immediately pause, block new enqueues, await resume
 
 ### Utilities
-- slugify(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)
+- node_id_from_text(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)
 
 ### Terminal State Constants
 - TASK_TERMINAL_STATES: frozenset[TaskStatus] = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 - WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = {COMPLETED, FAILED, CANCELLED, EXPIRED}
-- WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
+- WORKFLOW_NODE_TERMINAL_STATES: frozenset[WorkflowNodeStatus] = {COMPLETED, FAILED, SKIPPED}
 
 ### CLI Commands
-- `horsies worker <module> --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]`
+- `horsies worker <module> --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]`
   - `--profile NAME` — required; a profile in AppConfig.worker_profiles; no default profile; a missing or unknown name exits 1 and lists the defined names
   - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), shared_async=SharedAsyncChildren(count=N, seats=K), shared_thread=SharedThreadChildren(count=N, seats=K), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
-  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> check; worker_pool_size, worker_max_overflow -> WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))) for the worker process and task_send_pool=PoolSize(connections=N) on a child kind for task code that sends
+  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> pre_ping; worker_pool_size, worker_max_overflow -> WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))) for the worker process and task_send_pool=PoolSize(connections=N) on a child kind for task code that sends
   - Removed flags exit 2 and name the field: --processes -> IsolatedChildren.count; --max-tasks-per-child -> IsolatedRecycle.after; --max-memory-per-child-mb -> IsolatedRecycle.above; --max-claim-batch -> ClaimLimits.per_queue_per_pass; --max-claim-per-worker -> ClaimLimits.claimed_per_worker; --drain-timeout -> WorkerProfile.drain_timeout; --child-preload -> WorkerProfile.preload
   - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (the group that /proc/self/cgroup names, v1 memory group else v2 group; the smallest memory.limit_in_bytes / memory.max of the group and its parents, so a systemd MemoryMax or --cgroupns=host counts; without /proc/self/cgroup the files at the mount point; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker opens more Postgres connections itself than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
   - `--metrics-listen HOST:PORT` (or [IPV6]:PORT; no default, no config field) serves GET /metrics (Prometheus text 0.0.4), GET /livez (503 only when the claim loop is stuck) and GET /readyz (200 when the pools have no failure, a child serves and the liveness lock is held); a bad value exits 2; a bind failure does not stop the worker. See /horsies/observability/metrics/
-- `horsies scheduler <module> [--loglevel LEVEL]`
-- `horsies check <module> [--live] [--loglevel LEVEL]`
-- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
+- `horsies scheduler <module> [--log-level LEVEL]`
+- `horsies check <module> [--live] [--log-level LEVEL]`
+- `horsies web <module> [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
   - `horsies web --database-url URL [--session-database-url URL] [--pgbouncer-transaction-mode] [...]` — monitor a database without importing an app module (registry-less)
   - Pass either `<module>` or `--database-url`, not both
-  - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
-  - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
+  - Defaults: `--host 127.0.0.1`, `--port 8600`, `--authorization none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
+  - `--authorization none` is allowed only on a loopback host; a non-loopback host requires `--authorization trusted-header`
   - `--enable-actions` allows cancel/pause/resume
   - `--trace-link TEMPLATE` links a task's trace id in the task detail: an http or https URL with one {trace_id} (MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...)) when mounting; a refused template is HRS-221 CONFIG_INVALID_TRACE_LINK)
-- `horsies metrics <module> --listen HOST:PORT [--loglevel LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
+- `horsies metrics <module> --metrics-listen HOST:PORT [--log-level LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--metrics-listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
 - `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
@@ -787,12 +799,12 @@ Each entry: Title -- summary -> URL
 
 ### Tasks
 - Task Lifecycle -- states and transitions -> /horsies/concepts/task-lifecycle/
-- Result Handling -- TaskResult pattern, error types -> /horsies/concepts/result-handling/
+- Result Handling -- the Result of a task body, TaskOutcome (Succeeded, Failed) and ReadResult of a read, the ReadError classes, error types -> /horsies/concepts/result-handling/
 - Defining Tasks -- @app.task decorator -> /horsies/tasks/defining-tasks/
 - Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
-- Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
+- Error Handling -- error patterns of Result, TaskError and ReadResult -> /horsies/tasks/error-handling/
 - Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
-- Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, TaskResult -> /horsies/tasks/error-types/
+- Error Types -- the Python error types: TaskError, DatabaseResult and DatabaseOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, ReadResult and the ReadError classes -> /horsies/tasks/error-types/
 - Task Types -- the Python type surface of task signatures, strict values, shapes refused at definition, JsonValue and JsonInput, StrictJsonError, the codec functions -> /horsies/tasks/task-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- policy fields and limits, the retry delay (backoff, floor, jitter, cap), auto-retry triggers, retry vs rerun -> /horsies/tasks/retry-policy/
@@ -800,7 +812,7 @@ Each entry: Title -- summary -> URL
 ### Workflows
 - Workflow Semantics -- DAG behavior, failure, dependencies -> /horsies/concepts/workflows/workflow-semantics/
 - Workflow API -- WorkflowSpec/WorkflowHandle reference -> /horsies/concepts/workflows/workflow-api/
-- Workflow Examples -- Python examples of the workflow rules: status helpers, allow_failed_deps, resume, joins, sentinels, success policies, result keys, WorkflowContext, NodeKey, WorkflowMeta -> /horsies/concepts/workflows/workflow-examples/
+- Workflow Examples -- Python examples of the workflow rules: status helpers, allow_failed_dependencies, resume, joins, sentinels, success policies, result keys, WorkflowContext, NodeKey, WorkflowMetadata -> /horsies/concepts/workflows/workflow-examples/
 - Typed Node Builder -- .node() API for type-safe TaskNode construction -> /horsies/concepts/workflows/typed-node-builder/
 - Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
@@ -826,16 +838,16 @@ Each entry: Title -- summary -> URL
 - Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
-- Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
+- Child-Process Hooks -- per-child-process setup with @app.on_child_start -> /horsies/workers/child-process-hooks/
 - Event Handlers -- @app.on_event(EventType) runs a def or an async def function for each lifecycle event of one type in the handler child of the worker; @app.on_handler_child_start; delivery, counts and failures -> /horsies/workers/event-handlers/
 
 ### Monitoring
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
-- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
+- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_stale_tasks_async, get_expired_tasks_async, get_execution_class_coverage_async, get_execution_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard: surfaces, the run graph and timeline (node time, longest chain, linear and log scales), the attempt panel, durations, freshness, action outcomes, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
-- Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
+- Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthorizationPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
 
 ### Observability
@@ -847,18 +859,18 @@ Each entry: Title -- summary -> URL
 - Tracing Setup -- horsies[otel], AppConfig(tracing=OtelTracing()), the SDK of the sending process and of each worker child, the propagator, producer metrics -> /horsies/observability/tracing-setup/
 - Logs -- the task_id, attempt and trace_id fields of the worker's records, the log context of a task body, the JSON format of each client -> /horsies/observability/logs/
 - Log Setup -- AppConfig(log_format=JsonLogs()), TaskContextFilter, JsonLogsFormatter -> /horsies/observability/log-setup/
-- Lifecycle Events -- the event contract (version 7) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
+- Lifecycle Events -- the event contract (version 9) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
 - Dashboards and Alerts -- the Grafana dashboard and the Prometheus alert rules in deploy/, what each alert means -> /horsies/observability/dashboards-and-alerts/
 - OpenTelemetry Collector -- deploy/otel-collector/collector.yaml: scrape the endpoints, export OTLP -> /horsies/observability/opentelemetry-collector/
 - Observability Deployment -- Kubernetes and docker compose: workers with probes, one fleet collector, Prometheus, the Collector -> /horsies/observability/deployment/
 
 ### Operations
 - Deployment Topology -- a dedicated PostgreSQL instance and why, the transaction boundary with the application, the connections of each URL and the pooler mode, what a failover under asynchronous replication can lose (a send, a workflow start, a claim, the end of a task, workflow progress, the liveness lock), the settings that lose no commit -> /horsies/operations/deployment-topology/
-- Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
+- Atomic Enqueue and Topology -- send after commit, resend_on_transient_error, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
-- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
-- Testing -- direct task calls, TaskResult kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
+- Rerun in Your Transaction -- the Python rerun_task_in_async: re-execute a terminal task as a new task in the caller's transaction, RerunCommand, RerunEnqueuePolicy, RerunOutcome, registered_task_codes (the stored retry list is checked against the app's declared codes: RETRY_CODE_NOT_DECLARED, TASK_NOT_REGISTERED) -> /horsies/operations/rerun-in-your-transaction/
+- Testing -- direct task calls, TaskOutcome kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
 ### Troubleshooting
@@ -898,47 +910,47 @@ keyword(s) -> page URL
 
 install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
-pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
+pool_size, max_overflow, session_database, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
 PostgresConfig, psycopg, libpq, event loop, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
 stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
 RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
-send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
-TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
-BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
-TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
-retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
+send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, resend -> /horsies/tasks/sending-tasks/
+Result, Ok, Err, TaskError, Ok(Failed), Err(ReadError), error patterns -> /horsies/tasks/error-handling/
+BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
+TaskHandle, get, get_async, timeout, result, ReadResult, ReadWaitTimeout, ReadTaskNotFound -> /horsies/tasks/retrieving-results/
+retry, backoff, exponential, fixed, jitter, max_delay_seconds, retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
 TaskStatus, is_terminal, TASK_TERMINAL_STATES -> /horsies/tasks/retrieving-results/#terminal-statuses
-TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
+Result, ReadResult, TaskOutcome, Succeeded, Failed, ReadError, error as value -> /horsies/concepts/result-handling/
 DEFAULT, CUSTOM, priority, queue mode, max_concurrency per queue -> /horsies/concepts/queue-modes/
 QueueMode, CustomQueueConfig, queue_name, HRS-103 -> /horsies/configuration/app-config/#queue-mode-configuration
 WorkflowSpec, DAG, TaskNode, waits_for, args_from -> /horsies/concepts/workflows/workflow-semantics/
-WorkflowHandle, WorkflowTaskInfo, WorkflowStatus -> /horsies/concepts/workflows/workflow-api/
+WorkflowHandle, WorkflowNodeInfo, WorkflowStatus -> /horsies/concepts/workflows/workflow-api/
 SubWorkflowNode, WorkflowDefinition, build_with, child workflow -> /horsies/concepts/workflows/subworkflows/
-WorkflowContext, workflow_ctx_from, result_for, NodeKey -> /horsies/concepts/workflows/workflow-examples/
+WorkflowContext, workflow_context_from, result_for, NodeKey -> /horsies/concepts/workflows/workflow-examples/
 SuccessPolicy, SuccessCase, partial success -> /horsies/concepts/workflows/workflow-semantics/
 join, any, quorum, min_success, OR-join -> /horsies/concepts/workflows/workflow-semantics/
 on_error, pause, resume, PAUSED -> /horsies/concepts/workflows/workflow-semantics/
-allow_failed_deps, UPSTREAM_SKIPPED, recovery -> /horsies/concepts/workflows/workflow-semantics/
+allow_failed_dependencies, UPSTREAM_SKIPPED, recovery -> /horsies/concepts/workflows/workflow-semantics/
 fan-out, fan-in, parallel, diamond -> /horsies/quick-start/05-workflow-patterns/
 NodeFactory, .node(), typed node builder, type-safe -> /horsies/concepts/workflows/typed-node-builder/
 SubWorkflowSummary, summary_for, has_summary -> /horsies/concepts/workflows/subworkflows/
-WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/workflow-examples/
+WorkflowMetadata, workflow_meta, metadata injection -> /horsies/concepts/workflows/workflow-examples/
 TaskRuntime, runtime parameter, RuntimeTaskFunction -> /horsies/tasks/defining-tasks/#task-runtime
 FencingToken, fencing token, stale attempt, conditional write -> /horsies/concepts/fencing-token/
 TaskRuntime.for_test, AttemptNumber, direct call with a runtime -> /horsies/operations/testing/#pass-a-task-runtime
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
-good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
-schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
+good_until, task expiry, deadline, with_options, TaskFunctionWithOptions -> /horsies/tasks/sending-tasks/
+delay, delay_seconds, delayed send, resend_on_transient_error, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
 list_worker_states, get_worker_state, broker methods -> /horsies/monitoring/broker-methods/
 TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
-BrokerResult, BrokerOperationError, BrokerErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
+DatabaseResult, DatabaseOperationError, DatabaseErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
 schedule pattern, Interval, Hourly, Daily, Weekly, Monthly -> /horsies/scheduling/schedule-patterns/
 scheduler, check_interval, cron -> /horsies/scheduling/scheduler-overview/
@@ -948,36 +960,36 @@ serialization, envelope, __h_task_result__, strict JSON, NaN, surrogate -> /hors
 JsonValue, JsonInput, pydantic, datetime, SignatureValidationError, encode_value, decode_task_result -> /horsies/tasks/task-types/
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
-ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
-TaskError, BrokerOperationError, TaskSendError, NoCause, broker_error_cause, TaskResult -> /horsies/tasks/error-types/
+HorsiesErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
+TaskError, DatabaseOperationError, TaskSendError, NoCause, ReadError, ReadDatabaseError, ReadResultDeserializationError -> /horsies/tasks/error-types/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
-SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/error-types/
+SourceLocation, Rust-style errors, format_diagnostic, error display -> /horsies/tasks/error-types/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/
 agent skills, SKILL.md, tasks.md, workflows.md, configs.md, monitoring.md, horsies/.agents/skills/horsies, horsies skills install -> /horsies/cli/
 discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
-slugify, NodeKey -> /horsies/concepts/workflows/workflow-examples/
+node_id_from_text, NodeKey -> /horsies/concepts/workflows/workflow-examples/
 node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
 showcase, demo app, example application -> /horsies/quick-start/06-showcase/
 remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
 retention class, retention_class_key, queue_retention, retention_periods, partitions, dedupe horizon, audit horizon, heartbeat_leaf_horizon_hours -> /horsies/configuration/retention-config/
 RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
-on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
+on_child_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
-ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
+ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, get_stale_tasks, get_expired_tasks, BoundedTaskList, ExecutionClassCoverage, ExecutionClassReport -> /horsies/monitoring/health-reads/
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
-horsies[web], create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
-cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions, include_running, horsies_task_cancel -> /horsies/monitoring/action-semantics/
+horsies[web], create_monitoring_app, MonitoringAuthorizationPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
+cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions, CancelPolicy, INCLUDE_RUNNING, horsies_task_cancel -> /horsies/monitoring/action-semantics/
 cancellation, TaskRuntime.cancel_state, CancelRequested, CancelNotRequested, CancelCause, RunCancelState -> /horsies/tasks/defining-tasks/#cancellation
-rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/
+rerun_task_in_async, RerunCommand, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/
 AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
 deployment topology, dedicated instance, failover, asynchronous replication, synchronous replication, synchronous_commit, synchronous_standby_names, standby, lost commit -> /horsies/operations/deployment-topology/
-atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
+atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_error -> /horsies/operations/atomic-enqueue-and-topology/
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/

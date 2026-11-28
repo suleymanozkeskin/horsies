@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import assert_never
 
 from horsies import CancelNotRequested, CancelRequested, TaskRuntime
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.tasks.instance import app
 
@@ -64,7 +65,7 @@ def _cause_text(runtime: TaskRuntime) -> str:
             assert_never(unreachable)
 
 
-async def _wait_for_cancel(runtime: TaskRuntime, marker_dir: str) -> TaskResult[str, TaskError]:
+async def _wait_for_cancel(runtime: TaskRuntime, marker_dir: str) -> Result[str, TaskError]:
     """An ``async def`` body: wait until the cancel reaches the ``await``."""
     _started(marker_dir)
     try:
@@ -72,10 +73,10 @@ async def _wait_for_cancel(runtime: TaskRuntime, marker_dir: str) -> TaskResult[
     except asyncio.CancelledError:
         _write(marker_dir, 'cancelled', _cause_text(runtime))
         raise
-    return TaskResult(ok='never cancelled')
+    return Ok('never cancelled')
 
 
-def _poll_for_cancel(runtime: TaskRuntime, marker_dir: str) -> TaskResult[str, TaskError]:
+def _poll_for_cancel(runtime: TaskRuntime, marker_dir: str) -> Result[str, TaskError]:
     """A ``def`` body: read the cancel state between steps; stop at the
     cancel and return a value, which the cancel drops."""
     _started(marker_dir)
@@ -84,60 +85,60 @@ def _poll_for_cancel(runtime: TaskRuntime, marker_dir: str) -> TaskResult[str, T
         match runtime.cancel_state():
             case CancelRequested():
                 _write(marker_dir, 'cancelled', _cause_text(runtime))
-                return TaskResult(ok='stopped at the cancel')
+                return Ok('stopped at the cancel')
             case CancelNotRequested():
                 time.sleep(POLL_S)
             case _ as unreachable:
                 assert_never(unreachable)
-    return TaskResult(ok='never cancelled')
+    return Ok('never cancelled')
 
 
-@app.task(task_name='e2e_cancel_isolated_async')
+@app.task(name='e2e_cancel_isolated_async')
 async def cancel_isolated_async(
     runtime: TaskRuntime, *, marker_dir: str
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     return await _wait_for_cancel(runtime, marker_dir)
 
 
-@app.task(task_name='e2e_cancel_isolated_def')
-def cancel_isolated_def(runtime: TaskRuntime, *, marker_dir: str) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_cancel_isolated_def')
+def cancel_isolated_def(runtime: TaskRuntime, *, marker_dir: str) -> Result[str, TaskError]:
     return _poll_for_cancel(runtime, marker_dir)
 
 
 @app.task(
-    task_name='e2e_cancel_shared_async',
+    name='e2e_cancel_shared_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
 async def cancel_shared_async(
     runtime: TaskRuntime, *, marker_dir: str
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     return await _wait_for_cancel(runtime, marker_dir)
 
 
 @app.task(
-    task_name='e2e_cancel_shared_thread',
+    name='e2e_cancel_shared_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-def cancel_shared_thread(runtime: TaskRuntime, *, marker_dir: str) -> TaskResult[str, TaskError]:
+def cancel_shared_thread(runtime: TaskRuntime, *, marker_dir: str) -> Result[str, TaskError]:
     return _poll_for_cancel(runtime, marker_dir)
 
 
-@app.task(task_name='e2e_cancel_isolated_hard_stop', cancel_grace_ms=HARD_STOP_GRACE_MS)
-def cancel_isolated_hard_stop(*, marker_dir: str) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_cancel_isolated_hard_stop', cancel_grace_ms=HARD_STOP_GRACE_MS)
+def cancel_isolated_hard_stop(*, marker_dir: str) -> Result[str, TaskError]:
     """Ignores its cancel: the worker kills its child after the grace."""
     _started(marker_dir)
     time.sleep(BODY_LIMIT_S)
     _write(marker_dir, 'returned', 'returned')
-    return TaskResult(ok='ran to the end')
+    return Ok('ran to the end')
 
 
-@app.task(task_name='e2e_cancel_isolated_no_grace')
-def cancel_isolated_no_grace(*, marker_dir: str) -> TaskResult[str, TaskError]:
+@app.task(name='e2e_cancel_isolated_no_grace')
+def cancel_isolated_no_grace(*, marker_dir: str) -> Result[str, TaskError]:
     """Ignores its cancel and returns later: with no grace, nothing is
     killed."""
     _started(marker_dir)
     time.sleep(IGNORED_CANCEL_RUN_S)
     _write(marker_dir, 'returned', 'returned')
-    return TaskResult(ok='ran to the end')
+    return Ok('ran to the end')

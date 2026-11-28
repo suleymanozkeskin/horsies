@@ -1,0 +1,478 @@
+name: TypeScript Packages
+
+# The native addon of the TypeScript client for each row of the platform list
+# (.github/release-platforms.json), the npm packages, and their checks. A run
+# is started by hand (workflow_dispatch) or by the release workflow
+# (workflow_call); no push or pull request starts one. This workflow publishes
+# nothing: the release publishes the tarballs that its own call of this
+# workflow packed and checked.
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        description: The version of the npm packages (clients/typescript/horsies/package.json)
+        value: ${{ jobs.platforms.outputs.version }}
+
+permissions: {}
+
+env:
+  # The minimum runtimes of the client, Node 26 and Bun 1.4. The checks in
+  # containers run node:<version>-<variant> and oven/bun:<version>-<variant>
+  # of these versions; the platform list names the variants.
+  TYPESCRIPT_NODE_VERSION: "26.13.1"
+  TYPESCRIPT_BUN_VERSION: "1.4.4"
+  # The local registry of the install checks (tests/packages/registry.ts),
+  # on 127.0.0.1 of the runner.
+  PACKAGE_REGISTRY_PORT: "4873"
+  # The PostgreSQL of the install checks: on 127.0.0.1 of the runner, trust
+  # authentication.
+  INSTALL_CHECK_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/postgres
+
+jobs:
+  # The version of the npm packages and the two matrices, from the platform
+  # list: one build entry per platform, one install entry per platform and
+  # installer (npm on Node, Bun).
+  platforms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.matrix.outputs.version }}
+      build_matrix: ${{ steps.matrix.outputs.build_matrix }}
+      install_matrix: ${{ steps.matrix.outputs.install_matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      # The script imports no package, so the step needs no install.
+      - name: Read the platform list
+        id: matrix
+        working-directory: clients/typescript
+        run: |
+          set -euo pipefail
+          bun tests/packages/matrix.ts \
+            --node-version "$TYPESCRIPT_NODE_VERSION" \
+            --bun-version "$TYPESCRIPT_BUN_VERSION" \
+            | tee -a "$GITHUB_OUTPUT"
+
+  # One release build of the addon per platform, with no cargo feature: a
+  # published build has no test-only export (the feature test-probes). Each
+  # row builds on a runner of its own CPU, loads its file in Node 26 and in
+  # Bun 1.4, and uploads it.
+  build-addons:
+    name: build-addons (${{ matrix.name }})
+    needs: platforms
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      # Every platform reports its result, also when another one fails.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.platforms.outputs.build_matrix) }}
+    env:
+      ADDON_DIR: ${{ github.workspace }}/addon-out
+      ADDON_FILE: horsies.${{ matrix.platform }}.node
+      RUST_TARGET: ${{ matrix.rust_target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No npm step runs, so the action caches no npm folder.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      # The napi CLI of clients/typescript/bridge/package.json.
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      # rustup is preinstalled on the runner. With no argument it installs the
+      # toolchain and components that rust-toolchain.toml names.
+      - name: Install the Rust toolchain
+        if: matrix.build == 'glibc-2.17-toolchain' || matrix.build == 'runner'
+        run: |
+          rustup toolchain install
+          rustup target add "$RUST_TARGET"
+          rustc --version
+
+      # --use-napi-cross links against the glibc 2.17 of the napi cross
+      # toolchain; pack-npm checks that floor. A build with the runner's own
+      # toolchain needs the runner's glibc and refuses older systems.
+      - name: Build the addon with the glibc 2.17 toolchain
+        if: matrix.build == 'glibc-2.17-toolchain'
+        working-directory: clients/typescript/bridge
+        run: ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --use-napi-cross --output-dir "$ADDON_DIR"
+
+      # The image of the row's wheel (release.yml builds the wheel with
+      # maturin in the same manylinux image), on a runner of the row's CPU:
+      # the C compiler is the image's own gcc, and the addon needs no glibc
+      # above the image's. The napi CLI is JavaScript from the workspace
+      # install above; Node of the workflow's version runs it, from the
+      # nodejs.org tarball, checked against its SHASUMS256.txt.
+      - name: Build the addon in the manylinux image
+        if: matrix.build == 'manylinux-container'
+        env:
+          BUILD_IMAGE: ${{ matrix.build_image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ADDON_DIR"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$ADDON_DIR:/addon-out" \
+            --env RUST_TARGET \
+            --env NODE_VERSION="$TYPESCRIPT_NODE_VERSION" \
+            --workdir /work \
+            "$BUILD_IMAGE" \
+            bash -euo pipefail -c '
+              case "$(uname -m)" in
+                aarch64) node_arch=arm64 ;;
+                x86_64) node_arch=x64 ;;
+                *) echo "no Node build for $(uname -m)"; exit 1 ;;
+              esac
+              node_file="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"
+              cd /tmp
+              curl --fail --silent --show-error --location --remote-name "https://nodejs.org/dist/v${NODE_VERSION}/${node_file}"
+              curl --fail --silent --show-error --location --remote-name "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+              grep " ${node_file}\$" SHASUMS256.txt | sha256sum --check --strict
+              tar -xzf "$node_file"
+              export PATH="/tmp/node-v${NODE_VERSION}-linux-${node_arch}/bin:$PATH"
+              curl --proto "=https" --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+              export PATH="$HOME/.cargo/bin:$PATH"
+              cd /work
+              rustup toolchain install
+              rustup target add "$RUST_TARGET"
+              rustc --version
+              node --version
+              gcc --version | head -n 1
+              cd clients/typescript/bridge
+              ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir /addon-out
+            '
+
+      - name: Build the addon on the runner
+        if: matrix.build == 'runner'
+        working-directory: clients/typescript/bridge
+        run: ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir "$ADDON_DIR"
+
+      # musl: the build runs in an Alpine container of the runner's CPU, so
+      # the Rust toolchain and the C compiler are musl's own. The napi CLI is
+      # JavaScript from the workspace install of the step above; the
+      # container's Node runs it. napi build turns off crt-static for a musl
+      # target, so the addon links musl's libc dynamically. For
+      # aarch64-unknown-linux-musl, napi build sets the cross linker
+      # aarch64-linux-musl-gcc unless CARGO_TARGET_<TARGET>_LINKER is set;
+      # this build is native, so the variable names the container's gcc.
+      - name: Build the addon in an Alpine container
+        if: matrix.build == 'alpine-container'
+        env:
+          BUILD_IMAGE: ${{ matrix.build_image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ADDON_DIR"
+          linker_variable="CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$RUST_TARGET")_LINKER"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$ADDON_DIR:/addon-out" \
+            --env RUST_TARGET \
+            --env "$linker_variable=gcc" \
+            --workdir /work \
+            "$BUILD_IMAGE" \
+            sh -euc '
+              apk add --no-cache build-base rustup
+              rustup-init -y --profile minimal --default-toolchain none --no-modify-path
+              export PATH="$HOME/.cargo/bin:$PATH"
+              rustup toolchain install
+              rustup target add "$RUST_TARGET"
+              rustc --version
+              cd clients/typescript/bridge
+              ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir /addon-out
+            '
+
+      - name: Check that the build wrote exactly the addon file of the platform
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=("$ADDON_DIR"/*.node)
+          if [ "${#built[@]}" -ne 1 ] || [ "$(basename "${built[0]}")" != "$ADDON_FILE" ]; then
+            echo "::error::$ADDON_DIR holds [${built[*]}]; the build of ${{ matrix.name }} writes exactly $ADDON_FILE"
+            exit 1
+          fi
+          ls -l "$ADDON_DIR/$ADDON_FILE"
+
+      - name: Load the addon in Node and Bun on the runner
+        if: matrix.check == 'runner'
+        working-directory: clients/typescript
+        run: |
+          node tests/packages/addon-check.ts "$ADDON_DIR/$ADDON_FILE"
+          bun tests/packages/addon-check.ts "$ADDON_DIR/$ADDON_FILE"
+
+      # In the images of the install checks: a musl row loads its file on musl.
+      - name: Load the addon in Node and Bun containers of the platform
+        if: matrix.check == 'container'
+        env:
+          NODE_IMAGE: ${{ matrix.node_image }}
+          BUN_IMAGE: ${{ matrix.bun_image }}
+        run: |
+          set -euo pipefail
+          for runtime in node bun; do
+            case "$runtime" in
+              node) image="$NODE_IMAGE" ;;
+              bun) image="$BUN_IMAGE" ;;
+            esac
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE/clients/typescript:/ts:ro" \
+              --volume "$ADDON_DIR:/addon-out:ro" \
+              "$image" \
+              "$runtime" /ts/tests/packages/addon-check.ts "/addon-out/$ADDON_FILE"
+          done
+
+      - name: Upload the addon
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: typescript-addon-${{ matrix.platform }}
+          path: ${{ env.ADDON_DIR }}/${{ env.ADDON_FILE }}
+          if-no-files-found: error
+
+  # Builds horsies (tsc of TypeScript 7 with horsies/tsconfig.build.json),
+  # packs it and one platform package per row, and checks each tarball: the
+  # files it holds, its manifest, the API report of the packed declarations,
+  # no file that names the dev-only variable, no test-only export in an
+  # addon file, and the glibc floor of each glibc addon: 2.17 for the napi
+  # cross toolchain, the image's glibc for a manylinux build
+  # (tests/packages/pack.ts).
+  pack-npm:
+    needs: [platforms, build-addons]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # npm packs each package; no npm install runs, so the action caches no
+      # npm folder.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Install the workspace from bun.lock
+        working-directory: clients/typescript
+        run: bun install --frozen-lockfile
+
+      - name: Download the addon of every platform
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: typescript-addon-*
+          merge-multiple: true
+          path: addons
+
+      - name: Build, pack and check the npm packages
+        working-directory: clients/typescript
+        run: bun tests/packages/pack.ts --addons "$GITHUB_WORKSPACE/addons" --out "$GITHUB_WORKSPACE/npm-packages"
+
+      # The packed horsies tarball is the input of the public API gate: the API
+      # report, the exported-type check and the no-any check read its
+      # unpacked declarations.
+      - name: Run the public API gate on the packed horsies tarball
+        working-directory: clients/typescript
+        env:
+          VERSION: ${{ needs.platforms.outputs.version }}
+        run: bun tests/public-api/run.ts check --tarball "$GITHUB_WORKSPACE/npm-packages/horsies-$VERSION.tgz"
+
+      - name: Upload the tarballs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: typescript-npm-packages
+          path: npm-packages/
+          if-no-files-found: error
+
+  # Per platform and installer: a new project installs horsies from a local
+  # registry of the tarballs (npm on Node 26, or Bun 1.4), in a container of
+  # the platform's image or on the runner, then loads the addon through the
+  # package loader, resolves each entry point, requires the skill files and
+  # the bin file, pings PostgreSQL through app.pingDatabase(), and, on the
+  # Linux x86_64 glibc row, serves the monitoring page and its script from an
+  # app on a refused database URL (tests/packages/consumer-check.ts). Each
+  # Bun row also runs a program made by `bun build --compile` in a folder
+  # with no node_modules (tests/packages/compile-check.ts).
+  # For a held row, horsies does not list the platform package, so the check
+  # installs it by name beside horsies.
+  check-npm:
+    name: check-npm (${{ matrix.name }}, ${{ matrix.installer }})
+    needs: [platforms, pack-npm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.platforms.outputs.install_matrix) }}
+    env:
+      VERSION: ${{ needs.platforms.outputs.version }}
+      RUNTIME: ${{ matrix.runtime }}
+      INSTALLER: ${{ matrix.installer }}
+      PLATFORM_PACKAGE: ${{ matrix.package }}
+      RELEASE: ${{ matrix.release }}
+      WEB_PAGE: ${{ matrix.web_page }}
+      ALL_PLATFORM_PACKAGES: ${{ matrix.all_packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Node runs the registry; on the runner it also runs the npm check.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.TYPESCRIPT_NODE_VERSION }}
+          package-manager-cache: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.TYPESCRIPT_BUN_VERSION }}
+
+      - name: Download the tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: typescript-npm-packages
+          path: npm-packages
+
+      - name: Start PostgreSQL in a container
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          docker run --detach --name horsies-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:18
+          for attempt in $(seq 1 30); do
+            if docker exec horsies-postgres pg_isready --username postgres --host 127.0.0.1 > /dev/null 2>&1; then
+              echo "PostgreSQL accepts connections (attempt $attempt)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::PostgreSQL did not accept connections within 60 seconds"
+          docker logs horsies-postgres
+          exit 1
+
+      - name: Start PostgreSQL on the runner
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          brew install postgresql@18
+          bin="$(brew --prefix postgresql@18)/bin"
+          "$bin/initdb" --username=postgres --auth=trust --pgdata="$RUNNER_TEMP/pgdata"
+          "$bin/pg_ctl" --pgdata="$RUNNER_TEMP/pgdata" --log="$RUNNER_TEMP/postgres.log" \
+            --options="-p 5432 -c listen_addresses=127.0.0.1" --wait --timeout=60 start
+
+      # The registry keeps running for the later steps of the job.
+      - name: Start the local registry of the tarballs
+        run: |
+          set -euo pipefail
+          nohup node clients/typescript/tests/packages/registry.ts \
+            --packages "$GITHUB_WORKSPACE/npm-packages" --port "$PACKAGE_REGISTRY_PORT" \
+            > "$RUNNER_TEMP/registry.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/horsies" > /dev/null; then
+              echo "The registry answers (attempt $attempt)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the registry did not answer within 30 seconds"
+          cat "$RUNNER_TEMP/registry.log"
+          exit 1
+
+      # --network host: the container reaches the registry and PostgreSQL on
+      # 127.0.0.1 of the runner.
+      - name: Install and check in a container of the platform
+        if: matrix.place == 'container'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network host \
+            --volume "$GITHUB_WORKSPACE/clients/typescript:/ts:ro" \
+            --env HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            "$IMAGE" \
+            "$RUNTIME" /ts/tests/packages/consumer-check.ts \
+              --installer "$INSTALLER" \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE" \
+              --web-page "$WEB_PAGE" \
+              --all-platform-packages "$ALL_PLATFORM_PACKAGES"
+
+      - name: Install and check on the runner
+        if: matrix.place == 'runner'
+        working-directory: clients/typescript
+        run: |
+          HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            "$RUNTIME" tests/packages/consumer-check.ts \
+              --installer "$INSTALLER" \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE" \
+              --web-page "$WEB_PAGE" \
+              --all-platform-packages "$ALL_PLATFORM_PACKAGES"
+
+      # Per Bun row: a program that creates an app and pings PostgreSQL is
+      # compiled with `bun build --compile` in a project that installs horsies
+      # from the registry; the file is copied to a new folder, the project and
+      # its node_modules are removed, and the file runs there
+      # (tests/packages/compile-check.ts).
+      - name: Compile a program with bun build --compile and run it with no node_modules, in a container of the platform
+        if: matrix.installer == 'bun' && matrix.place == 'container'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network host \
+            --volume "$GITHUB_WORKSPACE/clients/typescript:/ts:ro" \
+            --env HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            "$IMAGE" \
+            bun /ts/tests/packages/compile-check.ts \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE"
+
+      - name: Compile a program with bun build --compile and run it with no node_modules, on the runner
+        if: matrix.installer == 'bun' && matrix.place == 'runner'
+        working-directory: clients/typescript
+        run: |
+          HORSIES_TEST_DATABASE_URL="$INSTALL_CHECK_DATABASE_URL" \
+            bun tests/packages/compile-check.ts \
+              --registry "http://127.0.0.1:$PACKAGE_REGISTRY_PORT/" \
+              --version "$VERSION" \
+              --platform-package "$PLATFORM_PACKAGE" \
+              --release "$RELEASE"
+
+      - name: Show the requests of the registry
+        if: always()
+        run: cat "$RUNNER_TEMP/registry.log" || true

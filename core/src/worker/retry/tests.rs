@@ -9,8 +9,8 @@ fn options_with_policy(policy: &str) -> String {
 
 fn fixed_policy(intervals: &str, retries: u32, jitter: bool) -> String {
     format!(
-        r#"{{"max_retries": {retries}, "intervals": {intervals}, "backoff_strategy": "fixed",
-            "jitter": {jitter}, "max_delay_seconds": null, "auto_retry_for": ["TRANSIENT"]}}"#
+        r#"{{"max_retries": {retries}, "intervals_seconds": {intervals}, "backoff_strategy": "fixed",
+            "jitter": {jitter}, "max_delay_seconds": null, "retry_for": ["TRANSIENT"]}}"#
     )
 }
 
@@ -306,51 +306,51 @@ fn a_refused_timeout_keeps_a_valid_retry_policy() {
 #[test]
 fn a_valid_policy_reads_as_a_rule() {
     let rule = rule_of(&fixed_policy("[60, 300, 900]", 3, true));
-    assert_eq!(rule.intervals, vec![60, 300, 900]);
+    assert_eq!(rule.intervals_seconds, vec![60, 300, 900]);
     assert_eq!(rule.backoff, Backoff::Fixed);
     assert!(rule.jitter);
     assert_eq!(rule.delay_cap, DelayCap::Uncapped);
-    assert_eq!(rule.auto_retry_for, vec!["TRANSIENT".to_owned()]);
+    assert_eq!(rule.retry_for, vec!["TRANSIENT".to_owned()]);
 }
 
 #[test]
 fn a_policy_outside_its_rule_refuses_the_run_and_cannot_retry() {
     let cases = [
-        // auto_retry_for is required and non-empty.
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "fixed", "jitter": false}"#,
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": []}"#,
+        // retry_for is required and non-empty.
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "fixed", "jitter": false}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": []}"#,
         // Codes are text: the tagged built-in object is not a stored code.
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": [{"__builtin_task_code__": "TASK_TIMEOUT"}]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": [{"__builtin_task_code__": "TASK_TIMEOUT"}]}"#,
         // No interval list, an empty one, a float, a zero, one above a day.
         r#"{"max_retries": 1, "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [1.5], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [0], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [86401], "backoff_strategy": "fixed",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1.5], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [0], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [86401], "backoff_strategy": "fixed",
+            "jitter": false, "retry_for": ["X"]}"#,
         // A strategy that is not fixed or exponential.
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "linear", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "linear", "jitter": false,
+            "retry_for": ["X"]}"#,
         // Fixed: one interval per retry. Exponential: one base interval.
-        r#"{"max_retries": 2, "intervals": [1], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 2, "intervals": [1, 2], "backoff_strategy": "exponential",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 2, "intervals_seconds": [1], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 2, "intervals_seconds": [1, 2], "backoff_strategy": "exponential",
+            "jitter": false, "retry_for": ["X"]}"#,
         // max_retries 1..=20, max_delay_seconds positive, no extra keys.
-        r#"{"max_retries": 0, "intervals": [1], "backoff_strategy": "exponential",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 21, "intervals": [1], "backoff_strategy": "exponential",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "exponential",
-            "jitter": false, "max_delay_seconds": 0, "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [1], "backoff_strategy": "exponential",
-            "jitter": false, "auto_retry_for": ["X"], "extra": 1}"#,
+        r#"{"max_retries": 0, "intervals_seconds": [1], "backoff_strategy": "exponential",
+            "jitter": false, "retry_for": ["X"]}"#,
+        r#"{"max_retries": 21, "intervals_seconds": [1], "backoff_strategy": "exponential",
+            "jitter": false, "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "exponential",
+            "jitter": false, "max_delay_seconds": 0, "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [1], "backoff_strategy": "exponential",
+            "jitter": false, "retry_for": ["X"], "extra": 1}"#,
         // A policy that is not an object.
         r#"[1, 2]"#,
     ];
@@ -375,16 +375,16 @@ fn a_policy_outside_its_rule_refuses_the_run_and_cannot_retry() {
 /// that the policy leaves out takes the field default, as at enqueue.
 #[test]
 fn a_key_the_policy_leaves_out_takes_the_field_default() {
-    let defaults = rule_of(r#"{"auto_retry_for": ["X"]}"#);
+    let defaults = rule_of(r#"{"retry_for": ["X"]}"#);
     assert_eq!(defaults.max_retries, 3);
-    assert_eq!(defaults.intervals, vec![60, 300, 900]);
+    assert_eq!(defaults.intervals_seconds, vec![60, 300, 900]);
     assert_eq!(defaults.backoff, Backoff::Fixed);
     assert!(defaults.jitter);
     assert_eq!(defaults.delay_cap, DelayCap::Uncapped);
 
-    let partial = rule_of(r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X"]}"#);
+    let partial = rule_of(r#"{"max_retries": 1, "intervals_seconds": [5], "retry_for": ["X"]}"#);
     assert_eq!(partial.max_retries, 1);
-    assert_eq!(partial.intervals, vec![5]);
+    assert_eq!(partial.intervals_seconds, vec![5]);
     assert_eq!(partial.backoff, Backoff::Fixed);
     assert!(partial.jitter);
 }
@@ -392,8 +392,13 @@ fn a_key_the_policy_leaves_out_takes_the_field_default() {
 /// A key that is present with `null` is not left out: strict mode refuses it.
 #[test]
 fn a_null_value_is_not_a_left_out_key() {
-    for key in ["max_retries", "intervals", "backoff_strategy", "jitter"] {
-        let policy = format!(r#"{{"{key}": null, "auto_retry_for": ["X"]}}"#);
+    for key in [
+        "max_retries",
+        "intervals_seconds",
+        "backoff_strategy",
+        "jitter",
+    ] {
+        let policy = format!(r#"{{"{key}": null, "retry_for": ["X"]}}"#);
         assert!(
             matches!(
                 retry_of(&options_with_policy(&policy)),
@@ -403,8 +408,8 @@ fn a_null_value_is_not_a_left_out_key() {
         );
     }
     let no_cap = rule_of(
-        r#"{"max_retries": 1, "intervals": [5], "max_delay_seconds": null,
-            "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [5], "max_delay_seconds": null,
+            "retry_for": ["X"]}"#,
     );
     assert_eq!(no_cap.delay_cap, DelayCap::Uncapped);
 }
@@ -412,10 +417,10 @@ fn a_null_value_is_not_a_left_out_key() {
 /// Python `validate_error_code_string`: each code is `^[A-Z][A-Z0-9_]*$`,
 /// and `WORKFLOW_STOPPED` is reserved (#1078).
 #[test]
-fn each_auto_retry_for_code_must_be_an_error_code_text() {
+fn each_retry_for_code_must_be_an_error_code_text() {
     let policy = |code: &str| {
         format!(
-            r#"{{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X", {}]}}"#,
+            r#"{{"max_retries": 1, "intervals_seconds": [5], "retry_for": ["X", {}]}}"#,
             serde_json::Value::from(code)
         )
     };
@@ -439,7 +444,7 @@ fn each_auto_retry_for_code_must_be_an_error_code_text() {
     }
     for accepted in ["A", "RATE_LIMITED", "E2E_42", "TASK_TIMEOUT", "MY_ERROR"] {
         assert_eq!(
-            rule_of(&policy(accepted)).auto_retry_for,
+            rule_of(&policy(accepted)).retry_for,
             vec!["X".to_owned(), accepted.to_owned()]
         );
     }
@@ -449,8 +454,8 @@ fn each_auto_retry_for_code_must_be_an_error_code_text() {
 #[test]
 fn a_delay_cap_above_the_u32_range_reads() {
     let rule = rule_of(
-        r#"{"max_retries": 1, "intervals": [5], "max_delay_seconds": 5000000000,
-            "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [5], "max_delay_seconds": 5000000000,
+            "retry_for": ["X"]}"#,
     );
     assert_eq!(rule.delay_cap, DelayCap::AtMost(5_000_000_000));
 }
@@ -481,14 +486,14 @@ fn every_refusal_starts_with_python_s_text() {
         assert_eq!(options.run_permit(), RunPermit::Refuse(expected));
     }
     for policy in [
-        r#"{"max_retries": 2, "intervals": [], "backoff_strategy": "fixed", "jitter": false,
-            "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 2, "intervals": [5, 10], "backoff_strategy": "quadratic",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 3, "intervals": [5, 10], "backoff_strategy": "fixed",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
-        r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["x"]}"#,
-        r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X"], "extra": 1}"#,
+        r#"{"max_retries": 2, "intervals_seconds": [], "backoff_strategy": "fixed", "jitter": false,
+            "retry_for": ["X"]}"#,
+        r#"{"max_retries": 2, "intervals_seconds": [5, 10], "backoff_strategy": "quadratic",
+            "jitter": false, "retry_for": ["X"]}"#,
+        r#"{"max_retries": 3, "intervals_seconds": [5, 10], "backoff_strategy": "fixed",
+            "jitter": false, "retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [5], "retry_for": ["x"]}"#,
+        r#"{"max_retries": 1, "intervals_seconds": [5], "retry_for": ["X"], "extra": 1}"#,
     ] {
         match read_stored_options(Some(&options_with_policy(policy))).run_permit() {
             RunPermit::Refuse(reason) => assert!(
@@ -500,11 +505,11 @@ fn every_refusal_starts_with_python_s_text() {
     }
 }
 
-/// Python reads only `retry_policy.auto_retry_for`: a top-level
-/// `auto_retry_for` key is not a policy.
+/// Python reads only `retry_policy.retry_for`: a top-level
+/// `retry_for` key is not a policy.
 #[test]
-fn a_top_level_auto_retry_for_is_not_a_policy() {
-    let retry = retry_of(r#"{"auto_retry_for": ["TRANSIENT"]}"#);
+fn a_top_level_retry_for_is_not_a_policy() {
+    let retry = retry_of(r#"{"retry_for": ["TRANSIENT"]}"#);
     assert_eq!(retry, StoredRetry::NoPolicy);
     assert_eq!(
         admit_retry(0, 3, &retry, Some("TRANSIENT")),
@@ -569,11 +574,11 @@ fn no_policy_is_not_admitted() {
 /// admits the reaper's crash retry.
 #[test]
 fn a_built_in_code_is_compared_by_its_value() {
-    let policy = r#"{"max_retries": 2, "intervals": [5], "backoff_strategy": "exponential",
-        "jitter": false, "auto_retry_for": ["WORKER_CRASHED", "TASK_TIMEOUT"]}"#;
+    let policy = r#"{"max_retries": 2, "intervals_seconds": [5], "backoff_strategy": "exponential",
+        "jitter": false, "retry_for": ["WORKER_CRASHED", "TASK_TIMEOUT"]}"#;
     let retry = retry_of(&options_with_policy(policy));
     let crashed = crate::core::task::error::TaskErrorCode::from(
-        crate::core::task::error::OperationalErrorCode::WorkerCrashed,
+        crate::core::task::error::OperationalCode::WorkerCrashed,
     )
     .to_string();
     assert_eq!(crashed, "WORKER_CRASHED");
@@ -605,8 +610,8 @@ fn fixed_backoff_uses_the_interval_of_the_attempt_and_clamps_to_the_last() {
 #[test]
 fn exponential_backoff_doubles_the_base_interval() {
     let rule = rule_of(
-        r#"{"max_retries": 5, "intervals": [30], "backoff_strategy": "exponential",
-            "jitter": false, "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 5, "intervals_seconds": [30], "backoff_strategy": "exponential",
+            "jitter": false, "retry_for": ["X"]}"#,
     );
     assert_eq!(rule.delay_seconds(1), 30.0);
     assert_eq!(rule.delay_seconds(2), 60.0);
@@ -617,8 +622,8 @@ fn exponential_backoff_doubles_the_base_interval() {
 #[test]
 fn the_cap_bounds_the_delay_after_backoff_and_jitter() {
     let rule = rule_of(
-        r#"{"max_retries": 20, "intervals": [30], "backoff_strategy": "exponential",
-            "jitter": true, "max_delay_seconds": 100, "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 20, "intervals_seconds": [30], "backoff_strategy": "exponential",
+            "jitter": true, "max_delay_seconds": 100, "retry_for": ["X"]}"#,
     );
     for attempt in 1..=20 {
         assert!(rule.delay_seconds(attempt) <= 100.0);
@@ -670,8 +675,8 @@ fn a_policy_that_fits_the_rule_stores_its_limit() {
         (fixed_policy("[60]", 1, true), 1),
         (fixed_policy("[60, 300, 900]", 3, false), 3),
         (
-            r#"{"max_retries": 20, "intervals": [30], "backoff_strategy": "exponential",
-                "jitter": true, "auto_retry_for": ["X"]}"#
+            r#"{"max_retries": 20, "intervals_seconds": [30], "backoff_strategy": "exponential",
+                "jitter": true, "retry_for": ["X"]}"#
                 .to_owned(),
             20,
         ),
@@ -704,8 +709,8 @@ fn options_that_do_not_parse_or_are_not_an_object_are_refused() {
 fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
     let exponential = |max_retries: &str| {
         format!(
-            r#"{{"max_retries": {max_retries}, "intervals": [60], "backoff_strategy": "exponential",
-                "jitter": true, "auto_retry_for": ["X"]}}"#
+            r#"{{"max_retries": {max_retries}, "intervals_seconds": [60], "backoff_strategy": "exponential",
+                "jitter": true, "retry_for": ["X"]}}"#
         )
     };
     let refused = [
@@ -719,11 +724,11 @@ fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
         exponential("21"),
         r#"5"#.to_owned(),
         r#"[3]"#.to_owned(),
-        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
-            "jitter": true, "auto_retry_for": []}"#
+        r#"{"max_retries": 2, "intervals_seconds": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "retry_for": []}"#
             .to_owned(),
-        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
-            "jitter": true, "auto_retry_for": ["X"], "extra": 1}"#
+        r#"{"max_retries": 2, "intervals_seconds": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "retry_for": ["X"], "extra": 1}"#
             .to_owned(),
     ];
     for policy in refused {
@@ -746,15 +751,11 @@ fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
 fn the_refusal_is_python_s_detail() {
     let options = options_with_policy(r#"{"max_retries": 5}"#);
     let refusal = stored_max_retries(Some(&options)).expect_err("a partial policy is refused");
-    assert_eq!(
-        refusal.to_string(),
-        "auto_retry_for: Field required [missing]"
-    );
+    assert_eq!(refusal.to_string(), "retry_for: Field required [missing]");
     assert_eq!(
         read_stored_options(Some(&options)).run_permit(),
         RunPermit::Refuse(
-            "stored retry_policy does not validate: auto_retry_for: Field required [missing]"
-                .to_owned()
+            "stored retry_policy does not validate: retry_for: Field required [missing]".to_owned()
         )
     );
 }

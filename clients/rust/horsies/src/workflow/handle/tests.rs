@@ -4,8 +4,9 @@ use std::convert::Infallible;
 
 use serde_json::json;
 
+use super::super::dependency::NoWorkflowOutput;
 use super::*;
-use crate::TaskErrorCode;
+use crate::{AppConfig, Horsies, TaskErrorCode, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 fn workflow() -> Uuid {
     Uuid::from_u128(9)
@@ -17,9 +18,9 @@ fn completed(result: Option<serde_json::Value>) -> WorkflowEnd {
     }
 }
 
-fn library_code<E: UserErrorCode>(outcome: &TaskOutcome<impl std::fmt::Debug, E>) -> String {
+fn code_text<E: CustomErrorCode>(outcome: &TaskOutcome<impl std::fmt::Debug, E>) -> String {
     match outcome {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("expected a failed outcome, got {value:?}"),
     }
 }
@@ -52,14 +53,14 @@ fn a_completed_result_above_u64_reads_as_u128() {
 }
 
 #[test]
-fn a_completed_error_keeps_its_user_code_as_text() {
+fn a_completed_error_keeps_its_custom_code_as_text() {
     let end = completed(Some(json!({
         "__h_task_result__": true,
         "ok": null,
         "err": {"error_code": "DECLINED", "message": "no"},
     })));
     let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-    assert_eq!(library_code(&outcome), "DECLINED");
+    assert_eq!(code_text(&outcome), "DECLINED");
 }
 
 #[test]
@@ -72,7 +73,7 @@ fn a_completed_workflow_without_a_result_is_unreadable() {
     ] {
         assert!(matches!(
             end_outcome::<u32>(workflow(), end),
-            Err(WorkflowReadError::StoredResultUnreadable { .. })
+            Err(WorkflowReadError::ResultDeserializationError { .. })
         ));
     }
 }
@@ -85,7 +86,7 @@ fn a_result_of_another_type_is_unreadable() {
     let refused = end_outcome::<u32>(workflow(), end).unwrap_err();
     assert_eq!(
         refused.code(),
-        BuiltInTaskCode::from(OperationalErrorCode::ResultDeserializationError)
+        BuiltInTaskCode::from(OperationalCode::ResultDeserializationError)
     );
 }
 
@@ -101,7 +102,7 @@ fn an_ended_workflow_without_a_stored_error_has_the_code_of_its_status() {
             error: None,
         };
         let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-        assert_eq!(library_code(&outcome), code);
+        assert_eq!(code_text(&outcome), code);
     }
 }
 
@@ -112,7 +113,7 @@ fn an_ended_workflow_reads_its_stored_error() {
         error: Some(json!({"error_code": {"__builtin_task_code__": "TASK_TIMEOUT"}}).to_string()),
     };
     let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-    assert_eq!(library_code(&outcome), "TASK_TIMEOUT");
+    assert_eq!(code_text(&outcome), "TASK_TIMEOUT");
 }
 
 #[test]
@@ -125,7 +126,7 @@ fn a_stored_error_that_does_not_read_is_unreadable() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), end),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{error:?}"
         );
@@ -135,10 +136,12 @@ fn a_stored_error_that_does_not_read_is_unreadable() {
 #[test]
 fn a_paused_workflow_is_the_paused_outcome() {
     let outcome = end_outcome::<u32>(workflow(), WorkflowEnd::Paused).unwrap();
-    assert_eq!(library_code(&outcome), "WORKFLOW_PAUSED");
+    assert_eq!(code_text(&outcome), "WORKFLOW_PAUSED");
 }
 
-fn outputless() -> serde_json::Value {
+/// The result that migrations before 1009 stored for a workflow with no
+/// output node: the marker and a map of the terminal nodes in `ok`.
+fn old_outputless() -> serde_json::Value {
     json!({
         "__h_task_result__": true,
         "__h_outputless_terminals__": true,
@@ -154,67 +157,26 @@ fn outputless() -> serde_json::Value {
     })
 }
 
-#[test]
-fn an_outputless_result_reads_each_node() {
-    let outcome =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(outputless()))).unwrap();
-    let TaskOutcome::Succeeded(results) = outcome else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results.get("fetch"),
-        Some(&TaskOutcome::Succeeded(JsonText::parse("3").unwrap()))
-    );
-    assert_eq!(
-        library_code(results.get("lost").unwrap()),
-        "RESULT_DESERIALIZATION_ERROR"
-    );
-}
-
-/// Each value of an outputless result and of an untyped node result keeps
-/// its stored text: an integer outside the `i64` and `u64` range keeps every
-/// digit and decodes as `u128` or `i128`.
+/// The value of an untyped node result keeps its stored text: an integer
+/// outside the `i64` and `u64` range keeps every digit and decodes as `u128`.
 #[test]
 fn an_untyped_value_keeps_its_stored_text() {
     let wide = "340282366920938463463374607431768211455";
-    let below = "-9223372036854775809";
-    let stored = format!(
-        r#"{{"__h_task_result__":true,"__h_outputless_terminals__":true,"ok":{{"results_by_id":{{"wide":{{"__h_task_result__":true,"ok":{wide},"err":null}},"below":{{"__h_task_result__":true,"ok":{below},"err":null}}}},"task_name_by_id":{{"wide":"wide","below":"below"}},"definition_key_by_id":{{}}}},"err":null}}"#
-    );
-    let outcome = completed_outcome::<OutputlessResults>(workflow(), &stored).unwrap();
-    let TaskOutcome::Succeeded(results) = outcome else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    let Some(TaskOutcome::Succeeded(value)) = results.get("wide") else {
-        panic!("the wide entry reads");
-    };
-    assert_eq!(value.get(), wide);
-    assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
-    let Some(TaskOutcome::Succeeded(value)) = results.get("below") else {
-        panic!("the below entry reads");
-    };
-    assert_eq!(value.decode::<i128>().unwrap(), i128::from(i64::MIN) - 1);
     let node = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
     let NodeResult::Outcome(TaskOutcome::Succeeded(value)) = node_result(&node) else {
         panic!("the node result reads");
     };
     assert_eq!(value.get(), wide);
+    assert_eq!(value.decode::<u128>().unwrap(), u128::MAX);
 }
 
-/// Python fails closed when the stored form and the handle's type disagree.
+/// A result of the old outputless form is not an envelope of the strict form:
+/// it is unreadable for an output node type.
 #[test]
-fn an_outputless_result_read_as_a_type_and_the_reverse_are_unreadable() {
+fn an_old_outputless_result_read_as_an_output_node_type_is_unreadable() {
     assert!(matches!(
-        end_outcome::<u32>(workflow(), completed(Some(outputless()))),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
-    ));
-    let typed = completed(Some(
-        json!({"__h_task_result__": true, "ok": 1, "err": null}),
-    ));
-    assert!(matches!(
-        end_outcome::<OutputlessResults>(workflow(), typed),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        end_outcome::<u32>(workflow(), completed(Some(old_outputless()))),
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -233,14 +195,14 @@ fn a_node_result_reads_with_the_node_types() {
     .to_string();
     assert!(matches!(
         envelope_outcome::<u32, Infallible>(workflow(), &declined),
-        Err(WorkflowReadError::UnknownUserCode { .. })
+        Err(WorkflowReadError::UnknownCustomCode { .. })
     ));
     let TaskOutcome::Failed(error) =
-        envelope_outcome::<u32, UserCode>(workflow(), &declined).unwrap()
+        envelope_outcome::<u32, CustomCode>(workflow(), &declined).unwrap()
     else {
         panic!("a stored error reads as Failed");
     };
-    assert!(matches!(error.code(), TaskErrorCode::User(code) if code.as_str() == "DECLINED"));
+    assert!(matches!(error.code(), TaskErrorCode::Custom(code) if code.as_str() == "DECLINED"));
 }
 
 #[test]
@@ -256,7 +218,7 @@ fn an_untyped_node_result_keeps_what_does_not_read() {
 fn each_read_failure_has_python_s_code() {
     let cases = [
         (
-            WorkflowReadError::WaitTimedOut {
+            WorkflowReadError::WaitTimeout {
                 workflow_id: workflow(),
             },
             BuiltInTaskCode::from(RetrievalCode::WaitTimeout),
@@ -268,11 +230,42 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::WorkflowNotFound.into(),
         ),
         (
+            WorkflowReadError::NodeNotFound {
+                workflow_id: workflow(),
+                node_id: "n".to_owned(),
+            },
+            RetrievalCode::NodeNotFound.into(),
+        ),
+        (
             WorkflowReadError::ResultNotReady {
                 workflow_id: workflow(),
                 node_id: "n".to_owned(),
             },
             RetrievalCode::ResultNotReady.into(),
+        ),
+        (
+            WorkflowReadError::ResultDeserializationError {
+                workflow_id: workflow(),
+                cause: "x".to_owned(),
+            },
+            OperationalCode::ResultDeserializationError.into(),
+        ),
+        (
+            WorkflowReadError::UnknownCustomCode {
+                workflow_id: workflow(),
+                cause: UnknownCustomCode {
+                    stored_code: "X".to_owned(),
+                    code_type: "T",
+                },
+            },
+            RetrievalCode::UnknownCustomCode.into(),
+        ),
+        (
+            WorkflowReadError::InvalidInput {
+                workflow_id: workflow(),
+                cause: WaitLimitRefused,
+            },
+            RetrievalCode::InvalidInput.into(),
         ),
         (
             WorkflowReadError::WaitInsideTask {
@@ -287,12 +280,12 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::AsyncContext.into(),
         ),
         (
-            WorkflowReadError::Database {
-                code: HandleErrorCode::DbOperationFailed,
+            WorkflowReadError::DatabaseError {
+                database_code: WorkflowHandleErrorCode::DatabaseOperationFailed,
                 message: "m".to_owned(),
                 retryable: true,
             },
-            OperationalErrorCode::BrokerError.into(),
+            OperationalCode::DatabaseError.into(),
         ),
     ];
     for (error, code) in cases {
@@ -300,136 +293,84 @@ fn each_read_failure_has_python_s_code() {
     }
 }
 
+/// The limit is the first check of `get`, before any statement: the app's
+/// address has no database, so a wait that ran would fail as `DatabaseError`.
+/// The limit at the bound passes the check.
+#[tokio::test]
+async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
+    let app = Horsies::new(AppConfig::from_database_url(
+        "postgresql://127.0.0.1:1/nothing",
+    ))
+    .unwrap();
+    let handle = app.workflow_handle::<u32>(workflow());
+    let above = WaitLimit::Within(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS + 1));
+    let refused = handle.get(above).await.unwrap_err();
+    assert_eq!(
+        refused,
+        WorkflowReadError::InvalidInput {
+            workflow_id: workflow(),
+            cause: WaitLimitRefused,
+        },
+    );
+    assert_eq!(refused.code().as_str(), "INVALID_INPUT");
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "invalid input for the read of workflow {}: the wait limit is above 4294967295 ms \
+             (about 49.7 days)",
+            workflow()
+        ),
+    );
+    let at_the_bound = WaitLimit::Within(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS));
+    assert_eq!(
+        handle.checked_wait(at_the_bound),
+        Ok(Some(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS)))
+    );
+}
+
 #[test]
 fn a_handle_error_maps_to_its_read_failure() {
     let message = || "m".to_owned();
     let cause = || horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned());
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::WorkflowNotFound {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::NotFound {
             message: message(),
             workflow_id: workflow(),
         }),
         WorkflowReadError::WorkflowNotFound { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::StoredDataInvalid {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::StoredDataInvalid {
             message: message(),
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::StoredResultUnreadable { .. }
+        WorkflowReadError::ResultDeserializationError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::DbOperationFailed {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::DatabaseOperationFailed {
             message: message(),
             retryable: false,
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::ResumeRecoveryFailed {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::ResumeRecoveryFailed {
             message: message(),
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
-        WorkflowReadError::of_handle_error(HandleOperationError::AsyncContext {
+        WorkflowReadError::of_handle_error(WorkflowHandleError::AsyncContext {
             message: message(),
             workflow_id: workflow(),
         }),
         WorkflowReadError::AsyncContext { .. }
     ));
-}
-
-/// Python's handle: an outputless entry that is `null`, has no task name,
-/// or is not a result envelope is a `RESULT_DESERIALIZATION_ERROR` outcome
-/// with its node in `data.node_id`; the other entries stay readable.
-#[test]
-fn an_outputless_entry_without_a_payload_a_task_name_or_an_envelope_names_its_node() {
-    let stored = json!({
-        "__h_task_result__": true,
-        "__h_outputless_terminals__": true,
-        "ok": {
-            "results_by_id": {
-                "a": {"__h_task_result__": true, "ok": 1, "err": null},
-                "b": null,
-                "c": {"not": "an envelope"},
-                "d": {"__h_task_result__": true, "ok": 2, "err": null},
-            },
-            "task_name_by_id": {"a": "t", "b": "t", "c": "t"},
-            "definition_key_by_id": {"a": null, "b": null, "c": null, "d": null},
-        },
-        "err": null,
-    });
-    let TaskOutcome::Succeeded(results) =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(stored))).unwrap()
-    else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    let Some(TaskOutcome::Succeeded(value)) = results.get("a") else {
-        panic!("entry a reads as Succeeded");
-    };
-    assert_eq!(
-        value
-            .decode::<serde_json::Value>()
-            .expect("the stored value decodes"),
-        json!(1)
-    );
-    for node in ["b", "c", "d"] {
-        let Some(TaskOutcome::Failed(error)) = results.get(node) else {
-            panic!("entry {node} reads as Failed");
-        };
-        assert_eq!(
-            error.code().text(),
-            "RESULT_DESERIALIZATION_ERROR",
-            "{node}"
-        );
-        assert_eq!(
-            error
-                .data()
-                .map(|data| data.decode::<serde_json::Value>().unwrap()),
-            Some(json!({ "node_id": node })),
-            "{node}"
-        );
-    }
-}
-
-/// Python's handle refuses an outputless envelope whose `ok` slot is not an
-/// object, or whose `results_by_id`, `task_name_by_id` or
-/// `definition_key_by_id` is not an object; a missing map is empty.
-#[test]
-fn a_malformed_outputless_envelope_is_unreadable_and_a_missing_map_is_empty() {
-    let envelope = |ok: serde_json::Value| {
-        json!({
-            "__h_task_result__": true,
-            "__h_outputless_terminals__": true,
-            "ok": ok,
-            "err": null,
-        })
-    };
-    for ok in [
-        json!(5),
-        json!({"results_by_id": [1]}),
-        json!({"results_by_id": {}, "task_name_by_id": [1]}),
-        json!({"results_by_id": {}, "definition_key_by_id": "x"}),
-    ] {
-        let read =
-            end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(ok.clone()))));
-        assert!(
-            matches!(read, Err(WorkflowReadError::StoredResultUnreadable { .. })),
-            "{ok}"
-        );
-    }
-    let TaskOutcome::Succeeded(results) =
-        end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(json!({}))))).unwrap()
-    else {
-        panic!("an outputless result reads as Succeeded");
-    };
-    assert!(results.is_empty());
 }
 
 /// A stored result that is not JSON is unreadable.
@@ -440,7 +381,7 @@ fn a_completed_result_that_is_not_json_is_unreadable() {
     };
     assert!(matches!(
         end_outcome::<u32>(workflow(), end),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -459,7 +400,7 @@ fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
             error: Some(stored.clone()),
         };
         let outcome = end_outcome::<u32>(workflow(), end).unwrap();
-        assert_eq!(library_code(&outcome), "STOPPED_BY_OPERATOR", "{status:?}");
+        assert_eq!(code_text(&outcome), "STOPPED_BY_OPERATOR", "{status:?}");
         let empty = WorkflowEnd::Ended {
             status,
             error: Some(String::new()),
@@ -467,7 +408,7 @@ fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), empty),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{status:?}"
         );
@@ -497,12 +438,12 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     let mut node = stored_node(
         "COMPLETED",
         Some(
-            r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#,
+            r#"{"status": "COMPLETED", "output": null, "total_nodes": 3, "completed_nodes": 3, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}"#,
         ),
     );
     node.result = Some(json!({"__h_task_result__": true, "ok": 42, "err": null}).to_string());
     let info = node_info(workflow(), node).unwrap();
-    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(info.status, WorkflowNodeStatus::Completed);
     assert_eq!(
         info.result,
         Some(NodeResult::Outcome(TaskOutcome::Succeeded(
@@ -515,10 +456,10 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (3, 3, 0, 0)
     );
@@ -533,7 +474,7 @@ fn a_stored_summary_output_keeps_its_stored_text() {
         "-9223372036854775809",
     ] {
         let text = format!(
-            r#"{{"status": "COMPLETED", "output": {output}, "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}}"#
+            r#"{{"status": "COMPLETED", "output": {output}, "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}}"#
         );
         let info = node_info(workflow(), stored_node("COMPLETED", Some(&text))).unwrap();
         let summary_output = info
@@ -557,7 +498,7 @@ fn a_stored_summary_output_keeps_its_stored_text() {
 #[test]
 fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("BOGUS", None)).unwrap_err();
-    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
     assert_eq!(refused.workflow_id(), workflow());
     assert_eq!(
@@ -566,7 +507,7 @@ fn a_node_status_outside_the_enum_is_stored_data_invalid() {
     );
     assert!(matches!(
         refused,
-        HandleOperationError::StoredDataInvalid {
+        WorkflowHandleError::StoredDataInvalid {
             cause: horsies_core::WorkflowError::InvalidStatus(ref status),
             ..
         } if status == "BOGUS"
@@ -598,7 +539,7 @@ fn a_stored_null_is_no_summary() {
 fn an_empty_stored_summary_is_stored_data_invalid() {
     let refused = node_info(workflow(), stored_node("COMPLETED", Some("")))
         .expect_err("an empty summary does not read");
-    assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+    assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
     assert!(!refused.retryable());
     assert_eq!(refused.workflow_id(), workflow());
     assert!(
@@ -618,11 +559,11 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
     let deep = format!("{{\"status\":{}{}}}", "[".repeat(1_100), "]".repeat(1_100));
     for summary in [
         "{not valid json!!!",
-        r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#,
+        r#"{"status": "NOT_A_STATUS", "total_nodes": 1}"#,
         deep.as_str(),
     ] {
         let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();
-        assert_eq!(refused.code(), HandleErrorCode::StoredDataInvalid);
+        assert_eq!(refused.code(), WorkflowHandleErrorCode::StoredDataInvalid);
         assert!(!refused.retryable());
         // The cause is the refused deserialize of the stored value: a
         // contract violation.
@@ -632,7 +573,7 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
         );
         assert!(matches!(
             refused,
-            HandleOperationError::StoredDataInvalid {
+            WorkflowHandleError::StoredDataInvalid {
                 cause: horsies_core::WorkflowError::Serialization(_),
                 ..
             }
@@ -653,4 +594,78 @@ fn a_workflow_handle_is_debug_send_and_sync() {
     assert_debug_send_sync::<WorkflowHandle<u32>>();
     assert_debug_send_sync::<WorkflowHandle<serde_json::Value>>();
     assert_debug_send_sync::<WorkflowHandle<std::rc::Rc<u8>>>();
+}
+
+/// The core stores `Ok(null)` for the node of a sub-workflow that has no
+/// output. The node reads as the one value `NoWorkflowOutput`: the read of a
+/// downstream node's input (`arg_from`) and of `WorkflowContext::result_for`
+/// decode with `read_stored_result`.
+#[test]
+fn an_outputless_child_node_result_reads_as_no_workflow_output() {
+    let text = json!({"__h_task_result__": true, "ok": null, "err": null}).to_string();
+    let input = serde_json::from_str::<TaskOutcome<NoWorkflowOutput, Infallible>>(&text).unwrap();
+    assert_eq!(input, TaskOutcome::Succeeded(NoWorkflowOutput));
+    let context_read = read_stored_result::<NoWorkflowOutput>(&text).unwrap();
+    assert!(matches!(context_read, TaskResult::Ok(NoWorkflowOutput)));
+    // A read as `serde_json::Value` holds the null: the stored form is unchanged.
+    assert_eq!(
+        envelope_outcome::<serde_json::Value, Infallible>(workflow(), &text).unwrap(),
+        TaskOutcome::Succeeded(serde_json::Value::Null)
+    );
+}
+
+/// A stored value other than `null` is a value that the child returned, not
+/// the absence of one.
+#[test]
+fn a_stored_value_is_not_no_workflow_output() {
+    let text = json!({"__h_task_result__": true, "ok": 5, "err": null}).to_string();
+    assert!(read_stored_result::<NoWorkflowOutput>(&text).is_err());
+    assert!(matches!(
+        envelope_outcome::<NoWorkflowOutput, Infallible>(workflow(), &text),
+        Err(WorkflowReadError::ResultDeserializationError { .. })
+    ));
+}
+
+/// A parent workflow whose output node is the outputless sub-workflow node
+/// stores `Ok(null)` as its own result. A handle typed `NoWorkflowOutput`
+/// reads it.
+#[test]
+fn a_handle_read_of_an_outputless_child_node_gives_no_workflow_output() {
+    let end = completed(Some(
+        json!({"__h_task_result__": true, "ok": null, "err": null}),
+    ));
+    assert_eq!(
+        end_outcome::<NoWorkflowOutput>(workflow(), end).unwrap(),
+        TaskOutcome::Succeeded(NoWorkflowOutput)
+    );
+}
+
+/// A workflow with no output node stores the plain envelope. A handle typed
+/// `NoWorkflowOutput` reads the value, or the stored error.
+#[test]
+fn an_outputless_workflow_read_as_no_workflow_output_gives_the_value_or_its_error() {
+    let plain = completed(Some(
+        json!({"__h_task_result__": true, "ok": null, "err": null}),
+    ));
+    assert_eq!(
+        end_outcome::<NoWorkflowOutput>(workflow(), plain).unwrap(),
+        TaskOutcome::Succeeded(NoWorkflowOutput)
+    );
+    let failed = completed(Some(json!({
+        "__h_task_result__": true,
+        "ok": null,
+        "err": {"error_code": "DECLINED", "message": "no"},
+    })));
+    let outcome = end_outcome::<NoWorkflowOutput>(workflow(), failed).unwrap();
+    assert_eq!(code_text(&outcome), "DECLINED");
+}
+
+/// A row written before migration 1009 holds the old outputless form. A
+/// handle typed `NoWorkflowOutput` does not read it: the read fails closed.
+#[test]
+fn an_old_outputless_row_read_as_no_workflow_output_is_unreadable() {
+    assert!(matches!(
+        end_outcome::<NoWorkflowOutput>(workflow(), completed(Some(old_outputless()))),
+        Err(WorkflowReadError::ResultDeserializationError { .. })
+    ));
 }

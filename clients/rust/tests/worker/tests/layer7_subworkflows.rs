@@ -8,10 +8,10 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use horsies::{
-    HorsiesError, NodeKey, NodeResult, OnError, OutputlessResults, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SuccessCase, SuccessPolicy, TaskOutcome, UserCode,
-    UserErrorCode, WorkflowDefinition, WorkflowHandle, WorkflowSpecBuilder, WorkflowStatus,
-    WorkflowTaskStatus,
+    CustomCode, CustomErrorCode, HorsiesError, NoWorkflowOutput, NodeKey, NodeResult, OnError,
+    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParameters, SuccessCase, SuccessPolicy,
+    TaskNode, TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle, WorkflowNodeStatus,
+    WorkflowSpecBuilder, WorkflowStatus,
 };
 use horsies_test_support::rows::{self, NodeRow};
 use horsies_test_support::tokio_postgres::Client;
@@ -33,18 +33,29 @@ const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
 /// The builder of Python's `_workflow_spec(name, ...)`.
-fn layer7(name: &str) -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(format!("e2e_layer7_{name}"));
+fn layer7(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut builder = suite.app.workflow_builder(format!("e2e_layer7_{name}"));
     let _key = builder.definition_key(format!("tests.e2e.layer7.{name}.v1"));
     builder
+}
+
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
 }
 
 /// A sub-workflow node `node_id` of `D` that gives no params.
 fn child<D>(node_id: &str) -> SubWorkflowNode<(), D::Output>
 where
-    D: WorkflowDefinition<Params = ()>,
+    D: WorkflowDefinition<Parameters = ()>,
 {
-    D::node(SubWorkflowParams::NotGiven)
+    D::node(SubWorkflowParameters::NotGiven)
         .unwrap_or_else(|refused| panic!("a node of {}: {refused}", D::name()))
         .node_id(node_id)
 }
@@ -74,7 +85,7 @@ async fn ended_nodes<T>(suite: &Suite, handle: &WorkflowHandle<T>, status: &str)
 /// The outcome of a workflow that ended.
 async fn outcome<T: DeserializeOwned + 'static>(
     handle: &WorkflowHandle<T>,
-) -> TaskOutcome<T, UserCode> {
+) -> TaskOutcome<T, CustomCode> {
     handle
         .get(within(WORKFLOW_WAIT))
         .await
@@ -96,23 +107,23 @@ fn child_of(node: &NodeRow) -> Uuid {
 }
 
 /// The sub-workflow failure of `outcome` (Python `_assert_subworkflow_error`):
-/// the code `SUBWORKFLOW_FAILED`, the child `child_id`, which FAILED with at
+/// the code `SUB_WORKFLOW_FAILED`, the child `child_id`, which FAILED with at
 /// least one failed task.
-fn subworkflow_failure<T: Debug, E: UserErrorCode + Debug>(
+fn subworkflow_failure<T: Debug, E: CustomErrorCode + Debug>(
     outcome: &TaskOutcome<T, E>,
     child_id: Uuid,
 ) -> &SubWorkflowFailure {
     let TaskOutcome::Failed(error) = outcome else {
         panic!("expected a sub-workflow failure, got {outcome:?}");
     };
-    assert_eq!(error.code().text(), "SUBWORKFLOW_FAILED");
+    assert_eq!(error.code().as_str(), "SUB_WORKFLOW_FAILED");
     let failure = error
         .sub_workflow()
         .unwrap_or_else(|| panic!("the error {error:?} is not a sub-workflow failure"));
     assert_eq!(failure.sub_workflow_id, child_id);
     assert_eq!(failure.sub_workflow_summary.status, WorkflowStatus::Failed);
     assert!(
-        failure.sub_workflow_summary.failed_tasks >= 1,
+        failure.sub_workflow_summary.failed_nodes >= 1,
         "the child has a failed task: {failure:?}"
     );
     failure
@@ -173,7 +184,7 @@ async fn test_subworkflow_success_full_surface_matrix() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("success_full_surface");
+    let mut spec = layer7(&suite, "success_full_surface");
     let node = spec.sub_workflow(child::<SubOk>("e2e_sub_success_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -184,10 +195,10 @@ async fn test_subworkflow_success_full_surface_matrix() {
     assert_eq!(nodes[0].status, "COMPLETED");
     let child_id = child_of(&nodes[0]);
 
-    let infos = handle.tasks().await.expect("the node infos");
+    let infos = handle.nodes().await.expect("the node infos");
     assert_eq!(infos.len(), 1);
     let info = &infos[0];
-    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(info.status, WorkflowNodeStatus::Completed);
     assert_eq!(info.sub_workflow_id, Some(child_id));
     let Some(NodeResult::Outcome(TaskOutcome::Succeeded(value))) = &info.result else {
         panic!("the node info has no ok result: {:?}", info.result);
@@ -209,7 +220,7 @@ async fn test_subworkflow_success_full_surface_matrix() {
         output.decode::<i64>().expect("the output decodes as i64"),
         SUB_OK_VALUE
     );
-    assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
+    assert_eq!((summary.total_nodes, summary.completed_nodes), (1, 1));
 
     let by_node = handle
         .result_for::<i64, WfCode>(&NodeKey::new("e2e_sub_success_child"))
@@ -233,7 +244,7 @@ async fn test_subworkflow_failure_fail_policy_preserves_error_everywhere() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("failure_fail_policy");
+    let mut spec = layer7(&suite, "failure_fail_policy");
     let _policy = spec.on_error(OnError::Fail);
     let node = spec.sub_workflow(child::<SubFail>("e2e_sub_failure_child"));
     let _output = spec.output(node);
@@ -259,10 +270,10 @@ async fn test_subworkflow_failure_fail_policy_preserves_error_everywhere() {
     );
     let _failure = subworkflow_failure(&outcome(&handle).await, child_id);
 
-    let infos = handle.tasks().await.expect("the node infos");
+    let infos = handle.nodes().await.expect("the node infos");
     assert_eq!(infos.len(), 1);
     let info = &infos[0];
-    assert_eq!(info.status, WorkflowTaskStatus::Failed);
+    assert_eq!(info.status, WorkflowNodeStatus::Failed);
     assert_eq!(info.sub_workflow_id, Some(child_id));
     let summary = info
         .sub_workflow_summary
@@ -284,7 +295,7 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("failure_pause_policy");
+    let mut spec = layer7(&suite, "failure_pause_policy");
     let _policy = spec.on_error(OnError::Pause);
     let node = spec.sub_workflow(child::<SubFail>("e2e_sub_pause_child"));
     let _output = spec.output(node);
@@ -292,7 +303,7 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
     rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
 
     match outcome(&handle).await {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "WORKFLOW_PAUSED"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "WORKFLOW_PAUSED"),
         TaskOutcome::Succeeded(value) => panic!("the paused workflow read {value}"),
     }
     let parent = rows::workflow_node(&client, handle.workflow_id(), 0).await;
@@ -329,15 +340,16 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
 async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("success_ctx_probe");
+    let mut spec = layer7(&suite, "success_ctx_probe");
     let node = spec.sub_workflow(child::<SubOk>(subworkflow::SUCCESS_CTX_CHILD));
-    let probe = spec.task(
+    let probe = add(
+        &mut spec,
         suite
-            .function(subworkflow::sub_probe_success_ctx::handle)
+            .function(subworkflow::sub_probe_success_ctx::function)
             .node()
             .node_id("e2e_sub_success_ctx_probe")
             .waits_for(node)
-            .workflow_ctx_from([node]),
+            .workflow_context_from([node]),
     );
     let _output = spec.output(probe);
     let handle = start::<serde_json::Value>(&suite, spec).await;
@@ -363,19 +375,20 @@ async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
 async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("failure_args_ctx_probe");
+    let mut spec = layer7(&suite, "failure_args_ctx_probe");
     let node = spec.sub_workflow(child::<SubFail>(subworkflow::FAILURE_PROBE_CHILD));
-    let probe = spec.task(
+    let probe = add(
+        &mut spec,
         suite
-            .function(subworkflow::sub_probe_failed_child::handle)
+            .function(subworkflow::sub_probe_failed_child::function)
             .node()
             .node_id("e2e_sub_failure_probe")
             .arg_from(
-                subworkflow::sub_probe_failed_child::params::child_result(),
+                subworkflow::sub_probe_failed_child::fields::child_result(),
                 node,
             )
-            .workflow_ctx_from([node])
-            .allow_failed_deps(true),
+            .workflow_context_from([node])
+            .allow_failed_dependencies(true),
     );
     let _output = spec.output(probe);
     let _policy =
@@ -386,7 +399,7 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
         output(&handle).await,
         json!({
             "args_is_subworkflow_error": true,
-            "args_error_code": "SUBWORKFLOW_FAILED",
+            "args_error_code": "SUB_WORKFLOW_FAILED",
             "ctx_is_subworkflow_error": true,
             "ids_match": true,
             "summary_status": "FAILED",
@@ -402,23 +415,27 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
 async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("outputless_success_policy");
-    let required = spec.task(
+    let mut spec = layer7(&suite, "outputless_success_policy");
+    let required = add(
+        &mut spec,
         suite
-            .function(workflow::mark::handle)
+            .function(workflow::mark::function)
             .node()
             .node_id("e2e_sub_outputless_ok")
-            .set(workflow::mark::params::value(), "required_ok".to_owned())
+            .set(workflow::mark::fields::value(), "required_ok".to_owned())
             .expect("a mark input"),
     );
     let optional = spec.sub_workflow(child::<SubFail>("e2e_sub_outputless_fail_child"));
     let _policy = spec.success_policy(
         SuccessPolicy::new(vec![SuccessCase::new([required])]).optional([optional]),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
-    let results = output(&handle).await;
-    let Some(TaskOutcome::Succeeded(required)) = results.get("e2e_sub_outputless_ok") else {
+    assert_eq!(output(&handle).await, NoWorkflowOutput);
+    let results = handle.results().await.expect("the node results");
+    let Some(NodeResult::Outcome(TaskOutcome::Succeeded(required))) =
+        results.get("e2e_sub_outputless_ok")
+    else {
         panic!("the required child reads as Succeeded");
     };
     assert_eq!(
@@ -427,9 +444,9 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
             .expect("the required child's value decodes"),
         "required_ok"
     );
-    let failed = results
-        .get("e2e_sub_outputless_fail_child")
-        .expect("the result of the failed child");
+    let Some(NodeResult::Outcome(failed)) = results.get("e2e_sub_outputless_fail_child") else {
+        panic!("the failed child has a stored result");
+    };
     let _failure = subworkflow_failure(failed, child_of(&nodes[1]));
 }
 
@@ -439,12 +456,12 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
 async fn test_parallel_subworkflows_preserve_independent_success_and_failure() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = layer7("parallel_success_failure");
+    let mut spec = layer7(&suite, "parallel_success_failure");
     let ok = spec.sub_workflow(child::<SubOk>("e2e_sub_parallel_ok_child"));
     let failing = spec.sub_workflow(child::<SubFail>("e2e_sub_parallel_fail_child"));
     let _policy =
         spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([ok])]).optional([failing]));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0].status, "COMPLETED");
@@ -463,7 +480,7 @@ async fn test_parallel_subworkflows_preserve_independent_success_and_failure() {
         .expect("read the failed child node");
     let _failure = subworkflow_failure(&failed_read, failed_child);
 
-    let infos = handle.tasks().await.expect("the node infos");
+    let infos = handle.nodes().await.expect("the node infos");
     let summaries: Vec<Option<WorkflowStatus>> = infos
         .iter()
         .map(|info| {
@@ -492,7 +509,7 @@ async fn test_nested_subworkflow_success_records_depth_root_and_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("nested_success");
+    let mut spec = layer7(&suite, "nested_success");
     let node = spec.sub_workflow(child::<SubNestedOkMiddle>("e2e_sub_nested_success_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -525,7 +542,7 @@ async fn test_nested_subworkflow_failure_surfaces_each_child_error() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("nested_failure");
+    let mut spec = layer7(&suite, "nested_failure");
     let node = spec.sub_workflow(child::<SubNestedFailMiddle>("e2e_sub_nested_failure_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -534,14 +551,14 @@ async fn test_nested_subworkflow_failure_surfaces_each_child_error() {
 
     let root_outcome = outcome(&handle).await;
     let root_failure = subworkflow_failure(&root_outcome, middle_id);
-    assert_eq!(root_failure.sub_workflow_summary.failed_tasks, 1);
+    assert_eq!(root_failure.sub_workflow_summary.failed_nodes, 1);
 
     let middle = suite.app.workflow_handle::<i64>(middle_id);
     let middle_outcome = outcome(&middle).await;
     let middle_nodes = rows::workflow_nodes(&client, middle_id).await;
     let leaf_id = child_of(&middle_nodes[0]);
     let middle_failure = subworkflow_failure(&middle_outcome, leaf_id);
-    assert_eq!(middle_failure.sub_workflow_summary.failed_tasks, 1);
+    assert_eq!(middle_failure.sub_workflow_summary.failed_nodes, 1);
     let middle_node = middle
         .result_for::<i64, WfCode>(&NodeKey::new("child"))
         .await
@@ -559,17 +576,18 @@ async fn test_nested_subworkflow_failure_surfaces_each_child_error() {
 async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("build_with_args_from");
-    let source = spec.task(
+    let mut spec = layer7(&suite, "build_with_args_from");
+    let source = add(
+        &mut spec,
         suite
-            .function(workflow::produce_int::handle)
+            .function(workflow::produce_int::function)
             .node()
             .node_id("e2e_sub_param_source")
-            .set(workflow::produce_int::params::value(), 37)
+            .set(workflow::produce_int::fields::value(), 37)
             .expect("a produce input"),
     );
     let node = spec.sub_workflow(
-        SubParam::node(SubWorkflowParams::NotGiven)
+        SubParam::node(SubWorkflowParameters::NotGiven)
             .expect("a param child node")
             .node_id("e2e_sub_param_child")
             .arg_from(UpstreamParams::field_value(), source),
@@ -580,30 +598,31 @@ async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
     assert_eq!(output(&handle).await, 37);
 }
 
-/// Python: `test_layer7_subworkflows.py::test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with`.
+/// Python: `test_layer7_subworkflows.py::test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with`.
 #[tokio::test]
 #[serial]
-async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with() {
+async fn test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("allow_failed_deps_to_build_with");
-    let source = spec.task(
+    let mut spec = layer7(&suite, "allow_failed_dependencies_to_build_with");
+    let source = add(
+        &mut spec,
         suite
-            .function(workflow::fail_with::handle)
+            .function(workflow::fail_with::function)
             .node()
             .node_id("e2e_sub_failed_input_source")
             .set(
-                workflow::fail_with::params::error_code(),
+                workflow::fail_with::fields::error_code(),
                 "E2E_UPSTREAM_FAIL".to_owned(),
             )
             .expect("a fail input"),
     );
     let node = spec.sub_workflow(
-        SubFailedInput::node(SubWorkflowParams::NotGiven)
+        SubFailedInput::node(SubWorkflowParameters::NotGiven)
             .expect("a failed-input child node")
             .node_id("e2e_sub_failed_input_child")
             .arg_from(UpstreamParams::field_value(), source)
-            .allow_failed_deps(true),
+            .allow_failed_dependencies(true),
     );
     let _output = spec.output(node);
     let _policy =
@@ -627,9 +646,9 @@ async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_w
 async fn test_subworkflow_static_kwargs_preserve_build_with_types() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("static_kwargs_preserve_types");
+    let mut spec = layer7(&suite, "static_kwargs_preserve_types");
     let node = spec.sub_workflow(
-        SubTypedKwarg::node(SubWorkflowParams::Given(PetParams {
+        SubTypedKwarg::node(SubWorkflowParameters::Given(PetParams {
             pet: Pet::Dog {
                 name: "Ada".to_owned(),
                 bark_volume: 7,

@@ -8,7 +8,7 @@ horsies.task.attempts
   label queue (horsies.queue): declared queue names, fallback "(unknown)"
   label execution (horsies.task.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
   label outcome (horsies.task.outcome): "COMPLETED" "FAILED" "WORKER_FAILURE" "CANCELLED"
-  label error_code (error.type): "" "UNHANDLED_EXCEPTION" "TASK_EXCEPTION" "WORKER_CRASHED" "BROKER_ERROR" "WORKER_RESOLUTION_ERROR" "WORKER_SERIALIZATION_ERROR" "RESULT_DESERIALIZATION_ERROR" "WORKFLOW_ENQUEUE_FAILED" "SUBWORKFLOW_LOAD_FAILED" "WORKFLOW_RECOVERY_LIMIT_REACHED" "SUBWORKFLOW_DEPTH_LIMIT_REACHED" "TASK_BLOCKED_LOOP" "NEIGHBOUR_BLOCKED_LOOP" "WORKFLOW_START_INCOMPLETE" "RETURN_TYPE_MISMATCH" "WORKFLOW_CTX_MISSING_ID" "NO_TYPE_AVAILABLE" "WAIT_TIMEOUT" "TASK_NOT_FOUND" "WORKFLOW_NOT_FOUND" "RESULT_NOT_AVAILABLE" "RESULT_NOT_READY" "ASYNC_CONTEXT" "INVALID_INPUT" "WAIT_INSIDE_TASK" "TASK_CANCELLED" "TASK_EXPIRED" "TASK_TIMEOUT" "WORKFLOW_PAUSED" "WORKFLOW_EXPIRED" "WORKFLOW_FAILED" "WORKFLOW_CANCELLED" "UPSTREAM_SKIPPED" "SUBWORKFLOW_FAILED" "WORKFLOW_SUCCESS_CASE_NOT_MET" "WORKFLOW_OUTPUT_SKIPPED" then declared user error codes, fallback "undeclared"
+  label error_code (error.type): "" "UNHANDLED_EXCEPTION" "TASK_EXCEPTION" "WORKER_CRASHED" "DATABASE_ERROR" "WORKER_RESOLUTION_ERROR" "WORKER_SERIALIZATION_ERROR" "RESULT_DESERIALIZATION_ERROR" "WORKFLOW_ENQUEUE_FAILED" "SUBWORKFLOW_LOAD_FAILED" "WORKFLOW_RECOVERY_LIMIT_REACHED" "SUBWORKFLOW_DEPTH_LIMIT_REACHED" "TASK_BLOCKED_LOOP" "NEIGHBOUR_BLOCKED_LOOP" "WORKFLOW_START_INCOMPLETE" "RETURN_TYPE_MISMATCH" "WORKFLOW_CONTEXT_MISSING_ID" "NODE_NOT_IN_CONTEXT" "NO_TYPE_AVAILABLE" "WAIT_TIMEOUT" "TASK_NOT_FOUND" "WORKFLOW_NOT_FOUND" "NODE_NOT_FOUND" "RESULT_NOT_AVAILABLE" "RESULT_NOT_READY" "ASYNC_CONTEXT" "INVALID_INPUT" "WAIT_INSIDE_TASK" "UNKNOWN_CUSTOM_CODE" "TASK_CANCELLED" "TASK_EXPIRED" "TASK_TIMEOUT" "WORKFLOW_PAUSED" "WORKFLOW_EXPIRED" "WORKFLOW_FAILED" "WORKFLOW_CANCELLED" "UPSTREAM_SKIPPED" "SUB_WORKFLOW_FAILED" "WORKFLOW_SUCCESS_CASE_NOT_MET" "WORKFLOW_OUTPUT_SKIPPED" then declared custom error codes, fallback "undeclared"
 horsies.task.attempts.end_not_known
   prometheus: horsies_task_attempts_end_not_known_total
   kind: counter
@@ -62,7 +62,7 @@ horsies.task.retries
   help: Attempts whose outcome write scheduled a retry, by error code.
   label task (horsies.task.name): declared task names, fallback "(unregistered)"
   label queue (horsies.queue): declared queue names, fallback "(unknown)"
-  label error_code (error.type): "" "UNHANDLED_EXCEPTION" "TASK_EXCEPTION" "WORKER_CRASHED" "BROKER_ERROR" "WORKER_RESOLUTION_ERROR" "WORKER_SERIALIZATION_ERROR" "RESULT_DESERIALIZATION_ERROR" "WORKFLOW_ENQUEUE_FAILED" "SUBWORKFLOW_LOAD_FAILED" "WORKFLOW_RECOVERY_LIMIT_REACHED" "SUBWORKFLOW_DEPTH_LIMIT_REACHED" "TASK_BLOCKED_LOOP" "NEIGHBOUR_BLOCKED_LOOP" "WORKFLOW_START_INCOMPLETE" "RETURN_TYPE_MISMATCH" "WORKFLOW_CTX_MISSING_ID" "NO_TYPE_AVAILABLE" "WAIT_TIMEOUT" "TASK_NOT_FOUND" "WORKFLOW_NOT_FOUND" "RESULT_NOT_AVAILABLE" "RESULT_NOT_READY" "ASYNC_CONTEXT" "INVALID_INPUT" "WAIT_INSIDE_TASK" "TASK_CANCELLED" "TASK_EXPIRED" "TASK_TIMEOUT" "WORKFLOW_PAUSED" "WORKFLOW_EXPIRED" "WORKFLOW_FAILED" "WORKFLOW_CANCELLED" "UPSTREAM_SKIPPED" "SUBWORKFLOW_FAILED" "WORKFLOW_SUCCESS_CASE_NOT_MET" "WORKFLOW_OUTPUT_SKIPPED" then declared user error codes, fallback "undeclared"
+  label error_code (error.type): "" "UNHANDLED_EXCEPTION" "TASK_EXCEPTION" "WORKER_CRASHED" "DATABASE_ERROR" "WORKER_RESOLUTION_ERROR" "WORKER_SERIALIZATION_ERROR" "RESULT_DESERIALIZATION_ERROR" "WORKFLOW_ENQUEUE_FAILED" "SUBWORKFLOW_LOAD_FAILED" "WORKFLOW_RECOVERY_LIMIT_REACHED" "SUBWORKFLOW_DEPTH_LIMIT_REACHED" "TASK_BLOCKED_LOOP" "NEIGHBOUR_BLOCKED_LOOP" "WORKFLOW_START_INCOMPLETE" "RETURN_TYPE_MISMATCH" "WORKFLOW_CONTEXT_MISSING_ID" "NODE_NOT_IN_CONTEXT" "NO_TYPE_AVAILABLE" "WAIT_TIMEOUT" "TASK_NOT_FOUND" "WORKFLOW_NOT_FOUND" "NODE_NOT_FOUND" "RESULT_NOT_AVAILABLE" "RESULT_NOT_READY" "ASYNC_CONTEXT" "INVALID_INPUT" "WAIT_INSIDE_TASK" "UNKNOWN_CUSTOM_CODE" "TASK_CANCELLED" "TASK_EXPIRED" "TASK_TIMEOUT" "WORKFLOW_PAUSED" "WORKFLOW_EXPIRED" "WORKFLOW_FAILED" "WORKFLOW_CANCELLED" "UPSTREAM_SKIPPED" "SUB_WORKFLOW_FAILED" "WORKFLOW_SUCCESS_CASE_NOT_MET" "WORKFLOW_OUTPUT_SKIPPED" then declared custom error codes, fallback "undeclared"
 horsies.task.claims.released
   prometheus: horsies_task_claims_released_total
   kind: counter
@@ -103,24 +103,24 @@ horsies.worker.children.started
   kind: counter
   unit: 1
   recorder: worker
-  help: Child processes that sent their ready frame, by kind.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child processes that sent their ready frame, by execution class.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.children.replaced
   prometheus: horsies_worker_children_replaced_total
   kind: counter
   unit: 1
   recorder: worker
-  help: Child processes that ended and were replaced, by kind and reason.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child processes that ended and were replaced, by execution class and reason.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
   label reason (horsies.reason): "child_died" "channel_lost" "protocol_violation" "protocol_mismatch" "killed_by_parent" "slot_defect" "spawner_stopped" "task_count" "memory_limit" "second_cancel" "loop_blocked" "leftover_work" "at_deadline" "core_stopped"
 horsies.worker.child.boot.duration
   prometheus: horsies_worker_child_boot_duration_seconds
   kind: histogram
   unit: s
   recorder: worker
-  help: Time from the start of a child process to its ready frame, by kind.
+  help: Time from the start of a child process to its ready frame, by execution class.
   buckets: 0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 30 60 120 300 600 1800 3600 7200 21600 86400
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.seats
   prometheus: horsies_worker_seats
   kind: gauge
@@ -140,8 +140,8 @@ horsies.worker.slots.down
   kind: gauge
   unit: 1
   recorder: worker
-  help: Child slots that are down, by kind.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child slots that are down, by execution class.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.claim.passes
   prometheus: horsies_worker_claim_passes_total
   kind: counter

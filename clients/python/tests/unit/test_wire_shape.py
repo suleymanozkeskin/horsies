@@ -50,11 +50,16 @@ from pydantic_core import core_schema
 
 from horsies import (
     AppConfig,
+    Err,
+    Failed,
     Horsies,
     JsonValue,
+    Ok,
     PostgresConfig,
+    Result,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 from horsies.core.codec import wire_shape
 from horsies.core.codec.kwargs import (
@@ -75,7 +80,7 @@ from horsies.core.codec.wire_shape import (
     shape_refusals,
     verify_shape_rules,
 )
-from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.workflow import (
@@ -118,10 +123,10 @@ def _rules(annotation: object) -> set[ShapeRule]:
 
 
 def _signature_refuses(annotation: object) -> bool:
-    def task(*, x: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def task(*, x: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
-    task.__annotations__ = {'x': annotation, 'return': TaskResult[int, TaskError]}
+    task.__annotations__ = {'x': annotation, 'return': Result[int, TaskError]}
     try:
         check_task_signature(task, task_name='task')
     except SignatureValidationError:
@@ -866,8 +871,8 @@ class TestParameterDefaults:
         assert calls == []
 
     def test_at_task_definition(self) -> None:
-        def task(*, n: int = 'x') -> TaskResult[int, TaskError]:  # type: ignore[assignment]
-            return TaskResult(ok=n)
+        def task(*, n: int = 'x') -> Result[int, TaskError]:  # type: ignore[assignment]
+            return Ok(n)
 
         with pytest.raises(SignatureValidationError, match='default'):
             check_task_signature(task, task_name='task')
@@ -875,10 +880,10 @@ class TestParameterDefaults:
     def test_workflow_ctx_and_args_from_slots_are_exempt(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            workflow_context: WorkflowContext | None = None,
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         check_task_signature(task, task_name='task')
 
@@ -1027,21 +1032,21 @@ class TestDataclassFields:
 
 
 @pytest.mark.unit
-class TestNestedTaskResult:
+class TestNestedTaskOutcome:
     @pytest.mark.parametrize(
         'annotation',
         [
-            list[TaskResult[int, TaskError]],
-            dict[str, TaskResult[int, TaskError]],
-            tuple[TaskResult[int, TaskError], ...],
-            int | TaskResult[int, TaskError],
+            list[TaskOutcome[int, TaskError]],
+            dict[str, TaskOutcome[int, TaskError]],
+            tuple[TaskOutcome[int, TaskError], ...],
+            int | TaskOutcome[int, TaskError],
         ],
     )
     def test_below_the_top_is_refused(self, annotation: object) -> None:
-        def task(*, x: Any) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, x: Any) -> Result[int, TaskError]:
+            return Ok(1)
 
-        task.__annotations__ = {'x': annotation, 'return': TaskResult[int, TaskError]}
+        task.__annotations__ = {'x': annotation, 'return': Result[int, TaskError]}
 
         with pytest.raises(SignatureValidationError, match='fits only|mixed union'):
             check_task_signature(task, task_name='task')
@@ -1049,27 +1054,27 @@ class TestNestedTaskResult:
     @pytest.mark.parametrize(
         'annotation',
         [
-            TaskResult[int, TaskError],
-            TaskResult[int, TaskError] | None,
-            Annotated[TaskResult[int, TaskError], 'a note'],
-            Annotated[TaskResult[int, TaskError] | None, 'a note'],
+            TaskOutcome[int, TaskError],
+            TaskOutcome[int, TaskError] | None,
+            Annotated[TaskOutcome[int, TaskError], 'a note'],
+            Annotated[TaskOutcome[int, TaskError] | None, 'a note'],
         ],
     )
     def test_a_slot_passes(self, annotation: object) -> None:
         assert _signature_refuses(annotation) is False
 
     def test_a_slot_ok_type_is_checked(self) -> None:
-        assert _signature_refuses(TaskResult[Open, TaskError]) is True
+        assert _signature_refuses(TaskOutcome[Open, TaskError]) is True
 
     def test_a_wrong_error_type_is_refused(self) -> None:
-        assert _signature_refuses(TaskResult[int, str]) is True
+        assert _signature_refuses(TaskOutcome[int, str]) is True
 
     def test_a_slot_default_other_than_none_is_refused(self) -> None:
         def task(
             *,
-            x: TaskResult[int, TaskError] | None = 'not none',  # type: ignore[assignment]
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            x: TaskOutcome[int, TaskError] | None = 'not none',  # type: ignore[assignment]
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         with pytest.raises(SignatureValidationError, match='must be None'):
             check_task_signature(task, task_name='task')
@@ -1077,13 +1082,13 @@ class TestNestedTaskResult:
     @pytest.mark.parametrize(
         'annotation',
         [
-            TaskResult[int, TaskError] | None,
-            Annotated[TaskResult[int, TaskError], 'a note'],
+            TaskOutcome[int, TaskError] | None,
+            Annotated[TaskOutcome[int, TaskError], 'a note'],
         ],
     )
     def test_a_producer_cannot_supply_a_slot(self, annotation: object) -> None:
-        def task(*, x: Any = None) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, x: Any = None) -> Result[int, TaskError]:
+            return Ok(1)
 
         task.__annotations__['x'] = annotation
         hints, sig = resolve_hints_and_sig(task) or ({}, None)
@@ -1097,32 +1102,32 @@ class TestNestedTaskResult:
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
 @pytest.mark.unit
 class TestFillOmittedDefaults:
     def test_the_function_gets_the_validated_default(self) -> None:
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {}) == {'s': 'ABC'}
 
     def test_a_given_value_stays(self) -> None:
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {'s': 'x'}) == {'s': 'x'}
 
     def test_a_list_default_is_a_fresh_copy(self) -> None:
-        def task(*, items: list[int] = []) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, items: list[int] = []) -> Result[int, TaskError]:
+            return Ok(1)
 
         filled = fill_omitted_defaults(task, {})
 
@@ -1130,8 +1135,8 @@ class TestFillOmittedDefaults:
         assert filled['items'] is not task.__kwdefaults__['items']
 
     def test_a_validator_that_refuses_its_default_raises(self) -> None:
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         with pytest.raises(ValueValidationError):
             fill_omitted_defaults(task, {})
@@ -1139,16 +1144,16 @@ class TestFillOmittedDefaults:
     def test_engine_filled_parameters_are_skipped(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            workflow_context: WorkflowContext | None = None,
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {}) == {}
 
     def test_a_refused_default_stops_the_send(self) -> None:
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         app = _mock_app()
         result = create_task_wrapper(task, app, 'test.task').send()
@@ -1196,9 +1201,9 @@ class TestOmittedDefaultInTheWorker:
         app = _real_app()
 
         @app.task('child_default')
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
             seen.append(s)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _run_child(app, 'child_default')
 
@@ -1211,10 +1216,10 @@ class TestOmittedDefaultInTheWorker:
         @app.task('child_slot')
         def task(
             *,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
             seen.append(value)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         ok, payload, _ = _run_child(app, 'child_slot')
 
@@ -1230,9 +1235,9 @@ class TestOmittedDefaultInTheWorker:
         def task(
             *,
             data: dict[str, JsonValue] = {'__h_taskresult_envelope__': True},
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             seen.append(data)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _run_child(app, 'child_envelope')
 
@@ -1243,9 +1248,9 @@ class TestOmittedDefaultInTheWorker:
         app = _real_app()
 
         @app.task('child_refused')
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
             seen.append(n)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _, payload, reason = _run_child(app, 'child_refused')
 
@@ -1262,27 +1267,27 @@ class TestDefaultOnASchedule:
         return TaskSchedule(
             name='nightly',
             task_name=task_name,
-            pattern=IntervalSchedule(hours=1),
+            pattern=IntervalSchedule(every=datetime.timedelta(hours=1)),
         )
 
     def test_a_refused_default_is_a_boot_refusal(self) -> None:
         app = _real_app()
 
         @app.task('schedule_refused')
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         result = _encode_schedule_kwargs(app, self._schedule('schedule_refused'))
 
         assert is_err(result)
-        assert result.err_value.code is ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.code is HorsiesErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_a_valid_default_gives_no_stored_kwargs(self) -> None:
         app = _real_app()
 
         @app.task('schedule_valid')
-        def task(*, n: int = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: int = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         result = _encode_schedule_kwargs(app, self._schedule('schedule_valid'))
 
@@ -1293,7 +1298,7 @@ class TestDefaultOnASchedule:
 def _real_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url='postgresql://user:password@localhost/unused',
             ),
         ),
@@ -1334,15 +1339,15 @@ class TestBuildWithBoundary:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='parent',
-                tasks=[SubWorkflowNode(workflow_def=_child(annotation, key=key))],
+                nodes=[SubWorkflowNode(workflow_definition=_child(annotation, key=key))],
             )
 
-        assert refused.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
     def test_a_valid_type_passes(self) -> None:
         WorkflowSpec(
             name='parent',
-            tasks=[SubWorkflowNode(workflow_def=_child(Optional[int], key='valid'))],
+            nodes=[SubWorkflowNode(workflow_definition=_child(Optional[int], key='valid'))],
         )
 
     def test_a_bad_default_is_refused_at_the_node(self) -> None:
@@ -1355,7 +1360,7 @@ class TestBuildWithBoundary:
                 raise AssertionError('not built')
 
         with pytest.raises(WorkflowValidationError):
-            WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+            WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_variadics_and_positional_parameters_pass(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1366,7 +1371,7 @@ class TestBuildWithBoundary:
             def build_with(cls, app: Any, value: int = 1, *args: Any, **params: Any) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_a_top_level_build_with_is_not_checked(self) -> None:
         class Client:
@@ -1394,7 +1399,7 @@ class TestBuildWithBoundary:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='parent',
-                tasks=[SubWorkflowNode(workflow_def=Child, kwargs={'when': 'x'})],
+                nodes=[SubWorkflowNode(workflow_definition=Child, kwargs={'when': 'x'})],
             )
 
         assert 'NotDefinedHere' in ' '.join(refused.value.notes)
@@ -1434,7 +1439,7 @@ class TestBuildWithBoundary:
             def build_with(cls, app: Any, *, value: int = 1) -> 'NotDefinedHere':  # type: ignore[name-defined]  # noqa: F821
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_a_decorator_from_another_module_is_followed(self) -> None:
         decorators = types.ModuleType('wire_shape_decorators')
@@ -1463,7 +1468,7 @@ class TestBuildWithBoundary:
             definition_key = 'tests.wire_shape.decorated'
             build_with = classmethod(source.build_with)
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_app_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1474,7 +1479,7 @@ class TestBuildWithBoundary:
             def build_with(cls, horsies_app: Any, *, value: int = 1) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_first_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1485,7 +1490,7 @@ class TestBuildWithBoundary:
             def build_with(klass, app: Any, *, value: int = 1) -> Any:
                 raise AssertionError('not built')
 
-        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', nodes=[SubWorkflowNode(workflow_definition=Child)])
 
     def test_the_boot_check_finds_a_class_level_node(self) -> None:
         class Child(WorkflowDefinition[int]):
@@ -1497,7 +1502,7 @@ class TestBuildWithBoundary:
                 raise AssertionError('not built')
 
         class Parent:
-            child = SubWorkflowNode(workflow_def=Child)
+            child = SubWorkflowNode(workflow_definition=Child)
 
         app = _real_app()
         with patch.object(app, '_discovered_task_modules', ['boot_module']), patch.object(
@@ -1512,7 +1517,7 @@ class TestBuildWithBoundary:
             errors = app._check_workflow_definitions()
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
         ]
 
 
@@ -1533,24 +1538,28 @@ class TestDefinitionOfAny:
         app = _real_app()
 
         @app.task('any_target')
-        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return value
+        def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            match value:
+                case Succeeded(value=number):
+                    return Ok(number)
+                case Failed(error=error):
+                    return Err(error)
 
-        source = SubWorkflowNode(workflow_def=self._child('any_source'))
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        source = SubWorkflowNode(workflow_definition=self._child('any_source'))
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[source, node])
+            WorkflowSpec(name='parent', nodes=[source, node])
 
-        assert refused.value.code is ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_it_cannot_be_an_output(self) -> None:
-        node = SubWorkflowNode(workflow_def=self._child('any_output'))
+        node = SubWorkflowNode(workflow_definition=self._child('any_output'))
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[node], output=node)
+            WorkflowSpec(name='parent', nodes=[node], output=node)
 
-        assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_annotated_any_cannot_feed_args_from_or_be_an_output(self) -> None:
         class Child(WorkflowDefinition[Annotated[Any, 'note']]):
@@ -1564,25 +1573,29 @@ class TestDefinitionOfAny:
         app = _real_app()
 
         @app.task('annotated_any_target')
-        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return value
+        def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            match value:
+                case Succeeded(value=number):
+                    return Ok(number)
+                case Failed(error=error):
+                    return Err(error)
 
-        source = SubWorkflowNode(workflow_def=Child)
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        source = SubWorkflowNode(workflow_definition=Child)
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[source, node])
-        assert refused.value.code is ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+            WorkflowSpec(name='parent', nodes=[source, node])
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-        output = SubWorkflowNode(workflow_def=Child)
+        output = SubWorkflowNode(workflow_definition=Child)
         with pytest.raises(WorkflowValidationError) as refused:
-            WorkflowSpec(name='parent', tasks=[output], output=output)
-        assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+            WorkflowSpec(name='parent', nodes=[output], output=output)
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_it_can_run_with_no_consumer(self) -> None:
         WorkflowSpec(
             name='parent',
-            tasks=[SubWorkflowNode(workflow_def=self._child('any_alone'))],
+            nodes=[SubWorkflowNode(workflow_definition=self._child('any_alone'))],
         )
 
 

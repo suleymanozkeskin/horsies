@@ -7,20 +7,25 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    ClassVar,
     Generic,
     Literal,
     Self,
     TypeGuard,
     cast,
+    overload,
 )
 
 from pydantic import BaseModel
 
-from .enums import OkT, OkT_co, WorkflowStatus
+from horsies._catalog.task_codes import ContractCode
+
+from .enums import CodeT, OkT, OkT_co, WorkflowStatus
 from .nodes import NodeKey
 
 if TYPE_CHECKING:
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.outcome import TaskOutcome
+    from horsies.core.models.tasks import TaskError
     from .nodes import TaskNode, SubWorkflowNode
 
 
@@ -38,16 +43,16 @@ class SubWorkflowSummary(Generic[OkT_co]):
     Useful for conditional logic based on partial success/failure.
 
     Example:
-        def make_report(workflow_ctx: WorkflowContext | None) -> TaskResult[str, TaskError]:
-            if workflow_ctx is None:
-                return TaskResult(err=TaskError(
-                    error_code="NO_CTX",
+        def make_report(workflow_context: WorkflowContext | None) -> Result[str, TaskError]:
+            if workflow_context is None:
+                return Err(TaskError(
+                    code="NO_CTX",
                     message="make_report ran without a workflow context",
                 ))
-            summary = workflow_ctx.summary_for(data_pipeline_node)
-            if summary.failed_tasks > 0:
-                return TaskResult(ok=f"Partial: {summary.completed_tasks}/{summary.total_tasks}")
-            return TaskResult(ok=f"Full: {summary.output}")
+            summary = workflow_context.summary_for(data_pipeline_node)
+            if summary.failed_nodes > 0:
+                return Ok(f"Partial: {summary.completed_nodes}/{summary.total_nodes}")
+            return Ok(f"Full: {summary.output}")
     """
 
     status: WorkflowStatus
@@ -56,17 +61,17 @@ class SubWorkflowSummary(Generic[OkT_co]):
     output: OkT_co | None
     """Child's output value (typed via generic parameter)"""
 
-    total_tasks: int
-    """Total number of tasks in child workflow"""
+    total_nodes: int
+    """Total number of nodes in the child workflow"""
 
-    completed_tasks: int
-    """Number of COMPLETED tasks"""
+    completed_nodes: int
+    """Number of COMPLETED nodes"""
 
-    failed_tasks: int
-    """Number of FAILED tasks"""
+    failed_nodes: int
+    """Number of FAILED nodes"""
 
-    skipped_tasks: int
-    """Number of SKIPPED tasks"""
+    skipped_nodes: int
+    """Number of SKIPPED nodes"""
 
     error_summary: str | None = None
     """Brief description of failure (if child failed)"""
@@ -81,10 +86,10 @@ class SubWorkflowSummary(Generic[OkT_co]):
         return {
             'status': self.status.value,
             'output': self.output,
-            'total_tasks': self.total_tasks,
-            'completed_tasks': self.completed_tasks,
-            'failed_tasks': self.failed_tasks,
-            'skipped_tasks': self.skipped_tasks,
+            'total_nodes': self.total_nodes,
+            'completed_nodes': self.completed_nodes,
+            'failed_nodes': self.failed_nodes,
+            'skipped_nodes': self.skipped_nodes,
             'error_summary': self.error_summary,
         }
 
@@ -149,35 +154,35 @@ class SubWorkflowSummary(Generic[OkT_co]):
         return cls(
             status=status,
             output=payload.get('output'),
-            total_tasks=_require_count('total_tasks', payload.get('total_tasks')),
-            completed_tasks=_require_count('completed_tasks', payload.get('completed_tasks')),
-            failed_tasks=_require_count('failed_tasks', payload.get('failed_tasks')),
-            skipped_tasks=_require_count('skipped_tasks', payload.get('skipped_tasks')),
+            total_nodes=_require_count('total_nodes', payload.get('total_nodes')),
+            completed_nodes=_require_count('completed_nodes', payload.get('completed_nodes')),
+            failed_nodes=_require_count('failed_nodes', payload.get('failed_nodes')),
+            skipped_nodes=_require_count('skipped_nodes', payload.get('skipped_nodes')),
             error_summary=error_summary,
         )
 
 
 # =============================================================================
-# WorkflowMeta (metadata only, no result access)
+# WorkflowMetadata (metadata only, no result access)
 # =============================================================================
 
 
 @dataclass
-class WorkflowMeta:
+class WorkflowMetadata:
     """
     Workflow execution metadata.
 
-    Auto-injected if task declares `workflow_meta: WorkflowMeta | None` parameter.
+    Auto-injected if task declares `workflow_meta: WorkflowMetadata | None` parameter.
     Contains only metadata, no result access.
 
     Attributes:
         workflow_id: UUID of the workflow instance
-        task_index: Index of the current task in the workflow
+        node_index: Index of the current node in the workflow
         task_name: Name of the current task
     """
 
     workflow_id: str
-    task_index: int
+    node_index: int
     task_name: str
 
 
@@ -186,8 +191,31 @@ class WorkflowMeta:
 # =============================================================================
 
 
-class WorkflowContextMissingIdError(RuntimeError):
-    """Raised when TaskNode node_id is missing for WorkflowContext.result_for()."""
+class WorkflowContextMissingId(RuntimeError):
+    """Raised by ``WorkflowContext.result_for`` and ``summary_for`` when the
+    node has no ``node_id``.
+
+    Attributes:
+        code: ``ContractCode.WORKFLOW_CONTEXT_MISSING_ID``.
+    """
+
+    code: ClassVar[Literal[ContractCode.WORKFLOW_CONTEXT_MISSING_ID]] = (
+        ContractCode.WORKFLOW_CONTEXT_MISSING_ID
+    )
+
+
+class NodeNotInContext(RuntimeError):
+    """Raised by ``WorkflowContext.result_for`` and ``summary_for`` when the
+    node has a ``node_id`` but the context holds no entry for it: the node is
+    not named in ``workflow_context_from``, or its dependency did not finish.
+
+    Attributes:
+        code: ``ContractCode.NODE_NOT_IN_CONTEXT``.
+    """
+
+    code: ClassVar[Literal[ContractCode.NODE_NOT_IN_CONTEXT]] = (
+        ContractCode.NODE_NOT_IN_CONTEXT
+    )
 
 
 # =============================================================================
@@ -200,47 +228,47 @@ class WorkflowContext(BaseModel):
     Context passed to workflow tasks with type-safe access to dependency results.
 
     Only injected if:
-    1. TaskNode has workflow_ctx_from set, AND
-    2. Task function declares `workflow_ctx: WorkflowContext | None` parameter
+    1. TaskNode has workflow_context_from set, AND
+    2. Task function declares `workflow_context: WorkflowContext | None` parameter
 
     Use result_for(node) to access results in a type-safe manner.
     Use summary_for(node) to access SubWorkflowSummary for SubWorkflowNodes.
 
     Attributes:
         workflow_id: UUID of the workflow instance
-        task_index: Index of the current task in the workflow
+        node_index: Index of the current node in the workflow
         task_name: Name of the current task
     """
 
     model_config = {'arbitrary_types_allowed': True}
 
     workflow_id: str  # UUID as string for JSON serialization
-    task_index: int
+    node_index: int
     task_name: str
 
     # Internal storage: results keyed by node_id
-    _results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+    _results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
     # Internal storage: subworkflow summaries keyed by node_id
     _summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
 
     def __init__(
         self,
         workflow_id: str,
-        task_index: int,
+        node_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskResult[Any, TaskError]] | None = None,
-        summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]] | None = None,
+        summaries_by_node_id: dict[str, SubWorkflowSummary[Any]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
             workflow_id=workflow_id,
-            task_index=task_index,
+            node_index=node_index,
             task_name=task_name,
             **kwargs,
         )
         # Store results internally (not exposed as Pydantic field)
-        object.__setattr__(self, '_results_by_id', results_by_id or {})
-        object.__setattr__(self, '_summaries_by_id', summaries_by_id or {})
+        object.__setattr__(self, '_results_by_id', results_by_node_id or {})
+        object.__setattr__(self, '_summaries_by_id', summaries_by_node_id or {})
 
     @staticmethod
     def _dump_payload_map(
@@ -252,7 +280,7 @@ class WorkflowContext(BaseModel):
         ``WorkflowContext`` (see ``model_dump`` / ``model_dump_json``
         overrides). The legacy ``to_jsonable`` branch is gone — the only
         sanctioned reconstruction path is ``from_serialized`` with
-        pre-typed ``TaskResult`` instances.
+        pre-typed ``TaskOutcome`` values.
         """
         return dict(payload)
 
@@ -287,33 +315,33 @@ class WorkflowContext(BaseModel):
     def _coerce_results_by_id(
         cls,
         raw_results: Any,
-    ) -> dict[str, TaskResult[Any, TaskError]]:
+    ) -> dict[str, TaskOutcome[Any, TaskError]]:
         """Strict-serde phase 6 (design §6 / plan §H).
 
         ``WorkflowContext`` no longer decodes raw envelopes inside this
         validator — decode happens at the engine/child-runner boundary
         where ``node_id → ok_type`` is known via the workflow spec
         and local task registry. Here we accept only pre-typed
-        ``TaskResult`` instances (the shape produced upstream) and
+        ``TaskOutcome`` values (the shape produced upstream) and
         reject raw dicts so a cross-version producer can't slip a
         wrong-shape value past the type system.
         """
-        from horsies.core.models.tasks import TaskResult
+        from horsies.core.models.outcome import Failed, Succeeded
 
         if raw_results is None:
             return {}
         if not isinstance(raw_results, dict):
-            raise ValueError('WorkflowContext results_by_id must be a dict')
+            raise ValueError('WorkflowContext results_by_node_id must be a dict')
 
-        results: dict[str, TaskResult[Any, TaskError]] = {}
+        results: dict[str, TaskOutcome[Any, TaskError]] = {}
         raw_result_map = cast(dict[Any, Any], raw_results)
         for key, value in raw_result_map.items():
             if not isinstance(key, str):
-                raise ValueError('WorkflowContext results_by_id keys must be strings')
-            if not isinstance(value, TaskResult):
+                raise ValueError('WorkflowContext results_by_node_id keys must be strings')
+            if not isinstance(value, Succeeded | Failed):
                 raise ValueError(
-                    f'WorkflowContext results_by_id[{key!r}] must be a '
-                    f'TaskResult instance; got {type(value).__name__}. '
+                    f'WorkflowContext results_by_node_id[{key!r}] must be a '
+                    f'TaskOutcome (Succeeded or Failed); got {type(value).__name__}. '
                     f'Strict-serde decodes raw envelopes at the engine/'
                     f'worker boundary, not inside the model validator.'
                 )
@@ -328,13 +356,13 @@ class WorkflowContext(BaseModel):
         if raw_summaries is None:
             return {}
         if not isinstance(raw_summaries, dict):
-            raise ValueError('WorkflowContext summaries_by_id must be a dict')
+            raise ValueError('WorkflowContext summaries_by_node_id must be a dict')
 
         summaries: dict[str, SubWorkflowSummary[Any]] = {}
         raw_summary_map = cast(dict[Any, Any], raw_summaries)
         for key, value in raw_summary_map.items():
             if not isinstance(key, str):
-                raise ValueError('WorkflowContext summaries_by_id keys must be strings')
+                raise ValueError('WorkflowContext summaries_by_node_id keys must be strings')
             if isinstance(value, SubWorkflowSummary):
                 summaries[key] = value
                 continue
@@ -368,9 +396,7 @@ class WorkflowContext(BaseModel):
                 "because its per-result ok_type information lives at the "
                 "engine/worker boundary, not on the model. Use "
                 "WorkflowContext.from_serialized(...) with pre-typed "
-                "TaskResult instances for in-process reconstruction; "
-                "encode individual TaskResults via encode_task_result if "
-                "you need a wire form."
+                "TaskOutcome values for in-process reconstruction."
             )
         data = super().model_dump(
             mode=mode,
@@ -390,17 +416,17 @@ class WorkflowContext(BaseModel):
         )
 
         if self._should_dump_payload_field(
-            'results_by_id',
+            'results_by_node_id',
             include=include,
             exclude=exclude,
         ):
-            data['results_by_id'] = self._dump_payload_map(self._results_by_id)
+            data['results_by_node_id'] = self._dump_payload_map(self._results_by_id)
         if self._should_dump_payload_field(
-            'summaries_by_id',
+            'summaries_by_node_id',
             include=include,
             exclude=exclude,
         ):
-            data['summaries_by_id'] = self._dump_payload_map(self._summaries_by_id)
+            data['summaries_by_node_id'] = self._dump_payload_map(self._summaries_by_id)
 
         return data
 
@@ -426,7 +452,7 @@ class WorkflowContext(BaseModel):
         """Refuse wire serialization of WorkflowContext.
 
         Strict-serde phase 7: WorkflowContext can only be reconstructed
-        via ``from_serialized`` with pre-typed ``TaskResult`` instances;
+        via ``from_serialized`` with pre-typed ``TaskOutcome`` values;
         per-result ``ok_type`` information lives at the engine/worker
         boundary, not on the model, so a JSON form has no sanctioned
         decode path.
@@ -467,10 +493,10 @@ class WorkflowContext(BaseModel):
             )
 
         data: dict[str, Any] = dict(cast(dict[str, Any], obj))
-        raw_results: Any = data.pop('results_by_id', None)
+        raw_results: Any = data.pop('results_by_node_id', None)
         if raw_results is None and '_results_by_id' in data:
             raw_results = data.pop('_results_by_id')
-        raw_summaries: Any = data.pop('summaries_by_id', None)
+        raw_summaries: Any = data.pop('summaries_by_node_id', None)
         if raw_summaries is None and '_summaries_by_id' in data:
             raw_summaries = data.pop('_summaries_by_id')
 
@@ -495,31 +521,50 @@ class WorkflowContext(BaseModel):
         )
         return ctx
 
+    @overload
+    def result_for(
+        self, node: TaskNode[OkT, CodeT] | NodeKey[OkT, CodeT],
+    ) -> TaskOutcome[OkT, TaskError[CodeT]]: ...
+
+    @overload
+    def result_for(
+        self, node: SubWorkflowNode[OkT],
+    ) -> TaskOutcome[OkT, TaskError]: ...
+
     def result_for(
         self,
-        node: TaskNode[OkT] | SubWorkflowNode[OkT] | NodeKey[OkT],
-    ) -> TaskResult[OkT, TaskError]:
+        node: TaskNode[OkT, Any] | SubWorkflowNode[OkT] | NodeKey[OkT, Any],
+    ) -> TaskOutcome[OkT, TaskError[Any]]:
         """
-        Get the result for a specific node.
+        Get the outcome of a specific node.
 
-        Type-safe: returns TaskResult[T, TaskError] where T matches the node's type.
+        The custom codes of a failed outcome are members of the ``Enum`` of
+        the node's task when the task returns ``TaskError[E]``, and text for
+        a task that returns ``TaskError`` and for a ``SubWorkflowNode`` (a
+        child workflow holds the codes of many tasks). A stored code that
+        ``E`` does not name is a failed outcome with
+        ``RESULT_DESERIALIZATION_ERROR``, as a node whose stored value does
+        not read.
+
+        Type-safe: returns TaskOutcome[T, TaskError] where T matches the node's type.
 
         Accepts SubWorkflowNode as well as TaskNode: a SubWorkflowNode's
-        terminal TaskResult is stored alongside task results (see
+        terminal outcome is stored alongside task outcomes (see
         ``has_result``, which also accepts both). Use ``summary_for`` when you
         need the richer SubWorkflowSummary instead.
 
         Args:
             node: The TaskNode, SubWorkflowNode, or NodeKey whose result to
-                  retrieve. Must have been included in workflow_ctx_from and
+                  retrieve. Must have been included in workflow_context_from and
                   have a node_id assigned.
 
         Returns:
-            The TaskResult from the completed task.
+            The outcome of the completed task: ``Succeeded(value)`` or
+            ``Failed(task_error)``.
 
         Raises:
-            KeyError: If the node's result is not in this context.
-            RuntimeError: If the node has no node_id assigned.
+            NodeNotInContext: If the node's result is not in this context.
+            WorkflowContextMissingId: If the node has no node_id assigned.
         """
 
         node_id: str | None
@@ -529,21 +574,21 @@ class WorkflowContext(BaseModel):
             node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.'
             )
 
         if node_id not in self._results_by_id:
-            raise KeyError(
+            raise NodeNotInContext(
                 f"TaskNode id '{node_id}' not in workflow context. "
-                'Ensure the node is included in workflow_ctx_from.'
+                'Ensure the node is included in workflow_context_from.'
             )
 
         # Cast is safe because the generic parameter ensures type correctness
-        return cast('TaskResult[OkT, TaskError]', self._results_by_id[node_id])
+        return cast('TaskOutcome[OkT, TaskError[Any]]', self._results_by_id[node_id])
 
-    def has_result(self, node: TaskNode[Any] | SubWorkflowNode[Any]) -> bool:
+    def has_result(self, node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> bool:
         """Check if a result exists for the given node."""
         if node.node_id is None:
             return False
@@ -569,29 +614,29 @@ class WorkflowContext(BaseModel):
 
         Args:
             node: The SubWorkflowNode whose summary to retrieve. Must have been
-                  included in workflow_ctx_from and have a node_id assigned.
+                  included in workflow_context_from and have a node_id assigned.
 
         Returns:
             A fresh ``SubWorkflowSummary[OkT]`` with the typed ``output``.
             The stored raw summary is not mutated.
 
         Raises:
-            KeyError: If the node's summary is not in this context.
-            RuntimeError: If the node has no node_id assigned.
+            NodeNotInContext: If the node's summary is not in this context.
+            WorkflowContextMissingId: If the node has no node_id assigned.
             pydantic.ValidationError: If the raw output payload doesn't
                 satisfy the child workflow's declared output type.
         """
         node_id = node.node_id
 
         if node_id is None:
-            raise WorkflowContextMissingIdError(
+            raise WorkflowContextMissingId(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id.'
             )
 
         if node_id not in self._summaries_by_id:
-            raise KeyError(
+            raise NodeNotInContext(
                 f"SubWorkflowNode id '{node_id}' not in workflow context summaries. "
-                'Ensure the node is included in workflow_ctx_from.'
+                'Ensure the node is included in workflow_context_from.'
             )
 
         raw_summary = self._summaries_by_id[node_id]
@@ -602,7 +647,7 @@ class WorkflowContext(BaseModel):
         from horsies.core.codec.typed import decode_value
         from .typing_utils import _resolve_workflow_def_ok_type
 
-        output_type = _resolve_workflow_def_ok_type(node.workflow_def)
+        output_type = _resolve_workflow_def_ok_type(node.workflow_definition)
         if output_type is None or output_type is Any:
             return cast('SubWorkflowSummary[OkT]', raw_summary)
 
@@ -616,10 +661,10 @@ class WorkflowContext(BaseModel):
         return SubWorkflowSummary(
             status=raw_summary.status,
             output=decoded_output,
-            total_tasks=raw_summary.total_tasks,
-            completed_tasks=raw_summary.completed_tasks,
-            failed_tasks=raw_summary.failed_tasks,
-            skipped_tasks=raw_summary.skipped_tasks,
+            total_nodes=raw_summary.total_nodes,
+            completed_nodes=raw_summary.completed_nodes,
+            failed_nodes=raw_summary.failed_nodes,
+            skipped_nodes=raw_summary.skipped_nodes,
             error_summary=raw_summary.error_summary,
         )
 
@@ -633,16 +678,16 @@ class WorkflowContext(BaseModel):
     def from_serialized(
         cls,
         workflow_id: str,
-        task_index: int,
+        node_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskResult[Any, TaskError]],
-        summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
+        results_by_node_id: dict[str, TaskOutcome[Any, TaskError]],
+        summaries_by_node_id: dict[str, SubWorkflowSummary[Any]] | None = None,
     ) -> WorkflowContext:
         """Reconstruct WorkflowContext from serialized data."""
         return cls(
             workflow_id=workflow_id,
-            task_index=task_index,
+            node_index=node_index,
             task_name=task_name,
-            results_by_id=results_by_id,
-            summaries_by_id=summaries_by_id,
+            results_by_node_id=results_by_node_id,
+            summaries_by_node_id=summaries_by_node_id,
         )

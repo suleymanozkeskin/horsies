@@ -128,9 +128,9 @@ async fn forget_leaf(pool: &TestPool, leaf: &LeafRef) {
 /// steps of the pass act.
 fn maintenance_only_recovery() -> RecoveryConfig {
     RecoveryConfig {
-        auto_requeue_stale_claimed: false,
-        auto_fail_stale_running: false,
-        auto_terminate_orphaned_workflow_tasks: false,
+        requeue_stale_claimed: false,
+        fail_stale_running: false,
+        terminate_orphaned_workflow_tasks: false,
         ..RecoveryConfig::default()
     }
 }

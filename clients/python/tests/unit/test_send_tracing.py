@@ -48,10 +48,10 @@ from horsies._catalog.producer_metrics import (
     TASK_SEND_DURATION_NAME,
     TASK_SENT_NAME,
 )
-from horsies.core.brokers.result_types import BrokerEnqueueFailed
+from horsies.core.brokers.result_types import DatabaseEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.telemetry.producer import OtelSendRecorder
 from horsies.core.telemetry.send_telemetry import (
@@ -65,7 +65,7 @@ from horsies.core.telemetry.send_telemetry import (
     WorkflowStartSubject,
     current_context_trace,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow, start_workflow_async
 
 pytestmark = [pytest.mark.unit]
@@ -128,15 +128,15 @@ def _app(
     telemetry: SendTelemetry,
     broker: MagicMock,
     *,
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
 ) -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.resend_on_transient_error = resend_on_transient_error
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = telemetry
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
@@ -149,8 +149,8 @@ def _broker(answer: object) -> MagicMock:
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def charge(*, amount: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=amount)
+    def charge(*, amount: int) -> Result[int, TaskError]:
+        return Ok(amount)
 
     return create_task_wrapper(charge, app, TASK_NAME)
 
@@ -173,11 +173,11 @@ def _traceparent(span: ReadableSpan) -> str:
     return f'00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}'
 
 
-def _enqueue_failed(*, retryable: bool) -> Err[BrokerEnqueueFailed]:
-    return Err(BrokerEnqueueFailed(
+def _enqueue_failed(*, retryable: bool) -> Err[DatabaseEnqueueFailed]:
+    return Err(DatabaseEnqueueFailed(
         message='db gone',
         retryable=retryable,
-        exception=ConnectionError('db gone'),
+        cause=ConnectionError('db gone'),
     ))
 
 
@@ -258,9 +258,9 @@ class TestTaskSendSpan:
         assert isinstance(trace, core.TraceCarrier)
         assert trace.carrier == {'traceparent': _traceparent(span)}
 
-    def test_a_schedule_is_traced(self, otel: Otel) -> None:
+    def test_a_delayed_send_is_traced(self, otel: Otel) -> None:
         broker = _broker(Ok(uuid.uuid4()))
-        result = _wrapper(_app(otel.telemetry, broker)).schedule(30, amount=5)
+        result = _wrapper(_app(otel.telemetry, broker)).with_options(delay_seconds=30).send(amount=5)
 
         assert is_ok(result)
         span = otel.one_span()
@@ -270,7 +270,7 @@ class TestTaskSendSpan:
     def test_a_resend_of_a_transient_failure_stays_in_one_span(self, otel: Otel) -> None:
         broker = MagicMock()
         broker.enqueue.side_effect = [_enqueue_failed(retryable=True), Ok(uuid.uuid4())]
-        app = _app(otel.telemetry, broker, resend_on_transient_err=True)
+        app = _app(otel.telemetry, broker, resend_on_transient_error=True)
         with patch('horsies.core.task_decorator.time.sleep'):
             result = _wrapper(app).send(amount=5)
 
@@ -384,8 +384,8 @@ class TestWorkflowStartSpan:
     def _spec() -> Any:
         spec = MagicMock()
         spec.name = 'nightly'
-        spec.tasks = []
-        spec.workflow_def_cls = None
+        spec.nodes = []
+        spec.workflow_definition = None
         spec.output = None
         return spec
 

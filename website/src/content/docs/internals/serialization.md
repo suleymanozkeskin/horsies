@@ -34,23 +34,15 @@ Every stored task result is one shape:
 - Marker `__h_task_result__: true` distinguishes a Horsies envelope from any other JSON in the row.
 - Exactly one of `ok` / `err` is non-null.
 - The `ok` slot carries a JSON value matching the task's declared output type. A structured value (a model, a dataclass, a struct) is stored as its plain JSON form, with no type tag. The reader reconstructs it from its declared type.
-- The `err` slot, when populated, carries the JSON form of the task error: `error_code`, `message`, `data`, and the exception in flattened form (`type`, `module`, `message`, `repr`, `traceback`), never a live exception.
+- The `err` slot, when populated, carries the JSON form of the task error: `error_code` (the field `TaskError.code`), `message`, `data`, and the exception in flattened form (`type`, `module`, `message`, `repr`, `traceback`), never a live exception.
 
-Outputless-workflow envelopes wrap an additional marker:
+A workflow with no output node stores the plain envelope with both slots null:
 
 ```json
-{
-  "__h_task_result__": true,
-  "__h_outputless_terminals__": true,
-  "ok": {
-    "results_by_id":   {"<node_id>": <per-node envelope>, ...},
-    "task_name_by_id": {"<node_id>": "<task_name>", ...}
-  },
-  "err": null
-}
+{"__h_task_result__": true, "ok": null, "err": null}
 ```
 
-Each `results_by_id` entry is itself a `__h_task_result__` envelope. The reader decodes each node by its task name: the task name gives the output type in the local registry.
+The same form is the result of the sub-workflow node of such a child. `NoWorkflowOutput` reads the `ok` null. The values of the nodes are in the node rows (`results()`, `nodes()`, `result_for()`). A result written before schema migration 1009 holds the key `__h_outputless_terminals__` and a map of the terminal nodes in `ok`; it is not an envelope of the strict form, and every reader refuses it.
 
 ## Encoding (worker side)
 
@@ -71,7 +63,7 @@ The reader holds the declared output type (from the task registry):
 2. If `err` is populated, the error decodes first. No output type is required to surface a failed task, also when its task name is unknown locally. The decode refuses a key that the error type does not declare, and an error without `error_code`. The refusal names the cause.
 3. Otherwise the ok slot is read through its JSON text, strictly, against the output type.
 
-A read that cannot decode returns an error with a code. The codes of the Python client are in [Decode Errors](/horsies/tasks/task-types/#decode-errors); the read errors of the Rust client are in [ReadError](/horsies/rust/tasks/retrieving-results/#readerror).
+A read that cannot decode returns an error with a code. The codes of the Python client are in [Decode Errors](/horsies/tasks/task-types/#decode-errors); the read errors of the Rust client are in [ReadError](/horsies/rust/tasks/retrieving-results/#readerror); the read errors of the TypeScript client are in [ReadError](/horsies/typescript/tasks/retrieving-results/#readerror).
 
 ## Strict Values
 
@@ -90,9 +82,9 @@ The core reads and writes JSON text with these rules:
 
 ## The Error Path
 
-An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
+An error is the report of a failure, and `retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
 
 - A lone surrogate in the code, the message or the exception text is escaped.
 - The `data` of an error must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value.
 
-The Python rules of `TaskError` subclasses and `SubWorkflowError` are in [The Error Path](/horsies/tasks/task-types/#the-error-path) of Task Types.
+The Python rules of `TaskError` subclasses and `SubWorkflowFailure` are in [The Error Path](/horsies/tasks/task-types/#the-error-path) of Task Types.

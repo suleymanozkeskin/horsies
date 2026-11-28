@@ -4,7 +4,8 @@
 //! Boot, after the log setup and the producer handle of the child:
 //!
 //! 1. the child's runtime;
-//! 2. the start hooks of the handler child, each bounded by
+//! 2. the start hooks of the handler child, each with the facts
+//!    [`ChildStartFacts::Handler`] and bounded by
 //!    [`CHILD_START_HOOK_BOUND`]; a failure ends the child with exit code
 //!    173, and the worker keeps the handler child down and runs on;
 //! 3. the thread and the queue of each handler ([`HANDLER_QUEUE_EVENTS`]
@@ -19,7 +20,7 @@
 //! node), then the event goes to the queue of each handler of its type. The
 //! dispatch never waits for a handler or for the database. An event that
 //! does not decode is logged and reaches no handler. A `handler_stats`
-//! frame goes out every [`HANDLER_STATS_INTERVAL`]. A run frame or a second
+//! frame goes out every [`HANDLER_STATISTICS_INTERVAL`]. A run frame or a second
 //! init frame ends the child with the bad-frame code.
 //!
 //! Stop frame: the queues close; the handlers and the reader task get
@@ -41,16 +42,17 @@ use tokio::sync::mpsc;
 use super::ended_spans::{EndedSpans, SpanReadFailures, StartedSpans, NODE_READ_QUEUE_SPANS};
 use super::handlers::{
     HandlerChildApp, HandlerTallies, RunningHandlers, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
-    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
+    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATISTICS_INTERVAL,
 };
 use super::host::{
     boot_failed, run_start_hook, shortage_or, start_child_runtime, AfterHookFailure, ChildHostExit,
-    CHILD_START_HOOK_BOUND,
+    ChildStartFacts, CHILD_START_HOOK_BOUND,
 };
 use super::link::{start_control_thread, Flushed, FrameWriter};
 use super::rss::read_rss;
 use super::seats::ServeEnd;
-use crate::events::{decode_event, Event, EventDecodeError, WireValue};
+use crate::events::{decode_event, AnyEvent, EventDecodeError, WireValue};
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     ChildFrame, FrameReader, HandlerStatsFrame, ParentFrame, ProcessId, ReadyFrame,
     ReportedBootCause,
@@ -90,18 +92,20 @@ pub(super) struct HandlerChildTimes {
 impl HandlerChildTimes {
     /// The times of a handler child.
     pub(super) const CHILD: Self = Self {
-        stats_every: HANDLER_STATS_INTERVAL,
+        stats_every: HANDLER_STATISTICS_INTERVAL,
         drain: HANDLER_DRAIN,
         last_stats: HANDLER_LAST_STATS_BOUND,
     };
 }
 
 /// Boot a handler child on `socket`, whose init frame `reader` read, and
-/// serve it until the stop frame or the end of the parent.
+/// serve it until the stop frame or the end of the parent. Its writer and
+/// control threads end the process through `exit`.
 pub(super) fn boot_and_serve_handlers(
     app: HandlerChildApp,
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> ChildHostExit {
     let runtime = match start_child_runtime(HANDLER_RUNTIME_THREADS) {
         Ok(runtime) => runtime,
@@ -109,7 +113,7 @@ pub(super) fn boot_and_serve_handlers(
             return boot_failed(socket, cause, "RuntimeStartFailed", &detail);
         }
     };
-    boot_and_serve_handlers_on(runtime, app, socket, reader)
+    boot_and_serve_handlers_on(runtime, app, socket, reader, exit)
 }
 
 /// [`boot_and_serve_handlers`] on `runtime`, the runtime of the child.
@@ -118,6 +122,7 @@ pub(super) fn boot_and_serve_handlers_on(
     app: HandlerChildApp,
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> ChildHostExit {
     let HandlerChildApp {
         handlers,
@@ -127,6 +132,7 @@ pub(super) fn boot_and_serve_handlers_on(
     if let Err(exit) = run_start_hook(
         runtime,
         start_hook,
+        ChildStartFacts::Handler,
         CHILD_START_HOOK_BOUND,
         AfterHookFailure::HandlerChildStaysDown,
     ) {
@@ -139,7 +145,7 @@ pub(super) fn boot_and_serve_handlers_on(
             return boot_failed(socket, cause, "ThreadStartFailed", &failed.to_string());
         }
     };
-    let (writer, mut frames) = match start_links(socket, reader) {
+    let (writer, mut frames) = match start_links(socket, reader, exit) {
         Ok(links) => links,
         Err(error) => {
             let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
@@ -169,13 +175,24 @@ pub(super) fn boot_and_serve_handlers_on(
     }
 }
 
-/// Start the writer thread and the control thread of `socket`.
+/// Start the writer thread and the control thread of `socket`; both end the
+/// process through `exit`.
 fn start_links(
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> io::Result<(FrameWriter, mpsc::Receiver<ParentFrame>)> {
-    let writer = FrameWriter::start(socket.try_clone()?, HANDLER_CHILD_FRAMES.get())?;
-    let frames = start_control_thread(socket.try_clone()?, reader, HANDLER_CHILD_FRAMES.get())?;
+    let writer = FrameWriter::start(
+        socket.try_clone()?,
+        HANDLER_CHILD_FRAMES.get(),
+        exit.clone(),
+    )?;
+    let frames = start_control_thread(
+        socket.try_clone()?,
+        reader,
+        HANDLER_CHILD_FRAMES.get(),
+        exit,
+    )?;
     Ok((writer, frames))
 }
 
@@ -288,7 +305,7 @@ pub(super) enum UndecodedEvent {
 /// Pure.
 ///
 /// Errors: [`UndecodedEvent`].
-pub(super) fn decode_wire_event(text: &str) -> Result<Event, UndecodedEvent> {
+pub(super) fn decode_wire_event(text: &str) -> Result<AnyEvent, UndecodedEvent> {
     let wire: WireValue =
         serde_json::from_str(text).map_err(|error| UndecodedEvent::NotJson(error.to_string()))?;
     decode_event(&wire).map_err(UndecodedEvent::Refused)

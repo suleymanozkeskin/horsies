@@ -1,11 +1,12 @@
 // The workflow DSL over the generated helpers: a node per task, a result
 // passed with `arg_from` (the receiving type `TaskOutcome`), the workflow
-// context, and a definition with its sub-workflow node.
+// context, a builder of the app, and a definition with its sub-workflow
+// node.
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, SubWorkflowParams, TaskError, TaskOutcome, WorkflowContext,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, HorsiesError, SubWorkflowParameters, TaskError, TaskOutcome,
+    WorkflowContext, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -26,16 +27,16 @@ async fn consume(total: TaskOutcome<f64, Infallible>) -> Result<String, TaskErro
     }
 }
 
-#[task("summarize", workflow_ctx)]
-async fn summarize(workflow_ctx: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
-    Ok(u32::try_from(workflow_ctx.task_index()).unwrap_or(0))
+#[task("summarize", workflow_context)]
+async fn summarize(workflow_context: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
+    Ok(u32::try_from(workflow_context.node_index()).unwrap_or(0))
 }
 
 struct Pipeline;
 
 impl WorkflowDefinition for Pipeline {
     type Output = String;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "pipeline"
@@ -45,20 +46,30 @@ impl WorkflowDefinition for Pipeline {
         "tests.pipeline.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let produced =
-            builder.task(produce::node()?.set(produce::params::order(), Order { order_id: 7 })?);
-        let consumed = builder.task(consume::node()?.arg_from(consume::params::total(), produced));
+            builder.task(produce::node().set(produce::fields::order(), Order { order_id: 7 })?)?;
+        let consumed =
+            builder.task(consume::node().arg_from(consume::fields::total(), produced))?;
         let _summary = builder.task(
-            summarize::node()?
+            summarize::node()
                 .waits_for(consumed)
-                .workflow_ctx_from([consumed]),
-        );
-        Ok(WorkflowDefConfig::new().output(consumed))
+                .workflow_context_from([consumed]),
+        )?;
+        Ok(WorkflowDefinitionConfig::new().output(consumed))
     }
 }
 
 fn main() {
-    let _spec = Pipeline::build();
-    let _node = Pipeline::node(SubWorkflowParams::NotGiven);
+    let Ok(mut app) = Horsies::new(AppConfig::from_database_url(
+        "postgresql://localhost/horsies",
+    )) else {
+        return;
+    };
+    let _produce = produce::register(&mut app);
+    let _consume = consume::register(&mut app);
+    let _summarize = summarize::register(&mut app);
+    let _spec = Pipeline::build(app.workflow_builder(Pipeline::name()));
+    let _function = app.register_workflow_definition::<Pipeline>();
+    let _node = Pipeline::node(SubWorkflowParameters::NotGiven);
 }

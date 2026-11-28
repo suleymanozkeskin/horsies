@@ -23,9 +23,9 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from tests.extension.programs.report import Report, run_case
 from tests.extension.programs.support import database_url
 
@@ -62,15 +62,15 @@ def ctrl_c_ends_a_blocking_get() -> Report:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(url)),
+            database=PostgresConfig(database_url=SecretStr(url)),
         ),
     )
 
-    @app.task(task_name=TASK_NAME)
-    def value_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    @app.task(name=TASK_NAME)
+    def value_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     spec = app.workflow(
         WORKFLOW_NAME, [node], output=node, definition_key=f'{WORKFLOW_NAME}.v1',
     )

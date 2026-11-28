@@ -35,18 +35,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode
+from horsies.core.brokers.result_types import DatabaseErrorCode
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    NoneDue,
-    OldestWaiting,
+    StreamWaitNoneDue,
+    StreamWaitDue,
     StreamCoverage,
-    StreamServed,
-    StreamUnserved,
-    StreamWithoutCapacity,
-    WorkerClassLoad,
+    StreamCoverageStateServed,
+    StreamCoverageStateUnserved,
+    StreamCoverageStateNoCapacity,
+    WorkerExecutionClassLoad,
 )
-from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
 
@@ -182,7 +182,7 @@ class TestClassCoverage:
         await _task(session, queue='b', execution=ISOLATED)
         await _task(session, queue='c', execution=THREAD)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
@@ -190,9 +190,9 @@ class TestClassCoverage:
 
         assert coverage.live_workers == 2
         assert coverage.streams == (
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=4)),
-            StreamCoverage('b', ISOLATED, StreamWithoutCapacity(workers=1)),
-            StreamCoverage('c', THREAD, StreamUnserved()),
+            StreamCoverage('a', ASYNC, StreamCoverageStateServed(workers=1, capacity=4)),
+            StreamCoverage('b', ISOLATED, StreamCoverageStateNoCapacity(workers=1)),
+            StreamCoverage('c', THREAD, StreamCoverageStateUnserved()),
         )
 
     async def test_a_snapshot_older_than_the_live_window_serves_nothing(
@@ -205,18 +205,18 @@ class TestClassCoverage:
             'w-gone',
             ISOLATED_CHILDREN,
             queues=['a'],
-            age_s=WORKER_STATE_LIVE_WINDOW_S + 5,
+            age_s=WORKER_STATE_LIVE_WINDOW_SECONDS + 5,
         )
         await _task(session, queue='a', execution=ISOLATED)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
                 raise AssertionError(error.message)
 
         assert coverage.live_workers == 0
-        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamUnserved()),)
+        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),)
 
     async def test_only_the_latest_snapshot_of_a_worker_counts(
         self,
@@ -234,14 +234,14 @@ class TestClassCoverage:
         )
         await _task(session, queue='a', execution=ISOLATED)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
                 raise AssertionError(error.message)
 
         assert coverage.live_workers == 1
-        assert coverage.streams[0].state == StreamWithoutCapacity(workers=1)
+        assert coverage.streams[0].coverage == StreamCoverageStateNoCapacity(workers=1)
 
     async def test_an_isolated_retry_of_a_shared_task_is_unserved_without_isolated_children(
         self,
@@ -254,15 +254,15 @@ class TestClassCoverage:
         await _task(session, queue='a', execution=ASYNC)
         await _task(session, queue='a', execution=ISOLATED)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
                 raise AssertionError(error.message)
 
         assert coverage.streams == (
-            StreamCoverage('a', ISOLATED, StreamUnserved()),
-            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=40)),
+            StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),
+            StreamCoverage('a', ASYNC, StreamCoverageStateServed(workers=1, capacity=40)),
         )
 
     async def test_a_delayed_row_counts_as_pending(
@@ -273,13 +273,13 @@ class TestClassCoverage:
         """A row due later still needs a worker of its class."""
         await _task(session, queue='a', execution=ISOLATED, due_in_s=3600)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):
                 raise AssertionError(error.message)
 
-        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamUnserved()),)
+        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamCoverageStateUnserved()),)
 
     async def test_rows_that_are_not_pending_make_no_stream(
         self,
@@ -294,7 +294,7 @@ class TestClassCoverage:
             owner='w-gone',
         )
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 assert coverage.streams == ()
             case Err(error):
@@ -313,9 +313,9 @@ class TestClassCoverage:
         )
         await _task(session, queue='a', execution=ISOLATED)
 
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Err(error):
-                assert error.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+                assert error.code == DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert error.retryable is False
                 assert 'w-odd' in error.message
                 assert 'class_capacity is unreadable' in error.message
@@ -337,7 +337,7 @@ class TestClassReport:
         await _task(session, queue='a', execution=ISOLATED, priority=90, due_in_s=600)
         await _task(session, queue='a', execution=ASYNC, due_in_s=120)
 
-        match await broker.get_class_report_async():
+        match await broker.get_execution_class_report_async():
             case Ok(report):
                 pass
             case Err(error):
@@ -360,11 +360,11 @@ class TestClassReport:
             )
         ).scalar_one()
         isolated, shared = report.streams
-        assert (isolated.queue_name, isolated.execution) == ('a', ISOLATED)
-        assert isolated.wait == OldestWaiting(oldest, report.checked_at - oldest)
+        assert (isolated.queue, isolated.execution) == ('a', ISOLATED)
+        assert isolated.wait == StreamWaitDue(oldest, report.checked_at - oldest)
         assert report.checked_at - oldest >= timedelta(seconds=300)
-        assert isolated.state == StreamServed(workers=1, capacity=4)
-        assert shared.wait == NoneDue(next_due)
+        assert isolated.coverage == StreamCoverageStateServed(workers=1, capacity=4)
+        assert shared.wait == StreamWaitNoneDue(next_due)
 
     async def test_budget_load_counts_rows_as_the_claim_does(
         self,
@@ -400,14 +400,14 @@ class TestClassReport:
         await _task(session, queue='a', execution=ASYNC, status='RUNNING', owner='w1')
         await _task(session, queue='a', execution=ASYNC, status='RUNNING', owner='w9')
 
-        match await broker.get_class_report_async():
+        match await broker.get_execution_class_report_async():
             case Ok(report):
                 pass
             case Err(error):
                 raise AssertionError(error.message)
 
         (worker,) = report.workers
-        assert worker == WorkerClassLoad(
+        assert worker == WorkerExecutionClassLoad(
             worker_id='w1',
             snapshot_at=worker.snapshot_at,
             budgets=(
@@ -427,9 +427,9 @@ class TestClassReport:
             session, queue='a', execution=ISOLATED, status='RUNNING', owner='w1'
         )
 
-        match await broker.get_class_report_async():
+        match await broker.get_execution_class_report_async():
             case Err(error):
-                assert error.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+                assert error.code == DatabaseErrorCode.MONITORING_QUERY_FAILED
                 assert 'w1' in error.message
                 assert 'ISOLATED' in error.message
             case Ok(report):

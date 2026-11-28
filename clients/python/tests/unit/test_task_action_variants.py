@@ -21,7 +21,7 @@ import pytest
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     TaskCancelledRecord,
     TooManyPendingCalls,
 )
@@ -29,14 +29,16 @@ from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring.task_actions import (
+    CancelPolicy,
     TaskActionCoreError,
-    TaskActionDbOperationFailed,
+    TaskActionDatabaseOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
+    TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
     TaskActionNotFound,
+    TaskActionOutcomeUnknown,
     TaskActionStoredDataInvalid,
-    TaskActionWorkflowTask,
     TaskCancelled,
     cancel_task,
 )
@@ -57,13 +59,16 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
         TaskActionNotCancellable(
             message=message, task_id=TASK_ID, current_status=TaskStatus.COMPLETED,
         ),
-        TaskActionWorkflowTask(
+        TaskActionIsWorkflowTask(
             message=message, task_id=TASK_ID, current_status=TaskStatus.FAILED,
         ),
-        TaskActionDbOperationFailed(
-            message=message, retryable=True, task_id=TASK_ID, exception=cause,
+        TaskActionDatabaseOperationFailed(
+            message=message, retryable=True, task_id=TASK_ID, cause=cause,
         ),
-        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, exception=cause),
+        TaskActionOutcomeUnknown(
+            message=message, retryable=True, task_id=TASK_ID, cause=cause,
+        ),
+        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, cause=cause),
     ]
 
 
@@ -107,7 +112,7 @@ class TestVariantCatalog:
         text = repr(error)
 
         match error:
-            case TaskActionNotCancellable() | TaskActionWorkflowTask():
+            case TaskActionNotCancellable() | TaskActionIsWorkflowTask():
                 assert repr(error.current_status) in text
             case _:
                 assert 'current_status' not in text
@@ -115,19 +120,19 @@ class TestVariantCatalog:
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('x')), ids=_variant_id,
     )
-    def test_only_a_database_failure_can_be_retryable(
+    def test_only_a_database_failure_or_an_unknown_outcome_can_be_retryable(
         self, error: TaskActionError,
     ) -> None:
         match error:
-            case TaskActionDbOperationFailed():
+            case TaskActionDatabaseOperationFailed() | TaskActionOutcomeUnknown():
                 assert error.retryable is True
             case _:
                 assert error.retryable is False
 
 
-def _broker_answering(answer: object) -> tuple[MagicMock, AsyncMock]:
-    """A broker whose core handle answers the cancel with ``answer``: a
-    record or a core error class, or an exception that the call raises."""
+def _app_answering(answer: object) -> tuple[MagicMock, AsyncMock]:
+    """An app whose broker's core handle answers the cancel with ``answer``:
+    a record or a core error class, or an exception that the call raises."""
     handle = MagicMock()
     match answer:
         case BaseException():
@@ -136,16 +141,18 @@ def _broker_answering(answer: object) -> tuple[MagicMock, AsyncMock]:
             handle.cancel_task_async = AsyncMock(return_value=answer)
     broker = MagicMock()
     broker._core_handle = handle
-    return broker, handle.cancel_task_async
+    app = MagicMock()
+    app.get_broker.return_value = broker
+    return app, handle.cancel_task_async
 
 
 async def _cancel(
     answer: object,
     *,
-    include_running: bool = True,
+    policy: CancelPolicy = CancelPolicy.INCLUDE_RUNNING,
 ) -> tuple[Result[TaskCancelled, TaskActionError], AsyncMock]:
-    broker, call = _broker_answering(answer)
-    result = await cancel_task(broker, TASK_ID, include_running=include_running)
+    app, call = _app_answering(answer)
+    result = await cancel_task(app, TASK_ID, policy=policy)
     return result, call
 
 
@@ -169,19 +176,27 @@ def _core_errors() -> list[TaskActionError]:
             task_id=TASK_ID,
             current_status=TaskStatus.RUNNING,
         ),
-        TaskActionWorkflowTask(
+        TaskActionIsWorkflowTask(
             message=(
                 f'Task {TASK_ID} belongs to a workflow; use the workflow actions instead.'
             ),
             task_id=TASK_ID,
             current_status=TaskStatus.PENDING,
         ),
-        TaskActionDbOperationFailed(
+        TaskActionDatabaseOperationFailed(
             message=f'Task cancel failed: connection failed: {CAUSE_MARKER}',
             retryable=True,
             task_id=TASK_ID,
-            exception=CoreConnectionError(
+            cause=CoreConnectionError(
                 'cancel_task', f'connection failed: {CAUSE_MARKER}', True,
+            ),
+        ),
+        TaskActionOutcomeUnknown(
+            message=f'Task cancel failed: database error: {CAUSE_MARKER}',
+            retryable=True,
+            task_id=TASK_ID,
+            cause=CoreConnectionError(
+                'cancel_task', f'database error: {CAUSE_MARKER}', True,
             ),
         ),
         TaskActionStoredDataInvalid(
@@ -190,7 +205,7 @@ def _core_errors() -> list[TaskActionError]:
                 f'terminalization outcome decode failed: {CAUSE_MARKER}'
             ),
             task_id=TASK_ID,
-            exception=OutcomeDecodeError(
+            cause=OutcomeDecodeError(
                 f'terminalization outcome decode failed: {CAUSE_MARKER}',
             ),
         ),
@@ -205,13 +220,21 @@ class TestCancelOutcome:
         result, call = await _cancel(_record(TaskCancelledRecord, was_status='RUNNING'))
 
         assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.RUNNING))
-        call.assert_awaited_once_with(TASK_ID, include_running=True)
+        call.assert_awaited_once_with(TASK_ID, policy='INCLUDE_RUNNING')
 
     @pytest.mark.asyncio
-    async def test_the_running_choice_reaches_the_core(self) -> None:
-        _, call = await _cancel(_core_errors()[1], include_running=False)
+    async def test_the_policy_reaches_the_core_as_its_text(self) -> None:
+        _, call = await _cancel(_core_errors()[1], policy=CancelPolicy.PENDING_OR_CLAIMED_ONLY)
 
-        call.assert_awaited_once_with(TASK_ID, include_running=False)
+        call.assert_awaited_once_with(TASK_ID, policy='PENDING_OR_CLAIMED_ONLY')
+
+    @pytest.mark.asyncio
+    async def test_the_default_policy_leaves_a_running_task(self) -> None:
+        app, call = _app_answering(_core_errors()[1])
+
+        _ = await cancel_task(app, TASK_ID)
+
+        call.assert_awaited_once_with(TASK_ID, policy='PENDING_OR_CLAIMED_ONLY')
 
     def test_the_core_errors_cover_every_class_of_the_core(self) -> None:
         built = {type(error) for error in _core_errors()}
@@ -235,7 +258,7 @@ class TestCancelFailures:
         ('error', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.cancel_task_async', 65_536), True),
-            (CoreStartFailed('the core runtime could not start'), False),
+            (RuntimeStartFailed('the core runtime could not start'), False),
         ],
         ids=['too-many-calls', 'core-start-failed'],
     )
@@ -247,8 +270,8 @@ class TestCancelFailures:
 
         assert is_err(result)
         failed = result.err_value
-        assert isinstance(failed, TaskActionDbOperationFailed)
-        assert failed.exception is error
+        assert isinstance(failed, TaskActionDatabaseOperationFailed)
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 

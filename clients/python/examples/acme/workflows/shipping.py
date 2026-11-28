@@ -24,7 +24,7 @@ from ..tasks.shipping import book_courier, print_label, tracking_seed
 
 
 class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
-    """Three sequential nodes, each consuming the previous node's TaskResult."""
+    """Three sequential nodes, each consuming the previous node's TaskOutcome."""
 
     name = 'shipping'
     definition_key = 'acme.shipping.v1'
@@ -41,19 +41,19 @@ class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
     ) -> WorkflowSpec[TrackingSeed]:
         """Build a fresh spec for one order's shipment."""
         book = TaskNode(
-            fn=book_courier,
+            function=book_courier,
             kwargs={'order_id': order_id, 'courier': courier, 'express': express},
             node_id='book_courier',
         )
         label = TaskNode(
-            fn=print_label,
+            function=print_label,
             kwargs={'order_id': order_id},
             waits_for=[book],
             args_from={'booking': book},
             node_id='print_label',
         )
         seed = TaskNode(
-            fn=tracking_seed,
+            function=tracking_seed,
             kwargs={'order_id': order_id},
             waits_for=[label],
             args_from={'label': label},
@@ -61,7 +61,7 @@ class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[book, label, seed],
+            nodes=[book, label, seed],
             on_error=OnError.FAIL,
             output=seed,
         )

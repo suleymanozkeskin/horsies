@@ -42,13 +42,18 @@ and can it act (`can_act`).
 |---|---|---|---|
 | `AllowAll` | `True` | `True` | The mount already sits behind the host app's authentication |
 | `ViewOnly` | `True` | `False` | Read-only dashboard |
-| `TrustedHeader` (a header name, and whether actions are allowed) | header present and non-empty | same check, when actions are allowed | A reverse proxy is the identity boundary |
+| `TrustedHeader` (a header name, and whether actions are allowed) | header present, non-empty, and no blank comma-separated member | same check, when actions are allowed | A reverse proxy is the identity boundary |
 
 Every `/api` route depends on `can_view`; a false verdict returns 403
 `{"detail": "Not authorized."}` and the SPA renders a full-screen
 not-authorized state. Every mutating route additionally requires `can_act` and
 the header `X-Horsies-Intent: action`; a POST without that header is rejected
 with 403.
+
+The access check runs before anything that needs the database. A caller that
+the policy refuses gets the 403 whatever the state of the database: the answer
+never carries a connect error. This holds in the Python mount and in the Rust
+mount.
 
 A custom policy answers the two questions itself, for example from the host
 app's session, JWT, or RBAC layer.
@@ -87,11 +92,11 @@ The CLI fails closed on the argument combination.
 
 | Condition | Result |
 |---|---|
-| Both `<app_path>` and `--database-url`, or neither | Argument error |
-| Non-loopback `--host` with `--auth none` | Exit 2 with an explanatory error |
-| Non-loopback `--host` | Requires `--auth trusted-header` and a header name |
-| `--auth none` on loopback, without `--enable-actions` | Policy is `ViewOnly` |
-| `--auth none` on loopback, with `--enable-actions` | Policy is `AllowAll` |
+| Both `<module>` and `--database-url`, or neither | Argument error |
+| Non-loopback `--host` with `--authorization none` | Exit 2 with an explanatory error |
+| Non-loopback `--host` | Requires `--authorization trusted-header` and a header name |
+| `--authorization none` on loopback, without `--enable-actions` | Policy is `ViewOnly` |
+| `--authorization none` on loopback, with `--enable-actions` | Policy is `AllowAll` |
 
 Actions are off unless `--enable-actions` is passed. A dashboard exposed on a
 non-loopback address without a proxy-enforced identity is not a reachable
@@ -128,6 +133,8 @@ stream cannot hold the broker's result waiters. The stream's subscriptions
 start on the first SSE subscriber and are held for the app's lifetime, so
 there is no per-request LISTEN churn.
 
+A handler serves at most 256 open event streams (`MAX_OPEN_EVENT_STREAMS`). A stream requested past the bound gets one `degraded` frame and ends, and the handler logs a warning. The dashboard falls back to polling for that viewer. A stream that ends frees its place.
+
 Size the pool for the number of concurrent dashboard viewers, and read
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the
 monitoring app at a transaction-pooled URL.
@@ -141,7 +148,7 @@ mode, pass it with `--session-database-url`, together with
 [CLI Reference](/horsies/cli/#horsies-web) (Python).
 
 In mounted mode this is already the broker config of the host app: the
-process listener uses `session_database_url` when set, and falls back to
+process listener uses the URL of a separate `session_database`, and falls back to
 `database_url` otherwise. Without a session-capable URL the event stream cannot connect, and
 the dashboard runs permanently on its polling fallback.
 
@@ -160,7 +167,7 @@ Instead of migrating, the app reads the highest successful version in
 <!-- members: SchemaState -->
 | State | Condition | Reads | Actions | UI |
 |---|---|---|---|---|
-| `MATCH` | Stored version equals the version this build expects | Served | Permitted, subject to the auth policy | Normal |
+| `MATCH` | Stored version equals the version this build expects | Served | Permitted, subject to the authorization policy | Normal |
 | `MISMATCH` | Stored version differs, older or newer | Served | Force-disabled server-side | Persistent read-only banner naming both versions |
 | `ABSENT` | A **successful** probe found neither `horsies_migrations` nor `horsies_schema_version`, or no successful row in `horsies_migrations` | — | Disabled | Full-screen state: the database has no horsies schema |
 | `ZERO_X` | A **successful** probe observed a horsies 0.x schema: `horsies_schema_version` without `horsies_migrations` (Python 0.x), or a highest version below 1000 (horsies-rust 0.x) | — | Disabled | Full-screen state: the database holds a 0.x schema that this build does not read or upgrade |
@@ -183,8 +190,8 @@ Two rules follow from that table:
 read is issued from the dashboard.
 
 While the schema does not match, every action endpoint returns 409
-`{"code": "SCHEMA_INCOMPATIBLE"}` regardless of the auth policy, and
-`/api/meta` reports `actions_enabled: false` with `actions_disabled_reason` set
+`{"code": "SCHEMA_INCOMPATIBLE"}` regardless of the authorization policy, and
+`/api/meta` reports `actions: "DISABLED"` with `actions_disabled_reason` set
 to `SCHEMA_INCOMPATIBLE`. `UNKNOWN` reports `SCHEMA_UNKNOWN`. Under `MISMATCH`
 reads continue to be served: a query that is genuinely incompatible fails on its
 own terms rather than being pre-emptively blocked.
@@ -197,7 +204,7 @@ point the fleet and the monitoring app at a new one.
 
 ## Things to Avoid
 
-**Don't expose the CLI on a non-loopback address with `--auth none`.** The CLI
+**Don't expose the CLI on a non-loopback address with `--authorization none`.** The CLI
 refuses this combination, and the refusal is the point: the dashboard exposes
 every task payload, error message, and worker hostname in the deployment. The
 wrong and the correct command are in

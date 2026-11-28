@@ -13,7 +13,7 @@
 //! (`stored_policy`). Each refusal has Python's text.
 //!
 //! Layout of the stored options (Python's): a JSON object whose
-//! `retry_policy` key holds the policy, with `auto_retry_for` inside it, and
+//! `retry_policy` key holds the policy, with `retry_for` inside it, and
 //! whose `timeout_ms` key holds the timeout. Other keys of the object are not
 //! read here.
 //!
@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use serde_json::value::RawValue;
 
 mod stored_policy;
@@ -39,7 +39,7 @@ pub const MIN_CANCEL_GRACE_MS: u64 = 100;
 pub const MAX_CANCEL_GRACE_MS: u64 = 10_000;
 /// The most retries one task can have (Python `MAX_RETRY_ATTEMPTS`).
 pub const MAX_RETRY_ATTEMPTS: u32 = 20;
-/// The largest retry interval in seconds (Python `RetryPolicy.intervals`).
+/// The largest retry interval in seconds (Python `RetryPolicy.intervals_seconds`).
 pub const MAX_RETRY_INTERVAL_SECONDS: u32 = 86_400;
 /// The smallest retry delay in seconds; jitter is added above it.
 const MIN_RETRY_DELAY_SECONDS: f64 = 1.0;
@@ -154,9 +154,9 @@ pub enum StoredRetry {
 /// The backoff of a retry rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backoff {
-    /// Attempt `n` waits `intervals[min(n, len) - 1]`.
+    /// Attempt `n` waits `intervals_seconds[min(n, len) - 1]`.
     Fixed,
-    /// Attempt `n` waits `intervals[0] * 2^(n - 1)`.
+    /// Attempt `n` waits `intervals_seconds[0] * 2^(n - 1)`.
     Exponential,
 }
 
@@ -180,16 +180,16 @@ pub enum DelayCap {
 /// [`MAX_RETRY_ATTEMPTS`], 1 to [`MAX_RETRY_ATTEMPTS`] intervals of 1 to
 /// [`MAX_RETRY_INTERVAL_SECONDS`] seconds (exactly one for exponential
 /// backoff, one per retry for fixed backoff) and at least one code in
-/// `auto_retry_for`, each an `UPPER_SNAKE_CASE` code text that is not a
+/// `retry_for`, each an `UPPER_SNAKE_CASE` code text that is not a
 /// reserved name and does not look like an exception class name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetryRule {
     max_retries: u32,
-    intervals: Vec<u32>,
+    intervals_seconds: Vec<u32>,
     backoff: Backoff,
     jitter: bool,
     delay_cap: DelayCap,
-    auto_retry_for: Vec<String>,
+    retry_for: Vec<String>,
 }
 
 /// Whether the dispatch may run user code, from the stored options.
@@ -401,6 +401,30 @@ pub fn stored_max_retries(task_options: Option<&str>) -> Result<i32, RetryLimitR
     }
 }
 
+/// Judge the `timeout_ms` of the options text of a new send with the rule
+/// of the dispatch ([`read_stored_options`] reads it with the same
+/// function): no options, no `timeout_ms` and `null` pass; an int from
+/// [`MIN_TASK_TIMEOUT_MS`] to [`MAX_TASK_TIMEOUT_MS`] passes; any other
+/// value is the refusal that the dispatch gives.
+///
+/// A text that is not a JSON object passes here: the send refuses it
+/// first, with the reader of the whole options (`enqueue_max_retries`).
+/// Pure.
+///
+/// Errors: [`TimeoutRefusal`], worded by [`timeout_refusal_message`].
+pub fn check_stored_timeout(task_options: Option<&str>) -> Result<(), TimeoutRefusal> {
+    let Some(text) = task_options else {
+        return Ok(());
+    };
+    let Ok(members) = options_members(text) else {
+        return Ok(());
+    };
+    match read_timeout(members.get("timeout_ms")) {
+        StoredTimeout::Invalid(refusal) => Err(refusal),
+        StoredTimeout::NoTimeout | StoredTimeout::Limit(_) => Ok(()),
+    }
+}
+
 impl StoredOptions {
     /// Whether the dispatch may run user code (Python `read_stored_timeout`
     /// and the child's refusal path). Unreadable options, a timeout that does
@@ -500,7 +524,7 @@ pub fn admit_retry<'a>(
         StoredRetry::NoPolicy | StoredRetry::Invalid { .. } => return RetryAdmission::NoPolicy,
     };
     match error_code {
-        Some(code) if !code.is_empty() && rule.auto_retry_for.iter().any(|entry| entry == code) => {
+        Some(code) if !code.is_empty() && rule.retry_for.iter().any(|entry| entry == code) => {
             RetryAdmission::Admitted(rule)
         }
         Some(_) | None => RetryAdmission::CodeNotListed,
@@ -521,17 +545,17 @@ impl RetryRule {
         let base = match self.backoff {
             Backoff::Exponential => {
                 let exponent = i32::try_from(retry_attempt.saturating_sub(1)).unwrap_or(i32::MAX);
-                f64::from(self.intervals[0]) * 2.0_f64.powi(exponent)
+                f64::from(self.intervals_seconds[0]) * 2.0_f64.powi(exponent)
             }
             Backoff::Fixed => {
-                let index =
-                    (retry_attempt.saturating_sub(1) as usize).min(self.intervals.len() - 1);
-                f64::from(self.intervals[index])
+                let index = (retry_attempt.saturating_sub(1) as usize)
+                    .min(self.intervals_seconds.len() - 1);
+                f64::from(self.intervals_seconds[index])
             }
         };
         let floored = base.max(MIN_RETRY_DELAY_SECONDS);
         let jittered = match self.jitter {
-            true => floored + rand::thread_rng().gen_range(0.0..=floored * JITTER_FRACTION),
+            true => floored + rand::rng().random_range(0.0..=floored * JITTER_FRACTION),
             false => floored,
         };
         match self.delay_cap {

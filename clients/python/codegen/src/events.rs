@@ -236,9 +236,9 @@ fn render_imports(usage: &Usage) -> String {
     let mut catalog_imports: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for union in &usage.unions {
         for catalog in union.catalogs {
-            let names = catalog_imports.entry(catalog.python_module).or_default();
-            if !names.contains(&catalog.python_class) {
-                names.push(catalog.python_class);
+            let names = catalog_imports.entry(catalog.module).or_default();
+            if !names.contains(&catalog.type_name) {
+                names.push(catalog.type_name);
             }
         }
     }
@@ -257,11 +257,11 @@ fn render_imports(usage: &Usage) -> String {
 /// variant classes, the events, then [`FIXED_EXPORTS`].
 fn render_all_list(contract: &EventContract, usage: &Usage) -> String {
     let mut names: Vec<&str> = vec!["EVENT_CONTRACT_VERSION"];
-    names.extend(usage.unions.iter().map(|union| union.python_name));
+    names.extend(usage.unions.iter().map(|union| union.alias_name));
     for named in contract.value_types {
         match named.shape {
             NamedShape::Variants { variants } => {
-                names.extend(variants.iter().map(|variant| variant.python_class));
+                names.extend(variants.iter().map(|variant| variant.type_name));
             }
             NamedShape::Choice { .. } => {}
         }
@@ -282,9 +282,9 @@ fn render_code_union(union: &CodeUnion) -> String {
     let classes: Vec<&str> = union
         .catalogs
         .iter()
-        .map(|catalog| catalog.python_class)
+        .map(|catalog| catalog.type_name)
         .collect();
-    let mut text = format!("type {} = {}\n", union.python_name, classes.join(" | "));
+    let mut text = format!("type {} = {}\n", union.alias_name, classes.join(" | "));
     text.push_str(&docstring(union.doc, "").unwrap_or_default());
     text
 }
@@ -318,15 +318,12 @@ fn render_value_type(named: &NamedType) -> String {
             for variant in variants {
                 text.push_str("\n\n");
                 text.push_str(&render_record_class(
-                    variant.python_class,
+                    variant.type_name,
                     variant.doc,
                     variant.fields,
                 ));
             }
-            let members: Vec<&str> = variants
-                .iter()
-                .map(|variant| variant.python_class)
-                .collect();
+            let members: Vec<&str> = variants.iter().map(|variant| variant.type_name).collect();
             text.push_str("\n\n");
             text.push_str(&render_union_alias(named.name, &members));
             text.push_str(&docstring(named.doc, "").unwrap_or_default());
@@ -361,7 +358,7 @@ fn python_type(form: ValueForm) -> &'static str {
         ValueForm::WholeNumber { .. } => "int",
         ValueForm::Duration => "timedelta",
         ValueForm::Time => "datetime",
-        ValueForm::Codes(union) => union.python_name,
+        ValueForm::Codes(union) => union.alias_name,
         ValueForm::Named(name) => name,
     }
 }
@@ -630,18 +627,18 @@ fn render_helpers(usage: &Usage) -> String {
 
 /// The name of the reader of a type: `_read_` and the snake case of its
 /// Python name.
-fn reader_name(python_name: &str) -> String {
-    format!("_read_{}", snake_case(python_name))
+fn reader_name(alias_name: &str) -> String {
+    format!("_read_{}", snake_case(alias_name))
 }
 
 /// The members of a code union by their wire value, and its reader.
 fn render_code_union_reader(union: &CodeUnion) -> String {
-    let name = union.python_name;
+    let name = union.alias_name;
     let constant = format!("_{}_MEMBERS", snake_case(name).to_uppercase());
     let classes: Vec<&str> = union
         .catalogs
         .iter()
-        .map(|catalog| catalog.python_class)
+        .map(|catalog| catalog.type_name)
         .collect();
     format!(
         "\n\n{constant}: Final[dict[str, {name}]] = {{\n    \
@@ -706,7 +703,7 @@ fn render_value_reader(named: &NamedType) -> String {
                 let tag = string_literal(variant.tag);
                 text.push_str(&format!(
                     "        case {tag}:\n            return {}(fields, at.inside({tag}))\n",
-                    reader_name(variant.python_class)
+                    reader_name(variant.type_name)
                 ));
             }
             text.push_str(&format!(
@@ -715,7 +712,7 @@ fn render_value_reader(named: &NamedType) -> String {
             ));
             for variant in variants {
                 text.push_str(&render_record_reader(
-                    variant.python_class,
+                    variant.type_name,
                     variant.fields,
                     RecordRole::Variant,
                 ));
@@ -736,7 +733,7 @@ fn reader_call(form: ValueForm, wire: &str, place: &str) -> String {
         }
         ValueForm::Duration => format!("_read_duration({wire}, {place})"),
         ValueForm::Time => format!("_read_time({wire}, {place})"),
-        ValueForm::Codes(union) => format!("{}({wire}, {place})", reader_name(union.python_name)),
+        ValueForm::Codes(union) => format!("{}({wire}, {place})", reader_name(union.alias_name)),
         ValueForm::Named(name) => format!("{}({wire}, {place})", reader_name(name)),
     }
 }
@@ -805,26 +802,29 @@ fn render_record_reader(class: &str, fields: &[EventField], role: RecordRole) ->
 mod tests {
     use std::collections::BTreeSet;
 
-    use horsies_core::catalog::{CatalogMember, CodeCatalog, PythonEnumBase, TerminalStates};
+    use horsies_core::catalog::{
+        CallForms, CatalogMember, CodeCatalog, EnumValues, TerminalStates,
+    };
     use horsies_core::events::{ChoiceValue, EventType, VariantType, EVENT_CONTRACT};
 
     use super::*;
 
     const CODES: CodeCatalog = CodeCatalog {
-        python_module: "task_codes",
-        python_class: "OutcomeCode",
-        python_base: PythonEnumBase::StrEnum,
+        module: "task_codes",
+        type_name: "OutcomeCode",
+        values: EnumValues::EqualText,
         doc: "",
         members: &[CatalogMember {
             name: "TASK_TIMEOUT",
             value: "TASK_TIMEOUT",
             doc: "",
+            forms: CallForms::AnyForm,
         }],
         terminal_states: TerminalStates::NotALifecycle,
     };
 
     const UNION: CodeUnion = CodeUnion {
-        python_name: "OutcomeCodes",
+        alias_name: "OutcomeCodes",
         doc: "An outcome code.",
         catalogs: &[CODES],
     };
@@ -869,13 +869,13 @@ mod tests {
             variants: &[
                 VariantType {
                     tag: "Reported",
-                    python_class: "StartReported",
+                    type_name: "StartReported",
                     doc: "",
                     fields: &[AT_FIELD],
                 },
                 VariantType {
                     tag: "NotReported",
-                    python_class: "StartNotReported",
+                    type_name: "StartNotReported",
                     doc: "No time.",
                     fields: &[],
                 },
@@ -1009,7 +1009,7 @@ mod tests {
         }
         let full = render_events_module(&EVENT_CONTRACT);
         assert!(full.contains(
-            "import uuid\nfrom dataclasses import dataclass, field\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Final, Literal, cast\n\nfrom horsies._catalog.task_codes import ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode\nfrom horsies.core.types.result import Err, Ok, Result\n"
+            "import uuid\nfrom dataclasses import dataclass, field\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Final, Literal, cast\n\nfrom horsies._catalog.task_codes import ContractCode, OperationalCode, OutcomeCode, RetrievalCode\nfrom horsies.core.types.result import Err, Ok, Result\n"
         ));
     }
 
@@ -1058,10 +1058,10 @@ mod tests {
             );
             if let NamedShape::Variants { variants } = named.shape {
                 for variant in variants {
-                    assert!(text.contains(&format!("\nclass {}:\n", variant.python_class)));
+                    assert!(text.contains(&format!("\nclass {}:\n", variant.type_name)));
                     assert!(text.contains(&format!(
                         "\ndef {}(fields: list[object], here: _At)",
-                        reader_name(variant.python_class)
+                        reader_name(variant.type_name)
                     )));
                 }
             }

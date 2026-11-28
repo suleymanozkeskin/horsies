@@ -17,8 +17,9 @@ use std::time::Duration;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::broker::{BrokerError, PostgresBroker, SendKind};
+use crate::broker::{BrokerError, EnqueueRefusal, EnqueueRefusalCause, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
+use crate::core::history::enqueue::SendPart;
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{
     send_error_from_enqueue, TaskSendError, TaskSendErrorCode, TaskSendPayload,
@@ -141,9 +142,9 @@ async fn remove_task_name(pool: &TestPool, task_name: &str) {
 /// `max_retries` (any JSON value), Python's `_options(max_retries=...)`.
 fn options_with_max_retries(max_retries: &str) -> String {
     policy_options(&format!(
-        "\"max_retries\": {max_retries}, \"intervals\": [5], \
+        "\"max_retries\": {max_retries}, \"intervals_seconds\": [5], \
          \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-         \"auto_retry_for\": [\"TRANSIENT\"]"
+         \"retry_for\": [\"TRANSIENT\"]"
     ))
 }
 
@@ -155,8 +156,8 @@ fn policy_options(fields: &str) -> String {
 /// The policies that Python refuses with `INVALID_TASK_OPTIONS`, with the
 /// ids of its parametrization.
 fn malformed_policies() -> Vec<(&'static str, String)> {
-    let valid_rest = "\"intervals\": [5], \"backoff_strategy\": \"exponential\", \
-                      \"jitter\": true, \"auto_retry_for\": [\"TRANSIENT\"]";
+    let valid_rest = "\"intervals_seconds\": [5], \"backoff_strategy\": \"exponential\", \
+                      \"jitter\": true, \"retry_for\": [\"TRANSIENT\"]";
     vec![
         ("negative", options_with_max_retries("-1")),
         (
@@ -168,17 +169,17 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
         (
             "exponential_with_two_intervals",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5, 10], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5, 10], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": [\"TRANSIENT\"]",
+                 \"retry_for\": [\"TRANSIENT\"]",
             ),
         ),
         (
             "no_retry_codes",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": []",
+                 \"retry_for\": []",
             ),
         ),
         (
@@ -267,13 +268,145 @@ async fn a_null_retry_policy_stores_zero_retries() {
     remove_task_name(&pool, &task_name).await;
 }
 
-/// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-/// test_conflict_names_the_owner_and_retry_is_accepted`: a key that another
-/// command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the owner task. The
-/// resend methods accept it; a resend while the reservation is active meets
-/// the same conflict with the same owner. Nothing more is written.
+/// The `execution` column of the task row `task_id`.
+async fn stored_execution_column(pool: &TestPool, task_id: Uuid) -> String {
+    sql::query_scalar("SELECT execution FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the stored execution class")
+}
+
+/// Send the class members `class_members` once with no `timeout_ms` and
+/// once with a `null` `timeout_ms`. Each send is refused before any
+/// statement: the task options refusal of the class `execution`, not
+/// retryable, `VALIDATION_FAILED` on the send path. No row is written.
+async fn assert_refused_without_a_timeout(class_members: &str, execution: &str) {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("shared_without_timeout");
+    let expected = EnqueueRefusal {
+        part: SendPart::TaskOptions,
+        message: format!(
+            "task_options refused: timeout_ms is absent for execution {execution}; a shared \
+             class requires timeout_ms"
+        ),
+        cause: EnqueueRefusalCause::RuleRefused,
+    };
+
+    for task_options in [
+        format!("{{{class_members}}}"),
+        format!("{{{class_members}, \"timeout_ms\": null}}"),
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(&task_options));
+        let task_id = new_task_id();
+
+        let refused = enqueue_payload(&broker, task_id, &payload)
+            .await
+            .expect_err(&task_options);
+
+        match &refused {
+            BrokerError::EnqueueContract(refusal) => {
+                assert_eq!(refusal, &expected, "{task_options}");
+            }
+            other => panic!("{task_options}: expected the task options refusal, got {other}"),
+        }
+        assert!(!refused.is_retryable(), "{task_options}");
+        let send_error = send_error_from_enqueue(task_id, payload, &refused);
+        assert_eq!(
+            send_error.code(),
+            TaskSendErrorCode::ValidationFailed,
+            "{task_options}"
+        );
+    }
+
+    assert_eq!(rows_of_task_name(&pool, &task_name).await, 0);
+}
+
+/// A `SHARED_ASYNC` task without a timeout is refused before any row. The
+/// Rust task macro and the Python task decorator refuse it at registration;
+/// the send refuses options that were written without them.
 #[tokio::test]
-async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
+async fn a_shared_async_task_without_a_timeout_is_refused_before_any_row() {
+    assert_refused_without_a_timeout(
+        "\"execution\": \"SHARED_ASYNC\", \"cancel_grace_ms\": 1000",
+        "SHARED_ASYNC",
+    )
+    .await;
+}
+
+/// A `SHARED_THREAD` task without a timeout is refused before any row.
+#[tokio::test]
+async fn a_shared_thread_task_without_a_timeout_is_refused_before_any_row() {
+    assert_refused_without_a_timeout("\"execution\": \"SHARED_THREAD\"", "SHARED_THREAD").await;
+}
+
+/// An `ISOLATED` task without a timeout is enqueued: the class runs with or
+/// without one.
+#[tokio::test]
+async fn an_isolated_task_without_a_timeout_is_enqueued() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("isolated_without_timeout");
+
+    for task_options in [
+        "{\"execution\": \"ISOLATED\"}",
+        "{\"execution\": \"ISOLATED\", \"timeout_ms\": null}",
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(task_options));
+        let task_id = enqueue_payload(&broker, new_task_id(), &payload)
+            .await
+            .expect(task_options);
+
+        assert_eq!(
+            stored_execution_column(&pool, task_id).await,
+            "ISOLATED",
+            "{task_options}"
+        );
+    }
+
+    remove_task_name(&pool, &task_name).await;
+}
+
+/// A `SHARED_ASYNC` and a `SHARED_THREAD` task with a timeout are enqueued,
+/// and each row stores its class.
+#[tokio::test]
+async fn a_shared_task_with_a_timeout_is_enqueued() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("shared_with_timeout");
+
+    for (task_options, execution) in [
+        (
+            "{\"execution\": \"SHARED_ASYNC\", \"cancel_grace_ms\": 1000, \"timeout_ms\": 30000}",
+            "SHARED_ASYNC",
+        ),
+        (
+            "{\"execution\": \"SHARED_THREAD\", \"timeout_ms\": 30000}",
+            "SHARED_THREAD",
+        ),
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(task_options));
+        let task_id = enqueue_payload(&broker, new_task_id(), &payload)
+            .await
+            .expect(task_options);
+
+        assert_eq!(
+            stored_execution_column(&pool, task_id).await,
+            execution,
+            "{task_options}"
+        );
+    }
+
+    remove_task_name(&pool, &task_name).await;
+}
+
+/// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
+/// A key that another command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the
+/// owner task. The send error is not retryable and the resend methods refuse
+/// it, so nothing more is written.
+#[tokio::test]
+async fn a_key_held_by_another_command_names_its_owner_and_is_refused_for_a_resend() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task_name = unique_task_name("key_owner");
@@ -308,18 +441,8 @@ async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_sa
         }
         other => panic!("expected a key conflict send error, got {other:?}"),
     }
-    let resend = send_error
-        .resend_target()
-        .expect("the resend methods accept a key conflict");
-
-    let resent = enqueue_payload(&broker, resend.task_id, resend.payload)
-        .await
-        .expect_err("the reservation is still active");
-
-    match resent {
-        BrokerError::IdempotencyKeyConflict { task_id, .. } => assert_eq!(task_id, owner),
-        other => panic!("expected the same key conflict, got {other:?}"),
-    }
+    assert!(!send_error.retryable());
+    assert!(send_error.resend_target().is_none());
     assert_eq!(rows_of_task_name(&pool, &task_name).await, 1);
     remove_task_name(&pool, &task_name).await;
 }
@@ -451,7 +574,7 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
     let application_name = format!("dead_send_{}", Uuid::new_v4().simple());
-    let mut config = PostgresConfig::from_url(with_query_parameter(
+    let mut config = PostgresConfig::from_database_url(with_query_parameter(
         &url,
         &format!("application_name={application_name}"),
     ));

@@ -1,11 +1,14 @@
 //! Workflow nodes: the references between nodes, the field tokens of a
 //! node's input, the join rule, and the task node.
 //!
-//! A [`TaskNode`] comes from the typed function of a registered task
-//! ([`TaskFunction::node`]), with the task's queue and options. Its input
-//! type `I` and output type `T` are the task's: `set` and `arg_from` take
-//! field tokens of `I` only, and `arg_from` takes a source whose output
-//! type is the field's, checked at compile time.
+//! A [`TaskNode`] comes from the generated `name::node()` or from
+//! [`TaskFunction::node`]. It names its task and holds no fact of a
+//! registration: the workflow builder of an app resolves the queue, the
+//! options and the workflow context flag of the task against that app when
+//! the node is added (`WorkflowSpecBuilder::task`). Its input type `I` and
+//! output type `T` are the task's: `set` and `arg_from` take field tokens of
+//! `I` only, and `arg_from` takes a source whose output type is the
+//! field's, checked at compile time.
 
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -14,7 +17,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::codec::to_json_bytes_strict;
-use horsies_core::TaskOptions;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -24,7 +26,7 @@ use crate::task::body::{
     decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
     value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
-use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+use crate::{CustomErrorCode, HorsiesError, HorsiesErrorCode, TaskFunction, TaskOutcome};
 
 // ---------------------------------------------------------------------------
 // Types and references
@@ -193,7 +195,7 @@ impl<T> Eq for NodeKey<T> {}
 /// workflow: the member name that serde reads.
 ///
 /// `#[horsies::task]` generates one per parameter of a task
-/// (`name::params::field()`), and `#[derive(WorkflowInput)]` one per field
+/// (`name::fields::field()`), and `#[derive(WorkflowInput)]` one per field
 /// of a child workflow's params type (`Params::field_name()`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputField<I, F> {
@@ -257,8 +259,8 @@ pub(crate) struct NodeLinks {
     /// The input members that take a dependency's result, by member name.
     pub(crate) args_from: BTreeMap<String, NodeRef>,
     /// The dependencies whose results the workflow context takes.
-    pub(crate) workflow_ctx_from: Vec<NodeRef>,
-    pub(crate) allow_failed_deps: bool,
+    pub(crate) workflow_context_from: Vec<NodeRef>,
+    pub(crate) allow_failed_dependencies: bool,
     pub(crate) join: JoinType,
     pub(crate) node_id: NodeIdChoice,
 }
@@ -268,8 +270,8 @@ impl NodeLinks {
         Self {
             dependencies: Vec::new(),
             args_from: BTreeMap::new(),
-            workflow_ctx_from: Vec::new(),
-            allow_failed_deps: false,
+            workflow_context_from: Vec::new(),
+            allow_failed_dependencies: false,
             join: JoinType::All,
             node_id: NodeIdChoice::Auto,
         }
@@ -425,7 +427,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
         InputRefused::NotAnObject => HorsiesError::new(format!(
             "the input of node {owner} is not a JSON object"
         ))
-        .with_code(ErrorCode::WorkflowPositionalArgsNotSupported)
+        .with_code(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         .with_help(
             "a workflow node takes its input as named members: give the task a struct input or \
              several parameters",
@@ -435,7 +437,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
             "the input of node {owner} has the member '{name}', a name that only the engine \
              writes"
         ))
-        .with_code(ErrorCode::WorkflowInvalidKwargKey)
+        .with_code(HorsiesErrorCode::WorkflowInvalidKwargKey)
         .with_help("keys that start with __h_ or __horsies_, and __builtin_task_code__, belong to the engine"),
     }
 }
@@ -444,7 +446,7 @@ fn not_serializable(owner: &str, cause: &str) -> HorsiesError {
     HorsiesError::new(format!(
         "the input of node {owner} does not serialize: {cause}"
     ))
-    .with_code(ErrorCode::WorkflowKwargsNotSerializable)
+    .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable)
 }
 
 /// A serde_json error kind as text, with no value and no position.
@@ -484,29 +486,40 @@ pub(crate) enum NodeDeadline {
     At(DateTime<Utc>),
 }
 
-/// The parts of a task node that the registration of its task gives.
-pub(crate) struct TaskNodeParts {
-    pub(crate) task_name: String,
+/// The queue of a task node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeQueue {
+    /// The queue of the task's registration on the builder's app.
+    OfTask,
+    /// The queue that the node names. The app checks it when the workflow
+    /// is registered or started.
+    Given(String),
+}
+
+/// What a task node takes from the registration of its task on one app:
+/// the queue, the stored options text (the retry options and the class) and
+/// whether the task's input takes the workflow context. The app's catalog
+/// of typed functions keeps one per task; the workflow builder reads it
+/// when a node is added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeRegistration {
     pub(crate) queue: String,
-    /// The task's stored options text (its retry options and class).
     pub(crate) task_options: Option<String>,
-    pub(crate) accepts_workflow_ctx: bool,
-    pub(crate) input_check: InputCheck,
+    pub(crate) accepts_workflow_context: bool,
 }
 
 /// A workflow node that runs a task with input `I` and output `T` (Python
 /// `TaskNode`).
 ///
-/// [`TaskFunction::node`] makes one with the task's queue and options and an
+/// The generated `name::node()` and [`TaskFunction::node`] make one with an
 /// empty input `{}`; set the input with [`Self::set_input`], [`Self::set`]
-/// and [`Self::arg_from`], then add it with `WorkflowSpecBuilder::task`.
+/// and [`Self::arg_from`], then add it with `WorkflowSpecBuilder::task`,
+/// which resolves the task against the builder's app.
 pub struct TaskNode<T, I> {
     pub(crate) task_name: String,
     pub(crate) input: NodeInput,
-    pub(crate) queue: String,
+    pub(crate) queue: NodeQueue,
     pub(crate) priority: NodePriority,
-    pub(crate) task_options: Option<String>,
-    pub(crate) accepts_workflow_ctx: bool,
     pub(crate) deadline: NodeDeadline,
     pub(crate) input_check: InputCheck,
     pub(crate) links: NodeLinks,
@@ -525,22 +538,28 @@ impl<T, I> std::fmt::Debug for TaskNode<T, I> {
     }
 }
 
-impl<T, I> TaskNode<T, I> {
-    pub(crate) fn new(parts: TaskNodeParts) -> Self {
+impl<T, I> TaskNode<T, I>
+where
+    I: Serialize + DeserializeOwned + 'static,
+{
+    /// A node of the task `task_name` with an empty input `{}`, the queue
+    /// and the priority of the task, no deadline and no link. The spec
+    /// build decodes its input with `I`.
+    pub(crate) fn of_task(task_name: &str) -> Self {
         Self {
-            task_name: parts.task_name,
+            task_name: task_name.to_owned(),
             input: NodeInput::empty(),
-            queue: parts.queue,
+            queue: NodeQueue::OfTask,
             priority: NodePriority::OfQueue,
-            task_options: parts.task_options,
-            accepts_workflow_ctx: parts.accepts_workflow_ctx,
             deadline: NodeDeadline::NoDeadline,
-            input_check: parts.input_check,
+            input_check: decode_check::<I>,
             links: NodeLinks::new(),
             types: PhantomData,
         }
     }
+}
 
+impl<T, I> TaskNode<T, I> {
     fn owner(&self) -> String {
         format!("'{}'", self.task_name)
     }
@@ -598,7 +617,9 @@ impl<T, I> TaskNode<T, I> {
     /// Take the result of `source` as the field `field` (Python
     /// `args_from`). The field's type is the receiving type
     /// `TaskOutcome<S, E>`, with `S` the source's output type; `E` reads the
-    /// source's user codes (`UserCode` takes any). The node waits for
+    /// source's custom codes (`CustomCode` takes any). A stored custom code that
+    /// the source's task does not declare fails the run with
+    /// `WORKER_SERIALIZATION_ERROR`, whatever `E` is. The node waits for
     /// `source`.
     pub fn arg_from<S, E>(
         mut self,
@@ -629,16 +650,16 @@ impl<T, I> TaskNode<T, I> {
 
     /// Give the task the results of `sources` in its workflow context. Each
     /// source must be a dependency of the node, and the task must take the
-    /// context (`workflow_ctx` on the task attribute).
-    pub fn workflow_ctx_from<D, R>(mut self, sources: D) -> Self
+    /// context (`workflow_context` on the task attribute).
+    pub fn workflow_context_from<D, R>(mut self, sources: D) -> Self
     where
         D: IntoIterator<Item = R>,
         R: Into<NodeRef>,
     {
         for source in sources {
             let source = source.into();
-            if !self.links.workflow_ctx_from.contains(&source) {
-                self.links.workflow_ctx_from.push(source);
+            if !self.links.workflow_context_from.contains(&source) {
+                self.links.workflow_context_from.push(source);
             }
         }
         self
@@ -655,7 +676,7 @@ impl<T, I> TaskNode<T, I> {
     /// Run the task on `queue` in place of the task's queue. The app checks
     /// the queue when the workflow is registered or started.
     pub fn queue(mut self, queue: impl Into<String>) -> Self {
-        self.queue = queue.into();
+        self.queue = NodeQueue::Given(queue.into());
         self
     }
 
@@ -667,8 +688,8 @@ impl<T, I> TaskNode<T, I> {
     }
 
     /// Run the node even when a dependency failed.
-    pub fn allow_failed_deps(mut self, allow: bool) -> Self {
-        self.links.allow_failed_deps = allow;
+    pub fn allow_failed_dependencies(mut self, allow: bool) -> Self {
+        self.links.allow_failed_dependencies = allow;
         self
     }
 
@@ -715,19 +736,14 @@ impl<A, T, E> TaskFunction<A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
-    /// A workflow node of the task, with the queue and the options of its
-    /// registration and an empty input `{}` (Python `TaskNode(fn=task)`).
-    /// The generated `name::node()` calls it.
+    /// A workflow node of the task with an empty input `{}` (Python
+    /// `TaskNode(fn=task)`), as the generated `name::node()` makes it. The
+    /// workflow builder that takes the node resolves the queue and the
+    /// options of the task against its own app.
     pub fn node(&self) -> TaskNode<T, A> {
-        TaskNode::new(TaskNodeParts {
-            task_name: self.task_name().to_owned(),
-            queue: self.queue_name().to_owned(),
-            task_options: self.task_options().map(TaskOptions::stored_options_text),
-            accepts_workflow_ctx: self.accepts_workflow_ctx(),
-            input_check: decode_check::<A>,
-        })
+        TaskNode::of_task(self.task_name())
     }
 }
 
@@ -754,47 +770,66 @@ pub(crate) mod tests {
         pub(crate) amount: f64,
     }
 
-    /// A task node of `task_name` with input `I` and output `T`, as the
-    /// node of a registered task on queue `default`.
+    /// A task node of `task_name` with input `I` and output `T`.
     pub(crate) fn task_node<T, I>(task_name: &str) -> TaskNode<T, I>
     where
         I: Serialize + DeserializeOwned + 'static,
     {
-        TaskNode::new(TaskNodeParts {
-            task_name: task_name.to_owned(),
+        TaskNode::of_task(task_name)
+    }
+
+    /// The registration of a task on queue `default`, with no options and
+    /// no workflow context.
+    pub(crate) fn default_registration() -> NodeRegistration {
+        NodeRegistration {
             queue: "default".to_owned(),
             task_options: None,
-            accepts_workflow_ctx: false,
-            input_check: decode_check::<I>,
-        })
+            accepts_workflow_context: false,
+        }
+    }
+
+    /// A builder of `name` on an app with no task. The spec tests add their
+    /// nodes with [`add`], which gives each node a registration.
+    pub(crate) fn test_builder(name: &str) -> crate::WorkflowSpecBuilder {
+        crate::WorkflowSpecBuilder::new(
+            name,
+            std::sync::Arc::new(crate::send::TaskFunctions::new()),
+        )
+    }
+
+    /// Add `node` to `builder` as the node of a task registered on queue
+    /// `default`, with no options and no workflow context. The lookup of
+    /// `WorkflowSpecBuilder::task` has tests of its own.
+    pub(crate) fn add<T: 'static, I>(
+        builder: &mut crate::WorkflowSpecBuilder,
+        node: TaskNode<T, I>,
+    ) -> TypedNodeRef<T> {
+        builder.add_task(node, default_registration())
     }
 
     fn amount() -> InputField<ChargeInput, f64> {
         InputField::raw("amount")
     }
 
-    /// The task of `a_node_before_the_registration_of_its_task_is_hrs_302`.
-    /// No test registers it.
-    #[horsies::task("node_before_register_probe")]
-    async fn node_before_register_probe(
+    /// The task of the tests of a generated node. No test registers it: a
+    /// node needs no registration until a builder takes it.
+    #[horsies::task("node_probe")]
+    async fn node_probe(
         order_id: u32,
     ) -> Result<u32, horsies::TaskError<std::convert::Infallible>> {
         Ok(order_id)
     }
 
+    /// The generated `name::node()` reads no process state: it names its
+    /// task, with the queue of the task's registration and no input member.
     #[test]
-    fn a_node_before_the_registration_of_its_task_is_hrs_302() {
-        let refused = match node_before_register_probe::node() {
-            Ok(_node) => panic!("node() before register gave a node"),
-            Err(refused) => refused,
-        };
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowUnregisteredTask));
-        assert!(
-            refused
-                .message
-                .contains("task 'node_before_register_probe' is not registered in this process"),
-            "{refused}"
-        );
+    fn a_generated_node_names_its_task_and_reads_no_registration() {
+        let node = node_probe::node();
+        assert_eq!(node.task_name(), "node_probe");
+        assert_eq!(node.queue, NodeQueue::OfTask);
+        assert_eq!(node.input.to_text(), "{}");
+        let node = node.queue("fast");
+        assert_eq!(node.queue, NodeQueue::Given("fast".to_owned()));
     }
 
     #[test]
@@ -813,7 +848,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .set(amount(), f64::NAN)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowKwargsNotSerializable));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowKwargsNotSerializable)
+        );
         assert!(refused.message.contains("'charge'"), "{refused}");
     }
 
@@ -830,14 +868,14 @@ pub(crate) mod tests {
         let refused = task_node::<u32, u64>("double").set_input(5).unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
         let refused = task_node::<u32, u64>("double")
             .input_json("[1, 2]")
             .unwrap_err();
         assert_eq!(
             refused.code,
-            Some(ErrorCode::WorkflowPositionalArgsNotSupported)
+            Some(HorsiesErrorCode::WorkflowPositionalArgsNotSupported)
         );
     }
 
@@ -846,7 +884,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .input_json(r#"{"__h_workflow_meta__": {}}"#)
             .unwrap_err();
-        assert_eq!(refused.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowInvalidKwargKey)
+        );
     }
 
     #[test]

@@ -94,7 +94,7 @@ pub struct RetentionClassKeyRefused {
 
 /// The age past which a PAUSED workflow expires: a whole number of
 /// microseconds from 1 to [`PausedWorkflowAge::MAX_MICROS`] (Python
-/// `RetentionConfig.paused_workflow_auto_cancel_after`, a positive
+/// `RetentionConfig.paused_workflow_cancel_after`, a positive
 /// `timedelta`, which holds whole microseconds only).
 ///
 /// Only [`PausedWorkflowAge::parse`] builds it, and the config reader calls
@@ -167,14 +167,16 @@ const MICROS_PER_DAY: i64 = 86_400_000_000;
 /// Why a duration is not a paused-workflow age. Nothing reads the value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PausedAgeRefused {
-    #[error("paused_workflow_auto_cancel_after must be positive, got {age}; use None to disable the sweep")]
+    #[error(
+        "paused_workflow_cancel_after must be positive, got {age}; use None to disable the sweep"
+    )]
     NotPositive { age: Duration },
     #[error(
-        "paused_workflow_auto_cancel_after ({age}) has a part below one microsecond; the expiry compares ages in whole microseconds"
+        "paused_workflow_cancel_after ({age}) has a part below one microsecond; the expiry compares ages in whole microseconds"
     )]
     NotWholeMicroseconds { age: Duration },
     #[error(
-        "paused_workflow_auto_cancel_after ({age}) is longer than {max_days} days; the expiry subtracts the age from now(), and the result must stay inside PostgreSQL's timestamp range. Use at most {max_days} days, or None to disable the sweep",
+        "paused_workflow_cancel_after ({age}) is longer than {max_days} days; the expiry subtracts the age from now(), and the result must stay inside PostgreSQL's timestamp range. Use at most {max_days} days, or None to disable the sweep",
         max_days = PausedWorkflowAge::MAX_DAYS
     )]
     TooLong { age: Duration },
@@ -185,7 +187,7 @@ pub struct RetentionConfig {
     pub worker_state_retention_hours: Option<u32>,
     pub terminal_record_retention_hours: Option<u32>,
     /// `None` turns the expiry sweep off.
-    pub paused_workflow_auto_cancel_after: Option<PausedWorkflowAge>,
+    pub paused_workflow_cancel_after: Option<PausedWorkflowAge>,
     pub history_leaf_horizon_days: u32,
     pub heartbeat_leaf_horizon_hours: u32,
     /// Finite periods a send may choose besides the 30-day default and the
@@ -194,8 +196,8 @@ pub struct RetentionConfig {
     /// Per-queue retention: a period in whole days, 1 to 1825, or `None` to
     /// keep the history record forever. An unmapped queue uses the default.
     pub queue_retention: HashMap<String, Option<Duration>>,
-    pub partition_maintenance_interval_s: u64,
-    pub retention_sweep_interval_s: u64,
+    pub partition_maintenance_interval_seconds: u64,
+    pub retention_sweep_interval_seconds: u64,
     pub retention_delete_batch_size: u32,
 }
 
@@ -215,11 +217,11 @@ fn default_heartbeat_leaf_horizon_hours() -> u32 {
     6
 }
 
-fn default_partition_maintenance_interval_s() -> u64 {
+fn default_partition_maintenance_interval_seconds() -> u64 {
     900
 }
 
-fn default_retention_sweep_interval_s() -> u64 {
+fn default_retention_sweep_interval_seconds() -> u64 {
     300
 }
 
@@ -232,13 +234,14 @@ impl Default for RetentionConfig {
         Self {
             worker_state_retention_hours: default_worker_state_retention_hours(),
             terminal_record_retention_hours: default_terminal_record_retention_hours(),
-            paused_workflow_auto_cancel_after: None,
+            paused_workflow_cancel_after: None,
             history_leaf_horizon_days: default_history_leaf_horizon_days(),
             heartbeat_leaf_horizon_hours: default_heartbeat_leaf_horizon_hours(),
             retention_periods: Vec::new(),
             queue_retention: HashMap::new(),
-            partition_maintenance_interval_s: default_partition_maintenance_interval_s(),
-            retention_sweep_interval_s: default_retention_sweep_interval_s(),
+            partition_maintenance_interval_seconds: default_partition_maintenance_interval_seconds(
+            ),
+            retention_sweep_interval_seconds: default_retention_sweep_interval_seconds(),
             retention_delete_batch_size: default_retention_delete_batch_size(),
         }
     }
@@ -257,7 +260,7 @@ struct RetentionConfigWire {
     #[serde(default = "default_terminal_record_retention_hours")]
     terminal_record_retention_hours: Option<u32>,
     #[serde(default)]
-    paused_workflow_auto_cancel_after: Option<Duration>,
+    paused_workflow_cancel_after: Option<Duration>,
     #[serde(default = "default_history_leaf_horizon_days")]
     history_leaf_horizon_days: u32,
     #[serde(default = "default_heartbeat_leaf_horizon_hours")]
@@ -266,10 +269,10 @@ struct RetentionConfigWire {
     retention_periods: Vec<Duration>,
     #[serde(default)]
     queue_retention: HashMap<String, Option<Duration>>,
-    #[serde(default = "default_partition_maintenance_interval_s")]
-    partition_maintenance_interval_s: u64,
-    #[serde(default = "default_retention_sweep_interval_s")]
-    retention_sweep_interval_s: u64,
+    #[serde(default = "default_partition_maintenance_interval_seconds")]
+    partition_maintenance_interval_seconds: u64,
+    #[serde(default = "default_retention_sweep_interval_seconds")]
+    retention_sweep_interval_seconds: u64,
     #[serde(default = "default_retention_delete_batch_size")]
     retention_delete_batch_size: u32,
 }
@@ -291,7 +294,7 @@ impl<'de> Deserialize<'de> for RetentionConfig {
             return Err(D::Error::custom(RETENTION_CLASSES_REMOVED));
         }
         let wire: RetentionConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
-        let paused_workflow_auto_cancel_after = match wire.paused_workflow_auto_cancel_after {
+        let paused_workflow_cancel_after = match wire.paused_workflow_cancel_after {
             None => None,
             Some(age) => Some(PausedWorkflowAge::parse(age).map_err(|refused| {
                 D::Error::custom(RetentionConfigError::PausedExpiryRefused { refused })
@@ -300,13 +303,13 @@ impl<'de> Deserialize<'de> for RetentionConfig {
         Ok(Self {
             worker_state_retention_hours: wire.worker_state_retention_hours,
             terminal_record_retention_hours: wire.terminal_record_retention_hours,
-            paused_workflow_auto_cancel_after,
+            paused_workflow_cancel_after,
             history_leaf_horizon_days: wire.history_leaf_horizon_days,
             heartbeat_leaf_horizon_hours: wire.heartbeat_leaf_horizon_hours,
             retention_periods: wire.retention_periods,
             queue_retention: wire.queue_retention,
-            partition_maintenance_interval_s: wire.partition_maintenance_interval_s,
-            retention_sweep_interval_s: wire.retention_sweep_interval_s,
+            partition_maintenance_interval_seconds: wire.partition_maintenance_interval_seconds,
+            retention_sweep_interval_seconds: wire.retention_sweep_interval_seconds,
             retention_delete_batch_size: wire.retention_delete_batch_size,
         })
     }
@@ -378,15 +381,15 @@ impl RetentionConfig {
         );
         validate_range(
             &mut errors,
-            "partition_maintenance_interval_s",
-            self.partition_maintenance_interval_s,
+            "partition_maintenance_interval_seconds",
+            self.partition_maintenance_interval_seconds,
             60,
             3_600,
         );
         validate_range(
             &mut errors,
-            "retention_sweep_interval_s",
-            self.retention_sweep_interval_s,
+            "retention_sweep_interval_seconds",
+            self.retention_sweep_interval_seconds,
             30,
             86_400,
         );
@@ -450,8 +453,8 @@ impl RetentionConfig {
     ///
     /// The periods come from a config that `validate` accepted; a period that
     /// fails to parse here was changed after validation, which is a defect.
-    pub fn resolve_queue_class(&self, queue_name: &str) -> Option<String> {
-        match self.queue_retention.get(queue_name) {
+    pub fn resolve_queue_retention_class(&self, queue: &str) -> Option<String> {
+        match self.queue_retention.get(queue) {
             None => Some(DEFAULT_RETENTION_CLASS_KEY.to_owned()),
             Some(None) => None,
             Some(Some(period)) => Some(validated_days(*period).class_key()),
@@ -477,7 +480,7 @@ impl RetentionConfig {
         choice: Option<&RetentionChoice>,
     ) -> Result<Option<String>, RetentionConfigError> {
         match choice {
-            None => Ok(self.resolve_queue_class(queue_name)),
+            None => Ok(self.resolve_queue_retention_class(queue_name)),
             Some(RetentionChoice::Forever) => Ok(None),
             Some(RetentionChoice::Period(days)) => {
                 let allowed = self.sendable_periods();
@@ -607,10 +610,10 @@ mod tests {
         assert_eq!(config.terminal_record_retention_hours, Some(720));
         assert_eq!(config.history_leaf_horizon_days, 3);
         assert_eq!(config.heartbeat_leaf_horizon_hours, 6);
-        assert_eq!(config.partition_maintenance_interval_s, 900);
-        assert_eq!(config.retention_sweep_interval_s, 300);
+        assert_eq!(config.partition_maintenance_interval_seconds, 900);
+        assert_eq!(config.retention_sweep_interval_seconds, 300);
         assert_eq!(config.retention_delete_batch_size, 500);
-        assert_eq!(config.paused_workflow_auto_cancel_after, None);
+        assert_eq!(config.paused_workflow_cancel_after, None);
 
         // The paused age is not here: its type holds its bound, and the
         // config reader refuses an age outside it
@@ -620,8 +623,8 @@ mod tests {
             terminal_record_retention_hours: Some(43_801),
             history_leaf_horizon_days: 1,
             heartbeat_leaf_horizon_hours: 49,
-            partition_maintenance_interval_s: 59,
-            retention_sweep_interval_s: 86_401,
+            partition_maintenance_interval_seconds: 59,
+            retention_sweep_interval_seconds: 86_401,
             retention_delete_batch_size: 49,
             ..Default::default()
         };
@@ -707,7 +710,7 @@ mod tests {
     fn a_paused_age_outside_its_bound_is_refused_when_the_config_is_read() {
         // chrono's duration form is [seconds, nanoseconds].
         let refused = serde_json::from_value::<RetentionConfig>(serde_json::json!({
-            "paused_workflow_auto_cancel_after": [3_600, 1],
+            "paused_workflow_cancel_after": [3_600, 1],
         }))
         .unwrap_err();
         let expected = RetentionConfigError::PausedExpiryRefused {
@@ -725,14 +728,14 @@ mod tests {
         );
 
         let zero = serde_json::from_value::<RetentionConfig>(serde_json::json!({
-            "paused_workflow_auto_cancel_after": [0, 0],
+            "paused_workflow_cancel_after": [0, 0],
         }))
         .unwrap_err();
         assert!(zero.to_string().contains("must be positive"), "{zero}");
 
         // One microsecond above the bound of 365,000 days.
         let too_long = serde_json::from_value::<RetentionConfig>(serde_json::json!({
-            "paused_workflow_auto_cancel_after": [31_536_000_000_i64, 1_000],
+            "paused_workflow_cancel_after": [31_536_000_000_i64, 1_000],
         }))
         .unwrap_err();
         let expected = RetentionConfigError::PausedExpiryRefused {
@@ -749,23 +752,21 @@ mod tests {
             "{too_long}"
         );
         let longest: RetentionConfig = serde_json::from_value(serde_json::json!({
-            "paused_workflow_auto_cancel_after": [31_536_000_000_i64, 0],
+            "paused_workflow_cancel_after": [31_536_000_000_i64, 0],
         }))
         .expect("the longest age");
         assert_eq!(
             longest
-                .paused_workflow_auto_cancel_after
+                .paused_workflow_cancel_after
                 .map(PausedWorkflowAge::micros),
             Some(PausedWorkflowAge::MAX_MICROS)
         );
 
         let read: RetentionConfig = serde_json::from_value(serde_json::json!({
-            "paused_workflow_auto_cancel_after": [3_600, 250_000],
+            "paused_workflow_cancel_after": [3_600, 250_000],
         }))
         .expect("an age of whole microseconds");
-        let age = read
-            .paused_workflow_auto_cancel_after
-            .expect("the age is set");
+        let age = read.paused_workflow_cancel_after.expect("the age is set");
         assert_eq!(age.micros(), 3_600_000_250);
         let written = serde_json::to_value(&read).expect("a config writes");
         let read_again: RetentionConfig =
@@ -780,8 +781,8 @@ mod tests {
             ("terminal_record_retention_hours", 1, 43_800),
             ("history_leaf_horizon_days", 2, 14),
             ("heartbeat_leaf_horizon_hours", 2, 48),
-            ("partition_maintenance_interval_s", 60, 3_600),
-            ("retention_sweep_interval_s", 30, 86_400),
+            ("partition_maintenance_interval_seconds", 60, 3_600),
+            ("retention_sweep_interval_seconds", 30, 86_400),
             ("retention_delete_batch_size", 50, 10_000),
         ];
         for &(field, min, max) in cases {
@@ -822,8 +823,10 @@ mod tests {
             }
             "history_leaf_horizon_days" => config.history_leaf_horizon_days = value as u32,
             "heartbeat_leaf_horizon_hours" => config.heartbeat_leaf_horizon_hours = value as u32,
-            "partition_maintenance_interval_s" => config.partition_maintenance_interval_s = value,
-            "retention_sweep_interval_s" => config.retention_sweep_interval_s = value,
+            "partition_maintenance_interval_seconds" => {
+                config.partition_maintenance_interval_seconds = value;
+            }
+            "retention_sweep_interval_seconds" => config.retention_sweep_interval_seconds = value,
             "retention_delete_batch_size" => config.retention_delete_batch_size = value as u32,
             unknown => panic!("unhandled retention boundary field {unknown}"),
         }

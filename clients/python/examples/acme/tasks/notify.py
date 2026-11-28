@@ -2,8 +2,8 @@
 """Customer notifications.
 
 `send_order_email` is the workflow's recovery handler. Its node sets
-`allow_failed_deps=True`, so it runs whether the capture completed, failed, or
-was skipped — it reads the upstream `TaskResult` and picks the template. The
+`allow_failed_dependencies=True`, so it runs whether the capture completed, failed, or
+was skipped — it reads the upstream `TaskOutcome` and picks the template. The
 workflow still fails by policy; the customer still hears from Acme Clothing.
 """
 
@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from horsies import (
     Err,
+    Failed,
     Ok,
-    OperationalErrorCode,
+    OperationalCode,
+    Result,
     RetryPolicy,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 
 from .. import simulate, store, tuning
@@ -36,26 +39,26 @@ APOLOGY_TEMPLATE = 'order-problem'
 
 @app.task(
     'send_order_email',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_order_email(
     *,
     order_id: str,
-    capture: TaskResult[PaymentCapture, TaskError],
-) -> TaskResult[EmailReceipt, TaskError]:
+    capture: TaskOutcome[PaymentCapture, TaskError],
+) -> Result[EmailReceipt, TaskError]:
     """Tell the customer how their order went — either way."""
     match store.get_order(order_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(order):
             if order is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                return Err(
+                    TaskError(
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to write about',
                         data={'order_id': order_id},
                     ),
@@ -64,36 +67,40 @@ def send_order_email(
 
     simulate.perform(tuning.SEND_ORDER_EMAIL_WORK, order_id, 'email')
 
-    # The upstream result decides the template, and an upstream failure is not
+    # The upstream outcome decides the template, and an upstream failure is not
     # this task's failure: the apology went out, so the handler completed.
-    template = APOLOGY_TEMPLATE if capture.is_err() else CONFIRMATION_TEMPLATE
-    return TaskResult(
-        ok=EmailReceipt(order_id=order_id, template=template, recipient=recipient),
+    match capture:
+        case Failed(_):
+            template = APOLOGY_TEMPLATE
+        case Succeeded(_):
+            template = CONFIRMATION_TEMPLATE
+    return Ok(
+        EmailReceipt(order_id=order_id, template=template, recipient=recipient),
     )
 
 
 @app.task(
     'send_shipping_sms',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def send_shipping_sms(
     *,
     order_id: str,
     tracking_code: str,
-) -> TaskResult[ShippingNotice, TaskError]:
+) -> Result[ShippingNotice, TaskError]:
     """Text the customer their tracking code."""
     match store.get_order(order_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(order):
             if order is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                return Err(
+                    TaskError(
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to notify',
                         data={'order_id': order_id},
                     ),
@@ -102,8 +109,8 @@ def send_shipping_sms(
 
     simulate.perform(tuning.SEND_SHIPPING_SMS_WORK, order_id, 'sms')
 
-    return TaskResult(
-        ok=ShippingNotice(
+    return Ok(
+        ShippingNotice(
             order_id=order_id,
             recipient=recipient,
             tracking_code=tracking_code,
@@ -113,13 +120,13 @@ def send_shipping_sms(
 
 @app.task(
     'marketing_blast',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
-def marketing_blast(*, segment: str) -> TaskResult[MarketingBlast, TaskError]:
+def marketing_blast(*, segment: str) -> Result[MarketingBlast, TaskError]:
     """Send one segment of a campaign.
 
     Slow, and sent in bulk onto a queue capped at 3. The backlog that builds is
@@ -129,8 +136,8 @@ def marketing_blast(*, segment: str) -> TaskResult[MarketingBlast, TaskError]:
     """
     simulate.perform(tuning.MARKETING_BLAST_WORK, segment, 'blast')
 
-    return TaskResult(
-        ok=MarketingBlast(
+    return Ok(
+        MarketingBlast(
             segment=segment,
             recipients=tuning.MARKETING_SEGMENT_SIZE,
         ),
@@ -139,32 +146,29 @@ def marketing_blast(*, segment: str) -> TaskResult[MarketingBlast, TaskError]:
 
 @app.task(
     'winback_blast',
-    queue_name=QUEUE_NOTIFICATIONS,
+    queue=QUEUE_NOTIFICATIONS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalCode.WORKER_CRASHED],
     ),
 )
 def winback_blast(
     *,
     segment: str,
-    sweep: TaskResult[AbandonedCartSweep, TaskError],
-) -> TaskResult[MarketingBlast, TaskError]:
+    sweep: TaskOutcome[AbandonedCartSweep, TaskError],
+) -> Result[MarketingBlast, TaskError]:
     """Mail the carts a sweep actually found.
 
-    The `sweep` parameter is a plain, required `TaskResult` — that is what an
-    `args_from` (or `from_node`) target has to be. Declaring it
-    `TaskResult[...] | None = None` looks harmless and is not: the decoder
-    recognises an injected envelope by `get_origin(annot) is TaskResult`, and a
-    union's origin is not `TaskResult`, so the envelope is handed to the value
-    decoder and rejected. Marketing's fire-and-forget send is a separate task
-    above for exactly this reason.
+    The `sweep` parameter is a required `TaskOutcome`. The workflow fills it
+    through `from_node`. A failed sweep fails the blast with the error of the
+    sweep. A send that has no upstream sweep uses `marketing_blast` above.
     """
     simulate.perform(tuning.MARKETING_BLAST_WORK, segment, 'winback')
 
-    if sweep.is_err():
-        return TaskResult(err=sweep.err_value)
-
-    return TaskResult(
-        ok=MarketingBlast(segment=segment, recipients=sweep.ok_value.swept),
-    )
+    match sweep:
+        case Failed(upstream_error):
+            return Err(upstream_error)
+        case Succeeded(found):
+            return Ok(
+                MarketingBlast(segment=segment, recipients=found.swept),
+            )

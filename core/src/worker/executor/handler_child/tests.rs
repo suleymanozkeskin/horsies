@@ -12,7 +12,9 @@ use serde_json::json;
 
 use super::*;
 use crate::core::task::Execution;
-use crate::events::{decode_event, ChildStarted, Event, EventTypeName, SlotIndex, SlotRecovered};
+use crate::events::{
+    decode_event, AnyEvent, ChildStarted, EventTypeName, SlotIndex, SlotRecovered,
+};
 use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
 use crate::telemetry::registry::{
     ProcessFacts, Registry, RegistryLabels, SampleValue, WorkerFacts,
@@ -49,7 +51,7 @@ fn bounds() -> HandlerChildBounds {
 /// The init frame of a handler child.
 fn handler_init() -> crate::worker::executor::protocol::InitFrame {
     crate::worker::executor::protocol::InitFrame {
-        program: ChildProgram::Rust,
+        program: ChildProgram::Host,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
         connection: ChildConnection::default(),
@@ -147,7 +149,7 @@ impl Harness {
 fn slot_recovered(slot: u32) -> SlotRecovered {
     SlotRecovered {
         at: Utc::now(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         slot: SlotIndex::try_from(slot).unwrap(),
     }
 }
@@ -171,7 +173,7 @@ fn record_frames(dir: &TestDir) -> String {
 }
 
 /// The events of every frame that the child kept in `dir`, in order.
-fn recorded(dir: &TestDir) -> Vec<Event> {
+fn recorded(dir: &TestDir) -> Vec<AnyEvent> {
     let mut frames: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|entry| {
@@ -190,17 +192,17 @@ fn recorded(dir: &TestDir) -> Vec<Event> {
             items
                 .iter()
                 .map(|item| decode_event(item).unwrap())
-                .collect::<Vec<Event>>()
+                .collect::<Vec<AnyEvent>>()
         })
         .collect()
 }
 
 /// The slot of each `SlotRecovered` event of `events`.
-fn recovered_slots(events: &[Event]) -> Vec<u32> {
+fn recovered_slots(events: &[AnyEvent]) -> Vec<u32> {
     events
         .iter()
         .map(|event| match event {
-            Event::SlotRecovered(recovered) => recovered.slot.get(),
+            AnyEvent::SlotRecovered(recovered) => recovered.slot.get(),
             other => panic!("the child takes only SlotRecovered here, not {other:?}"),
         })
         .collect()
@@ -407,7 +409,7 @@ async fn only_the_event_types_that_the_child_takes_reach_it() {
 
     let started = child.points.emit(|| ChildStarted {
         at: Utc::now(),
-        child_kind: Execution::Isolated,
+        child_execution: Execution::Isolated,
         slot: SlotIndex::try_from(0).unwrap(),
         child_pid: ProcessId::new(42).unwrap(),
         boot_duration: Duration::from_millis(3),

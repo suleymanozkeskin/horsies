@@ -64,7 +64,7 @@ Workers run tasks in child processes that they own, rather than threads:
 
 ### Type-Safe Results
 
-All tasks must return `TaskResult[T, TaskError]`:
+All tasks must return a `Result`: the value, or a `TaskError` (`Result[T, TaskError]` in Python):
 
 - Forces explicit error handling at definition time
 - Distinguishes domain errors (returned by task) from infrastructure errors (thrown by library)
@@ -87,11 +87,11 @@ split:
 
 ```text
 Producer/Worker SQL  --> database_url          --> PgBouncer transaction pool
-Worker LISTEN        --> session_database_url  --> direct/session Postgres
-Result wait LISTEN   --> session_database_url  --> direct/session Postgres
-Web UI LISTEN        --> session_database_url  --> direct/session Postgres
-Schema setup         --> session_database_url  --> direct/session Postgres
-Partition maintenance --> session_database_url --> direct/session Postgres
+Worker LISTEN        --> session_database      --> direct/session Postgres
+Result wait LISTEN   --> session_database      --> direct/session Postgres
+Web UI LISTEN        --> session_database      --> direct/session Postgres
+Schema setup         --> session_database      --> direct/session Postgres
+Partition maintenance --> session_database     --> direct/session Postgres
 ```
 
 Workers check session behavior before partition maintenance starts. Startup
@@ -106,7 +106,8 @@ unavailable.
 | `Horsies` | Application instance - configure and register tasks here |
 | `@app.task` | Decorator to define tasks |
 | `TaskHandle` | Returned by `.send()` - use to retrieve results |
-| `TaskResult` | Return type of all tasks - contains success or error |
+| `Result` | Return type of all tasks - contains success or error |
+| `TaskOutcome` | How a task ended, as a result read gives it - `Succeeded` with the value or `Failed` with the error |
 | `Worker` (CLI) | Started via `horsies worker <app> --profile <name>` |
 | `Scheduler` (CLI) | Started via `horsies scheduler` command |
 
@@ -133,7 +134,7 @@ unavailable.
 1. Producer calls `handle.get()`
 2. If result cached on handle, return immediately
 3. Otherwise, listen for `task_done` notification or poll database
-4. Return `TaskResult` with success value or error
+4. Return the outcome (`Succeeded` with the value, or `Failed` with the error), or a read error when the read gives no outcome
 
 ## Concurrency Model
 

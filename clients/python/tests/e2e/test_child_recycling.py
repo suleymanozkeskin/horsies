@@ -13,7 +13,7 @@ import pytest
 
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks.profiles import RECYCLE_AFTER_2_TASKS, RECYCLE_OFF
@@ -35,12 +35,12 @@ def _ready_check():
             if is_err(r):
                 return False
             handle = r.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
 
-def _run_burst(timeout_ms: int) -> set[int]:
+def _run_burst(wait_ms: int) -> set[int]:
     """Send the burst, assert every task completes OK, return distinct PIDs."""
     handles = [
         unwrap_send(basic_tasks.pid_task.send(sleep_ms=SLEEP_MS))
@@ -48,9 +48,8 @@ def _run_burst(timeout_ms: int) -> set[int]:
     ]
     pids: set[int] = set()
     for handle in handles:
-        result = handle.get(timeout_ms=timeout_ms)
-        assert_ok(result)
-        pids.add(result.unwrap())
+        result = handle.get(wait_ms=wait_ms)
+        pids.add(succeeded_value(result))
     return pids
 
 
@@ -62,7 +61,7 @@ def test_recycle_disabled_bounds_pids_by_process_count() -> None:
         profile=RECYCLE_OFF,
         ready_check=_ready_check(),
     ):
-        pids = _run_burst(timeout_ms=10_000)
+        pids = _run_burst(wait_ms=10_000)
         assert len(pids) <= PROCESSES, (
             f'expected <= {PROCESSES} distinct child PIDs with recycling off, '
             f'got {len(pids)}: {pids}'
@@ -77,7 +76,7 @@ def test_max_tasks_per_child_rotates_pids() -> None:
         profile=RECYCLE_AFTER_2_TASKS,
         ready_check=_ready_check(),
     ):
-        pids = _run_burst(timeout_ms=20_000)
+        pids = _run_burst(wait_ms=20_000)
         assert len(pids) > PROCESSES, (
             f'expected > {PROCESSES} distinct child PIDs with recycling, '
             f'got {len(pids)}: {pids}'

@@ -148,7 +148,7 @@ pub fn render_all() -> Vec<GeneratedFile> {
     });
     for new_type in TEXT_NEW_TYPES {
         files.push(GeneratedFile {
-            relative_path: catalog_folder.join(format!("{}.py", new_type.python_module)),
+            relative_path: catalog_folder.join(format!("{}.py", new_type.module)),
             text: render_new_type_module(new_type),
         });
     }

@@ -126,7 +126,7 @@ def stored_error_paths(error: tuple[PathStep, ...]) -> tuple[JsonPath, ...]:
       and ``data.detected_at``, as in the result envelope;
     - ``data.workflow_id``: the workflow of the recovery limit error and of
       the output-skipped error (``WORKFLOW_OUTPUT_SKIPPED``);
-    - ``sub_workflow_id``: the child of a ``SUBWORKFLOW_FAILED`` error;
+    - ``sub_workflow_id``: the child of a ``SUB_WORKFLOW_FAILED`` error;
     - ``message`` and ``sub_workflow_summary.error_summary``: texts that name
       a workflow by its id (``Subworkflow <id> failed``, ``Workflow <id> is
       COMPLETED and has no output: ...``).
@@ -233,17 +233,12 @@ result of a task node holds its task's error data."""
 WORKFLOW_RESULT: Final = StoredJson(
     storage=JsonStorage.TEXT,
     format=Unversioned(),
-    paths=(
-        *stored_error_paths((Key(name='err'),)),
-        *stored_error_paths((Key(name='ok'), *_RESULTS_BY_ID_ERROR)),
-    ),
+    paths=stored_error_paths((Key(name='err'),)),
 )
 """A stored workflow result, its error by ``stored_error_paths`` (the
 output-skipped error names the workflow in ``err.data.workflow_id`` and in
-``err.message``). The result of a workflow without an output node holds the
-result of each terminal node in ``ok.results_by_id``
-(``{"__h_outputless_terminals__": true, "ok": {"results_by_id": ...}}``),
-each error by ``stored_error_paths``."""
+``err.message``). The result of a workflow without an output node is the plain
+envelope with ``ok`` and ``err`` null: it holds no error."""
 
 SUB_WORKFLOW_SUMMARY: Final = StoredJson(
     storage=JsonStorage.TEXT,

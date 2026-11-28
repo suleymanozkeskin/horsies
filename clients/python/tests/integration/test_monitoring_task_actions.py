@@ -1,6 +1,6 @@
 """Integration tests for the horsies.monitoring cancel action.
 
-The action mutates real rows through the ``broker`` fixture. Coverage:
+The action mutates real rows through the ``app`` fixture. Coverage:
 
 1. cancel_task — every eligible status, every diagnosis code, idempotence
 2. cancel_task side effects — cleared claim fields, end timestamp, task_done
@@ -24,20 +24,24 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies._core import CoreConnectionError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.monitoring import (
-    TaskActionDbOperationFailed,
+    CancelPolicy,
+    TaskActionDatabaseOperationFailed,
     TaskActionErrorCode,
+    TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
-    TaskActionWorkflowTask,
     cancel_task,
 )
 from tests.integration.conftest import DB_URL
@@ -79,17 +83,19 @@ async def clean_task_tables(
 
 
 @pytest_asyncio.fixture
-async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
-    """A broker pointed at a port nothing listens on."""
+async def unreachable_app() -> AsyncGenerator[Horsies, None]:
+    """An app whose broker points at a port nothing listens on."""
     broken = PostgresBroker(
         PostgresConfig(
             database_url=SecretStr(
                 'postgresql://postgres:none@127.0.0.1:1/none'
             )
         ),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
-    yield broken
+    app = Horsies(AppConfig(database=broken.config))
+    app._broker = broken  # pyright: ignore[reportPrivateUsage]
+    yield app
     await broken.close_async()
 
 
@@ -284,12 +290,12 @@ class TestCancelTaskSucceeds:
     """Every status that has not begun user code cancels cleanly."""
 
     async def test_pending_task_is_cancelled(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id))
+        result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert result.ok_value.was_status is TaskStatus.PENDING
@@ -301,14 +307,14 @@ class TestCancelTaskSucceeds:
         assert row.terminalization_kind == 'CANCEL_ADMIN'
 
     async def test_claimed_task_is_cancelled_and_claim_released(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(
             status=TaskStatus.CLAIMED, worker_id=WORKER_ID, claimed_at=ago(5)
         )
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id))
+        result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert result.ok_value.was_status is TaskStatus.CLAIMED
@@ -325,7 +331,7 @@ class TestCancelTaskSucceeds:
         assert row.finalizing_by_worker_id is None
 
     async def test_running_task_requires_the_explicit_opt_in(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(
             status=TaskStatus.RUNNING,
@@ -335,7 +341,7 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        refused = await cancel_task(broker, uuid.UUID(task.id))
+        refused = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_err(refused)
         assert type(refused.err_value) is TaskActionNotCancellable
@@ -347,20 +353,20 @@ class TestCancelTaskSucceeds:
         assert refused.err_value.current_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'RUNNING'
 
-        allowed = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
+        allowed = await cancel_task(app, uuid.UUID(task.id), policy=CancelPolicy.INCLUDE_RUNNING)
 
         assert is_ok(allowed)
         assert allowed.ok_value.was_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'CANCELLED'
 
     async def test_cancel_writes_an_end_timestamp(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """Without failed_at the row would have no measurable end."""
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id))
+        result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         row = await read_task(session, task.id)
@@ -368,7 +374,7 @@ class TestCancelTaskSucceeds:
         assert row.completed_at is None
 
     async def test_cancel_of_a_running_task_records_its_attempt_as_cancelled(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """The cancel statement writes the CANCELLED attempt of the run before
         the move; the move archives it and leaves no live attempt row."""
@@ -380,7 +386,7 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
+        result = await cancel_task(app, uuid.UUID(task.id), policy=CancelPolicy.INCLUDE_RUNNING)
 
         assert is_ok(result)
         assert await attempt_rows(session, task.id) == []
@@ -398,7 +404,7 @@ class TestCancelTaskSucceeds:
         assert archive.endswith('"CANCEL",null]],null]'), archive
 
     async def test_cancel_of_a_claimed_task_records_no_attempt(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(
             status=TaskStatus.CLAIMED,
@@ -407,7 +413,7 @@ class TestCancelTaskSucceeds:
         )
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id))
+        result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_ok(result)
         assert await attempt_rows(session, task.id) == []
@@ -423,14 +429,14 @@ class TestCancelTaskSucceeds:
         assert archive.startswith('[[],'), archive
 
     async def test_cancel_fires_the_terminal_status_notification(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         """Waiting result handles unblock on the trigger, not on a manual notify."""
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
 
         async def do_cancel() -> None:
-            result = await cancel_task(broker, uuid.UUID(task.id))
+            result = await cancel_task(app, uuid.UUID(task.id))
             assert is_ok(result)
 
         notification = await next_notification('task_done', do_cancel)
@@ -446,10 +452,10 @@ class TestCancelTaskSucceeds:
 class TestCancelTaskRefuses:
     """Each refusal names its cause and, for conflicts, the observed status."""
 
-    async def test_missing_task(self, broker: PostgresBroker) -> None:
+    async def test_missing_task(self, app: Horsies) -> None:
         missing_id = uuid.uuid4()
 
-        result = await cancel_task(broker, missing_id)
+        result = await cancel_task(app, missing_id)
 
         assert is_err(result)
         assert type(result.err_value) is TaskActionNotFound
@@ -461,16 +467,16 @@ class TestCancelTaskRefuses:
         assert result.err_value.retryable is False
 
     async def test_workflow_bound_task(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.PENDING, is_workflow_task=True)
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id))
+        result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_err(result)
-        assert type(result.err_value) is TaskActionWorkflowTask
-        assert result.err_value == TaskActionWorkflowTask(
+        assert type(result.err_value) is TaskActionIsWorkflowTask
+        assert result.err_value == TaskActionIsWorkflowTask(
             message=(
                 f'Task {uuid.UUID(task.id)} belongs to a workflow; '
                 'use the workflow actions instead.'
@@ -491,12 +497,12 @@ class TestCancelTaskRefuses:
         ],
     )
     async def test_terminal_task(
-        self, broker: PostgresBroker, session: AsyncSession, status: TaskStatus
+        self, app: Horsies, session: AsyncSession, status: TaskStatus
     ) -> None:
         task = make_task(status=status)
         await persist(session, task)
 
-        result = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
+        result = await cancel_task(app, uuid.UUID(task.id), policy=CancelPolicy.INCLUDE_RUNNING)
 
         assert is_err(result)
         assert type(result.err_value) is TaskActionNotCancellable
@@ -510,15 +516,15 @@ class TestCancelTaskRefuses:
         assert result.err_value.current_status is status
 
     async def test_second_cancel_is_a_conflict_not_a_second_effect(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.PENDING)
         await persist(session, task)
-        first = await cancel_task(broker, uuid.UUID(task.id))
+        first = await cancel_task(app, uuid.UUID(task.id))
         assert is_ok(first)
         first_failed_at = (await read_task(session, task.id)).failed_at
 
-        second = await cancel_task(broker, uuid.UUID(task.id))
+        second = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_err(second)
         assert isinstance(second.err_value, TaskActionNotCancellable)
@@ -526,28 +532,28 @@ class TestCancelTaskRefuses:
         assert (await read_task(session, task.id)).failed_at == first_failed_at
 
     async def test_history_row_with_an_unknown_status_is_stored_data_invalid(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED)
         await persist(session, task)
 
         async with stored_history_status(session, task.id, 'NOT_KNOWN'):
-            result = await cancel_task(broker, uuid.UUID(task.id))
+            result = await cancel_task(app, uuid.UUID(task.id))
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
-        assert isinstance(error.exception, OutcomeDecodeError)
-        assert type(error.exception) is OutcomeDecodeError
+        assert isinstance(error.cause, OutcomeDecodeError)
+        assert type(error.cause) is OutcomeDecodeError
         assert error.task_id == uuid.UUID(task.id)
         assert error.retryable is False
         assert "'NOT_KNOWN'" in error.message
         # Python's texts: the message holds the decode error's text, and the
         # exception's text is that text.
-        decode_text = str(error.exception)
+        decode_text = str(error.cause)
         assert decode_text.startswith('terminalization outcome decode failed: ')
         assert "'NOT_KNOWN'" in decode_text
-        assert error.exception.args == (decode_text,)
+        assert error.cause.args == (decode_text,)
         assert error.message == f'Task cancel failed: stored data does not parse: {decode_text}'
         assert (await read_task(session, task.id)).status == 'FAILED'
 
@@ -560,7 +566,7 @@ class TestWorkflowBoundRowsAreUntouched:
     """The cancel action never edits a row a workflow owns."""
 
     async def test_cancel_does_not_mutate_a_real_workflow_node_task(
-        self, broker: PostgresBroker, session: AsyncSession
+        self, app: Horsies, session: AsyncSession
     ) -> None:
         workflow = WorkflowRow(
             id=str(uuid.uuid4()),
@@ -586,7 +592,7 @@ class TestWorkflowBoundRowsAreUntouched:
                 task_name='action_task',
                 status='FAILED',
                 dependencies=(),
-                allow_failed_deps=False,
+                allow_failed_dependencies=False,
                 kind=TaskNode(task_id=task.id),
                 result=None,
                 created_at=ago(120),
@@ -595,10 +601,10 @@ class TestWorkflowBoundRowsAreUntouched:
             ),
         )
 
-        cancelled = await cancel_task(broker, uuid.UUID(task.id), include_running=True)
+        cancelled = await cancel_task(app, uuid.UUID(task.id), policy=CancelPolicy.INCLUDE_RUNNING)
 
         assert is_err(cancelled)
-        assert isinstance(cancelled.err_value, TaskActionWorkflowTask)
+        assert isinstance(cancelled.err_value, TaskActionIsWorkflowTask)
         assert cancelled.err_value.current_status is TaskStatus.FAILED
         row = await read_task(session, task.id)
         assert row.status == 'FAILED'
@@ -612,23 +618,23 @@ class TestDatabaseFailure:
     """An unreachable database is an Err, never an exception."""
 
     async def test_cancel_reports_a_retryable_db_failure(
-        self, unreachable_broker: PostgresBroker
+        self, unreachable_app: Horsies
     ) -> None:
         task_id = uuid.uuid4()
-        result = await cancel_task(unreachable_broker, task_id)
+        result = await cancel_task(unreachable_app, task_id)
 
         assert is_err(result)
         error = result.err_value
-        assert type(error) is TaskActionDbOperationFailed
+        assert type(error) is TaskActionDatabaseOperationFailed
         assert error.retryable is True
         assert error.task_id == task_id
-        assert isinstance(error.exception, CoreConnectionError)
-        assert error.exception.retryable is True
+        assert isinstance(error.cause, CoreConnectionError)
+        assert error.cause.retryable is True
         # Python's texts: the message holds the cause's text, and the
         # exception is that text with the subject of the cancel.
         assert error.message.startswith('Task cancel failed: ')
         cause_text = error.message.removeprefix('Task cancel failed: ')
         assert cause_text != ''
-        assert error.exception.subject == 'cancel_task'
-        assert error.exception.message == cause_text
-        assert str(error.exception) == f'cancel_task: {cause_text}'
+        assert error.cause.subject == 'cancel_task'
+        assert error.cause.message == cause_text
+        assert str(error.cause) == f'cancel_task: {cause_text}'

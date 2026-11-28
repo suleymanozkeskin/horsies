@@ -24,16 +24,17 @@ import horsies
 from horsies import (
     AppConfig,
     Horsies,
+    Ok,
     PostgresConfig,
+    Result,
     SubWorkflowNode,
     TaskError,
     TaskNode,
-    TaskResult,
     WorkflowDefinition,
     WorkflowSpec,
 )
 from horsies.core.errors import (
-    ErrorCode,
+    HorsiesErrorCode,
     HorsiesError,
     TaskDefinitionError,
     WorkflowValidationError,
@@ -123,7 +124,7 @@ def _library_sites() -> list[_Site]:
 class TestEverySiteGivesACodeAndHelp:
     def test_the_scan_finds_a_site_with_no_help(self) -> None:
         sites = _sites_in(
-            "raise WorkflowValidationError('positional', code=ErrorCode.X)",
+            "raise WorkflowValidationError('positional', code=HorsiesErrorCode.X)",
             where='known',
         )
 
@@ -195,7 +196,7 @@ class TestEverySiteGivesACodeAndHelp:
 def _new_app() -> Horsies:
     return Horsies(
         AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr(
                     'postgresql://user:password@localhost/unused',
                 ),
@@ -216,13 +217,13 @@ class _SubNote(_Note):
 
 
 @_app.task('hints_one')
-def _one() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+def _one() -> Result[int, TaskError]:
+    return Ok(1)
 
 
 @_app.task('hints_takes_note')
-def _takes_note(*, note: _Note) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=note.n)
+def _takes_note(*, note: _Note) -> Result[int, TaskError]:
+    return Ok(note.n)
 
 
 def _key(label: str) -> str:
@@ -230,23 +231,23 @@ def _key(label: str) -> str:
 
 
 def _quorum(*, min_success: int | None, join: Any = 'quorum') -> None:
-    first = TaskNode(fn=_one, node_id='first')
+    first = TaskNode(function=_one, node_id='first')
     second = TaskNode(
-        fn=_one,
+        function=_one,
         node_id='second',
         waits_for=[first],
         join=join,
         min_success=min_success,
     )
-    WorkflowSpec(name='hints_join', tasks=[first, second])
+    WorkflowSpec(name='hints_join', nodes=[first, second])
 
 
 def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
     WorkflowSpec(
         name='hints_join_empty',
-        tasks=[
+        nodes=[
             TaskNode(
-                fn=_one,
+                function=_one,
                 node_id='only',
                 join='quorum',
                 min_success=min_success,
@@ -256,11 +257,11 @@ def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
 
 
 def _no_tasks() -> None:
-    WorkflowSpec(name='hints_empty', tasks=[])
+    WorkflowSpec(name='hints_empty', nodes=[])
 
 
 def _blank_node_id() -> None:
-    WorkflowSpec(name='hints_blank', tasks=[TaskNode(fn=_one, node_id=' ')])
+    WorkflowSpec(name='hints_blank', nodes=[TaskNode(function=_one, node_id=' ')])
 
 
 def _skip_index_assignment(_spec: object) -> None:
@@ -269,26 +270,26 @@ def _skip_index_assignment(_spec: object) -> None:
 
 def _index_not_set() -> None:
     with patch.object(WorkflowSpec, '_assign_indices', _skip_index_assignment):
-        WorkflowSpec(name='hints_index', tasks=[TaskNode(fn=_one)])
+        WorkflowSpec(name='hints_index', nodes=[TaskNode(function=_one)])
 
 
 def _task_key() -> None:
-    TaskNode(fn=_one).key()
+    TaskNode(function=_one).key()
 
 
 def _subworkflow_key() -> None:
     class Child(WorkflowDefinition[int]):
         name = 'hints_key_child'
         definition_key = _key('key_child')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
-    SubWorkflowNode(workflow_def=Child).key()
+    SubWorkflowNode(workflow_definition=Child).key()
 
 
 def _no_name() -> None:
     class NoName(WorkflowDefinition[int]):
         definition_key = _key('no_name')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     NoName.build(_app)
 
@@ -304,7 +305,7 @@ def _no_nodes() -> None:
 def _no_definition_key() -> None:
     class NoKey(WorkflowDefinition[int]):
         name = 'hints_no_key'
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     NoKey.build(_app)
 
@@ -315,24 +316,24 @@ def _duplicate_definition_key() -> None:
     class First(WorkflowDefinition[int]):
         name = 'hints_first'
         definition_key = shared
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     class Second(WorkflowDefinition[int]):
         name = 'hints_second'
         definition_key = shared
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
 
 def _cached_spec() -> None:
     prebuilt: WorkflowSpec[Any] = WorkflowSpec(
         name='hints_cached',
-        tasks=[TaskNode(fn=_one)],
+        nodes=[TaskNode(function=_one)],
     )
 
     class Cached(WorkflowDefinition[Any]):
         name = 'hints_cached'
         definition_key = _key('cached')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
         @classmethod
         def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
@@ -345,8 +346,8 @@ def _cached_spec() -> None:
 def _value_built_past_validation() -> None:
     WorkflowSpec(
         name='hints_read_back',
-        tasks=[
-            TaskNode(fn=_takes_note, kwargs={'note': _Note.model_construct(n='7')}),
+        nodes=[
+            TaskNode(function=_takes_note, kwargs={'note': _Note.model_construct(n='7')}),
         ],
     )
 
@@ -354,8 +355,8 @@ def _value_built_past_validation() -> None:
 def _value_with_a_field_the_type_lacks() -> None:
     WorkflowSpec(
         name='hints_fields',
-        tasks=[
-            TaskNode(fn=_takes_note, kwargs={'note': _SubNote(n=1, secret='kept')}),
+        nodes=[
+            TaskNode(function=_takes_note, kwargs={'note': _SubNote(n=1, secret='kept')}),
         ],
     )
 
@@ -369,64 +370,64 @@ def _broker_that_fails() -> None:
 @pytest.mark.parametrize(
     ('trigger', 'code', 'hint'),
     [
-        (_no_tasks, ErrorCode.WORKFLOW_NO_NODES, 'add at least one TaskNode'),
-        (_blank_node_id, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'non-empty string'),
-        (_index_not_set, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'report this bug'),
+        (_no_tasks, HorsiesErrorCode.WORKFLOW_NO_NODES, 'add at least one TaskNode'),
+        (_blank_node_id, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'non-empty string'),
+        (_index_not_set, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'report this bug'),
         (
             lambda: _quorum(min_success=None),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'number of dependencies that must succeed',
         ),
         (
             lambda: _quorum(min_success=0),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             '1 or more',
         ),
         (
             lambda: _quorum(min_success=5),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'at most their number',
         ),
         (
             lambda: _quorum_with_no_dependencies(min_success=1),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             'add nodes to waits_for',
         ),
         (
             lambda: _quorum(min_success=1, join='all'),
-            ErrorCode.WORKFLOW_INVALID_JOIN,
+            HorsiesErrorCode.WORKFLOW_INVALID_JOIN,
             "use join='quorum'",
         ),
-        (_task_key, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'set node_id on the node'),
+        (_task_key, HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID, 'set node_id on the node'),
         (
             _subworkflow_key,
-            ErrorCode.WORKFLOW_INVALID_NODE_ID,
+            HorsiesErrorCode.WORKFLOW_INVALID_NODE_ID,
             'set node_id on the node',
         ),
-        (_no_name, ErrorCode.WORKFLOW_NO_NAME, "name = 'my_workflow'"),
-        (_no_nodes, ErrorCode.WORKFLOW_NO_NODES, 'in place of build()'),
-        (_no_definition_key, ErrorCode.WORKFLOW_NO_DEFINITION_KEY, 'definition_key ='),
+        (_no_name, HorsiesErrorCode.WORKFLOW_NO_NAME, "name = 'my_workflow'"),
+        (_no_nodes, HorsiesErrorCode.WORKFLOW_NO_NODES, 'in place of build()'),
+        (_no_definition_key, HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY, 'definition_key ='),
         (
             _duplicate_definition_key,
-            ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
             'its own definition_key',
         ),
         (
             _cached_spec,
-            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+            HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
             'new WorkflowSpec inside build_with()',
         ),
         (
             _value_built_past_validation,
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
             'decodes back to its declared type',
         ),
         (
             _value_with_a_field_the_type_lacks,
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
             'declare the field on that type',
         ),
-        (_broker_that_fails, ErrorCode.BROKER_INIT_FAILED, 'check database_url'),
+        (_broker_that_fails, HorsiesErrorCode.DATABASE_INIT_FAILED, 'check database_url'),
     ],
     ids=[
         'no_tasks',
@@ -451,7 +452,7 @@ def _broker_that_fails() -> None:
 )
 def test_the_report_names_the_fix(
     trigger: Callable[[], None],
-    code: ErrorCode,
+    code: HorsiesErrorCode,
     hint: str,
 ) -> None:
     with pytest.raises(HorsiesError) as refused:
@@ -486,10 +487,10 @@ class TestARefusedSignatureSplitsItsReport:
         with pytest.raises(TaskDefinitionError) as refused:
 
             @_app.task('hints_banned')
-            def banned(*, value: Any) -> TaskResult[int, TaskError]:
-                return TaskResult(ok=1)
+            def banned(*, value: Any) -> Result[int, TaskError]:
+                return Ok(1)
 
-        assert refused.value.code is ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
+        assert refused.value.code is HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert 'Fix:' not in refused.value.message
         assert "parameter 'value'" in refused.value.message
         self._assert_parts(refused.value)
@@ -498,15 +499,15 @@ class TestARefusedSignatureSplitsItsReport:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(
                 name='hints_parent',
-                tasks=[SubWorkflowNode(workflow_def=_RefusedChild)],
+                nodes=[SubWorkflowNode(workflow_definition=_RefusedChild)],
             )
 
-        assert refused.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert refused.value.code is HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
         self._assert_parts(refused.value)
 
     def test_at_the_boot_check(self) -> None:
         class Parent:
-            child = SubWorkflowNode(workflow_def=_RefusedChild)
+            child = SubWorkflowNode(workflow_definition=_RefusedChild)
 
         with (
             patch.object(_app, '_discovered_task_modules', ['boot_module']),
@@ -525,6 +526,6 @@ class TestARefusedSignatureSplitsItsReport:
             errors = _app._check_workflow_definitions()
 
         assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
         ]
         self._assert_parts(errors[0])

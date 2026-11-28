@@ -1,15 +1,19 @@
-//! TCP keepalives and the TCP user timeout of every core connection, as
-//! config values (Python `PostgresConfig.tcp_keepalives`,
-//! `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`,
-//! `tcp_user_timeout_ms`, `clients/python/horsies/core/models/broker.py:129-157`).
+//! TCP keepalives and the TCP user timeout of every core connection
+//! (Python `PostgresConfig.tcp_keepalives`, `tcp_user_timeout`,
+//! `clients/python/horsies/core/models/broker.py`).
 //!
-//! Each count is a bounded type that only its `TryFrom<u32>` constructs, so
-//! a value out of bounds is refused when the config or the manifest is
-//! deserialized. The defaults are the statement layer's
+//! Each setting has two forms. The config form ([`input`]) is what
+//! `PostgresConfig` holds: each count is a plain number, and AppConfig
+//! validation refuses a value outside its bound
+//! ([`crate::core::PostgresConfig::socket_value_errors`]). The checked form
+//! (the enums of this module) carries each bound in a type that only its
+//! `TryFrom<u32>` constructs: it is the form of the manifests
+//! ([`crate::manifest::DatabaseManifest`]), so a manifest value out of
+//! bounds is refused when the manifest is deserialized. Each bounded type
+//! implements [`ManifestValue`] next to its parser, so the bound has one
+//! definition. The defaults are the statement layer's
 //! [`DEFAULT_SOCKET_SETTINGS`](crate::db::DEFAULT_SOCKET_SETTINGS), which are
-//! Python's defaults. The two config enums are manifest types
-//! ([`crate::manifest::DatabaseManifest`]); each bounded type implements
-//! [`ManifestValue`] next to its parser, so the bound has one definition.
+//! Python's defaults.
 
 use std::time::Duration;
 
@@ -17,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::no_member_after_the_tag;
 use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
 
 /// Largest keepalive idle time and interval in seconds: Linux's limit for
 /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` (tcp(7)).
@@ -66,7 +70,7 @@ impl From<KeepaliveSeconds> for u32 {
 }
 
 impl ManifestValue for KeepaliveSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "KEEPALIVE_SECONDS",
         min: 1,
         max: MAX_KEEPALIVE_SECONDS as u64,
@@ -105,7 +109,7 @@ impl From<KeepaliveProbes> for u32 {
 }
 
 impl ManifestValue for KeepaliveProbes {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "KEEPALIVE_PROBES",
         min: 1,
         max: MAX_KEEPALIVE_PROBES as u64,
@@ -143,15 +147,14 @@ impl From<TcpUserTimeoutMs> for u32 {
 }
 
 impl ManifestValue for TcpUserTimeoutMs {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "TCP_USER_TIMEOUT_MS",
         min: 1,
         max: MAX_TCP_USER_TIMEOUT_MS as u64,
     });
 }
 
-/// TCP keepalives of every core connection. Python's
-/// `tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
+/// TCP keepalives of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -198,8 +201,7 @@ impl TcpKeepalivesConfig {
     }
 }
 
-/// The TCP user timeout of every core connection. Python's
-/// `tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
+/// The TCP user timeout of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -236,12 +238,189 @@ impl TcpUserTimeoutConfig {
 
 /// The socket settings of the statement layer from the two config values.
 pub fn socket_settings(
-    keepalives: TcpKeepalivesConfig,
-    tcp_user_timeout: TcpUserTimeoutConfig,
+    keepalives: input::TcpKeepalivesConfig,
+    tcp_user_timeout: input::TcpUserTimeoutConfig,
 ) -> SocketSettings {
     SocketSettings {
         keepalives: keepalives.keepalives(),
         tcp_user_timeout: tcp_user_timeout.tcp_user_timeout(),
+    }
+}
+
+/// The config forms of the two settings, as `PostgresConfig` holds them:
+/// each count is a plain number. A number outside its bound parses;
+/// AppConfig validation refuses it, and [`TcpKeepalivesConfig::checked`]
+/// and [`TcpUserTimeoutConfig::checked`] build the checked form of the
+/// manifests. The JSON form is the form of the checked types.
+pub mod input {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::core::config::no_member_after_the_tag;
+    use crate::db::{Keepalives, TcpUserTimeout};
+
+    use super::{KeepaliveProbes, KeepaliveSeconds, TcpUserTimeoutMs};
+
+    /// A socket setting value outside its bound. `field` is the path of the
+    /// value in `PostgresConfig`; `cause` names the bound, never the value.
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    #[error("{field}: {cause}")]
+    pub struct SocketValueRefused {
+        pub field: &'static str,
+        pub cause: String,
+    }
+
+    /// TCP keepalives of every core connection (Python `TcpKeepalivesOff`,
+    /// `TcpKeepalivesOn`). Default: on, 30 s idle, 10 s between probes, 3
+    /// probes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+    pub enum TcpKeepalivesConfig {
+        #[serde(deserialize_with = "no_member_after_the_tag")]
+        Off,
+        On {
+            /// Idle time before the first probe (libpq `keepalives_idle`):
+            /// 1 to [`super::MAX_KEEPALIVE_SECONDS`] seconds.
+            idle_seconds: u32,
+            /// Time between probes (libpq `keepalives_interval`): 1 to
+            /// [`super::MAX_KEEPALIVE_SECONDS`] seconds.
+            interval_seconds: u32,
+            /// Unanswered probes before the drop (libpq
+            /// `keepalives_count`): 1 to [`super::MAX_KEEPALIVE_PROBES`].
+            probes: u32,
+        },
+    }
+
+    impl Default for TcpKeepalivesConfig {
+        fn default() -> Self {
+            super::TcpKeepalivesConfig::default().into()
+        }
+    }
+
+    impl From<super::TcpKeepalivesConfig> for TcpKeepalivesConfig {
+        fn from(checked: super::TcpKeepalivesConfig) -> Self {
+            match checked {
+                super::TcpKeepalivesConfig::Off => Self::Off,
+                super::TcpKeepalivesConfig::On {
+                    idle_seconds,
+                    interval_seconds,
+                    probes,
+                } => Self::On {
+                    idle_seconds: idle_seconds.get(),
+                    interval_seconds: interval_seconds.get(),
+                    probes: probes.get(),
+                },
+            }
+        }
+    }
+
+    impl TcpKeepalivesConfig {
+        /// The checked form, or the first value outside its bound, in field
+        /// order. Pure.
+        pub fn checked(self) -> Result<super::TcpKeepalivesConfig, SocketValueRefused> {
+            match self {
+                Self::Off => Ok(super::TcpKeepalivesConfig::Off),
+                Self::On {
+                    idle_seconds,
+                    interval_seconds,
+                    probes,
+                } => Ok(super::TcpKeepalivesConfig::On {
+                    idle_seconds: bounded::<KeepaliveSeconds>(
+                        "tcp_keepalives.idle_seconds",
+                        idle_seconds,
+                    )?,
+                    interval_seconds: bounded::<KeepaliveSeconds>(
+                        "tcp_keepalives.interval_seconds",
+                        interval_seconds,
+                    )?,
+                    probes: bounded::<KeepaliveProbes>("tcp_keepalives.probes", probes)?,
+                }),
+            }
+        }
+
+        /// The keepalives of the statement layer. A config that AppConfig
+        /// validation accepted holds values inside their bounds.
+        pub fn keepalives(self) -> Keepalives {
+            match self {
+                Self::Off => Keepalives::Off,
+                Self::On {
+                    idle_seconds,
+                    interval_seconds,
+                    probes,
+                } => Keepalives::On {
+                    idle: Duration::from_secs(u64::from(idle_seconds)),
+                    interval: Duration::from_secs(u64::from(interval_seconds)),
+                    probes,
+                },
+            }
+        }
+    }
+
+    /// The TCP user timeout of every core connection (Python
+    /// `TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter`). Default:
+    /// 30,000 ms.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+    pub enum TcpUserTimeoutConfig {
+        /// The operating system's timeout.
+        #[serde(deserialize_with = "no_member_after_the_tag")]
+        SystemDefault,
+        /// Sent data may stay unacknowledged this long before the kernel
+        /// closes the connection (libpq `tcp_user_timeout`): 1 to
+        /// [`super::MAX_TCP_USER_TIMEOUT_MS`] ms.
+        After { milliseconds: u32 },
+    }
+
+    impl Default for TcpUserTimeoutConfig {
+        fn default() -> Self {
+            super::TcpUserTimeoutConfig::default().into()
+        }
+    }
+
+    impl From<super::TcpUserTimeoutConfig> for TcpUserTimeoutConfig {
+        fn from(checked: super::TcpUserTimeoutConfig) -> Self {
+            match checked {
+                super::TcpUserTimeoutConfig::SystemDefault => Self::SystemDefault,
+                super::TcpUserTimeoutConfig::After { milliseconds } => Self::After {
+                    milliseconds: milliseconds.get(),
+                },
+            }
+        }
+    }
+
+    impl TcpUserTimeoutConfig {
+        /// The checked form, or the milliseconds outside their bound. Pure.
+        pub fn checked(self) -> Result<super::TcpUserTimeoutConfig, SocketValueRefused> {
+            match self {
+                Self::SystemDefault => Ok(super::TcpUserTimeoutConfig::SystemDefault),
+                Self::After { milliseconds } => Ok(super::TcpUserTimeoutConfig::After {
+                    milliseconds: bounded::<TcpUserTimeoutMs>(
+                        "tcp_user_timeout.milliseconds",
+                        milliseconds,
+                    )?,
+                }),
+            }
+        }
+
+        /// The TCP user timeout of the statement layer. A config that
+        /// AppConfig validation accepted holds a value inside its bound.
+        pub fn tcp_user_timeout(self) -> TcpUserTimeout {
+            match self {
+                Self::SystemDefault => TcpUserTimeout::SystemDefault,
+                Self::After { milliseconds } => {
+                    TcpUserTimeout::After(Duration::from_millis(u64::from(milliseconds)))
+                }
+            }
+        }
+    }
+
+    /// `value` as the bounded type `T`, or the refusal of `field`. Pure.
+    fn bounded<T: TryFrom<u32, Error = String>>(
+        field: &'static str,
+        value: u32,
+    ) -> Result<T, SocketValueRefused> {
+        T::try_from(value).map_err(|cause| SocketValueRefused { field, cause })
     }
 }
 
@@ -254,11 +433,42 @@ mod tests {
     fn the_defaults_are_the_statement_layer_s() {
         assert_eq!(
             socket_settings(
-                TcpKeepalivesConfig::default(),
-                TcpUserTimeoutConfig::default()
+                input::TcpKeepalivesConfig::default(),
+                input::TcpUserTimeoutConfig::default()
             ),
             DEFAULT_SOCKET_SETTINGS
         );
+    }
+
+    #[test]
+    fn a_config_value_outside_its_bound_is_refused_with_its_field() {
+        let refused = input::TcpKeepalivesConfig::On {
+            idle_seconds: 30,
+            interval_seconds: MAX_KEEPALIVE_SECONDS + 1,
+            probes: 0,
+        }
+        .checked()
+        .expect_err("the interval is above its bound");
+        assert_eq!(refused.field, "tcp_keepalives.interval_seconds");
+        let refused = input::TcpUserTimeoutConfig::After { milliseconds: 0 }
+            .checked()
+            .expect_err("zero milliseconds are below the bound");
+        assert_eq!(refused.field, "tcp_user_timeout.milliseconds");
+    }
+
+    #[test]
+    fn a_config_value_inside_its_bound_reaches_the_checked_form() {
+        let config = input::TcpKeepalivesConfig::On {
+            idle_seconds: 45,
+            interval_seconds: 7,
+            probes: MAX_KEEPALIVE_PROBES,
+        };
+        let checked = config.checked().expect("every value is in bounds");
+        assert_eq!(input::TcpKeepalivesConfig::from(checked), config);
+        assert_eq!(checked.keepalives(), config.keepalives());
+        let timeout = input::TcpUserTimeoutConfig::After { milliseconds: 1500 };
+        let checked = timeout.checked().expect("1500 ms is in bounds");
+        assert_eq!(input::TcpUserTimeoutConfig::from(checked), timeout);
     }
 
     #[test]
@@ -280,8 +490,8 @@ mod tests {
     #[test]
     fn off_and_the_system_default_reach_the_statement_layer() {
         let settings = socket_settings(
-            TcpKeepalivesConfig::Off,
-            TcpUserTimeoutConfig::SystemDefault,
+            input::TcpKeepalivesConfig::Off,
+            input::TcpUserTimeoutConfig::SystemDefault,
         );
 
         assert_eq!(settings.keepalives, Keepalives::Off);

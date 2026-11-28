@@ -1,0 +1,14 @@
+// expect: TS2322 at 13
+// workflowContextFrom on a task that does not take the workflow context.
+
+import { defineTask, h } from "../../../horsies/src/index.ts";
+import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
+
+const ping = defineTask({ name: "ping", input: {}, output: h.null() });
+const audit = defineTask({ name: "audit", input: {}, output: h.null() });
+
+export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", outputType: h.null(), parameters: {} }, (w) => {
+  const pinged = w.task(ping, {}, { nodeId: "ping" });
+
+  return { output: w.task(audit, {}, { nodeId: "audit", waitsFor: [pinged], workflowContextFrom: [pinged] }) };
+});

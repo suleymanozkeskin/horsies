@@ -76,7 +76,7 @@ pub fn child_handle_setup(init: &InitFrame) -> Result<ChildHandleSetup, HandlerC
                 pool_pre_ping: pool.check,
                 pool_size: connections,
                 max_overflow: no_overflow,
-                pool_timeout: WholeSeconds::from_secs(CHILD_POOL_CHECKOUT_WAIT_SECONDS),
+                pool_timeout_seconds: WholeSeconds::from_secs(CHILD_POOL_CHECKOUT_WAIT_SECONDS),
                 pool_recycle: CHILD_POOL_MAX_AGE,
                 echo: false,
                 tcp_keepalives: init.connection.tcp_keepalives,
@@ -104,13 +104,13 @@ mod tests {
     use crate::db::KeptOpen;
     use crate::worker::executor::protocol::{
         ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl as InitUrl,
-        HandlerChild, IsolatedChild, PoolMaxSize, PoolMinSize, SharedThreadChild, TaskSendPool,
-        ThreadSeats,
+        HandlerChild, IsolatedChild, MemoryLimit, PoolMaxSize, PoolMinSize, SharedThreadChild,
+        TaskSendPool, ThreadSeats,
     };
 
     fn init(child_kind: ChildKind, connection: ChildConnection) -> InitFrame {
         InitFrame {
-            program: ChildProgram::Rust,
+            program: ChildProgram::Host,
             log_level: ChildLogLevel::Info,
             database_url: InitUrl::new("postgresql://user:secret@db:5432/app".to_owned()),
             connection,
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(database.pool_size.get(), 3);
         assert_eq!(database.max_overflow.get(), 0);
         assert_eq!(
-            database.pool_timeout.get(),
+            database.pool_timeout_seconds.get(),
             CHILD_POOL_CHECKOUT_WAIT_SECONDS
         );
         assert_eq!(database.pool_recycle, CHILD_POOL_MAX_AGE);
@@ -189,6 +189,7 @@ mod tests {
                 seats: ThreadSeats::new(4).expect("thread seats"),
                 pool: pool(0, 2, false),
                 task_send_pool: TaskSendPool::new(1).expect("a task-send pool"),
+                recycle_above: MemoryLimit::Off,
             }),
             connection,
         ))

@@ -22,7 +22,7 @@ import horsies.telemetry as telemetry
 from horsies._catalog import events
 from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.errors import ConfigurationError, HorsiesErrorCode
 from horsies.core.event_handlers import (
     EventHandler,
     HandlerKind,
@@ -45,14 +45,14 @@ _MODULE: Final = __name__
 def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
-            broker=PostgresConfig(
+            database=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@localhost/db')
             ),
         ),
     )
 
 
-def _refusal(raised: pytest.ExceptionInfo[ConfigurationError]) -> ErrorCode | None:
+def _refusal(raised: pytest.ExceptionInfo[ConfigurationError]) -> HorsiesErrorCode | None:
     return raised.value.code
 
 
@@ -75,7 +75,7 @@ class TestAcceptedHandlers:
         assert handler.name == f'{_MODULE}._on_end'
         assert handler.event_type.event_class is AttemptEnded
         assert handler.event_type.name == 'AttemptEnded'
-        assert handler.kind is HandlerKind.DEF
+        assert handler.handler_kind is HandlerKind.DEF
         assert handler.function is _on_end
 
     def test_an_async_def_handler_is_awaited(self) -> None:
@@ -84,7 +84,7 @@ class TestAcceptedHandlers:
         app.on_event(AttemptEnded)(_on_end_async)
 
         (handler,) = app.get_event_handlers()
-        assert handler.kind is HandlerKind.ASYNC_DEF
+        assert handler.handler_kind is HandlerKind.ASYNC_DEF
 
     def test_a_bound_method_is_named_by_its_class(self) -> None:
         class Sink:
@@ -98,7 +98,7 @@ class TestAcceptedHandlers:
 
         (handler,) = app.get_event_handlers()
         assert handler.name == f'{_MODULE}.{Sink.on_claim.__qualname__}'
-        assert handler.kind is HandlerKind.DEF
+        assert handler.handler_kind is HandlerKind.DEF
 
     @pytest.mark.parametrize('event_class', events.EVENT_TYPES)
     def test_every_event_type_is_known_by_its_manifest_name(
@@ -173,7 +173,7 @@ class TestUnknownEventType:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(value)  # pyright: ignore[reportArgumentType]
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_UNKNOWN_EVENT_TYPE
         assert raised.value.code is not None
         assert raised.value.code.value == 'HRS-222'
         assert app.get_event_handlers() == ()
@@ -252,7 +252,7 @@ class TestInvalidSignature:
         with pytest.raises(ConfigurationError) as raised:
             decorator(handler)  # pyright: ignore[reportArgumentType, reportCallIssue]
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_INVALID_SIGNATURE
         assert raised.value.code is not None
         assert raised.value.code.value == 'HRS-223'
         assert any(note in text for text in raised.value.notes), raised.value.notes
@@ -267,7 +267,7 @@ class TestNames:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(AttemptEnded)(_on_end)
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_DUPLICATE_NAME
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_DUPLICATE_NAME
         assert raised.value.code is not None
         assert raised.value.code.value == 'HRS-224'
         assert f'{_MODULE}._on_end' in raised.value.message
@@ -280,7 +280,7 @@ class TestNames:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(TaskClaimed)(lambda event: None)
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_DUPLICATE_NAME
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_DUPLICATE_NAME
 
     def test_a_name_over_its_bound_is_refused(self) -> None:
         def handler(event: AttemptEnded) -> None:
@@ -292,7 +292,7 @@ class TestNames:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(AttemptEnded)(handler)
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_INVALID_NAME
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_INVALID_NAME
         assert raised.value.code is not None
         assert raised.value.code.value == 'HRS-225'
         assert (
@@ -322,7 +322,7 @@ class TestNames:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(AttemptEnded)(handler)
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_INVALID_NAME
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_INVALID_NAME
 
 
 def _numbered_handler(number: int) -> Callable[[AttemptEnded], None]:
@@ -342,7 +342,7 @@ class TestLimit:
         with pytest.raises(ConfigurationError) as raised:
             app.on_event(AttemptEnded)(_numbered_handler(MAX_EVENT_HANDLERS))
 
-        assert _refusal(raised) is ErrorCode.EVENT_HANDLER_LIMIT
+        assert _refusal(raised) is HorsiesErrorCode.EVENT_HANDLER_LIMIT
         assert raised.value.code is not None
         assert raised.value.code.value == 'HRS-226'
         assert len(app.get_event_handlers()) == MAX_EVENT_HANDLERS
@@ -359,7 +359,7 @@ class TestLimit:
             EventHandler(
                 name=f'm.h{number}',
                 event_type=known,
-                kind=HandlerKind.DEF,
+                handler_kind=HandlerKind.DEF,
                 function=_on_end,
             )
             for number in range(MAX_EVENT_HANDLERS)
@@ -386,7 +386,7 @@ class TestHandlerChildStartHook:
         app.on_handler_child_start(first)
 
         assert app.get_handler_child_start_hooks() == [first, second]
-        assert app.get_child_process_start_hooks() == []
+        assert app.get_child_start_hooks() == []
 
     def test_an_async_hook_is_refused(self) -> None:
         app = _make_app()
@@ -397,7 +397,7 @@ class TestHandlerChildStartHook:
         with pytest.raises(ConfigurationError) as raised:
             app.on_handler_child_start(hook)  # pyright: ignore[reportArgumentType]
 
-        assert _refusal(raised) is ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert _refusal(raised) is HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
         assert 'on_handler_child_start' in raised.value.message
         assert app.get_handler_child_start_hooks() == []
 
@@ -407,7 +407,7 @@ class TestHandlerChildStartHook:
         with pytest.raises(ConfigurationError) as raised:
             app.on_handler_child_start('reset')  # pyright: ignore[reportArgumentType]
 
-        assert _refusal(raised) is ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert _refusal(raised) is HorsiesErrorCode.CONFIG_INVALID_CHILD_HOOK
 
 
 class TestWorkerManifest:
@@ -447,7 +447,7 @@ class TestWorkerManifest:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
@@ -472,7 +472,7 @@ class TestWorkerManifest:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 

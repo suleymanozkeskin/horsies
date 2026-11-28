@@ -22,8 +22,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_err
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result, is_err
 from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
@@ -48,9 +48,9 @@ def _with_lock_timeout(url: str) -> str:
 
 
 def _secret_task(app: Horsies) -> Any:
-    @app.task(task_name='hide_parameters_secret_task')
-    def secret_task(*, secret: str) -> TaskResult[str, TaskError]:
-        return TaskResult(ok=secret)
+    @app.task(name='hide_parameters_secret_task')
+    def secret_task(*, secret: str) -> Result[str, TaskError]:
+        return Ok(secret)
 
     return secret_task
 
@@ -60,7 +60,7 @@ async def test_failed_enqueue_hides_the_task_arguments(
 ) -> None:
     url = await make_database()
     config = PostgresConfig(database_url=SecretStr(_with_lock_timeout(url)))
-    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+    app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, database=config))
     broker = PostgresBroker(config)
     app._broker = broker  # pyright: ignore[reportPrivateUsage]
     broker.app = app
@@ -84,5 +84,5 @@ async def test_failed_enqueue_hides_the_task_arguments(
     assert 'canceling statement due to lock timeout' in error.message
     assert CORE_STATEMENT in error.message
     assert ARGUMENT_MARKER not in error.message
-    assert isinstance(error.exception, BaseException)
-    assert ARGUMENT_MARKER not in str(error.exception)
+    assert isinstance(error.cause, BaseException)
+    assert ARGUMENT_MARKER not in str(error.cause)

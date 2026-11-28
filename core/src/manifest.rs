@@ -15,8 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
+use crate::core::history::identity::keys::IDEMPOTENCY_WINDOW_DEFAULT_MICROS;
 use crate::core::{mask_database_url, PostgresConfig};
-use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+use crate::manifest_schema::{IntBound, ManifestValue, ValueType};
+
+mod producer_builder;
+
+pub use producer_builder::{
+    core_database_url, core_scheme_url, producer_manifest, send_manifest,
+    session_database_manifest, BrokerSettingRefused,
+};
 
 /// The one manifest version this core reads.
 pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
@@ -79,7 +87,7 @@ impl From<ManifestVersion> for u32 {
 }
 
 impl ManifestValue for ManifestVersion {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "MANIFEST_VERSION",
         min: PRODUCER_MANIFEST_VERSION as u64,
         max: PRODUCER_MANIFEST_VERSION as u64,
@@ -96,27 +104,24 @@ pub struct DatabaseManifest {
     pub session_database: SessionDatabase,
     /// The main URL points at a PgBouncer transaction-pool endpoint.
     pub pgbouncer_transaction_mode: bool,
-    /// Ping a pooled connection before use (Python's rule: only after it
+    /// Ping a pooled connection before use (only after it
     /// waited in the pool for more than 1 s).
     pub pool_pre_ping: bool,
     /// Connections the pool keeps. Always a number: the core bounds its
-    /// connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    /// connections, so a pool size of 0 (no limit) has no form here.
     pub pool_size: PoolSize,
-    /// Connections past `pool_size`. Always a number: SQLAlchemy's
-    /// `max_overflow=-1` (no limit) has no form here.
+    /// Connections past `pool_size`. Always a number: an overflow
+    /// of -1 (no limit) has no form here.
     pub max_overflow: PoolConnections,
     /// The longest a checkout waits for a free connection. 0 means a checkout
-    /// does not wait: it fails at once when no connection is free, as
-    /// SQLAlchemy's `pool_timeout=0`.
-    pub pool_timeout: WholeSeconds,
+    /// does not wait: it fails at once when no connection is free.
+    pub pool_timeout_seconds: WholeSeconds,
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
-    /// its three values).
+    /// TCP keepalives of every core connection.
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python
-    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    /// TCP user timeout of every core connection.
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -151,7 +156,7 @@ impl DatabaseUrl {
 }
 
 impl ManifestValue for DatabaseUrl {
-    const PYTHON: PythonValue = PythonValue::Str;
+    const VALUE_TYPE: ValueType = ValueType::Str;
 }
 
 impl std::fmt::Debug for DatabaseUrl {
@@ -195,7 +200,7 @@ impl From<PoolSize> for u32 {
 }
 
 impl ManifestValue for PoolSize {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "POOL_SIZE",
         min: 1,
         max: MAX_POOL_CONNECTIONS as u64,
@@ -233,7 +238,7 @@ impl From<PoolConnections> for u32 {
 }
 
 impl ManifestValue for PoolConnections {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "POOL_CONNECTIONS",
         min: 0,
         max: MAX_POOL_CONNECTIONS as u64,
@@ -256,14 +261,13 @@ impl WholeSeconds {
     }
 }
 
-/// When the pool replaces a connection by its age (SQLAlchemy's
-/// `pool_recycle`).
+/// When the pool replaces a connection by its age.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PoolRecycle {
-    /// A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`).
+    /// A connection is never replaced by age.
     #[serde(deserialize_with = "no_member_after_the_tag")]
     Never,
     /// A connection older than `seconds` is replaced at its next checkout; 0
@@ -280,7 +284,7 @@ impl PoolRecycle {
 }
 
 impl ManifestValue for WholeSeconds {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "WHOLE_SECONDS",
         min: 0,
         max: u32::MAX as u64,
@@ -289,10 +293,6 @@ impl ManifestValue for WholeSeconds {
 
 /// Schema behaviour of a handle.
 ///
-/// The Python broker flags map to it: `assume_initialized=True` is
-/// `ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
-/// `run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
-/// `OBSERVE_ONLY`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -327,6 +327,20 @@ pub struct SendManifest {
 pub struct ReservationWindowMicros(u64);
 
 impl ReservationWindowMicros {
+    /// The reservation window of a keyed send when nothing sets one: 24
+    /// hours ([`IDEMPOTENCY_WINDOW_DEFAULT_MICROS`], the window of the
+    /// broker). Every producer manifest of an app holds it.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "the assertions below prove the value positive"
+    )]
+    pub const DEFAULT: Self = {
+        // The assertion keeps the cast exact and the value inside the bounds.
+        assert!(IDEMPOTENCY_WINDOW_DEFAULT_MICROS > 0);
+        assert!(IDEMPOTENCY_WINDOW_DEFAULT_MICROS as u64 <= MAX_RESERVATION_WINDOW_MICROS);
+        Self(IDEMPOTENCY_WINDOW_DEFAULT_MICROS as u64)
+    };
+
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -361,7 +375,7 @@ impl From<ReservationWindowMicros> for u64 {
 }
 
 impl ManifestValue for ReservationWindowMicros {
-    const PYTHON: PythonValue = PythonValue::Int(IntBound {
+    const VALUE_TYPE: ValueType = ValueType::Int(IntBound {
         name: "RESERVATION_WINDOW_MICROS",
         min: 1,
         max: MAX_RESERVATION_WINDOW_MICROS,
@@ -377,24 +391,26 @@ impl DatabaseManifest {
     /// fields of the config take it: the pool reads `pool_pre_ping`, and
     /// [`PostgresConfig::worker_process_config`] reads `worker_pool_pre_ping`.
     pub fn to_postgres_config(&self, retain_rerun_input_default: bool) -> PostgresConfig {
-        let session_database_url = match &self.session_database {
-            SessionDatabase::SameAsDatabaseUrl => None,
-            SessionDatabase::Separate { url } => Some(url.expose().to_owned()),
+        let session_database = match &self.session_database {
+            SessionDatabase::SameAsDatabaseUrl => crate::core::SessionDatabase::SameAsDatabaseUrl,
+            SessionDatabase::Separate { url } => crate::core::SessionDatabase::Separate {
+                url: url.expose().to_owned(),
+            },
         };
         PostgresConfig {
             database_url: self.database_url.expose().to_owned(),
-            session_database_url,
+            session_database,
             pgbouncer_transaction_mode: self.pgbouncer_transaction_mode,
             pool_pre_ping: self.pool_pre_ping,
             worker_pool_pre_ping: self.pool_pre_ping,
             pool_size: self.pool_size.get(),
             max_overflow: self.max_overflow.get(),
             retain_rerun_input_default,
-            pool_timeout: self.pool_timeout.get(),
+            pool_timeout_seconds: self.pool_timeout_seconds.get(),
             pool_recycle: self.pool_recycle,
             echo: self.echo,
-            tcp_keepalives: self.tcp_keepalives,
-            tcp_user_timeout: self.tcp_user_timeout,
+            tcp_keepalives: self.tcp_keepalives.into(),
+            tcp_user_timeout: self.tcp_user_timeout.into(),
         }
     }
 }
@@ -468,7 +484,7 @@ mod tests {
                     "pool_pre_ping": true,
                     "pool_size": 30,
                     "max_overflow": 30,
-                    "pool_timeout": 30,
+                    "pool_timeout_seconds": 30,
                     "pool_recycle": {{"kind": "AFTER_SECONDS", "seconds": 1800}},
                     "echo": false,
                     "tcp_keepalives": {{
@@ -499,7 +515,10 @@ mod tests {
             DAY_MICROS
         );
         let config = manifest.database.to_postgres_config(false);
-        assert_eq!(config.session_database_url, None);
+        assert_eq!(
+            config.session_database,
+            crate::core::SessionDatabase::SameAsDatabaseUrl
+        );
         assert_eq!(config.pool_size, 30);
         assert_eq!(config.socket_settings(), crate::db::DEFAULT_SOCKET_SETTINGS);
     }
@@ -553,8 +572,8 @@ mod tests {
         let manifest = parse_producer_manifest(&text).expect("the manifest is complete");
         let config = manifest.database.to_postgres_config(true);
         assert_eq!(
-            config.session_database_url.as_deref(),
-            Some("postgresql://user:secret@direct:5432/db")
+            config.effective_session_database_url(),
+            "postgresql://user:secret@direct:5432/db"
         );
         assert!(config.retain_rerun_input_default);
     }
@@ -666,13 +685,19 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_timeout_of_zero_means_a_checkout_does_not_wait() {
-        assert_eq!(database_config("pool_timeout", "0").pool_timeout, 0);
+    fn a_pool_timeout_seconds_of_zero_means_a_checkout_does_not_wait() {
+        assert_eq!(
+            database_config("pool_timeout_seconds", "0").pool_timeout_seconds,
+            0
+        );
     }
 
     #[test]
-    fn a_negative_pool_timeout_is_refused() {
-        assert_eq!(refused_path("pool_timeout", "-1"), "database.pool_timeout");
+    fn a_negative_pool_timeout_seconds_is_refused() {
+        assert_eq!(
+            refused_path("pool_timeout_seconds", "-1"),
+            "database.pool_timeout_seconds"
+        );
     }
 
     #[test]
@@ -699,7 +724,7 @@ mod tests {
             r#"{"kind": "AFTER_SECONDS", "seconds": -5}"#
         )
         .starts_with("database.pool_recycle"));
-        // The bare number of SQLAlchemy is not a manifest form.
+        // The bare number of a client pool is not a manifest form.
         assert!(refused_path("pool_recycle", "-1").starts_with("database.pool_recycle"));
     }
 

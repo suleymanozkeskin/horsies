@@ -121,7 +121,7 @@ export function nodeCoverageText(timing: NodeTiming): string {
 function runConflictText(conflict: RunConflict): string {
   switch (conflict.kind) {
     case 'node':
-      return `node #${conflict.task_index}`;
+      return `node #${conflict.node_index}`;
     case 'pause':
       return `pause record: ${conflictText(conflict.conflict)}`;
     default:
@@ -206,7 +206,7 @@ function placedClaimText(segment: TimingSegment, placedAtMs: number): string | n
   switch (segment.end.kind) {
     case 'open':
       return null;
-    case 'ended':
+    case 'closed':
       return placementText(instantMs(segment.started_at), placedAtMs);
     default:
       return assertNever(segment.end, 'segment end');

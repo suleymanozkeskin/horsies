@@ -20,7 +20,7 @@ import type { TaskDetail } from '@/types/tasks';
 const META: MonitoringMeta = {
   horsies_version: '0.3.1',
   base_path: '/',
-  actions_enabled: true,
+  actions: 'ENABLED',
   can_act: true,
   schema_version: 14,
   expected_schema_version: 14,
@@ -41,10 +41,10 @@ const IDLE_CONTROLS: EntityActionControls = {
 };
 
 function workflowBoundTask(
-  overrides: Partial<Pick<TaskDetail, 'workflow_id' | 'workflow_task_index'>>
+  overrides: Partial<Pick<TaskDetail, 'workflow_id' | 'workflow_node_index'>>
 ): TaskDetail {
   return {
-    leaf: {
+    task_row: {
       task_id: 't1',
       status: 'FAILED',
       error_code: null,
@@ -55,20 +55,20 @@ function workflowBoundTask(
       started_at: null,
       completed_at: null,
       failed_at: null,
-      queue_s: null,
-      exec_s: null,
+      queue_seconds: null,
+      execution_seconds: null,
       worker_hostname: null,
       good_until: null,
       trace_id: null,
     },
     task_name: 'demo',
-    queue_name: 'default',
+    queue: 'default',
     priority: 0,
     is_workflow_task: true,
     error_category: null,
     attempts: [],
     workflow_id: null,
-    workflow_task_index: null,
+    workflow_node_index: null,
     ...overrides,
   };
 }
@@ -118,7 +118,7 @@ async function renderBar(
 describe('workflow-bound task note', () => {
   it('deep-links to the owning run and the node', async () => {
     await renderBar(
-      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_task_index: 4 })
+      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_node_index: 4 })
     );
 
     const link = screen.getByRole('link');
@@ -126,9 +126,9 @@ describe('workflow-bound task note', () => {
     expect(link.textContent).toBe('abcdef1234'.slice(0, 8));
   });
 
-  it('links to node 0 — task_index is zero-based, not falsy-absent', async () => {
+  it('links to node 0 — node_index is zero-based, not falsy-absent', async () => {
     await renderBar(
-      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_task_index: 0 })
+      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_node_index: 0 })
     );
 
     expect(screen.getByRole('link').getAttribute('href')).toBe(
@@ -138,7 +138,7 @@ describe('workflow-bound task note', () => {
 
   it('links to the run alone when the node index is absent', async () => {
     await renderBar(
-      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_task_index: null })
+      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_node_index: null })
     );
 
     expect(screen.getByRole('link').getAttribute('href')).toBe(
@@ -155,7 +155,7 @@ describe('workflow-bound task note', () => {
 
   it('never renders task actions on a workflow-bound row', async () => {
     await renderBar(
-      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_task_index: 1 })
+      workflowBoundTask({ workflow_id: 'abcdef1234', workflow_node_index: 1 })
     );
 
     expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
@@ -170,7 +170,7 @@ describe('task actions on a standalone row', () => {
       {
         ...detail,
         is_workflow_task: false,
-        leaf: { ...detail.leaf, status: 'PENDING' },
+        task_row: { ...detail.task_row, status: 'PENDING' },
       },
       { shown: true, enabled: true }
     );

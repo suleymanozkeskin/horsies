@@ -22,14 +22,14 @@ use super::function_rows::{
     MONITORING_WORKFLOW_NODE, MONITORING_WORKFLOW_RUN, MONITORING_WORKFLOW_RUNS,
 };
 use crate::core::history::errors::HistoryError;
-use crate::core::history::reads::pages::HistoryWindow;
+use crate::core::history::reads::pages::MonitoringWindow;
 use crate::core::task::error::BuiltInTaskCode;
 use crate::core::types::status::TaskStatus;
 
 use super::errors::{MonitoringQueryError, MonitoringResult};
 use super::models::{
     Breakdown, ErrorCategory, ErrorFacet, FacetValue, Facets, ScheduleStateInfo, StatusCount,
-    TaskDetailRead, TaskListPage, WorkflowRunDetail, WorkflowRunSummary, WorkflowTaskDetail,
+    TaskDetailRead, TaskListPage, WorkflowNodeDetail, WorkflowRunDetail, WorkflowRunSummary,
 };
 
 /// The most `offset + limit` of one task list page.
@@ -54,7 +54,7 @@ pub enum TaskSortField {
     FailedAt,
     Status,
     TaskName,
-    QueueName,
+    Queue,
     Priority,
     RetryCount,
     QueueSeconds,
@@ -69,13 +69,15 @@ impl TaskSortField {
         Self::FailedAt,
         Self::Status,
         Self::TaskName,
-        Self::QueueName,
+        Self::Queue,
         Self::Priority,
         Self::RetryCount,
         Self::QueueSeconds,
         Self::ExecutionSeconds,
     ];
 
+    /// The wire text of the sort key: the name of the field of the task
+    /// list row that the key sorts on. Pure.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::EnqueuedAt => "enqueued_at",
@@ -84,11 +86,30 @@ impl TaskSortField {
             Self::FailedAt => "failed_at",
             Self::Status => "status",
             Self::TaskName => "task_name",
-            Self::QueueName => "queue_name",
+            Self::Queue => "queue",
             Self::Priority => "priority",
             Self::RetryCount => "retry_count",
+            Self::QueueSeconds => "queue_seconds",
+            Self::ExecutionSeconds => "execution_seconds",
+        }
+    }
+
+    /// The sort key text of `horsies_monitoring_task_list` (`p_sort_key`).
+    /// The SQL function keeps its schema names (`queue_name`, `queue_s`,
+    /// `exec_s`); this maps the wire text to them. Pure.
+    const fn sql_key(self) -> &'static str {
+        match self {
+            Self::Queue => "queue_name",
             Self::QueueSeconds => "queue_s",
             Self::ExecutionSeconds => "exec_s",
+            Self::EnqueuedAt
+            | Self::StartedAt
+            | Self::CompletedAt
+            | Self::FailedAt
+            | Self::Status
+            | Self::TaskName
+            | Self::Priority
+            | Self::RetryCount => self.as_str(),
         }
     }
 }
@@ -155,18 +176,18 @@ pub struct TaskFilters {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{reason}")]
-pub struct PaginationRefused {
+pub struct PageRefused {
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskStatsQuery {
-    window: HistoryWindow,
+pub struct TaskStatusCountsQuery {
+    window: MonitoringWindow,
     filters: TaskFilters,
 }
 
-impl TaskStatsQuery {
-    pub fn new(window: HistoryWindow) -> Self {
+impl TaskStatusCountsQuery {
+    pub fn new(window: MonitoringWindow) -> Self {
         Self {
             window,
             filters: TaskFilters::default(),
@@ -182,12 +203,12 @@ impl TaskStatsQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskFacetsQuery {
-    window: HistoryWindow,
+    window: MonitoringWindow,
     filters: TaskFilters,
 }
 
 impl TaskFacetsQuery {
-    pub fn new(window: HistoryWindow) -> Self {
+    pub fn new(window: MonitoringWindow) -> Self {
         Self {
             window,
             filters: TaskFilters::default(),
@@ -217,14 +238,14 @@ impl TaskFacetsQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskBreakdownQuery {
-    window: HistoryWindow,
+    window: MonitoringWindow,
     group_by: TaskGroupBy,
     filters: TaskFilters,
     limit: i64,
 }
 
 impl TaskBreakdownQuery {
-    pub fn new(window: HistoryWindow, group_by: TaskGroupBy) -> Self {
+    pub fn new(window: MonitoringWindow, group_by: TaskGroupBy) -> Self {
         Self {
             window,
             group_by,
@@ -238,9 +259,9 @@ impl TaskBreakdownQuery {
         self
     }
 
-    pub fn with_limit(mut self, limit: i64) -> Result<Self, PaginationRefused> {
+    pub fn with_limit(mut self, limit: i64) -> Result<Self, PageRefused> {
         if !(1..=MAX_BREAKDOWN_LIMIT).contains(&limit) {
-            return Err(PaginationRefused {
+            return Err(PageRefused {
                 reason: format!("limit must be between 1 and {MAX_BREAKDOWN_LIMIT}; got {limit}"),
             });
         }
@@ -251,20 +272,20 @@ impl TaskBreakdownQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskListQuery {
-    window: HistoryWindow,
+    window: MonitoringWindow,
     filters: TaskFilters,
-    sort_by: TaskSortField,
+    sort_field: TaskSortField,
     sort_direction: SortDirection,
     offset: i64,
     limit: i64,
 }
 
 impl TaskListQuery {
-    pub fn new(window: HistoryWindow) -> Self {
+    pub fn new(window: MonitoringWindow) -> Self {
         Self {
             window,
             filters: TaskFilters::default(),
-            sort_by: TaskSortField::EnqueuedAt,
+            sort_field: TaskSortField::EnqueuedAt,
             sort_direction: SortDirection::Descending,
             offset: 0,
             limit: 50,
@@ -277,27 +298,27 @@ impl TaskListQuery {
     }
 
     pub fn with_sort(mut self, field: TaskSortField, direction: SortDirection) -> Self {
-        self.sort_by = field;
+        self.sort_field = field;
         self.sort_direction = direction;
         self
     }
 
-    pub fn with_pagination(mut self, offset: i64, limit: i64) -> Result<Self, PaginationRefused> {
+    pub fn with_pagination(mut self, offset: i64, limit: i64) -> Result<Self, PageRefused> {
         if offset < 0 {
-            return Err(PaginationRefused {
+            return Err(PageRefused {
                 reason: format!("offset must be at least 0; got {offset}"),
             });
         }
         if !(1..=MAX_TASK_PAGE_LIMIT).contains(&limit) {
-            return Err(PaginationRefused {
+            return Err(PageRefused {
                 reason: format!("limit must be between 1 and {MAX_TASK_PAGE_LIMIT}; got {limit}"),
             });
         }
-        let reach = offset.checked_add(limit).ok_or_else(|| PaginationRefused {
+        let reach = offset.checked_add(limit).ok_or_else(|| PageRefused {
             reason: "offset + limit exceeds the supported integer range".to_owned(),
         })?;
         if reach > MAX_TASK_PAGE_REACH {
-            return Err(PaginationRefused {
+            return Err(PageRefused {
                 reason: format!("offset + limit must be <= {MAX_TASK_PAGE_REACH}; got {reach}"),
             });
         }
@@ -305,11 +326,23 @@ impl TaskListQuery {
         self.limit = limit;
         Ok(self)
     }
+
+    /// The first row of the page, counted from 0: the default of
+    /// [`TaskListQuery::new`] or the value of `with_pagination`. Pure.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// The most rows of the page: the default of [`TaskListQuery::new`] or
+    /// the value of `with_pagination`. Pure.
+    pub fn limit(&self) -> i64 {
+        self.limit
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRunsQuery {
-    name: Option<String>,
+    workflow_name: Option<String>,
     status: Option<String>,
     limit: i64,
 }
@@ -317,14 +350,14 @@ pub struct WorkflowRunsQuery {
 impl WorkflowRunsQuery {
     pub fn new() -> Self {
         Self {
-            name: None,
+            workflow_name: None,
             status: None,
             limit: 30,
         }
     }
 
-    pub fn with_name(mut self, name: Option<String>) -> Self {
-        self.name = name;
+    pub fn with_workflow_name(mut self, workflow_name: Option<String>) -> Self {
+        self.workflow_name = workflow_name;
         self
     }
 
@@ -333,9 +366,9 @@ impl WorkflowRunsQuery {
         self
     }
 
-    pub fn with_limit(mut self, limit: i64) -> Result<Self, PaginationRefused> {
+    pub fn with_limit(mut self, limit: i64) -> Result<Self, PageRefused> {
         if !(1..=MAX_WORKFLOW_RUNS_LIMIT).contains(&limit) {
-            return Err(PaginationRefused {
+            return Err(PageRefused {
                 reason: format!(
                     "limit must be between 1 and {MAX_WORKFLOW_RUNS_LIMIT}; got {limit}"
                 ),
@@ -368,10 +401,11 @@ pub fn elapsed(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Opti
     Some(end.unwrap_or_else(Utc::now) - start)
 }
 
-/// The span from `start` to `end`. With no `end`, the span of a `live` task
-/// runs to now (the host clock), and any other task has no span. `None`
-/// when `start` is `None`. Exact and signed, as [`elapsed`].
-pub fn span(
+/// The duration from `start` to `end`. With no `end`, the duration of a
+/// `live` task runs to now (the host clock), and any other task has no
+/// duration. `None` when `start` is `None`. Exact and signed, as
+/// [`elapsed`].
+pub fn duration(
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
     live: bool,
@@ -391,7 +425,7 @@ pub fn categorize_error_code(code: Option<&str>) -> Option<ErrorCategory> {
         Some(BuiltInTaskCode::Contract(_)) => Some(ErrorCategory::Contract),
         Some(BuiltInTaskCode::Retrieval(_)) => Some(ErrorCategory::Retrieval),
         Some(BuiltInTaskCode::Outcome(_)) => Some(ErrorCategory::Outcome),
-        None => Some(ErrorCategory::Domain),
+        None => Some(ErrorCategory::Custom),
     }
 }
 
@@ -427,7 +461,7 @@ fn is_data_corrupted(error: &BrokerError) -> bool {
     }
 }
 
-/// Rows of a monitoring function that do not decode: `DB_OPERATION_FAILED`,
+/// Rows of a monitoring function that do not decode: `DATABASE_OPERATION_FAILED`,
 /// not retryable.
 fn row_failure(operation: &str, error: RowDecodeError) -> MonitoringQueryError {
     MonitoringQueryError::broker(operation, BrokerError::RowDecode(error))
@@ -600,11 +634,11 @@ fn status_texts(statuses: &[TaskStatus]) -> Vec<String> {
 /// statuses in their fixed order, zeros included. A history row in the
 /// window whose status is not a task status is
 /// `HISTORY_CONTRACT_VIOLATION`, and no count is returned.
-pub async fn task_stats(
+pub async fn task_status_counts(
     broker: &PostgresBroker,
-    query: &TaskStatsQuery,
+    query: &TaskStatusCountsQuery,
 ) -> MonitoringResult<Vec<StatusCount>> {
-    let operation = "task stats query";
+    let operation = "task status counts query";
     let statement = &MONITORING_TASK_STATS;
     let lower = query.window.lower();
     let upper = query.window.upper();
@@ -706,7 +740,7 @@ pub async fn list_tasks(
     let statuses = status_texts(&query.filters.statuses);
     let categories = category_texts(&query.filters.error_categories);
     let taxonomy = builtin_taxonomy();
-    let sort_key = query.sort_by.as_str();
+    let sort_key = query.sort_field.sql_key();
     let sort_direction = query.sort_direction.sql();
     // `with_pagination` bounds both to the page reach (MAX_TASK_PAGE_REACH).
     let offset =
@@ -769,7 +803,7 @@ pub async fn list_tasks(
 /// - A history row that does not decode, or a published reader that reports
 ///   the task live after the live miss of the same snapshot, is
 ///   `HISTORY_CONTRACT_VIOLATION`; any other failure, a missing reader too,
-///   is `DB_OPERATION_FAILED`.
+///   is `DATABASE_OPERATION_FAILED`.
 pub async fn get_task_detail(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -816,8 +850,8 @@ pub async fn list_workflow_names(broker: &PostgresBroker) -> MonitoringResult<Ve
 
 /// The newest root runs, read by `horsies_monitoring_workflow_runs` in one
 /// statement. Runs created at one time come by id, highest first, so a page
-/// does not reorder between polls. The name and the status are exact
-/// filters that combine with AND; a status that no run has gives an empty
+/// does not reorder between polls. The workflow name and the status are
+/// exact filters that combine with AND; a status that no run has gives an empty
 /// list.
 pub async fn list_workflow_runs(
     broker: &PostgresBroker,
@@ -832,7 +866,7 @@ pub async fn list_workflow_runs(
         .query_main(
             &statement
                 .bind()
-                .value(&query.name)
+                .value(&query.workflow_name)
                 .value(&query.status)
                 .value(&limit)
                 .finish(),
@@ -852,7 +886,7 @@ pub async fn list_workflow_runs(
 /// each task of a node, live or in history at the locator of its
 /// `TASK_MOVED` event. No statement runs per node or per task.
 ///
-/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// Errors: `DATABASE_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
 /// attempt archive that does not decode, a run of more than 10,000 nodes, or
 /// a database with no bookkeeping row of migration 1001.
 pub async fn get_workflow_run(
@@ -875,14 +909,14 @@ pub async fn get_workflow_run(
 /// One node with its error, its backing task and the task's attempts, read
 /// by `horsies_monitoring_workflow_node` in one statement (one snapshot), or
 /// `None` when the run has no node at the index. A sub-workflow node, and a
-/// node whose task no table holds, have no leaf and no attempt. A stored
+/// node whose task no table holds, have no task row and no attempt. A stored
 /// node result or a history row that does not decode is
 /// `HISTORY_CONTRACT_VIOLATION`.
 pub async fn get_workflow_node(
     broker: &PostgresBroker,
     workflow_id: Uuid,
-    task_index: i32,
-) -> MonitoringResult<Option<WorkflowTaskDetail>> {
+    node_index: i32,
+) -> MonitoringResult<Option<WorkflowNodeDetail>> {
     let operation = "workflow node detail query";
     let statement = &MONITORING_WORKFLOW_NODE;
     let rows = broker
@@ -890,7 +924,7 @@ pub async fn get_workflow_node(
             &statement
                 .bind()
                 .value(&workflow_id)
-                .value(&task_index)
+                .value(&node_index)
                 .finish(),
         )
         .await
@@ -921,6 +955,38 @@ pub async fn list_schedules(broker: &PostgresBroker) -> MonitoringResult<Vec<Sch
     let list = bounded_list_from_rows(rows)
         .map_err(|shape| list_shape_failure(operation, statement, shape))?;
     Ok(list_items(list, "schedule state", "schedules"))
+}
+
+#[cfg(test)]
+mod sort_key_tests {
+    use super::TaskSortField;
+
+    /// The sort key text that `horsies_monitoring_task_list` takes for each
+    /// sort field: the wire text, apart from the three fields whose SQL
+    /// names stay.
+    #[test]
+    fn each_sort_field_maps_to_the_sql_key_of_the_task_list_function() {
+        let keys: Vec<(&str, &str)> = TaskSortField::ALL
+            .into_iter()
+            .map(|field| (field.as_str(), field.sql_key()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("enqueued_at", "enqueued_at"),
+                ("started_at", "started_at"),
+                ("completed_at", "completed_at"),
+                ("failed_at", "failed_at"),
+                ("status", "status"),
+                ("task_name", "task_name"),
+                ("queue", "queue_name"),
+                ("priority", "priority"),
+                ("retry_count", "retry_count"),
+                ("queue_seconds", "queue_s"),
+                ("execution_seconds", "exec_s"),
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -982,7 +1048,7 @@ mod facet_tests {
         let rows = || {
             vec![
                 row("error_code", "TASK_TIMEOUT", 7, Some(("OUTCOME", 9))),
-                row("error_code", "BILLING_DOWN", 4, Some(("DOMAIN", 4))),
+                row("error_code", "BILLING_DOWN", 4, Some(("CUSTOM", 4))),
                 row("error_code", "TASK_CANCELLED", 2, Some(("OUTCOME", 9))),
             ]
         };
@@ -990,17 +1056,17 @@ mod facet_tests {
         let all = facets_from_rows(rows(), &[]).expect("rows decode");
         assert_eq!(all.error_codes.len(), 3);
 
-        let domain = facets_from_rows(rows(), &[ErrorCategory::Domain]).expect("rows decode");
+        let custom = facets_from_rows(rows(), &[ErrorCategory::Custom]).expect("rows decode");
         assert_eq!(
-            domain.error_codes,
+            custom.error_codes,
             vec![ErrorFacet {
                 value: "BILLING_DOWN".to_owned(),
                 count: 4,
-                category: "DOMAIN".to_owned(),
+                category: "CUSTOM".to_owned(),
             }]
         );
-        assert_eq!(domain.error_category_totals.get("OUTCOME"), Some(&9));
-        assert_eq!(domain.error_category_totals.get("DOMAIN"), Some(&4));
+        assert_eq!(custom.error_category_totals.get("OUTCOME"), Some(&9));
+        assert_eq!(custom.error_category_totals.get("CUSTOM"), Some(&4));
     }
 
     #[test]
@@ -1011,7 +1077,7 @@ mod facet_tests {
                     "error_code",
                     &format!("CODE_{index}"),
                     1,
-                    Some(("DOMAIN", 35)),
+                    Some(("CUSTOM", 35)),
                 )
             })
             .collect();
@@ -1019,7 +1085,7 @@ mod facet_tests {
         let facets = facets_from_rows(rows, &[]).expect("rows decode");
 
         assert_eq!(facets.error_codes.len() as i64, ERROR_FACET_CAP);
-        assert_eq!(facets.error_category_totals.get("DOMAIN"), Some(&35));
+        assert_eq!(facets.error_category_totals.get("CUSTOM"), Some(&35));
     }
 
     #[test]

@@ -9,7 +9,7 @@ import { useTask } from '@/hooks/use-task';
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { useWorkflowTask } from '@/hooks/use-workflow-task';
 import { assertNever } from '@/lib/exhaustive';
-import type { LeafTask, WorkflowNode, WorkflowTaskDetail } from '@/types/workflows';
+import type { TaskRow, WorkflowNode, WorkflowNodeDetail } from '@/types/workflows';
 
 import { ChainBadge, NodeTimingSection } from './node-timing';
 import { residualState } from './residual';
@@ -28,18 +28,18 @@ interface NodeDetailContentProps {
  * node (its child run is its work) and a skipped node (it never has an
  * attempt). */
 type NodeTaskView =
-  | { kind: 'task'; leaf: LeafTask }
+  | { kind: 'task'; leaf: TaskRow }
   | { kind: 'no_task' }
   | { kind: 'none' };
 
-function nodeTaskView(node: WorkflowNode, detail: WorkflowTaskDetail | undefined): NodeTaskView {
-  if (detail === undefined || detail.is_subworkflow) {
+function nodeTaskView(node: WorkflowNode, detail: WorkflowNodeDetail | undefined): NodeTaskView {
+  if (detail === undefined || detail.is_sub_workflow) {
     return { kind: 'none' };
   }
   if (node.node_status === 'SKIPPED' && detail.attempts.length === 0) {
     return { kind: 'none' };
   }
-  return detail.leaf === null ? { kind: 'no_task' } : { kind: 'task', leaf: detail.leaf };
+  return detail.task_row === null ? { kind: 'no_task' } : { kind: 'task', leaf: detail.task_row };
 }
 
 /** Whether the node is on the longest chain of its run, from the run read
@@ -85,12 +85,12 @@ export function NodeDetailContent({
   node,
   onOpenSubworkflow,
 }: NodeDetailContentProps) {
-  const label = node.node_id ?? node.task_name ?? `#${node.task_index}`;
-  const drillId = node.is_subworkflow ? node.sub_workflow_id : null;
-  const { detail } = useWorkflowTask(workflowId, node.task_index);
-  const chainRead = useChainMembership(workflowId, node.task_index);
+  const label = node.node_id ?? node.task_name ?? `#${node.node_index}`;
+  const drillId = node.is_sub_workflow ? node.sub_workflow_id : null;
+  const { detail } = useWorkflowTask(workflowId, node.node_index);
+  const chainRead = useChainMembership(workflowId, node.node_index);
 
-  const leaf = detail?.leaf ?? null;
+  const leaf = detail?.task_row ?? null;
   const nodeError = detail?.node_error;
   const residual = residualState(runStatus, node.node_status, leaf?.status ?? null);
   const repeatsAttemptMessage =
@@ -110,7 +110,7 @@ export function NodeDetailContent({
               {RESIDUAL_COPY[residual].badge}
             </span>
           )}
-          {node.allow_failed_deps && (
+          {node.allow_failed_dependencies && (
             <Hint text="Tolerant join: the node runs even when a dependency failed. The graph draws it with a dashed border.">
               <span className="rounded-full border border-dashed border-hairline-strong px-2 py-0.5 text-10 text-muted-foreground">
                 tolerant join
@@ -130,7 +130,7 @@ export function NodeDetailContent({
         )}
       </div>
 
-      <NodeTimingSection workflowId={workflowId} taskIndex={node.task_index} />
+      <NodeTimingSection workflowId={workflowId} taskIndex={node.node_index} />
 
       {drillId && (
         <button

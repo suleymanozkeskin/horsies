@@ -16,20 +16,20 @@ The `.node()` method on `TaskFunction` creates `TaskNode` instances with static 
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    database=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
-@app.task(task_name='compute_score')
+@app.task(name='compute_score')
 def compute_score(
     *,
     user_id: str,
     base_score: int,
     multiplier: float = 1.0,
-) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=int(base_score * multiplier))
+) -> Result[int, TaskError]:
+    return Ok(int(base_score * multiplier))
 
 # Type-safe node construction
 node = compute_score.node(node_id='score')(
@@ -48,7 +48,7 @@ The API separates workflow configuration from task arguments:
 task.node(workflow_options)(task_arguments)
 ```
 
-Stage 1 accepts workflow options (keyword-only): `waits_for`, `args_from`, `workflow_ctx_from`, `node_id`, `allow_failed_deps`, `join`, `min_success`, etc.
+Stage 1 accepts workflow options (keyword-only): `waits_for`, `args_from`, `workflow_context_from`, `node_id`, `allow_failed_dependencies`, `join`, `min_success`, etc.
 
 Stage 2 accepts task arguments matching the function signature.
 
@@ -92,22 +92,22 @@ _score_c = compute_score.node(
 
 ### Dependency Injection with `from_node()`
 
-Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`:
+Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`. The parameter receives a `TaskOutcome[T, TaskError]`: `Succeeded(value)`, or `Failed(task_error)` with `allow_failed_dependencies=True`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import from_node
+from horsies import TaskOutcome, from_node
 
-@app.task(task_name='fetch_user')
-def fetch_user(*, user_id: str) -> TaskResult[UserData, TaskError]:
+@app.task(name='fetch_user')
+def fetch_user(*, user_id: str) -> Result[UserData, TaskError]:
     ...
 
-@app.task(task_name='process_user')
+@app.task(name='process_user')
 def process_user(
     *,
-    user_data: TaskResult[UserData, TaskError],
+    user_data: TaskOutcome[UserData, TaskError],
     threshold: int = 50,
-) -> TaskResult[ProcessedUser, TaskError]:
+) -> Result[ProcessedUser, TaskError]:
     ...
 
 fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
@@ -118,7 +118,7 @@ process_node = process_user.node(node_id='process')(
     threshold=70,
 )
 # Equivalent to:
-# TaskNode(fn=process_user, args_from={'user_data': fetch_node},
+# TaskNode(function=process_user, args_from={'user_data': fetch_node},
 #          waits_for=[fetch_node], kwargs={'threshold': 70})
 ```
 
@@ -135,7 +135,7 @@ from horsies import TaskNode
 fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
 
 process_node = TaskNode(
-    fn=process_user,
+    function=process_user,
     waits_for=[fetch_node],
     args_from={'user_data': fetch_node},
     kwargs={'threshold': 70},
@@ -196,11 +196,11 @@ process_node = process_user.node(
 |-----------|------|---------|-------------|
 | `waits_for` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Dependencies |
 | `args_from` | `dict[str, TaskNode \| SubWorkflowNode]` | `None` | Result injection mapping |
-| `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
+| `workflow_context_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
 | `node_id` | `str` | `None` | Stable identifier |
 | `queue` | `str` | `None` | Queue override |
 | `priority` | `int` | `None` | Priority override, from 1 (highest) to 100 (lowest). A value outside 1–100 raises `HRS-034` when the spec is built |
-| `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
+| `allow_failed_dependencies` | `bool` | `False` | Run despite failed deps |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |

@@ -3,7 +3,7 @@
 The core reads the workflow row LEFT JOIN its nodes in one statement and
 answers ``WorkflowAbsent`` when no workflow has the id, or the node records
 (none when the workflow exists and no node matched). The handle maps
-``WorkflowAbsent`` to ``HandleWorkflowNotFound`` and no node to an empty
+``WorkflowAbsent`` to ``WorkflowHandleNotFound`` and no node to an empty
 ``Ok``.
 """
 
@@ -18,7 +18,7 @@ import pytest
 
 import horsies._core as core
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.workflow.handle_types import HandleWorkflowNotFound
+from horsies.core.models.workflow.handle_types import WorkflowHandleNotFound
 from horsies.core.types.result import is_err, is_ok
 
 pytestmark = [pytest.mark.unit]
@@ -50,7 +50,7 @@ class TestResults:
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, HandleWorkflowNotFound)
+        assert isinstance(error, WorkflowHandleNotFound)
         assert error.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio
@@ -71,18 +71,18 @@ class TestTasks:
     async def test_no_workflow_row_is_workflow_not_found(self) -> None:
         handle = _handle('workflow_nodes_async', _record(core.WorkflowAbsent))
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         error = result.err_value
-        assert isinstance(error, HandleWorkflowNotFound)
+        assert isinstance(error, WorkflowHandleNotFound)
         assert error.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio
     async def test_a_workflow_without_a_node_is_an_empty_list(self) -> None:
         handle = _handle('workflow_nodes_async', _record(core.WorkflowNodesRead, nodes=[]))
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         assert result.ok_value == []

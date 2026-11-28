@@ -1,4 +1,5 @@
 pub mod caller;
+pub mod codes;
 pub mod input_envelope;
 pub mod operations;
 pub mod provenance;
@@ -9,7 +10,11 @@ pub use caller::{
     CallerStatement, CallerStatementRefused, CallerTransaction, CallerType, OwnTransactionError,
     StatementValue,
 };
-pub use operations::{NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask};
+pub use codes::RerunErrorCode;
+pub use operations::{
+    DeclaredCodes, NotEligibleReason, RegisteredTaskCodes, RerunCommand, RerunEnqueuePolicy,
+    RerunError, RerunOutcome,
+};
 pub use steps::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRefusal,
     RerunRowError, RerunWrite, RerunWriteOutcome,
