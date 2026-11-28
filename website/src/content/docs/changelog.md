@@ -15,6 +15,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **`StoredTime` stores a time of day in Python's text (Rust).**
+  `horsies::StoredTime` wraps a chrono `NaiveTime`. It writes `09:10:12` for a
+  whole second, `09:10:12.500000` for a fraction (6 digits) and 9 digits for a
+  part below the microsecond. chrono's own serde form writes a whole
+  millisecond with 3 digits (`09:10:12.500`). The read takes any count of
+  fraction digits. A plain `NaiveTime` keeps chrono's text.
 - **`TaskRuntime` gives the attempt facts of the run.** `task_id` is the
   same on every attempt of a task. `attempt` is the attempt number: 1 is the
   first run, 2 the first retry. `max_retries` is the retry budget of the task
@@ -163,6 +169,23 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A send refuses a `timeout_ms` that no worker accepts.** A present
+  `timeout_ms` that is not an int, is below 1000 ms or is above 4294967295 ms
+  is refused at the send with `VALIDATION_FAILED` before any statement, and
+  nothing is written. The text is the text of the worker's dispatch read:
+  `task_options refused for <task>: stored timeout_ms is a str, not an int`,
+  `... is below 1000 ms`, or `... is above the limit of 4294967295 ms (about
+  49.7 days)`. A run no longer fails with `WORKER_SERIALIZATION_ERROR` for
+  such a value. `null` and an absent `timeout_ms` are not refused here. A
+  schedule keeps its outcome.
+- **A workflow start refuses a shared-class task node with no `timeout_ms`.**
+  A `SHARED_ASYNC` or `SHARED_THREAD` task node whose merged task options have
+  no `timeout_ms` (absent or `null`) is refused at the start with the start's
+  validation error, which names the node (`workflow node <index> (<task>)
+  refused: task_options refused: timeout_ms is absent for execution
+  <class>; a shared class requires timeout_ms`). Nothing is written. An
+  `ISOLATED` node needs no timeout. The Python task decorator and the Rust
+  task macro refuse the same declaration at registration.
 - **Breaking: the task record has one `result` field with three states.**
   `TaskInfo.result` is a `ResultSlot` in Python and Rust. Python
   `TaskInfo.raw_result`, `TaskInfo.decoded_result` and
