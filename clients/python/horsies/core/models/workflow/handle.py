@@ -33,6 +33,7 @@ from horsies.core.codec.typed import (
     TypeAnnotation,
     decode_task_error,
     decode_task_result,
+    validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.outcome import (
@@ -42,6 +43,7 @@ from horsies.core.models.outcome import (
     ReadError,
     ReadInvalidInput,
     ReadNoTypeAvailable,
+    ReadNodeNotFound,
     ReadResult,
     ReadResultDeserializationError,
     ReadResultNotReady,
@@ -54,6 +56,7 @@ from horsies.core.models.outcome import (
     TaskOutcome,
 )
 from horsies.core.models.tasks import (
+    CustomCodeType,
     TaskError,
     OperationalCode,
     OutcomeCode,
@@ -94,6 +97,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from horsies._core import (
+        NodeAbsent,
         NodeResultNotStored,
         StoredNodeResultRecord,
         WaitTimedOut,
@@ -402,14 +406,13 @@ def _decode_per_task_envelope(
     source_ok_type = resolve_source_ok_type(
         app, task_name, sub_definition_key=sub_definition_key,
     )
+    code_type = resolve_source_code_type(
+        app, task_name, sub_definition_key=sub_definition_key,
+    )
     if source_ok_type is None:
-        return Err(_NodeUnreadable(
-            message=(
-                f'Source {task_name!r} not registered (no task or '
-                f'workflow definition with this name) (node {node_id!r})'
-            ),
-            data={'node_id': node_id, 'task_name': task_name},
-        ))
+        return _unregistered_source_outcome(
+            loaded, code_type, task_name=task_name, node_id=node_id,
+        )
     try:
         outcome = decode_task_result(loaded, source_ok_type)
     except (StrictJsonError, ValueValidationError) as exc:
@@ -417,10 +420,49 @@ def _decode_per_task_envelope(
             message=f'decode_task_result failed for node {node_id!r}: {exc}',
             data={'node_id': node_id, 'task_name': task_name},
         ))
-    return typed_outcome(
-        outcome,
-        resolve_source_code_type(app, task_name, sub_definition_key=sub_definition_key),
-    )
+    return typed_outcome(outcome, code_type)
+
+
+def _unregistered_source_outcome(
+    loaded: Json,
+    code_type: CustomCodeType,
+    *,
+    task_name: str,
+    node_id: str,
+) -> Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | ReadUnknownCustomCode]:
+    """The decode of a node whose source this process does not register. Pure.
+
+    The err slot of the envelope needs no ok type: ``decode_task_error``
+    reads it, and the outcome is ``Failed``. Only an ok slot needs the
+    registered type, so an envelope with an ok slot is ``_NodeUnreadable``.
+    An envelope that is not a task result envelope, or an err slot that
+    does not decode, is ``_NodeUnreadable`` naming the cause.
+    """
+    data: JsonInput = {'node_id': node_id, 'task_name': task_name}
+    try:
+        envelope = validate_task_result_envelope(loaded)
+    except StrictJsonError as exc:
+        return Err(_NodeUnreadable(
+            message=f'TaskResult envelope invalid for node {node_id!r}: {exc}',
+            data=data,
+        ))
+    err_slot = envelope.get('err')
+    if err_slot is None:
+        return Err(_NodeUnreadable(
+            message=(
+                f'Source {task_name!r} not registered (no task or '
+                f'workflow definition with this name) (node {node_id!r})'
+            ),
+            data=data,
+        ))
+    try:
+        failed = Failed(decode_task_error(err_slot))
+    except (StrictJsonError, ValueValidationError) as exc:
+        return Err(_NodeUnreadable(
+            message=f'TaskError decode failed for node {node_id!r}: {exc}',
+            data=data,
+        ))
+    return typed_outcome(failed, code_type)
 
 
 def _stored_node_decode(
@@ -1035,7 +1077,11 @@ class WorkflowHandle(Generic[OutT]):
             ReadResult[T, TaskError] where T matches the node's type.
             - If task completed: ``Ok(Succeeded(value))`` or
               ``Ok(Failed(task_error))``
-            - If task not completed: ``Err(ReadResultNotReady)``
+            - If no workflow has the id of the handle:
+              ``Err(ReadWorkflowNotFound)``
+            - If the workflow has no node of the node id:
+              ``Err(ReadNodeNotFound)``
+            - If the node exists and has not completed: ``Err(ReadResultNotReady)``
             - If node has no node_id: ``Err(ReadWorkflowContextMissingId)``
             - If the stored result does not read:
               ``Err(ReadResultDeserializationError)``
@@ -1129,6 +1175,8 @@ class WorkflowHandle(Generic[OutT]):
         record: (
             StoredNodeResultRecord
             | NodeResultNotStored
+            | NodeAbsent
+            | WorkflowAbsent
             | WorkflowHandleDatabaseOperationFailed
             | WorkflowHandleStoredDataInvalid
         ),
@@ -1137,11 +1185,21 @@ class WorkflowHandle(Generic[OutT]):
         record. A failure of the core is ``ReadDatabaseError`` with the core's
         message. Pure apart from the type lookups of the decode."""
         from horsies._core import (
+            NodeAbsent,
             NodeResultNotStored,
             StoredNodeResultRecord,
+            WorkflowAbsent,
         )
 
         match record:
+            case WorkflowAbsent():
+                return Err(ReadWorkflowNotFound(
+                    message=f'Workflow {self.workflow_id} not found',
+                ))
+            case NodeAbsent():
+                return Err(ReadNodeNotFound(message=(
+                    f"Workflow '{self.workflow_id}' has no node '{node_id}'"
+                )))
             case NodeResultNotStored():
                 return Err(ReadResultNotReady(message=(
                     f"Task '{node_id}' has not completed yet "

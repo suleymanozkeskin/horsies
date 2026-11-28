@@ -13,6 +13,7 @@ from horsies.core.errors import HorsiesErrorCode, WorkflowValidationError
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Result
+from horsies.core.models.workflow.no_output import NoWorkflowOutput
 from horsies.core.models.workflow.nodes import TaskNode, SubWorkflowNode
 from horsies.core.models.workflow.typing_utils import (
     _get_inspect_target,
@@ -752,7 +753,19 @@ class TestValidateWorkflowGenericOutputMatch:
         ):
             validate_workflow_generic_output_match(mock_cls, mock_spec)
 
-    def test_outputless_none_declared_type_no_error(self) -> None:
+    def test_outputless_no_workflow_output_declared_type_no_error(self) -> None:
+        mock_cls = MagicMock()
+        mock_spec = MagicMock()
+        mock_spec.output = None
+
+        with patch(
+            "horsies.core.models.workflow.typing_utils._resolve_workflow_def_ok_type",
+            autospec=True,
+            return_value=NoWorkflowOutput,
+        ):
+            validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+    def test_outputless_none_declared_type_is_refused(self) -> None:
         mock_cls = MagicMock()
         mock_spec = MagicMock()
         mock_spec.output = None
@@ -762,7 +775,10 @@ class TestValidateWorkflowGenericOutputMatch:
             autospec=True,
             return_value=type(None),
         ):
-            validate_workflow_generic_output_match(mock_cls, mock_spec)
+            with pytest.raises(WorkflowValidationError) as exc:
+                validate_workflow_generic_output_match(mock_cls, mock_spec)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_outputless_any_declared_type_no_error(self) -> None:
         mock_cls = MagicMock()

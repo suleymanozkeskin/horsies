@@ -43,8 +43,10 @@ use crate::HorsiesError;
 /// let checkout = app.register_workflow_definition::<Checkout>()?;
 /// ```
 pub trait WorkflowDefinition: 'static {
-    /// The type of the workflow's result: the output node's type, or
-    /// `OutputlessResults` for a workflow with no output node.
+    /// The type of the workflow's result: the output node's type, or for a
+    /// workflow with no output node `OutputlessResults` (the outcome of each
+    /// node) or `NoWorkflowOutput` (the value of its sub-workflow node, and
+    /// of a handle that reads no node outcomes).
     type Output: 'static;
 
     /// The parameters of `build_with`; `()` for a definition without parameters.

@@ -42,6 +42,7 @@ __all__ = [
     'ReadError',
     'ReadInvalidInput',
     'ReadNoTypeAvailable',
+    'ReadNodeNotFound',
     'ReadResult',
     'ReadResultDeserializationError',
     'ReadResultNotAvailable',
@@ -109,6 +110,20 @@ class ReadWorkflowNotFound:
 
 
 @dataclass(slots=True, frozen=True)
+class ReadNodeNotFound:
+    """The workflow exists and has no node of the id that the read asked for.
+
+    The same id gives the same error on every read: a caller that polls does
+    not retry it.
+    """
+
+    code: ClassVar[Literal[RetrievalCode.NODE_NOT_FOUND]] = (
+        RetrievalCode.NODE_NOT_FOUND
+    )
+    message: str
+
+
+@dataclass(slots=True, frozen=True)
 class ReadResultNotAvailable:
     """The task reached a terminal status and stored no result, or a handle
     with no broker holds no result. Kept by the handle."""
@@ -121,7 +136,7 @@ class ReadResultNotAvailable:
 
 @dataclass(slots=True, frozen=True)
 class ReadResultNotReady:
-    """The workflow node stores no result yet. A later read may find one."""
+    """The workflow node exists and stores no result yet. A later read may find one."""
 
     code: ClassVar[Literal[RetrievalCode.RESULT_NOT_READY]] = (
         RetrievalCode.RESULT_NOT_READY
@@ -238,6 +253,7 @@ type ReadError = (
     ReadWaitTimeout
     | ReadTaskNotFound
     | ReadWorkflowNotFound
+    | ReadNodeNotFound
     | ReadResultNotAvailable
     | ReadResultNotReady
     | ReadWaitInsideTask

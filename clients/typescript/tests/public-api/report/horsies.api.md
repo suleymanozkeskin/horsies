@@ -529,7 +529,7 @@ export interface BuildReturnWithoutOutput extends BuildReturn {
 }
 
 // @public
-export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "DATABASE_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CONTEXT_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "UNKNOWN_CUSTOM_CODE", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUB_WORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
+export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "DATABASE_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CONTEXT_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "NODE_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "UNKNOWN_CUSTOM_CODE", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUB_WORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
 
 // @public (undocumented)
 export type BuiltInTaskCode = OperationalCode | ContractCode | RetrievalCode | OutcomeCode;
@@ -2713,6 +2713,8 @@ export interface ReadErrorCodes {
     // (undocumented)
     readonly invalidInput: "INVALID_INPUT";
     // (undocumented)
+    readonly nodeNotFound: "NODE_NOT_FOUND";
+    // (undocumented)
     readonly noTypeAvailable: "NO_TYPE_AVAILABLE";
     // (undocumented)
     readonly resultNotAvailable: "RESULT_NOT_AVAILABLE";
@@ -3257,6 +3259,7 @@ export const RetrievalCode: {
     readonly WAIT_TIMEOUT: "WAIT_TIMEOUT";
     readonly TASK_NOT_FOUND: "TASK_NOT_FOUND";
     readonly WORKFLOW_NOT_FOUND: "WORKFLOW_NOT_FOUND";
+    readonly NODE_NOT_FOUND: "NODE_NOT_FOUND";
     readonly RESULT_NOT_AVAILABLE: "RESULT_NOT_AVAILABLE";
     readonly RESULT_NOT_READY: "RESULT_NOT_READY";
     readonly ASYNC_CONTEXT: "ASYNC_CONTEXT";
@@ -5386,7 +5389,9 @@ export type WorkflowPlace = "NOT_IN_WORKFLOW" | "WORKFLOW_NOT_KNOWN";
 export type WorkflowReadError =
 /** The workflow had not ended when the wait ended; it may still run. */
 ReadErrorTag<"waitTimeout"> | ReadErrorTag<"workflowNotFound">
-/** The node stores no result yet, or the workflow has no node of this id. */
+/** The workflow has no node of the id. */
+| ReadErrorTag<"nodeNotFound">
+/** The node exists and stores no result yet. */
 | ReadErrorTag<"resultNotReady">
 /** The stored value does not read with the handle's types. `cause` holds no value. */
 | (ReadErrorTag<"storedResultUnreadable"> & {

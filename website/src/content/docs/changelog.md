@@ -15,6 +15,23 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **A node result read tells no workflow, no node and no result apart.**
+  The core's `PostgresBroker::workflow_node_result_read` gives `NodeResultRead`:
+  `WorkflowAbsent`, `NodeAbsent`, `NotStored` or `Stored`. The new retrieval
+  code `NODE_NOT_FOUND` (`RetrievalCode::NodeNotFound`) names a workflow that
+  has no node of the id. Python has `ReadNodeNotFound`; Rust has
+  `WorkflowReadError::NodeNotFound { workflow_id, node_id }`. The bridge
+  classes of Python are `NodeAbsent` (new) and `WorkflowAbsent` (an id that no
+  workflow has); `NodeResultNotStored` now means a node that exists and stores
+  no result yet.
+- **`NoWorkflowOutput`, the value of a sub-workflow node whose child has no
+  output node (Python, Rust).** The core stores `Ok(null)` for that node. The
+  read gives the one named value `NoWorkflowOutput`, as in TypeScript. In
+  Rust, `NoWorkflowOutput` is a unit type: a definition with no output node
+  declares `type Output = NoWorkflowOutput` for its sub-workflow node, and a
+  handle typed `NoWorkflowOutput` reads such a workflow as
+  `Succeeded(NoWorkflowOutput)` or its stored error. A stored value other than
+  `null` does not read as `NoWorkflowOutput`.
 - **Cancel: the unknown outcome has its own error.** `TaskActionError` has the
   new variant `OutcomeUnknown` (code `OUTCOME_UNKNOWN`; Python class
   `TaskActionOutcomeUnknown`, member `TaskActionErrorCode.OUTCOME_UNKNOWN`),
@@ -95,6 +112,21 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Python): an outputless child workflow reads as `NoWorkflowOutput`,
+  not `Succeeded(None)`.** A `WorkflowDefinition` with no `config.output`
+  declares `WorkflowDefinition[NoWorkflowOutput]`; `WorkflowDefinition[None]`
+  without `config.output` raises HRS-025 (`WORKFLOW_OUTPUT_TYPE_MISMATCH`).
+  The `SubWorkflowNode` of it is a `SubWorkflowNode[NoWorkflowOutput]`, and a
+  task parameter that receives its outcome is
+  `TaskOutcome[NoWorkflowOutput, TaskError]`. A child whose output node
+  returns `None` still gives `Succeeded(None)`.
+- **A node result read of an id that no workflow has is `WORKFLOW_NOT_FOUND`;
+  a node id that the workflow does not have is `NODE_NOT_FOUND`.** Both were
+  `RESULT_NOT_READY`, which now means a node that exists and stores no result
+  yet (Python `result_for`, Rust `result_for`).
+- The Rust sub-workflow node read of a child with no output node no longer
+  fails with `ResultDeserializationError` when the node is typed
+  `NoWorkflowOutput`.
 - **Python: the built-in code enums print their code text.** The generated
   code enums (`OperationalCode`, `ContractCode`, `RetrievalCode`,
   `OutcomeCode`, `HorsiesErrorCode`, `DatabaseErrorCode`,
@@ -1177,6 +1209,13 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **`WorkflowHandle.result_for`, `results` and `tasks` (Python) read the
+  stored error of a node whose source is not registered in the reading
+  process.** An err-only envelope needs no ok type: `decode_task_error` reads
+  it, and the outcome is `Failed` with the stored code and message. Only an
+  envelope with an ok slot needs the registered type, so it stays
+  `RESULT_DESERIALIZATION_ERROR`. The read gave
+  `RESULT_DESERIALIZATION_ERROR` for both before.
 - **Python: the signature check refuses a tuple with an unpacked item.**
   A parameter or return annotation such as `tuple[int, *tuple[bool, ...]]`
   is refused at registration with `SignatureValidationError`. The error names

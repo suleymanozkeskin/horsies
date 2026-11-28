@@ -24,7 +24,7 @@ mod sub_workflow;
 
 pub use context::{WorkflowContext, WorkflowContextError};
 pub use definition::{WorkflowDefinition, WorkflowDefinitionConfig};
-pub use dependency::OutputlessResults;
+pub use dependency::{NoWorkflowOutput, OutputlessResults};
 pub use function::{WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowTemplate};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};

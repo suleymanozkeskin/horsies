@@ -209,8 +209,9 @@ def show_total(handle: TaskHandle[int]) -> None:
 | `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow had not ended when the wait limit passed. It may still run |
 | `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send |
 | `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle |
+| `ReadNodeNotFound` | `RetrievalCode.NODE_NOT_FOUND` | `WorkflowHandle.result_for()`: the workflow has no node of the id |
 | `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result |
-| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node exists and stores no result yet |
 | `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read |
 | `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
 | `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
@@ -305,8 +306,9 @@ The `code` of a read error (`read_error.code`) when `handle.get()` / `handle.res
 - `WAIT_TIMEOUT` — `ReadWaitTimeout`: `get()` timed out; task may still be running, not cached, re-pollable
 - `TASK_NOT_FOUND` — `ReadTaskNotFound`: task ID does not exist
 - `WORKFLOW_NOT_FOUND` — `ReadWorkflowNotFound`: workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
+- `NODE_NOT_FOUND` — `ReadNodeNotFound`: the workflow has no node of the id that `result_for()` asked for
 - `RESULT_NOT_AVAILABLE` — `ReadResultNotAvailable`: the task reached a terminal status and stored no result
-- `RESULT_NOT_READY` — `ReadResultNotReady`: the workflow node stores no result yet
+- `RESULT_NOT_READY` — `ReadResultNotReady`: the workflow node exists and stores no result yet
 - `ASYNC_CONTEXT` — `ReadAsyncContext`: sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
 - `INVALID_INPUT` — `ReadInvalidInput`: an argument of `get()` / `get_async()` was refused before any read: `wait_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
 - `WAIT_INSIDE_TASK` — `ReadWaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(DatabaseWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_context.result_for()` still work in a task
@@ -932,7 +934,7 @@ from horsies import (
     TaskError, SubWorkflowFailure, TaskInfo, TaskAttemptInfo,
     # Read result types: the outcome and the read errors
     ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
-    ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadResultNotAvailable, ReadResultNotReady,
+    ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotAvailable, ReadResultNotReady,
     ReadWaitInsideTask, ReadAsyncContext, ReadInvalidInput, ReadResultDeserializationError, ReadUnknownCustomCode,
     ReadDatabaseError, ReadNoTypeAvailable, ReadWorkflowContextMissingId,
     # The run of a task: cancel state

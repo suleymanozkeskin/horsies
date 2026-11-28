@@ -25,6 +25,7 @@ export interface ReadErrorCodes {
   readonly waitTimeout: "WAIT_TIMEOUT";
   readonly taskNotFound: "TASK_NOT_FOUND";
   readonly workflowNotFound: "WORKFLOW_NOT_FOUND";
+  readonly nodeNotFound: "NODE_NOT_FOUND";
   readonly resultNotAvailable: "RESULT_NOT_AVAILABLE";
   readonly resultNotReady: "RESULT_NOT_READY";
   readonly storedResultUnreadable: "RESULT_DESERIALIZATION_ERROR";

@@ -360,6 +360,7 @@ mod tests {
             "WAIT_TIMEOUT",
             "TASK_NOT_FOUND",
             "WORKFLOW_NOT_FOUND",
+            "NODE_NOT_FOUND",
             "RESULT_NOT_AVAILABLE",
             "RESULT_NOT_READY",
             "ASYNC_CONTEXT",

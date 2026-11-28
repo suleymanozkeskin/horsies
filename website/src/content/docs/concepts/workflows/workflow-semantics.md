@@ -172,7 +172,7 @@ Set `allow_failed_dependencies=True` on the downstream task. It will run and rec
 - `WorkflowHandle.get()` returns the workflow-level outcome (output value or error, not a status enum). A read that gives no outcome, for example a wait timeout, returns a read error.
 - A FAILED workflow stores no output. This is also true when its output node ran with `allow_failed_dependencies=True` and succeeded. Read that node's result with `WorkflowHandle.result_for()`.
 - A COMPLETED workflow can have a SKIPPED or FAILED output node. See [Output Node Under a Success Policy](#output-node-under-a-success-policy).
-- `WorkflowHandle.result_for()` is non-blocking and may return the read error `RESULT_NOT_READY` if the task has not completed.
+- `WorkflowHandle.result_for()` is non-blocking. It returns the read error `RESULT_NOT_READY` if the node exists and has not completed, `NODE_NOT_FOUND` if the workflow has no node of the id, and `WORKFLOW_NOT_FOUND` if no workflow has the id.
 
 ### Upstream Failure and args_from
 
@@ -495,7 +495,7 @@ A node is COMPLETED only when its result is ok, so the status of a `SubWorkflowN
 - Without a success policy, the parent is FAILED, and its `get()` gives the error as a `Failed` outcome.
 - `SubWorkflowSummary.status` is COMPLETED on this FAILED node, because the child is COMPLETED. `SubWorkflowSummary.output` is `None`.
 
-A child workflow with no output node is not affected: its `SubWorkflowNode` is COMPLETED with the value `None`.
+A child workflow with no output node is not affected: its `SubWorkflowNode` is COMPLETED with the value `NoWorkflowOutput`.
 
 **A parent that completes with this node.** The parent's success case can leave the node out: the node is in `optional`, or in no case. The node is still FAILED, and `on_error` still runs:
 
@@ -586,4 +586,4 @@ The Python example is in [What the Receiving Function Gets](/horsies/concepts/wo
 
 ### Reading a Node Result Before the Workflow Ends
 
-A node result read does not block: it is one database query. When the task of the node has not completed, the read returns the read error `RESULT_NOT_READY`. Workflows can run for minutes to hours, so wait for the workflow first, for example with the workflow result read and a timeout, and then read node results. The Python example is in [Things to Avoid](/horsies/concepts/workflows/workflow-examples/#things-to-avoid).
+A node result read does not block: it is one database query. When the task of the node has not completed, the read returns the read error `RESULT_NOT_READY`. A node id that the workflow does not have is `NODE_NOT_FOUND`, which a later read does not change. Workflows can run for minutes to hours, so wait for the workflow first, for example with the workflow result read and a timeout, and then read node results. The Python example is in [Things to Avoid](/horsies/concepts/workflows/workflow-examples/#things-to-avoid).

@@ -1146,7 +1146,8 @@ impl CoreHandle {
     }
 
     /// The stored result of one node: `StoredNodeResultRecord`,
-    /// `NodeResultNotStored` or a generated handle error class. Reads only; a
+    /// `NodeResultNotStored`, `NodeAbsent`, `WorkflowAbsent` or a generated
+    /// handle error class. Reads only; a
     /// caller that leaves drops the read.
     fn workflow_node_result(
         &self,

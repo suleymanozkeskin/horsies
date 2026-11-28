@@ -106,8 +106,9 @@ match divide.send(a=10, b=2):
 | `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The wait limit passed before the task or the workflow ended. It can still run, and a later read can find it ended | No |
 | `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send, so a later read can find it | No |
 | `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle, or retention removed the workflow after `get()` read its terminal status | No |
+| `ReadNodeNotFound` | `RetrievalCode.NODE_NOT_FOUND` | `WorkflowHandle.result_for()`: the workflow has no node of the id. The same id gives the same error on every read | No |
 | `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result | Yes |
-| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet. A later read can find one | No |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node exists and stores no result yet. A later read can find one | No |
 | `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a worker child, where task bodies run. Nothing was read. See [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) | No |
 | `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
 | `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
@@ -210,6 +211,7 @@ A read gives these codes as `read_error.code`, not inside a `TaskError`. Each co
 | `WAIT_TIMEOUT` | Timeout elapsed while waiting for result (task may still be running) |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database |
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status |
+| `NODE_NOT_FOUND` | The workflow exists and has no node of the id that `result_for()` asked for |
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
 | `RESULT_NOT_READY` | Result not yet available; task is still running |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |

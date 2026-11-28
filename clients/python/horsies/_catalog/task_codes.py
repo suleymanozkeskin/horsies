@@ -90,6 +90,11 @@ class RetrievalCode(StrEnum):
 
     WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
 
+    NODE_NOT_FOUND = 'NODE_NOT_FOUND'
+    """The workflow exists and has no node of the id that a node result read asked for. The same
+    id gives the same answer on every read: a caller that polls does not retry it.
+    """
+
     RESULT_NOT_AVAILABLE = 'RESULT_NOT_AVAILABLE'
 
     RESULT_NOT_READY = 'RESULT_NOT_READY'
