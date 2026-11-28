@@ -810,3 +810,19 @@ class TestWorkerPing:
 
         with pytest.raises(AssertionError, match='DATABASE_PING_FAILED'):
             await broker.ping_workers_async()
+
+
+def test_a_claimed_limit_that_the_core_reports_as_none_reads_as_no_limit() -> None:
+    from horsies.core.brokers.worker_state_records import (
+        _task_limit,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _task_limit(None) == NoTaskLimit()
+
+
+def test_a_claimed_limit_that_the_core_reports_as_a_count_reads_as_a_limit() -> None:
+    from horsies.core.brokers.worker_state_records import (
+        _task_limit,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _task_limit(4) == TaskLimit(tasks=4)

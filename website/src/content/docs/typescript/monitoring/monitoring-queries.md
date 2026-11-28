@@ -223,6 +223,8 @@ Each `TimingSegmentInfo` has `phase`, `startedAt`, `end` (`{ kind: "ended", at }
 
 `endpoint` is `{ kind: "terminal", status, at }` (`status` is `"COMPLETED"`, `"FAILED"` or `"SKIPPED"`; `at` is the completion time of the node) or `{ kind: "notTerminal" }`. The endpoint is a marker, not a segment. A node that a workflow cancel, a failure or the recovery limit ended while its task went on keeps the segments of that task, so the endpoint can come before the end of the segments.
 
+<!-- members: UnknownReason -->
+
 | `UnknownReason` | The segment |
 |-----------------|-------------|
 | `"ATTEMPT_NOT_CAPTURED"` | Is an attempt row with no phase record |

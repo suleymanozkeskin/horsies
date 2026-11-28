@@ -4211,7 +4211,7 @@ export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema
 
 // @public
 export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends boolean = boolean> {
-    readonly errorCodes?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
+    readonly errorCodes?: string extends E ? readonly [WidenedCodes, ...WidenedCodes[]] : readonly [CustomCode<E>, ...CustomCode<E>[]];
     readonly execution?: X;
     readonly input: P;
     readonly name: string;

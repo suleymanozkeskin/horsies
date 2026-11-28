@@ -31,7 +31,7 @@ pub use task::{
     BuiltInTaskCode, CancelGraceOutOfRange, ContractCode, CustomCode, CustomCodeRefused,
     DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
     ErrorCodeLabel, ExceptionRecord, Execution, ExecutionClass, OperationalCode, OutcomeCode,
-    RegisteredTask, RetrievalCode, RetryPolicy, RetryPolicyError, StoredErrorRefused,
+    RegisteredTask, ResultSlot, RetrievalCode, RetryPolicy, RetryPolicyError, StoredErrorRefused,
     SubWorkflowFailure, TaskAttemptInfo, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo,
     TaskOptions, TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
     DEFAULT_CANCEL_GRACE_MS, UNDECLARED_LABEL,

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::core::{Execution, ExecutionClass, TaskInfo, TaskStatus};
+use crate::core::{Execution, ExecutionClass, ResultSlot, TaskInfo, TaskStatus};
 
 use crate::broker::error::BrokerError;
 use crate::broker::result_types::StoredEnvelopeText;
@@ -41,8 +41,13 @@ impl TaskInfoRow {
     /// `BrokerError::InvalidExecutionClass`; the column's CHECK holds the
     /// domain, so that refusal means the row was written past it. The live
     /// table stores no result (`0001_tables.sql`): the result of a terminal
-    /// task is in its history row, so the info has none.
-    pub fn into_task_info(self) -> Result<TaskInfo<StoredEnvelopeText>, BrokerError> {
+    /// task is in its history row, so a read that asked for the result gets
+    /// `ResultSlot::NotStored`, and a read that did not gets
+    /// `ResultSlot::NotRequested`.
+    pub fn into_task_info(
+        self,
+        include_result: bool,
+    ) -> Result<TaskInfo<StoredEnvelopeText>, BrokerError> {
         let status = parse_task_status(&self.status)?;
         let execution = Execution::from_stored(&self.execution)
             .ok_or_else(|| BrokerError::InvalidExecutionClass(self.execution.clone()))?;
@@ -68,7 +73,10 @@ impl TaskInfoRow {
             worker_process_name: self.worker_process_name,
             error_code: self.error_code,
             failed_reason: self.failed_reason,
-            result: None,
+            result: match include_result {
+                true => ResultSlot::NotStored,
+                false => ResultSlot::NotRequested,
+            },
             attempts: None,
             execution: ExecutionClass::Live(execution),
         })
@@ -212,14 +220,26 @@ mod tests {
             ("SHARED_ASYNC", Execution::SharedAsync),
             ("SHARED_THREAD", Execution::SharedThread),
         ] {
-            let info = task_info_row(stored).into_task_info().unwrap();
+            let info = task_info_row(stored).into_task_info(false).unwrap();
             assert_eq!(info.execution, ExecutionClass::Live(execution));
         }
     }
 
     #[test]
+    fn live_task_info_without_the_result_flag_is_not_requested() {
+        let info = task_info_row("ISOLATED").into_task_info(false).unwrap();
+        assert_eq!(info.result, ResultSlot::NotRequested);
+    }
+
+    #[test]
+    fn live_task_info_with_the_result_flag_is_not_stored() {
+        let info = task_info_row("ISOLATED").into_task_info(true).unwrap();
+        assert_eq!(info.result, ResultSlot::NotStored);
+    }
+
+    #[test]
     fn live_task_info_refuses_an_unknown_execution_class() {
-        let refused = task_info_row("PARALLEL").into_task_info().unwrap_err();
+        let refused = task_info_row("PARALLEL").into_task_info(false).unwrap_err();
         assert!(
             matches!(&refused, BrokerError::InvalidExecutionClass(value) if value == "PARALLEL"),
             "{refused:?}"

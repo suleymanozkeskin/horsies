@@ -18,6 +18,15 @@ and there is no migration contract between pre-1.0 versions.
   `BrokerSettingRefused` with its catalog code: `HRS-213` for `pool_size` and
   `max_overflow`, `HRS-215` for a TCP keepalive or user timeout value. The Rust
   client calls the builder; its own copies are removed.
+- **Worker snapshot: the claimed limit of the profile, not the seat count.**
+  A worker whose profile sets no `claimed_per_worker` limit writes
+  `max_claim_per_worker = 0` to its snapshot (it wrote the seat count).
+  `WorkerStateSnapshot.claim_limits.claimed_per_worker` reads as
+  `NoTaskLimit` for that worker and as `TaskLimit(tasks)` for a set limit, so
+  "no limit, N seats" and "a limit of N" read apart. The effective limit with
+  no limit is the seat count: the sum of the `capacity` values in
+  `execution_class_budgets`. No schema change. Snapshots that a worker of an
+  earlier build wrote keep the seat count and read as a limit.
 - **A node result read tells no workflow, no node and no result apart.**
   The core's `PostgresBroker::workflow_node_result_read` gives `NodeResultRead`:
   `WorkflowAbsent`, `NodeAbsent`, `NotStored` or `Stored`. The new retrieval
@@ -115,6 +124,23 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: the task record has one `result` field with three states.**
+  `TaskInfo.result` is a `ResultSlot` in Python and Rust. Python
+  `TaskInfo.raw_result`, `TaskInfo.decoded_result` and
+  `TaskInfo.result_decoded` are `TaskInfo.result`: `ResultSlotNotRequested()`
+  (the read did not pass `include_result=True`), `ResultSlotNotStored()` (it
+  did, and the task stored no result; a live task has none) and
+  `ResultSlotStored(value)`. `TaskInfo` is generic in the stored value: the
+  stored envelope (`dict[str, Json]`) for a broker read, a `TaskOutcome` for
+  an app read (`handle.info`, `Horsies.get_task_info`). An app read of an ok
+  value of a task that is not registered in the process gives the plain JSON
+  value (it left the field empty). `TaskInfo` is a frozen dataclass and
+  `result` has no default. Rust `TaskInfo::result` is
+  `ResultSlot<R>` with `NotRequested`, `NotStored` and `Stored(R)` (it was
+  `Option<R>`); `TaskInfo::try_map_result` keeps the other two states.
+  `ResultSlot` is exported from `horsies_core` and `horsies`. Python
+  `StoredResult.raw_result` is `StoredResult.envelope`. A live task read with
+  the result flag gives `NotStored`.
 - **Breaking (Python): an outputless child workflow reads as `NoWorkflowOutput`,
   not `Succeeded(None)`.** A `WorkflowDefinition` with no `config.output`
   declares `WorkflowDefinition[NoWorkflowOutput]`; `WorkflowDefinition[None]`

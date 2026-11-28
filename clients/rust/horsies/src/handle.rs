@@ -38,6 +38,8 @@ use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
 use crate::{CustomErrorCode, TaskError};
 
+/// The stored result of a task info: not requested, not stored, or stored.
+pub use horsies_core::ResultSlot;
 /// Why neither the live table nor the task history holds a task.
 pub use horsies_core::TaskAbsenceReason;
 /// The info of an attempt of a task, and the status of a task.
@@ -47,8 +49,9 @@ pub use horsies_core::{TaskAttemptInfo, TaskStatus};
 /// any statement.
 pub use horsies_core::{WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
-/// The info of a task. Its `result` is the stored result read as a
-/// `TaskResult`: the `ok` slot as its stored text (`JsonText::decode` reads
+/// The info of a task. Its `result` is a [`ResultSlot`]: `NotRequested` when
+/// the read did not ask for the result, `NotStored` when it asked and the
+/// task stored none, `Stored` with the stored result read as a `TaskResult`: the `ok` slot as its stored text (`JsonText::decode` reads
 /// it with the task's type), the `err` slot as a stored task error. The
 /// core's read returns the envelope as stored, and the client reads it
 /// (Python `Horsies.get_task_info_async`).
@@ -1004,7 +1007,7 @@ mod tests {
 
     /// A task info as the core's read returns it: the stored result as its
     /// stored text.
-    fn stored_info(result: Option<Value>) -> horsies_core::TaskInfo<StoredEnvelopeText> {
+    fn stored_info(result: ResultSlot<Value>) -> horsies_core::TaskInfo<StoredEnvelopeText> {
         horsies_core::TaskInfo {
             task_id: task(),
             task_name: "charge".to_owned(),
@@ -1025,11 +1028,15 @@ mod tests {
             worker_process_name: None,
             error_code: None,
             failed_reason: None,
-            result: result.map(|value| {
-                StoredEnvelopeText::parse(value.to_string())
-                    .unwrap()
-                    .expect("an envelope is an object")
-            }),
+            result: match result {
+                ResultSlot::NotRequested => ResultSlot::NotRequested,
+                ResultSlot::NotStored => ResultSlot::NotStored,
+                ResultSlot::Stored(value) => ResultSlot::Stored(
+                    StoredEnvelopeText::parse(value.to_string())
+                        .unwrap()
+                        .expect("an envelope is an object"),
+                ),
+            },
             attempts: None,
             execution: horsies_core::ExecutionClass::NotKeptInHistory,
         }
@@ -1039,20 +1046,20 @@ mod tests {
     /// envelope that the core returns; the other fields pass unchanged.
     #[test]
     fn a_task_info_result_is_read_by_the_client() {
-        let info = task_info_of_stored(stored_info(Some(json!({
+        let info = task_info_of_stored(stored_info(ResultSlot::Stored(json!({
             "__h_task_result__": true,
             "ok": 3,
             "err": null
         }))))
         .expect("a stored value reads");
-        let Some(TaskResult::Ok(value)) = info.result else {
+        let ResultSlot::Stored(TaskResult::Ok(value)) = info.result else {
             panic!("a stored value is an ok result");
         };
         assert_eq!(value.get(), "3");
         assert_eq!(info.task_name, "charge");
         assert_eq!(info.retry_count, 1);
 
-        let library = task_info_of_stored(stored_info(Some(json!({
+        let library = task_info_of_stored(stored_info(ResultSlot::Stored(json!({
             "__h_task_result__": true,
             "ok": null,
             "err": {
@@ -1063,10 +1070,18 @@ mod tests {
             }
         }))))
         .expect("a stored library error reads");
-        assert!(matches!(library.result, Some(TaskResult::Err(_))));
+        assert!(matches!(
+            library.result,
+            ResultSlot::Stored(TaskResult::Err(_))
+        ));
 
-        let none = task_info_of_stored(stored_info(None)).expect("no result reads");
-        assert!(none.result.is_none());
+        let not_requested = task_info_of_stored(stored_info(ResultSlot::NotRequested))
+            .expect("a result that was not requested reads");
+        assert!(matches!(not_requested.result, ResultSlot::NotRequested));
+
+        let not_stored = task_info_of_stored(stored_info(ResultSlot::NotStored))
+            .expect("a result that is not stored reads");
+        assert!(matches!(not_stored.result, ResultSlot::NotStored));
 
         // The value keeps its stored text: an integer outside the `i64` and
         // `u64` range keeps every digit.
@@ -1075,10 +1090,13 @@ mod tests {
             "-9223372036854775809",
         ] {
             let text = format!(r#"{{"__h_task_result__":true,"ok":{wide},"err":null}}"#);
-            let mut stored = stored_info(None);
-            stored.result = StoredEnvelopeText::parse(text).unwrap();
+            let mut stored = stored_info(ResultSlot::NotRequested);
+            stored.result = match StoredEnvelopeText::parse(text).unwrap() {
+                Some(envelope) => ResultSlot::Stored(envelope),
+                None => ResultSlot::NotStored,
+            };
             let info = task_info_of_stored(stored).expect("a wide value reads");
-            let Some(TaskResult::Ok(value)) = info.result else {
+            let ResultSlot::Stored(TaskResult::Ok(value)) = info.result else {
                 panic!("a stored value is an ok result");
             };
             assert_eq!(value.get(), wide);
@@ -1095,7 +1113,7 @@ mod tests {
             json!({"not": MARKER}),
         ] {
             let Err(ReadError::ResultDeserializationError { task_id, cause }) =
-                task_info_of_stored(stored_info(Some(stored.clone())))
+                task_info_of_stored(stored_info(ResultSlot::Stored(stored.clone())))
             else {
                 panic!("{stored}: the client reads only a task result");
             };

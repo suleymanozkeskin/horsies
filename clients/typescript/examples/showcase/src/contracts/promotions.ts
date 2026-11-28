@@ -40,7 +40,6 @@ export const publishCdn = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string(), sku: h.string() },
   output: PricePush,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -52,7 +51,6 @@ export const publishOrigin = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string(), sku: h.string() },
   output: PricePush,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -64,7 +62,6 @@ export const prewarmSearch = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string() },
   output: SearchPrewarm,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -76,7 +73,6 @@ export const warmCacheEdge = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string() },
   output: CacheWarm,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -88,7 +84,6 @@ export const updatePrice = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { sku: h.string(), campaignId: h.string() },
   output: PriceUpdate,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 

@@ -198,7 +198,7 @@ def show_total(handle: TaskHandle[int]) -> None:
             print(read_error.code, read_error.message)
 ```
 
-`TaskOutcome[T, TaskError]` is also the type of a workflow node input from `args_from`, of `WorkflowContext.result_for()` and of `TaskInfo.decoded_result`. Read it with `case Succeeded(value):` and `case Failed(error):`.
+`TaskOutcome[T, TaskError]` is also the type of a workflow node input from `args_from`, of `WorkflowContext.result_for()` and of the stored value of `TaskInfo.result` from an app read. Read it with `case Succeeded(value):` and `case Failed(error):`.
 
 ### `ReadError`
 
@@ -503,8 +503,8 @@ task_id: UUID  # stable across retries of the same send
 def get(wait_ms: int | None = None) -> ReadResult[T, TaskError]
 async def get_async(wait_ms: int | None = None) -> ReadResult[T, TaskError]
 
-def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
-async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo | None]
+def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
+async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]
 ```
 
 ### Caching semantics
@@ -524,12 +524,23 @@ claimed_at: datetime | None, started_at: datetime | None
 completed_at: datetime | None, failed_at: datetime | None
 worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
 error_code: str | None                      # always returned (final TaskError.code, NULL if not failed)
-raw_result: dict[str, Any] | None           # opt-in: include_result=True; the stored envelope
-decoded_result: TaskOutcome[Any, TaskError] | None  # opt-in: include_result=True; set when this process decodes it
-result_decoded: bool                         # True when decoded_result is set
+result: ResultSlot[R]                        # always set; see the three states below
 failed_reason: str | None                    # opt-in: include_failed_reason=True
 attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (None when not requested, [] when empty); newest first
 ```
+
+### `ResultSlot`
+
+`TaskInfo.result` is one of three states:
+
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
+```python
+ResultSlotNotRequested()    # the read did not pass include_result=True
+ResultSlotNotStored()       # include_result=True, and the task stored no result (a live task has none)
+ResultSlotStored(value)     # include_result=True, and the task stored a result
+```
+
+`R` is the stored envelope (`dict[str, Json]`) for a broker read, and `TaskOutcome[Any, TaskError]` for an app read (`handle.info`, `app.get_task_info`). An app read decodes an ok value with the task's type when the task is registered in this process, and leaves it plain JSON when it is not. Match the slot with `case ResultSlotStored(value=outcome):`.
 
 ### `TaskAttemptInfo` fields
 
@@ -932,6 +943,7 @@ from horsies import (
     Horsies, AppConfig, PostgresConfig,
     # Task result types
     TaskError, SubWorkflowFailure, TaskInfo, TaskAttemptInfo,
+    ResultSlotNotRequested, ResultSlotNotStored, ResultSlotStored,
     # Read result types: the outcome and the read errors
     ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
     ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotAvailable, ReadResultNotReady,
