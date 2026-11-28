@@ -39,9 +39,9 @@ reports each refusal with its `HRS-nnn` code.
 | `input` | one schema per parameter | An `h.*` wire type or a zod 4 schema per parameter. `{}` for a task with no parameters |
 | `output` | a schema | A wire type that is always present (no `.optional()`), or a zod 4 schema |
 | `errorCodes` | `["CODE", ...]` | The codes that the task may return, as literals. Left out: any code that is not a built-in name |
-| `execution` | `"ISOLATED"` (default), `"SHARED_ASYNC"` | How a worker runs the task (Execution Classes) |
-| `timeoutMs` | 1,000 to 4,294,967,295 | The deadline of a run. Required for `SHARED_ASYNC` (typecheck). Below 1,000 is `HRS-102` |
-| `cancelGraceMs` | 100 to 10,000 | See The Cancel Signal |
+| `execution` | `"ISOLATED"` (default), `"SHARED_ASYNC"`, `"SHARED_THREAD"` | How a worker runs the task (Execution Classes) |
+| `timeoutMs` | 1,000 to 4,294,967,295 | The deadline of a run. Required for `SHARED_ASYNC` and `SHARED_THREAD` (typecheck). Below 1,000 is `HRS-102` |
+| `cancelGraceMs` | 100 to 10,000 | Not taken by `SHARED_THREAD` (typecheck; `HRS-110`). See The Cancel Signal |
 | `retryPolicy` | a `RetryPolicy` | See Retry Policy |
 | `workflowContext` | `true` | A workflow node of the task may name `workflowContextFrom`, and the body reads `runtime.workflowContext` (see `workflows.md`, The Workflow Context) |
 
@@ -73,6 +73,7 @@ export const importFeed = defineTask({
 |---|---|---|
 | `ISOLATED` | sync or async | One task at a time in a child process of its own. At its `timeoutMs` the worker kills the child |
 | `SHARED_ASYNC` | async only (typecheck) | Many runs on the one event loop of a shared async child. `timeoutMs` is required |
+| `SHARED_THREAD` | sync or async | Many runs in the seat isolates of a shared thread child. The runtime is `ThreadTaskRuntime` (no `spawn`). `timeoutMs` is required; `cancelGraceMs` is not taken |
 
 - A shared async run stops at its deadline only where its code passes
   `runtime.signal` (or reads `runtime.cancelState()`). A promise cannot be
@@ -81,7 +82,8 @@ export const importFeed = defineTask({
 - Keep CPU work out of `SHARED_ASYNC`: a body that blocks the event loop
   blocks every run of its child. See The Cancel Signal.
 - The behaviour of each class is on the shared docs pages
-  `workers/execution-modes` and `workers/shared-async-tasks`.
+  `workers/execution-modes`, `workers/shared-async-tasks` and
+  `workers/shared-thread-tasks`.
 
 ## Wire Types
 

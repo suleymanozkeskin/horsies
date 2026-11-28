@@ -34,9 +34,10 @@ use std::time::Duration;
 
 use horsies_core::core::codec::check_json_text;
 use horsies_core::{
-    HandleOperation, HandleResult, NodeResultsRead as CoreNodeResultsRead,
-    NodesRead as CoreNodesRead, PostgresBroker, StoredNode, StoredNodeResult, TerminalErrorStatus,
-    WorkflowEnd, WorkflowHandleError, WorkflowStatus, WorkflowWait,
+    HandleOperation, HandleResult, NodeResultRead as CoreNodeResultRead,
+    NodeResultsRead as CoreNodeResultsRead, NodesRead as CoreNodesRead, PostgresBroker, StoredNode,
+    StoredNodeResult, TerminalErrorStatus, WorkflowEnd, WorkflowHandleError, WorkflowStatus,
+    WorkflowWait,
 };
 use napi::bindgen_prelude::{Object, ToNapiValue};
 use napi::Env;
@@ -307,9 +308,12 @@ pub enum NodeResultRead {
     Stored {
         result: CheckedText,
     },
-    /// No node of the id stores a result yet, or no workflow has the id:
-    /// the core's read does not tell the two apart.
-    NotReady,
+    /// The node exists and stores no result yet.
+    NotStored,
+    /// The workflow has no node of the id.
+    NodeAbsent,
+    /// No workflow has the id.
+    WorkflowAbsent,
     Failed {
         error: RawCatalogError,
     },
@@ -703,22 +707,25 @@ async fn node_result_operation(producer: ProducerHandle, request: NodeRequest) -
     } = request;
     let operation = node_operation(&node_id);
     let read = match broker_for(&producer, &operation, workflow_id).await {
-        Ok(broker) => broker.workflow_node_result(workflow_id, &node_id).await,
+        Ok(broker) => {
+            broker
+                .workflow_node_result_read(workflow_id, &node_id)
+                .await
+        }
         Err(error) => Err(error),
     };
     node_result_read_of(operation.subject(), read)
 }
 
 /// The node result of the core's answer, its text checked. Pure.
-fn node_result_read_of(
-    subject: &str,
-    read: HandleResult<Option<StoredNodeResult>>,
-) -> NodeResultRead {
+fn node_result_read_of(subject: &str, read: HandleResult<CoreNodeResultRead>) -> NodeResultRead {
     match read {
-        Ok(Some(stored)) => NodeResultRead::Stored {
+        Ok(CoreNodeResultRead::Stored(stored)) => NodeResultRead::Stored {
             result: CheckedText::of(stored.result),
         },
-        Ok(None) => NodeResultRead::NotReady,
+        Ok(CoreNodeResultRead::NotStored) => NodeResultRead::NotStored,
+        Ok(CoreNodeResultRead::NodeAbsent) => NodeResultRead::NodeAbsent,
+        Ok(CoreNodeResultRead::WorkflowAbsent) => NodeResultRead::WorkflowAbsent,
         Err(error) => NodeResultRead::Failed {
             error: RawCatalogError::of(subject, &error),
         },
@@ -929,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_node_result_is_checked_and_none_is_not_ready() {
+    fn a_stored_node_result_is_checked() {
         let subject = node_operation("charge").subject();
         let stored = StoredNodeResult {
             node_id: Some("charge".to_owned()),
@@ -939,15 +946,37 @@ mod tests {
             sub_definition_key: None,
         };
         assert!(matches!(
-            node_result_read_of(subject, Ok(Some(stored))),
+            node_result_read_of(subject, Ok(CoreNodeResultRead::Stored(stored))),
             NodeResultRead::Stored {
                 result: CheckedText::Refused { .. }
             }
         ));
+    }
+
+    #[test]
+    fn each_state_without_a_result_has_its_own_node_result_read() {
+        let subject = node_operation("charge").subject();
         assert_eq!(
-            node_result_read_of(subject, Ok(None)),
-            NodeResultRead::NotReady
+            node_result_read_of(subject, Ok(CoreNodeResultRead::NotStored)),
+            NodeResultRead::NotStored
         );
+        assert_eq!(
+            node_result_read_of(subject, Ok(CoreNodeResultRead::NodeAbsent)),
+            NodeResultRead::NodeAbsent
+        );
+        assert_eq!(
+            node_result_read_of(subject, Ok(CoreNodeResultRead::WorkflowAbsent)),
+            NodeResultRead::WorkflowAbsent
+        );
+    }
+
+    #[test]
+    fn a_failed_node_result_read_gives_its_handle_class() {
+        let subject = node_operation("charge").subject();
+        assert!(matches!(
+            node_result_read_of(subject, Err(WorkflowHandleError::not_found(workflow()))),
+            NodeResultRead::Failed { error } if class_of(&error) == "WorkflowHandleNotFound"
+        ));
     }
 
     #[test]

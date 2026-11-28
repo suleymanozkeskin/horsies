@@ -31,7 +31,8 @@ use crate::{
 /// The Python base class of a generated enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonEnumBase {
-    /// `class X(str, Enum)`: members compare equal to their text.
+    /// `class X(StrEnum)`: members compare equal to their text, and `str()`
+    /// and `f"{member}"` give the text.
     StrEnum,
     /// `class X(Enum)`.
     PlainEnum,
@@ -325,6 +326,7 @@ mod tests {
             "TASK_NOT_CANCELLABLE",
             "TASK_IS_WORKFLOW_TASK",
             "DATABASE_OPERATION_FAILED",
+            "OUTCOME_UNKNOWN",
             "STORED_DATA_INVALID",
         ]);
     }
@@ -359,6 +361,7 @@ mod tests {
             "WAIT_TIMEOUT",
             "TASK_NOT_FOUND",
             "WORKFLOW_NOT_FOUND",
+            "NODE_NOT_FOUND",
             "RESULT_NOT_AVAILABLE",
             "RESULT_NOT_READY",
             "ASYNC_CONTEXT",

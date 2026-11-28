@@ -111,6 +111,7 @@ function contractRefusal(refused: ContractRefused, path: string): HorsiesError {
 function contractRuleCode(rule: ContractRule): RefusalCode {
   switch (rule) {
     case "TaskName":
+    case "ErrorCodes":
       return HorsiesErrorCode.TASK_INVALID_OPTIONS;
     case "ParameterName":
     case "SchemaVendor":

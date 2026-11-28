@@ -13,3 +13,9 @@ export const MAX_BREAKDOWN_LIMIT = 500;
 export const MAX_WORKFLOW_RUNS_LIMIT = 200;
 
 export const LIST_ROW_BOUND = 10_000;
+
+export const WORKER_PING_WAIT_BOUND_SECONDS = 60;
+
+export const WORKER_HISTORY_ROW_BOUND = 10_000;
+
+export const MAX_OPEN_EVENT_STREAMS = 256;

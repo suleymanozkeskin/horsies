@@ -170,7 +170,6 @@ describe("h.* builders", () => {
     assert.deepEqual(kindOf(upstream), {
       node: "taskOutcome",
       output: { state: "compiled", kind: kindOf(h.object({ id: h.int() })) },
-      codes: { state: "open" },
     });
     assert.equal(parametersKind({ order: upstream }).members[0]?.kind.node, "taskOutcome");
 

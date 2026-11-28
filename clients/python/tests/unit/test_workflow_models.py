@@ -16,6 +16,7 @@ from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, T
 from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
+    NoWorkflowOutput,
     NodeKey,
     TaskNode,
     SubWorkflowNode,
@@ -2548,18 +2549,35 @@ class TestWorkflowOutputTypeMismatch:
         assert 'config.output' in err.message
         assert 'int' in err.message
 
-    def test_none_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[None] may omit config.output."""
+    def test_no_workflow_output_type_allows_outputless_definition(self) -> None:
+        """WorkflowDefinition[NoWorkflowOutput] may omit config.output."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
-        class NoOutputWorkflow(WorkflowDefinition[None]):
-            name = 'none_output_workflow'
-            definition_key = _definition_key('none_output_workflow')
+        class NoOutputWorkflow(WorkflowDefinition[NoWorkflowOutput]):
+            name = 'no_workflow_output_workflow'
+            definition_key = _definition_key('no_workflow_output_workflow')
             task_a = TaskNode(function=fn_a)
 
         spec = NoOutputWorkflow.build(app)
         assert spec.output is None
+
+    def test_none_output_type_is_refused_for_an_outputless_definition(self) -> None:
+        """None is a value that a node returns: it does not declare the absence of an output."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+        app = self._make_app()
+
+        class NoneOutputWorkflow(WorkflowDefinition[None]):
+            name = 'none_output_workflow'
+            definition_key = _definition_key('none_output_workflow')
+            task_a = TaskNode(function=fn_a)
+
+        with pytest.raises(WorkflowValidationError) as exc:
+            NoneOutputWorkflow.build(app)
+
+        assert exc.value.code == HorsiesErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+        assert exc.value.help_text is not None
+        assert 'NoWorkflowOutput' in exc.value.help_text
 
     def test_any_output_type_allows_outputless_definition(self) -> None:
         """WorkflowDefinition[Any] may omit config.output as a compatibility escape hatch."""
@@ -2645,7 +2663,7 @@ class TestWorkflowDefinitionConfig:
         """A class without config gets the default WorkflowDefinitionConfig."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class DefaultWorkflow(WorkflowDefinition[None]):
+        class DefaultWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'default_config'
             definition_key = _definition_key('default_config')
             fetch = TaskNode(function=fn_a)
@@ -2661,7 +2679,7 @@ class TestWorkflowDefinitionConfig:
         """A subclass without its own config uses the parent's config."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
-        class ParentWorkflow(WorkflowDefinition[None]):
+        class ParentWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'parent_config'
             definition_key = _definition_key('parent_config')
             fetch = TaskNode(function=fn_a)
@@ -3778,7 +3796,7 @@ class TestTaskNodeOptionValidation:
     def test_definition_build_refuses_a_naive_good_until(self) -> None:
         fn = MockTaskWrapper(task_name='expire')
 
-        class NaiveDeadlineWorkflow(WorkflowDefinition[None]):
+        class NaiveDeadlineWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'definition_naive_deadline'
             definition_key = _definition_key('definition_naive_deadline')
             expire = TaskNode(function=fn, good_until=datetime(2030, 1, 1))

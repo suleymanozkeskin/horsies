@@ -1143,6 +1143,16 @@ async fn blocking_handle_reads_of_a_running_workflow() {
             }
             other => panic!("expected RESULT_NOT_READY, got {other:?}"),
         }
+        match view.result_for::<u32, Infallible>(&NodeKey::new("no_such_node")) {
+            Err(WorkflowReadError::NodeNotFound {
+                workflow_id: read,
+                node_id,
+            }) => {
+                assert_eq!(read, workflow_id);
+                assert_eq!(node_id, "no_such_node");
+            }
+            other => panic!("expected NODE_NOT_FOUND, got {other:?}"),
+        }
         match view.get(wait_of(SHORT_WAIT)) {
             Err(WorkflowReadError::WaitTimeout {
                 workflow_id: waited,
@@ -1293,6 +1303,12 @@ async fn blocking_handle_methods_of_an_unknown_workflow_are_workflow_not_found()
         assert_workflow_not_found(view.resume(), workflow_id);
         assert_workflow_not_found(view.cancel(), workflow_id);
         match view.get(wait_of(SHORT_WAIT)) {
+            Err(WorkflowReadError::WorkflowNotFound {
+                workflow_id: missing,
+            }) => assert_eq!(missing, workflow_id),
+            other => panic!("expected WORKFLOW_NOT_FOUND, got {other:?}"),
+        }
+        match view.result_for::<u32, Infallible>(&NodeKey::new(ANSWER_NODE)) {
             Err(WorkflowReadError::WorkflowNotFound {
                 workflow_id: missing,
             }) => assert_eq!(missing, workflow_id),

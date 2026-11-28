@@ -35,7 +35,6 @@ export const allocateWarehouse = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { sku: h.string(), quantity: h.int() },
   output: WarehouseAllocation,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 

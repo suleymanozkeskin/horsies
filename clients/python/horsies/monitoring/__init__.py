@@ -195,6 +195,7 @@ from horsies.monitoring.task_actions import (
     TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
     TaskActionNotFound,
+    TaskActionOutcomeUnknown,
     TaskActionStoredDataInvalid,
     TaskCancelled,
     cancel_task,
@@ -250,6 +251,7 @@ __all__ = [
     'TaskActionNotCancellable',
     'TaskActionIsWorkflowTask',
     'TaskActionNotFound',
+    'TaskActionOutcomeUnknown',
     'TaskActionStoredDataInvalid',
     # Actions
     'CancelPolicy',

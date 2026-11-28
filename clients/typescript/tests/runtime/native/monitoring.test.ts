@@ -13,6 +13,10 @@ import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/ha
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
+import {
+  WORKER_HISTORY_ROW_BOUND,
+  WORKER_PING_WAIT_BOUND_SECONDS,
+} from "../../../horsies/src/_catalog/monitoring_bounds.ts";
 import { createFreshDatabase, type FreshDatabase } from "./fresh-database.ts";
 import { manifestJson, manifestJsonWithSchema } from "./manifest.ts";
 
@@ -231,6 +235,27 @@ describe("an unreachable database", () => {
     for (const answer of answers) {
       assert.ok(!answer.ok && answer.error.code === "INVALID_INPUT");
     }
+  });
+
+  test("a ping wait or a history limit above its core bound is INVALID_INPUT before the connect", async () => {
+    const unreachable = area(REFUSED_DATABASE_URL);
+    const pingBoundMs = WORKER_PING_WAIT_BOUND_SECONDS * 1000;
+
+    const answers = [
+      await unreachable.pingWorkers({ waitMs: pingBoundMs + 1 }),
+      await unreachable.monitoring.getWorkerStateHistory("w1", { kind: "newest", count: WORKER_HISTORY_ROW_BOUND + 1 }),
+    ];
+
+    for (const answer of answers) {
+      assert.ok(!answer.ok && answer.error.code === "INVALID_INPUT");
+    }
+  });
+
+  test("a ping wait at its core bound is sent: the refused connect answers WORKER_PING_FAILED", async () => {
+    const unreachable = area(REFUSED_DATABASE_URL);
+    const answer = await unreachable.pingWorkers({ waitMs: WORKER_PING_WAIT_BOUND_SECONDS * 1000 });
+
+    assert.ok(!answer.ok && answer.error.code === "WORKER_PING_FAILED");
   });
 
   test("a ping on a handle with no listener is LISTENER_DISABLED before the connect", async () => {

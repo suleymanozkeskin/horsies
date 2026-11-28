@@ -237,10 +237,12 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
-    worker_history_limit_refused, ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget,
-    ExecutionClassBudgets, ShortageErrno, SlotHealth, SnapshotProfile,
-    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_listener_disabled, ping_min_responses_refused, ping_wait_over_bound, ping_wait_refused,
+    worker_history_limit_over_bound, worker_history_limit_refused, worker_history_over_bound,
+    ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget, ExecutionClassBudgets,
+    ShortageErrno, SlotHealth, SnapshotProfile, MAX_BOOT_FAILURE_DETAIL_CHARS,
+    WORKER_HISTORY_ROW_BOUND, WORKER_PING_WAIT_BOUND,
 };
 
 // fleet check and class report
@@ -312,8 +314,8 @@ pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
-    NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus, WorkflowEnd,
-    WorkflowWait,
+    NodeResultRead, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus,
+    WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::recovery::{

@@ -30,12 +30,58 @@ use super::app::WebState;
 use super::common::{
     broker_read_failed, pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool,
     parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_direction,
-    parse_sort_field, parse_statuses, query_failed, validate_f64_range, validate_i64_range,
-    ApiError, PathInteger, QueryValues,
+    parse_sort_field, parse_statuses, query_failed, refuse_unknown_parameters, validate_f64_range,
+    validate_i64_range, ApiError, PathInteger, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
 use super::request_body::{read_action_body, WorkflowActionBody};
 use super::stdlib_uuid_text::parse_stdlib_uuid_text;
+
+/// The query parameters of the routes that read a query, in declaration
+/// order. A route refuses any other parameter ([`refuse_unknown_parameters`]).
+const TASK_STATS_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+];
+const TASK_FACETS_PARAMETERS: &[&str] =
+    &["since", "until", "status", "error_category", "retried_only"];
+const TASK_BREAKDOWN_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "group_by",
+    "status",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+    "limit",
+];
+const TASK_LIST_PARAMETERS: &[&str] = &[
+    "since",
+    "until",
+    "status",
+    "task_name",
+    "queue",
+    "worker",
+    "error_code",
+    "error_category",
+    "retried_only",
+    "sort_field",
+    "sort_direction",
+    "offset",
+    "limit",
+];
+const WORKFLOW_LIST_PARAMETERS: &[&str] = &["workflow_name", "status", "limit"];
+const WORKER_PING_PARAMETERS: &[&str] = &["timeout_seconds"];
+const WORKER_HISTORY_PARAMETERS: &[&str] = &["limit"];
 
 pub(crate) fn read_router() -> Router<WebState> {
     Router::new()
@@ -177,6 +223,7 @@ async fn read_task_stats(
 ) -> Result<Json<Vec<crate::monitoring::StatusCount>>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_STATS_PARAMETERS)?;
     let params = TaskStatsParams::from_values(&values)?;
     let query = TaskStatusCountsQuery::new(params.window()?).with_filters(params.filters()?);
     state
@@ -212,6 +259,7 @@ async fn read_task_facets(
 ) -> Result<Json<crate::monitoring::Facets>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_FACETS_PARAMETERS)?;
     let params = TaskFacetsParams::from_values(&values)?;
     let window = params.window.resolve()?;
     let query = TaskFacetsQuery::new(window)
@@ -264,6 +312,7 @@ async fn read_task_breakdown(
 ) -> Result<Json<crate::monitoring::Breakdown>, ApiError> {
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_BREAKDOWN_PARAMETERS)?;
     let params = TaskBreakdownParams::from_values(&values)?;
     let window = params.window.resolve()?;
     let filters = TaskFilters {
@@ -335,6 +384,7 @@ async fn read_tasks(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<crate::monitoring::TaskListPage>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, TASK_LIST_PARAMETERS)?;
     let params = TaskListParams::from_values(&values)?;
     let reach = i128::from(params.offset) + i128::from(params.limit);
     if reach > 500 {
@@ -427,6 +477,7 @@ async fn read_workflows(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Vec<crate::monitoring::WorkflowRunSummary>>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKFLOW_LIST_PARAMETERS)?;
     let params = WorkflowParams::from_values(&values)?;
     let query = WorkflowRunsQuery::new()
         .with_workflow_name(params.workflow_name)
@@ -527,6 +578,7 @@ async fn read_worker_ping(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<LivenessReport>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKER_PING_PARAMETERS)?;
     let params = PingParams::from_values(&values)?;
     let database = match state.broker.ping_database().await {
         Ok(ping) => DatabaseLiveness::Ping {
@@ -639,6 +691,7 @@ async fn read_worker_history(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Vec<WorkerHistoryPoint>>, ApiError> {
     let values = QueryValues::parse(raw.as_deref());
+    refuse_unknown_parameters(&values, WORKER_HISTORY_PARAMETERS)?;
     let params = HistoryParams::from_values(&values)?;
     state
         .broker
@@ -664,7 +717,13 @@ async fn read_worker_history(
 
 async fn read_events(State(state): State<WebState>) -> Response {
     let heartbeat = state.heartbeat;
-    let mut subscription = state.events.subscribe().await;
+    let mut subscription = match state.events.subscribe().await {
+        Ok(subscription) => subscription,
+        Err(refused) => {
+            return ApiError::unavailable(format!("The event stream is refused: {refused}."))
+                .into_response()
+        }
+    };
     let events = stream! {
         while let Some(event) = subscription.recv().await {
             match event {

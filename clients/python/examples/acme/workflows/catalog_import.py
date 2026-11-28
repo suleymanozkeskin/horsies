@@ -18,6 +18,7 @@ from typing import Any, Final
 
 from horsies import (
     Horsies,
+    NoWorkflowOutput,
     OnError,
     SubWorkflowNode,
     TaskNode,
@@ -30,10 +31,10 @@ from ..app import app
 from ..tasks.analytics import catalog_import_chunk
 
 
-class CatalogImport(WorkflowDefinition[None]):
+class CatalogImport(WorkflowDefinition[NoWorkflowOutput]):
     """Fan out a catalog import over many slow chunks.
 
-    Declared `WorkflowDefinition[None]` with no `config.output`: there is no
+    Declared `WorkflowDefinition[NoWorkflowOutput]` with no `config.output`: there is no
     single result worth naming, and `handle.get()` returns the terminal results
     of every chunk keyed by node id.
     """
@@ -54,7 +55,7 @@ class CatalogImport(WorkflowDefinition[None]):
 
         Returns `WorkflowSpec[Any]`: an outputless workflow's `handle.get()`
         yields the terminal results of every node keyed by node id, not one
-        typed value, which is exactly what `WorkflowDefinition[None]` declares.
+        typed value, which is what `WorkflowDefinition[NoWorkflowOutput]` declares.
         """
         nodes: list[TaskNode[Any] | SubWorkflowNode[Any]] = [
             TaskNode(

@@ -55,7 +55,7 @@ spec = ETLPipeline.build(app)
 - `definition_key` is required — a stable string key for persistence and runtime lookup. Auto-registered by the metaclass at import time.
 - `config` is a frozen `WorkflowDefinitionConfig(output=None, on_error=OnError.FAIL, success_policy=None)`. The class body can name its own nodes in it. A subclass without its own `config` uses the parent's `config`.
 - A `Meta` attribute (any object, also from a base class) or a `config` that is not a `WorkflowDefinitionConfig` raises HRS-033 when the class is created, before `build()`.
-- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `config.output`, `T` must be `None` (`WorkflowDefinition[None]`) or `Any`; a concrete `T` without `config.output` raises HRS-025.
+- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `config.output`, `T` must be `NoWorkflowOutput` (`WorkflowDefinition[NoWorkflowOutput]`) or `Any`; `None` or another concrete `T` without `config.output` raises HRS-025.
 - Nodes are collected in definition order by the metaclass.
 - Spec and all nodes are **frozen** (immutable) after construction.
 
@@ -211,7 +211,7 @@ Differences from `TaskNode`:
 - `kwargs` forwarded to `workflow_definition.build_with(app, **kwargs)` at execution time.
 - `args_from` injects the upstream `TaskOutcome` into `build_with()`.
 - The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowFailure`.
-- Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `Succeeded(None)`. The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- Outputless child (`WorkflowDefinition[NoWorkflowOutput]`, no `config.output`): the parent node completes with `Succeeded(NoWorkflowOutput())`. `NoWorkflowOutput` is not `None`: a child whose output node returns `None` gives `Succeeded(None)`. A task parameter that receives the node is `TaskOutcome[NoWorkflowOutput, TaskError]`. The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
 - A raise in the child start stops in the reaper's recovery, and the recovery limit bounds it (see Failure Semantics).
 - An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
 - The child start encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them (a value that does not fit is `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, and the node fails with `WORKFLOW_ENQUEUE_FAILED`), so a refusal at the child start is a defect: it raises `SerializationError` and the transaction rolls back.
@@ -407,7 +407,7 @@ appearing during a pause are expected, not a fault.
 
 ### `result_for()` semantics
 
-Non-blocking single DB query. Returns `Err(ReadResultNotReady(...))` if the node has no result yet. Always call `handle.get()` first to wait for completion. A node with no `node_id` returns `Err(ReadWorkflowContextMissingId(...))`.
+Non-blocking single DB query. Returns `Err(ReadWorkflowNotFound(...))` if no workflow has the id of the handle, `Err(ReadNodeNotFound(...))` if the workflow has no node of the node id (the same id gives the same error on every read), and `Err(ReadResultNotReady(...))` if the node exists and has no result yet. A node of a source that this process does not register reads its stored error as a `Failed` outcome; a stored value needs the registered type, so it is `Err(ReadResultDeserializationError(...))`. Always call `handle.get()` first to wait for completion. A node with no `node_id` returns `Err(ReadWorkflowContextMissingId(...))`.
 
 ### WorkflowHandleError / WorkflowHandleErrorCode
 
@@ -761,7 +761,7 @@ from horsies import (
     Result, Ok, Err, is_ok, is_err,
     # Outcomes and reads
     TaskOutcome, Succeeded, Failed, ReadResult, ReadError,
-    ReadWaitTimeout, ReadWorkflowNotFound, ReadResultNotReady, ReadResultDeserializationError,
+    ReadWaitTimeout, ReadWorkflowNotFound, ReadNodeNotFound, ReadResultNotReady, ReadResultDeserializationError,
     ReadDatabaseError, ReadNoTypeAvailable, ReadAsyncContext, ReadWaitInsideTask, ReadInvalidInput,
     ReadWorkflowContextMissingId,
 )

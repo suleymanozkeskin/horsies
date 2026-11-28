@@ -9,7 +9,7 @@
 //! `#[code_catalog(value = "...")]`.
 //!
 //! Container attribute: `#[code_catalog(module = "...", base = "...")]`,
-//! with `base` one of `str_enum` (`class X(str, Enum)`) and `enum`
+//! with `base` one of `str_enum` (`class X(StrEnum)`) and `enum`
 //! (`class X(Enum)`), and an optional `class = "..."` when the Python class
 //! name differs from the enum name.
 //!

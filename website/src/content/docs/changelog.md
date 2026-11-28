@@ -49,6 +49,59 @@ there is no migration contract between pre-1.0 versions.
   Python `WorkflowContextMissingId` carries that `code`. The core's
   `WorkflowContext::result_for`, `summary_for` and `output_for` give
   `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
+- **Worker snapshot: the claimed limit of the profile, not the seat count.**
+  A worker whose profile sets no `claimed_per_worker` limit writes
+  `max_claim_per_worker = 0` to its snapshot (it wrote the seat count).
+  `WorkerStateSnapshot.claim_limits.claimed_per_worker` reads as
+  `NoTaskLimit` for that worker and as `TaskLimit(tasks)` for a set limit, so
+  "no limit, N seats" and "a limit of N" read apart. The effective limit with
+  no limit is the seat count: the sum of the `capacity` values in
+  `execution_class_budgets`. No schema change. Snapshots that a worker of an
+  earlier build wrote keep the seat count and read as a limit.
+- **A node result read tells no workflow, no node and no result apart.**
+  The core's `PostgresBroker::workflow_node_result_read` gives `NodeResultRead`:
+  `WorkflowAbsent`, `NodeAbsent`, `NotStored` or `Stored`. The new retrieval
+  code `NODE_NOT_FOUND` (`RetrievalCode::NodeNotFound`) names a workflow that
+  has no node of the id. Python has `ReadNodeNotFound`; Rust has
+  `WorkflowReadError::NodeNotFound { workflow_id, node_id }`. The bridge
+  classes of Python are `NodeAbsent` (new) and `WorkflowAbsent` (an id that no
+  workflow has); `NodeResultNotStored` now means a node that exists and stores
+  no result yet.
+- **`NoWorkflowOutput`, the value of a sub-workflow node whose child has no
+  output node (Python, Rust).** The core stores `Ok(null)` for that node. The
+  read gives the one named value `NoWorkflowOutput`, as in TypeScript. In
+  Rust, `NoWorkflowOutput` is a unit type: a definition with no output node
+  declares `type Output = NoWorkflowOutput` for its sub-workflow node, and a
+  handle typed `NoWorkflowOutput` reads such a workflow as
+  `Succeeded(NoWorkflowOutput)` or its stored error. A stored value other than
+  `null` does not read as `NoWorkflowOutput`.
+- **Cancel: the unknown outcome has its own error.** `TaskActionError` has the
+  new variant `OutcomeUnknown` (code `OUTCOME_UNKNOWN`; Python class
+  `TaskActionOutcomeUnknown`, member `TaskActionErrorCode.OUTCOME_UNKNOWN`),
+  with `message`, `retryable`, `task_id` and `cause`. The cancel statement
+  was sent and its reply was lost: the cancel may have committed. A cancel
+  again tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with
+  `CANCELLED`. `DATABASE_OPERATION_FAILED` now means that nothing changed:
+  the statement was not sent, the server refused it, or the connect failed.
+  The web route answers both with 503 when the cause may clear, else 500. In
+  the core, `CancelTaskError::OutcomeUnknown(StatementFailure)` is the new
+  variant, and `TaskActionError::cancel_outcome_unknown` builds the error.
+- **Monitoring reads and waits have bounds, in the core.** A call past a
+  bound is refused with `INVALID_INPUT` (`DatabaseInvalidInput` in Python,
+  `DatabaseOperationError::InvalidInput` in Rust), and nothing runs:
+  - `WORKER_PING_WAIT_BOUND` (60 s): `ping_workers` with a longer wait. The
+    upper bound of Python's `wait_ms` was `2**64 - 1`; it is 60,000.
+  - `WORKER_HISTORY_ROW_BOUND` (10,000): `get_worker_state_history` with a
+    `WorkerHistoryLimitNewest` / `WorkerHistoryLimit::Newest` count above the
+    bound. `WorkerHistoryLimitAllRetained` / `WorkerHistoryLimit::AllRetained`
+    reads at most the bound and is refused for a worker that holds more
+    retained snapshots: no snapshots are returned in part.
+  - `MAX_OPEN_EVENT_STREAMS` (256): `MonitoringHandler::subscribe_events`
+    keeps at most this many event streams open. A stream requested past the
+    bound is the degraded frame and the end, with a warning in the log; the
+    core's `try_subscribe_events` returns `EventStreamsRefused { open, bound }`.
+    Python's `subscribe_events_async` answers `EventStreamRefused`. A stream
+    that ends frees its place.
 - **Core: public constants for the client checks.**
   `horsies_core` exports the idempotency key bound
   (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
@@ -101,6 +154,50 @@ there is no migration contract between pre-1.0 versions.
   its sections with it; its refusal texts and paths do not change.
 
 ### Changed
+
+- **Breaking (Python): an outputless child workflow reads as `NoWorkflowOutput`,
+  not `Succeeded(None)`.** A `WorkflowDefinition` with no `config.output`
+  declares `WorkflowDefinition[NoWorkflowOutput]`; `WorkflowDefinition[None]`
+  without `config.output` raises HRS-025 (`WORKFLOW_OUTPUT_TYPE_MISMATCH`).
+  The `SubWorkflowNode` of it is a `SubWorkflowNode[NoWorkflowOutput]`, and a
+  task parameter that receives its outcome is
+  `TaskOutcome[NoWorkflowOutput, TaskError]`. A child whose output node
+  returns `None` still gives `Succeeded(None)`.
+- **A node result read of an id that no workflow has is `WORKFLOW_NOT_FOUND`;
+  a node id that the workflow does not have is `NODE_NOT_FOUND`.** Both were
+  `RESULT_NOT_READY`, which now means a node that exists and stores no result
+  yet (Python `result_for`, Rust `result_for`).
+- The Rust sub-workflow node read of a child with no output node no longer
+  fails with `ResultDeserializationError` when the node is typed
+  `NoWorkflowOutput`.
+- **Python: the built-in code enums print their code text.** The generated
+  code enums (`OperationalCode`, `ContractCode`, `RetrievalCode`,
+  `OutcomeCode`, `HorsiesErrorCode`, `DatabaseErrorCode`,
+  `TaskSendErrorCode`, `SeatRelayCode`, `WorkflowStartErrorCode`,
+  `WorkflowHandleErrorCode`, `MonitoringQueryErrorCode`,
+  `TaskActionErrorCode`, `MonitoringQueryRefusalCode`, `RerunErrorCode`) and
+  the generated text enums `TaskAbsenceReason`, `TaskAttemptOutcome`,
+  `WorkflowStatus` and `WorkflowNodeStatus` are `StrEnum` in place of
+  `(str, Enum)`. `str(code)` and `f"{code}"` give the code text
+  (`DATABASE_ERROR`); on Python 3.13 they gave `OperationalCode.DATABASE_ERROR`.
+  Matching, comparison, hashing and the stored text do not change.
+  `TaskStatus` stays a plain `Enum`. Enums that user code declares are not
+  affected.
+- **An upstream error with a code that the upstream task does not declare
+  refuses the input of the downstream task (Python and Rust).** A node input
+  that is an upstream outcome (`TaskOutcome` in Python, `TaskOutcome<S, E>` in
+  Rust) fails the run with `WORKER_SERIALIZATION_ERROR` when the stored error
+  of a task node holds a custom code that the upstream task does not declare
+  (`error_codes=` in Python, the declared codes of the code type in Rust). The
+  body does not run. An upstream task that declares no code reads any code, and
+  a sub-workflow node is not checked. The workflow context read and the result
+  read already refuse the same case.
+- **Rust: `check --live` connects with an observe-only handle.**
+  `Horsies::check_live` builds a handle of its own with
+  `SchemaMode::ObserveOnly`, as the Python and TypeScript checks do, runs the
+  connectivity check and the worker connection check on it, and closes it. The
+  app's handle does not connect and its schema mode does not apply. The result
+  of the check does not change.
 
 - **The Rust client's `sqlx` feature needs sqlx 0.9, and the minimum Rust
   is 1.95.** The `sqlx` feature of `horsies` builds against sqlx 0.9 (it was
@@ -889,17 +986,6 @@ there is no migration contract between pre-1.0 versions.
   value changes; the stored error code of a task (`{"user": ...}`) does
   not change. A Rust or Python `match` on these variants takes the new
   names.
-- **A key conflict of a send has `retryable = True`.** Python
-  `TaskSendIdempotencyKeyConflict` has the class variable
-  `retryable: ClassVar[bool] = True`: the conflict clears when the
-  reservation ends. The retry methods accept it, as before, and
-  `resend_on_transient_err` does not send it again, as before. The Rust
-  `TaskSendError::retryable()` is `true` for it, as before. Codegen model:
-  `ErrorSlot::AlwaysRetryable`, which the `ErrorCatalog` derive sets for a
-  variant with `#[error_class(always_retryable)]`; a variant takes at most
-  one of `never_retryable` and `always_retryable`. Code that matches on
-  `ErrorSlot` takes the new variant.
-
 - **Breaking: the web API refuses an unknown key in an action body.**
   `POST /api/tasks/{id}/cancel` takes the key `policy` (no body, or a JSON
   object), and `POST /api/workflows/{id}/pause`, `/resume` and
@@ -919,6 +1005,20 @@ there is no migration contract between pre-1.0 versions.
   before every check of the body, as before. `CancelTaskBody` refuses an
   unknown key for any serde reader (`#[serde(deny_unknown_fields)]`). The web
   UI sends known keys only.
+- **Breaking: the web API refuses an unknown query parameter.** A route that
+  reads query parameters refuses a parameter that it does not know with 422,
+  before it reads any parameter: `GET /api/tasks`, `/api/tasks/status-counts`,
+  `/api/tasks/facets`, `/api/tasks/breakdown`, `/api/workflows`,
+  `/api/workers/ping` and `/api/workers/{worker_id}/history`. The response has
+  one issue, for the first unknown parameter in query order: `type`
+  `extra_forbidden`, `loc` `["query", name]`, `input` the value of its first
+  occurrence, and `ctx.known_keys` the parameters that the route knows, in
+  declaration order; `msg` names the parameter and the known parameters.
+  Before, a misspelled filter or paging parameter read as not given, and the
+  route answered with unfiltered or default data. A route that reads no query
+  parameter (for example `GET /api/workers`) ignores a parameter, as before.
+  The web UI sends known parameters only.
+
 - **Breaking: one name per concept for tasks, sends, reads, schedules,
   reruns and events (Python, Rust, core).** The entries below list each
   rename. No old name stays as an alias. Before the upgrade, drain the
@@ -1155,6 +1255,13 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **`WorkflowHandle.result_for`, `results` and `tasks` (Python) read the
+  stored error of a node whose source is not registered in the reading
+  process.** An err-only envelope needs no ok type: `decode_task_error` reads
+  it, and the outcome is `Failed` with the stored code and message. Only an
+  envelope with an ok slot needs the registered type, so it stays
+  `RESULT_DESERIALIZATION_ERROR`. The read gave
+  `RESULT_DESERIALIZATION_ERROR` for both before.
 - **Python: the signature check refuses a tuple with an unpacked item.**
   A parameter or return annotation such as `tuple[int, *tuple[bool, ...]]`
   is refused at registration with `SignatureValidationError`. The error names
@@ -1214,6 +1321,18 @@ there is no migration contract between pre-1.0 versions.
   it for reads and for actions, as the TypeScript client does. Every value
   of a repeated header is checked. A value with all members present, such as
   `alice, bob`, is still allowed.
+- **The monitoring page escapes the custom stylesheet URL and the mount path.**
+  `custom_css_url` and the mount path are written into the `<link href>` and
+  `<base href>` attributes of the page with `&`, `"`, `'`, `<` and `>` escaped.
+  A value with a quote no longer ends the attribute.
+- **A refused caller gets the access refusal before any database state.** The
+  monitoring handler answers a request that the access policy refuses with 403
+  `Not authorized.` before it connects its broker. Before, with the database
+  down, the Python mount and the Rust mount answered 503 or 500 with the
+  connect error text to a caller that the policy refuses. The core exports
+  `horsies_core::web::refusal_by_policy(need, grant)` for a host that builds
+  the handler on demand: it gives the 403 for a refused request and `None` for
+  any other. A refused act on `/api/meta` is not a refusal; the route reports it.
 
 ## 0.8.1 — 2026-11-25
 

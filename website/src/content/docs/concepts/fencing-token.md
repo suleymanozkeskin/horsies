@@ -38,6 +38,7 @@ The tokens of two task ids have no order. Compare a token only with a token of t
 |--------|------|---------------|
 | Python | A task whose first parameter is `runtime: TaskRuntime` reads `runtime.fencing_token`, a `FencingToken` with `task_id` and `value` | A direct call passes `TaskRuntime.for_test(...)`. See [Defining Tasks](/horsies/tasks/defining-tasks/#fencing-token) |
 | Rust | `rt.fencing_token()` on the `TaskRuntime` of the body gives `Result<FencingToken, FencingTokenRefused>` | `Err(FencingTokenRefused::NotInARun)`. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/#fencing-token) |
+| TypeScript | A body reads `runtime.fencingToken`, a `FencingToken` with `taskId` and `value` | A test passes `TaskRuntime.forTest(...)`. See [Defining Tasks](/horsies/typescript/tasks/defining-tasks/#fencing-token) |
 
 ### Fence the Writes
 

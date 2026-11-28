@@ -443,7 +443,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `snapshot_at` | `timestamptz` | Snapshot time |
 | `hostname`, `pid` | | Main process identity |
 | `processes` | `integer` | Worker process count |
-| `max_claim_batch`, `max_claim_per_worker`, `cluster_wide_cap` | `integer` | Claim limits |
+| `max_claim_batch`, `max_claim_per_worker`, `cluster_wide_cap` | `integer` | Claim limits of the profile; 0 is no limit. `max_claim_per_worker` is 0 when the profile sets no claimed limit |
 | `queues` | `varchar(100)[]` | Subscribed queues |
 | `queue_priorities`, `queue_max_concurrency`, `recovery_config` | `jsonb` | Configuration snapshot |
 | `tasks_running`, `tasks_claimed` | `integer` | Current counts |
