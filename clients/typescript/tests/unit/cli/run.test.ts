@@ -4,18 +4,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import {
-  type CliDeps,
-  COMMAND_NAMES,
-  type CommandTable,
-  EXIT_LOG_POLL_MS,
-  EXIT_LOG_WAIT_MS,
-  MAX_EXIT_LOG_POLLS,
-  processMode,
-  type ProcessFacts,
-  runCli,
-  waitForLogRecords,
-} from "../../../horsies/src/cli/run.ts";
+import { EXIT_LOG_POLL_MS, EXIT_LOG_WAIT_MS, MAX_EXIT_LOG_POLLS, waitForLogRecords } from "../../../horsies/src/cli/exit-log-wait.ts";
+import { type CliDeps, COMMAND_NAMES, type CommandTable, processMode, type ProcessFacts, runCli } from "../../../horsies/src/cli/run.ts";
 import type { CommandExitCode } from "../../../horsies/src/cli/usage.ts";
 import type { LogBacklog } from "../../../horsies/src/native/worker/addon.ts";
 import { ClientDefect, type CoreDefect, ManifestRefused } from "../../../horsies/src/thrown-errors.ts";

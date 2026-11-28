@@ -77,9 +77,8 @@ async function handlerChildStaysDown(suite: Suite, instance: Instance): Promise<
 
   assert.equal(await succeeded(handle, RESULT_WAIT_MS), 8, `${instance}: the worker runs its tasks`);
 
-  await pollFor(HOOK_FAILURE_WAIT_MS, `${instance}: the log line of the failed handler child start`, async () =>
-    worker.logCount(STAYS_DOWN_TEXT) > 0 ? found(true) : NOT_YET,
-  );
+  // The handler child writes this line, then ends itself; a failed wait names the worker's output.
+  await worker.waitForLog(STAYS_DOWN_TEXT, HOOK_FAILURE_WAIT_MS);
 
   assert.equal(suite.markers.read(HANDLER_LINES_MARKER).kind, "absent", `${instance}: no handler ran`);
 }

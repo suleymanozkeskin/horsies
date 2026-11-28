@@ -191,6 +191,7 @@ describe("the fill of the handler slot", () => {
       hostname: "host-1",
       writeLine: () => undefined,
       wait: async () => undefined,
+      logRecords: async () => undefined,
       exit: (code) => {
         throw new Error(`ended with ${String(code)}`);
       },

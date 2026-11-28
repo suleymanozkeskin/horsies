@@ -99,6 +99,7 @@ function threadDeps(native: FakeChildNative): ChildModeDeps & Recorded {
     seats,
     writeLine: () => undefined,
     wait: async () => undefined,
+    logRecords: async () => undefined,
     exit: (code) => {
       throw new Ended(code);
     },
@@ -376,6 +377,7 @@ describe("a SHARED_THREAD child", () => {
       ...threadDeps(native),
       // The flush bound never passes here: the end waits for the answers.
       wait: async () => new Promise<void>(() => undefined),
+      logRecords: async () => undefined,
       exit: (code) => {
         exits.push(code);
 

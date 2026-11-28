@@ -19,8 +19,8 @@
 //    boots the seat isolates, and each post goes to the seat pool (`src/seats/router.ts`): the main thread runs no
 //    body and sets no run mark, and its turns keep the core's main-thread watch fed.
 // 6. The exit rule: the flush of the body observer and, in a `SHARED_THREAD` child, of each seat isolate (the router
-//    asks the pool), at most its bound, then the end of the process with the host's code (80, `CORE_STOPPED`, for a
-//    child whose core stopped). The child never waits for
+//    asks the pool), and the wait for the core log records in the channel, together at most its bound, then the end of
+//    the process with the host's code (80, `CORE_STOPPED`, for a child whose core stopped). The child never waits for
 //    its event loop to empty.
 
 import { hostname } from "node:os";
@@ -71,6 +71,7 @@ import { unreachable } from "../wire/unreachable.ts";
 import { type ChildMembersView, servedMembers } from "./app-members.ts";
 import { type BodyObserver, bodyObserverOf, NO_BODY_OBSERVER } from "./body-observer.ts";
 import { CHILD_EXIT_FLUSH_BOUND_MS, ChildEnd } from "./exit.ts";
+import { processLogWaitDeps, waitForLogRecords } from "../cli/exit-log-wait.ts";
 import {
   type CulpritMethod,
   type LoopNative,
@@ -126,6 +127,8 @@ export interface ChildModeDeps {
   readonly writeLine: (line: string) => void;
   /** Wait `milliseconds`; the wait does not keep the process alive. */
   readonly wait: (milliseconds: number) => Promise<void>;
+  /** Wait, bounded, while core log records wait in the channel: the exit rule runs it before the exit. */
+  readonly logRecords: () => Promise<void>;
   readonly exit: (code: number) => never;
   /** The defect rule: it never throws. */
   readonly reportDefect: (defect: CoreDefect) => void;
@@ -139,7 +142,13 @@ export interface ChildModeDeps {
  */
 export async function runChildMode(app: Horsies, processArguments: readonly string[], deps: ChildModeDeps): Promise<never> {
   const flushes = new ExitFlushes(observerOfApp(app));
-  const childEnd = new ChildEnd({ flush: async () => flushes.flush(), wait: deps.wait, exit: deps.exit });
+
+  const childEnd = new ChildEnd({
+    flush: async () => flushes.flush(),
+    logRecords: deps.logRecords,
+    wait: deps.wait,
+    exit: deps.exit,
+  });
 
   let ended: ChildModeEnd;
 
@@ -421,6 +430,7 @@ export function processChildModeDeps(): ChildModeDeps {
       new Promise((resolve) => {
         setTimeout(resolve, milliseconds);
       }),
+    logRecords: async () => waitForLogRecords(processLogWaitDeps()),
     exit: (code) => process.exit(code),
     reportDefect,
   };

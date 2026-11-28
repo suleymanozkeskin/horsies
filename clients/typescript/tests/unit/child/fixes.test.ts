@@ -54,6 +54,7 @@ function deps(native: FakeChildNative, lines: string[], defects: CoreDefect[]): 
     seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async () => undefined,
+    logRecords: async () => undefined,
     exit: (code) => {
       throw new Ended(code);
     },

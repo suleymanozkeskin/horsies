@@ -25,13 +25,12 @@ import { CHILD_MODE_FLAG } from "../app/suppression.ts";
 import { processChildModeDeps, runChildMode } from "../child/host.ts";
 import { type ThreadChannel, threadChannel } from "../seats/channel.ts";
 import { processSeatIsolateDeps, runSeatIsolate } from "../seats/isolate.ts";
-import { workerLogBacklog } from "../native/worker/worker.ts";
 import { raiseDefect, reportDefect } from "../native/call/defect.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../native/call/never.ts";
 import { processCheckCommandDeps, runCheckCommand } from "./check-command.ts";
-import type { LogBacklog } from "../native/worker/addon.ts";
+import { type LogWaitDeps, processLogWaitDeps, waitForLogRecords } from "./exit-log-wait.ts";
 import {
   type CommandExitCode,
   type CommandOutput,
@@ -78,15 +77,6 @@ export const COMMANDS: CommandTable = {
 
 /** The usage line of `cli.run` with no command or an unknown one. */
 export const CLI_USAGE: string = `<entry> {${COMMAND_NAMES.join(",")}} ...`;
-
-/** The longest wait for the core log records before the process ends, in milliseconds. */
-export const EXIT_LOG_WAIT_MS = 2000;
-
-/** The pause between two reads of the log backlog, in milliseconds. */
-export const EXIT_LOG_POLL_MS = 10;
-
-/** The most reads of the log backlog in one wait: the wait ends at this count or at `EXIT_LOG_WAIT_MS`, the first. */
-export const MAX_EXIT_LOG_POLLS: number = EXIT_LOG_WAIT_MS / EXIT_LOG_POLL_MS;
 
 /** The mode of this process. `child`: the arguments after the entry script, the child flag first. */
 export type ProcessMode =
@@ -164,18 +154,12 @@ export type ChildRunner = (app: Horsies, args: readonly string[]) => Promise<nev
 export type SeatRunner = (app: Horsies) => Promise<never>;
 
 /** What `cli.run` does that has effects. */
-export interface CliDeps {
+export interface CliDeps extends LogWaitDeps {
   readonly facts: ProcessFacts;
   readonly table: CommandTable;
   readonly child: ChildRunner;
   readonly seat: SeatRunner;
   readonly output: CommandOutput;
-  /** Whether core log records wait in the channel. Does not wait. */
-  logBacklog(): LogBacklog;
-  /** Wait `milliseconds`, letting the event loop run. */
-  pause(milliseconds: number): Promise<void>;
-  /** A monotonic clock, in milliseconds. */
-  now(): number;
   /** The defect rule of the process (`reportDefect`): in a worker process it aborts. */
   reportDefect(defect: CoreDefect): void;
   /** End the process with `code`. */
@@ -251,18 +235,6 @@ async function endProcess(code: CommandExitCode, deps: CliDeps): Promise<never> 
   return deps.exit(code);
 }
 
-/**
- * Wait while core log records wait in the channel and the forwarder hands them on: until `EXIT_LOG_WAIT_MS` passed by
- * the clock, or `MAX_EXIT_LOG_POLLS` reads, the first.
- */
-export async function waitForLogRecords(deps: Pick<CliDeps, "logBacklog" | "pause" | "now">): Promise<void> {
-  const deadline = deps.now() + EXIT_LOG_WAIT_MS;
-
-  for (let poll = 0; poll < MAX_EXIT_LOG_POLLS && deps.now() < deadline && deps.logBacklog() === "waiting"; poll += 1) {
-    await deps.pause(EXIT_LOG_POLL_MS);
-  }
-}
-
 /** The dependencies of `cli.run` in this process. */
 export function processCliDeps(): CliDeps {
   return {
@@ -271,9 +243,7 @@ export function processCliDeps(): CliDeps {
     child: async (app, args) => runChildMode(app, args, processChildModeDeps()),
     seat: async (app) => runSeatIsolate(app, processSeatIsolateDeps()),
     output: processOutput(),
-    logBacklog: workerLogBacklog,
-    pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    now: () => performance.now(),
+    ...processLogWaitDeps(),
     reportDefect,
     exit: (code) => process.exit(code),
   };
