@@ -112,12 +112,13 @@ Set the drain timeout below the stop window of the supervisor. See [Graceful Shu
 
 A worker starts each child with the runtime that runs the worker: a worker started with `bun` has Bun children, and a worker started with `node` has Node children.
 
-<!-- members: Execution subset -->
+<!-- members: Execution -->
 
 | Class | Node 26 | Bun 1.4 |
 |-------|---------|---------|
 | `ISOLATED` | Yes | Yes |
 | `SHARED_ASYNC` | Yes | Yes |
+| `SHARED_THREAD` | Yes | No. The worker refuses a profile with `SHARED_THREAD` children with `sharedThreadUnavailable`: see [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/) |
 
 A shared async child watches its event loop. When the loop is blocked, the child names the task that held it: see [A Blocked Event Loop](/horsies/workers/shared-async-tasks/#a-blocked-event-loop). The child marks the task of each synchronous part of a body and of `runtime.spawn` work on both runtimes. The part of a body after an `await` is marked through `v8.promiseHooks`, which only Node has. On Bun, a block after an `await` names no task: it takes the path of a block that no one task held.
 
