@@ -376,8 +376,8 @@ fn rule_text(refusal: &DeclaredOptionRefusal) -> RuleText {
         DeclaredOptionRefusal::RetryCodeNotCustomCode { refused } => {
             RuleText::option(refused.to_string())
         }
-        DeclaredOptionRefusal::RetryCodeNotDeclared { code } => RuleText::option(format!(
-            "{RETRY_FOR_FIELD} code '{code}' is not a declared error code of the task; a \
+        DeclaredOptionRefusal::RetryCodeNotDeclared { retry_code } => RuleText::option(format!(
+            "{RETRY_FOR_FIELD} code '{retry_code}' is not a declared error code of the task; a \
              custom code that retries the task is one of its errors"
         )),
         DeclaredOptionRefusal::TimeoutBelowMinimum => RuleText::option(format!(
@@ -653,6 +653,19 @@ mod tests {
             },
             ..facts()
         });
+    }
+
+    #[test]
+    fn the_text_of_an_undeclared_retry_code_names_the_retry_code() {
+        let text = rule_text(&DeclaredOptionRefusal::RetryCodeNotDeclared {
+            retry_code: "PROVIDER_DOWN".to_owned(),
+        });
+        assert!(
+            text.message
+                .contains("code 'PROVIDER_DOWN' is not a declared error code of the task"),
+            "{}",
+            text.message
+        );
     }
 
     /// A number that is not a `u32` is refused at the boundary, one refusal
