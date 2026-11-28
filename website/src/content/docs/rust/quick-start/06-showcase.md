@@ -11,7 +11,7 @@ The repository holds a complete application under `clients/rust/examples/showcas
 
 The domain state is real. Products, orders and payments are rows in `acme_*` tables that the tasks read and write. Only the outside world is simulated: the payment provider, the courier, the label printer and the mail gateway.
 
-The showcase registers 36 tasks, 12 workflows, 32 schedule entries (29 enabled) and 4 queues. Every task returns `TaskError<AcmeCode>`, and `AcmeCode` has 17 codes.
+The showcase registers 36 tasks, 12 workflows, 32 schedule entries (29 enabled) and 4 queues. Every task returns `TaskError<AcmeCode>`, and `AcmeCode` has 18 codes.
 
 ## Why and When
 
