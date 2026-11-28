@@ -18,6 +18,18 @@
 //! The entry point sets the rule once, before the first core call. The start
 //! of the core fixes it.
 //!
+//! The task child rule, internal: a task child sets `ABORT_PROCESS` at its
+//! entry, and the first read of its core by the core's child host
+//! ([`enter_task_child_rule`]) moves it, once and for good, to the task
+//! child rule: a panic in a core background task stops the core (the child
+//! host then ends the child with exit code 80 at the next start, after a body
+//! that returned, or at a core call of the child), and a defect of the
+//! package still aborts. Before that first read the process is under
+//! `ABORT_PROCESS`: a background panic aborts the child, which holds no
+//! attempt then, and the worker treats it as a crashed child. The handler
+//! child never reads its core through the child host, so it keeps
+//! `ABORT_PROCESS`. The public `PanicRule` has no value for this rule.
+//!
 //! A chained panic hook keeps the cause of each panic, with its source
 //! location, on its thread, so the catch site can report it.
 
@@ -114,6 +126,19 @@ static REPORTED_DEFECT: OnceLock<String> = OnceLock::new();
 /// `StopCore` by the start of the core.
 static PANIC_RULE: OnceLock<PanicRule> = OnceLock::new();
 
+/// The internal rule of a task child once its child host read its core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskChildRule {
+    /// A panic in a core background task stops the core; a defect of the
+    /// package aborts, as under `ABORT_PROCESS`.
+    StopCoreAbortDefects,
+}
+
+/// Set once, at the first read of the core by the child host of a task
+/// child; never cleared, so the process never goes back to the abort of a
+/// background panic.
+static TASK_CHILD_RULE: OnceLock<TaskChildRule> = OnceLock::new();
+
 static PANIC_HOOK: Once = Once::new();
 
 thread_local! {
@@ -137,6 +162,18 @@ pub fn set_panic_rule(rule: PanicRule) -> Result<(), PanicRuleFixed> {
 /// `StopCore`. Starts nothing.
 pub fn panic_rule() -> PanicRule {
     PANIC_RULE.get().copied().unwrap_or(PanicRule::StopCore)
+}
+
+/// Enter the task child rule: the child host of a task child read its core.
+/// The first call sets it; later calls change nothing. Starts nothing.
+pub fn enter_task_child_rule() {
+    let _rule_in_force = TASK_CHILD_RULE.get_or_init(|| TaskChildRule::StopCoreAbortDefects);
+}
+
+/// The task child rule, once the child host of this task child read its
+/// core. Starts nothing.
+pub fn task_child_rule() -> Option<TaskChildRule> {
+    TASK_CHILD_RULE.get().copied()
 }
 
 /// Fix the rule at the start of the core: the rule set before, else
@@ -210,11 +247,15 @@ pub fn abort_for_defect(handoff: RecordHandoff) -> Envelope<()> {
 }
 
 /// Apply the process panic rule to a panic in a core background task. Under
-/// `AbortProcess` this does not return.
+/// `AbortProcess` this does not return, unless the task child rule is in
+/// force: then the core stops.
 pub fn background_task_panicked(report: PanicReport) {
-    match panic_rule() {
-        PanicRule::StopCore => crate::process_core::runtime::stop_after_background_panic(report),
-        PanicRule::AbortProcess => {
+    match (panic_rule(), task_child_rule()) {
+        (PanicRule::StopCore, _)
+        | (PanicRule::AbortProcess, Some(TaskChildRule::StopCoreAbortDefects)) => {
+            crate::process_core::runtime::stop_after_background_panic(report);
+        }
+        (PanicRule::AbortProcess, None) => {
             let what = format!(
                 "panic in core background task {}: {}",
                 report.subject, report.cause
@@ -338,7 +379,8 @@ mod tests {
 
     use super::*;
     use crate::process_core::runtime::{core_for_call, core_status, pure_call_refusal};
-    use crate::process_core::runtime::{CallRefusal, CoreStatus};
+    use crate::process_core::runtime::{task_child_core_state, CallRefusal, CoreStatus};
+    use horsies_core::{HostCoreState, HostCoreStop};
 
     /// The child test to run, set in the environment of a child process. The
     /// panic rule and the core are per process, so the tests that set them
@@ -502,6 +544,133 @@ mod tests {
         assert!(output.status.success(), "{stdout}\n{stderr}");
         assert!(
             stdout.contains("test process_core::panic_rule::tests::stop_rule_child ... ok"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn task_child_before_read_child() {
+        if !in_child("process_core::panic_rule::tests::task_child_before_read_child") {
+            return;
+        }
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        start_core();
+        assert_eq!(task_child_rule(), None);
+        panic_in_background_task();
+        // The child host did not read the core: the line above aborts.
+    }
+
+    #[test]
+    fn a_task_child_aborts_on_a_background_panic_before_the_first_read_of_its_core() {
+        let output = run_child("process_core::panic_rule::tests::task_child_before_read_child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+        assert!(
+            stderr.contains("aborts: panic in core background task thread rule-test-task: "),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn task_child_after_read_child() {
+        if !in_child("process_core::panic_rule::tests::task_child_after_read_child") {
+            return;
+        }
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        start_core();
+        assert_eq!(task_child_core_state(), HostCoreState::Running);
+        assert_eq!(task_child_rule(), Some(TaskChildRule::StopCoreAbortDefects));
+        // The rule stays: a later read and a set of the public rule change
+        // nothing.
+        assert_eq!(task_child_core_state(), HostCoreState::Running);
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        panic_in_background_task();
+        assert_eq!(core_status(), CoreStatus::Stopped);
+        match task_child_core_state() {
+            HostCoreState::Stopped(HostCoreStop { subject, cause }) => {
+                assert_eq!(subject, "thread rule-test-task");
+                assert!(cause.starts_with(PLANNED_PANIC), "{cause}");
+            }
+            HostCoreState::Running => panic!("the core stopped"),
+        }
+        let _never = core_for_call().is_ok();
+        // A refused call ends the child with 80; the parent test fails on
+        // any other end.
+    }
+
+    #[test]
+    fn a_task_child_stops_its_core_after_the_first_read_and_ends_with_80_at_a_refused_call() {
+        let output = run_child("process_core::panic_rule::tests::task_child_after_read_child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(80), "{stderr}");
+        assert!(
+            stderr.contains("horsies: the core stopped in process "),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "horsies: At a core call of this child: the core of this child stopped after a \
+                 panic in a core background task (thread rule-test-task: "
+            ),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("the child ends itself with exit code 80"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn task_child_defect_child() {
+        if !in_child("process_core::panic_rule::tests::task_child_defect_child") {
+            return;
+        }
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        start_core();
+        assert_eq!(task_child_core_state(), HostCoreState::Running);
+        let answer = report_defect("CLIENT_DEFECT".to_owned(), "taskId: a UUID".to_owned());
+        assert!(
+            matches!(
+                answer,
+                Envelope::Value(DefectAnswer::AbortWithRecord { .. })
+            ),
+            "{answer:?}"
+        );
+        let _never = abort_for_defect(RecordHandoff::NotGiven);
+    }
+
+    #[test]
+    fn a_defect_in_a_task_child_aborts_under_the_task_child_rule() {
+        let output = run_child("process_core::panic_rule::tests::task_child_defect_child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+    }
+
+    #[test]
+    fn panic_before_start_child() {
+        if !in_child("process_core::panic_rule::tests::panic_before_start_child") {
+            return;
+        }
+        panic_in_background_task();
+        assert_eq!(core_status(), CoreStatus::Stopped);
+        match core_for_call() {
+            Err(CallRefusal::Stopped(report)) => {
+                assert_eq!(report.subject, "thread rule-test-task");
+            }
+            Err(other) => panic!("a stopped core refuses with CoreStopped, got {other:?}"),
+            Ok(_core) => panic!("a panic before the start keeps the core stopped"),
+        }
+    }
+
+    #[test]
+    fn a_panic_before_the_core_started_keeps_the_core_stopped() {
+        let output = run_child("process_core::panic_rule::tests::panic_before_start_child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout
+                .contains("test process_core::panic_rule::tests::panic_before_start_child ... ok"),
             "{stdout}"
         );
     }
