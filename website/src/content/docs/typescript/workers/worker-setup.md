@@ -112,6 +112,8 @@ Set the drain timeout below the stop window of the supervisor. See [Graceful Shu
 
 A worker starts each child with the runtime that runs the worker: a worker started with `bun` has Bun children, and a worker started with `node` has Node children.
 
+<!-- members: Execution subset -->
+
 | Class | Node 26 | Bun 1.4 |
 |-------|---------|---------|
 | `ISOLATED` | Yes | Yes |
