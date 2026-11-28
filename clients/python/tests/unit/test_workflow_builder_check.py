@@ -1126,7 +1126,7 @@ class TestRecursiveSubworkflowBindingInCheck:
                     )
                 bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(
-                    name=f'{cls.name}_d{depth}', nodes=[bad], output=bad,
+                    name=f'{cls.name}_d{depth}', nodes=[bad],
                 )
 
         @app.check_workflow_builder()

@@ -153,7 +153,7 @@ class TestNestingFindingsInCheck:
             ) -> WorkflowSpec[Any]:
                 if level >= LEVEL_WHERE_THE_NESTING_ENDS:
                     leaf = TaskNode(function=_task_fn(), node_id='leaf')
-                    return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
+                    return WorkflowSpec(name=cls.name, nodes=[leaf])
                 child = SubWorkflowNode(workflow_definition=Ends, kwargs={'level': level + 1})
                 return WorkflowSpec(name=cls.name, nodes=[child])
 
