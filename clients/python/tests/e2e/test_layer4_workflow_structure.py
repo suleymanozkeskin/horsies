@@ -24,17 +24,18 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable
 
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.outcome import ReadWaitTimeout, Succeeded
-from horsies.core.models.workflow import TaskNode, WorkflowTerminalResults
+from horsies.core.models.workflow import NoWorkflowOutput, TaskNode
 
 from horsies.core.types.result import is_ok
 from tests.e2e.helpers.assertions import (
     assert_failed,
+    node_outcomes_of,
     read_error,
     read_succeeded,
     start_ok_in_thread,
@@ -514,13 +515,13 @@ async def test_explicit_output_task(broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_default_terminal_results(broker: PostgresBroker) -> None:
-    """Without explicit output, get() returns dict of terminal task results."""
+    """Without explicit output, get() returns NoWorkflowOutput; results() gives the node values."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_fanout has no output= set, so returns dict of terminal results
+        # spec_fanout has no output= set, so get() returns NoWorkflowOutput
         handle = await start_ok_in_thread(wf_tasks.spec_fanout)
 
         # Wait for workflow completion via DB polling
@@ -532,14 +533,13 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
         # Get result via sync handle.get() - should work after workflow completes
         result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
-        # Returns dict keyed by node_id
-        value_of_get = succeeded_value(result)
-        assert isinstance(value_of_get, dict)
-        output = cast(WorkflowTerminalResults, value_of_get)
+        assert succeeded_value(result) == NoWorkflowOutput()
 
-        # Terminal tasks are B, C, D (indices 1, 2, 3)
+        # results() is keyed by node_id: A, B, C, D (indices 0, 1, 2, 3).
         # Keys should be like "e2e_fanout:1", "e2e_fanout:2", etc.
-        assert len(output) == 3, f'Expected 3 terminal results, got {len(output)}'
+        all_outcomes = await node_outcomes_of(handle)
+        assert len(all_outcomes) == 4, f'Expected 4 node results, got {len(all_outcomes)}'
+        output = {key: value for key, value in all_outcomes.items() if not key.endswith(':0')}
 
         # Each key should be in 'workflow_name:task_index' format
         # Each value should be a Succeeded('completed_...')
@@ -721,12 +721,10 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
         assert task['completed_at'] is not None
 
         result = await asyncio.to_thread(handle.get, wait_ms=2000)
-        output = succeeded_value(result)
-        # Default terminal results: dict keyed by node_id
-        assert isinstance(output, dict)
-        terminal_results = list(cast(WorkflowTerminalResults, output).values())
-        assert len(terminal_results) == 1
-        assert terminal_results[0] == Succeeded('completed_ONLY')
+        assert succeeded_value(result) == NoWorkflowOutput()
+        node_results = list((await node_outcomes_of(handle)).values())
+        assert len(node_results) == 1
+        assert node_results[0] == Succeeded('completed_ONLY')
 
 
 # =============================================================================

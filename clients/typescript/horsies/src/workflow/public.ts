@@ -43,7 +43,6 @@ export {
   type UpstreamCode,
   type UpstreamValue,
   type WorkflowOutput,
-  type WorkflowTerminalResults,
 } from "./node.ts";
 
 export type { ContextReadError, RuntimeWorkflowContext, WorkflowContext } from "./context.ts";

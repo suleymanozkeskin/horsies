@@ -6,9 +6,9 @@
 // zod schemas). A call that leaves out a field that the type requires (untyped code with no `parameters`) is a defect
 // of the call: `defineTask` throws `TypeError` for the params contract.
 //
-// `outputType` is optional, as the output of Python's `WorkflowDefinitionConfig` and Rust's `OutputlessResults`. A
-// workflow with no `outputType` has no output node: `get` reads the outcome of each terminal node
-// (`WorkflowTerminalResults`), and a sub-workflow node of it gives `NoWorkflowOutput`.
+// `outputType` is optional, as the output of Python's `WorkflowDefinitionConfig`. A workflow with no `outputType`
+// has no output node: `get` gives `NoWorkflowOutput` or the stored error, and a sub-workflow node of it gives
+// `NoWorkflowOutput`. The per-node values come from `results()`.
 
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { defineTask } from "../contract/define-task.ts";

@@ -8,7 +8,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use horsies::{
-    CustomCode, CustomErrorCode, HorsiesError, NodeKey, NodeResult, OnError, OutputlessResults,
+    CustomCode, CustomErrorCode, HorsiesError, NoWorkflowOutput, NodeKey, NodeResult, OnError,
     SubWorkflowFailure, SubWorkflowNode, SubWorkflowParameters, SuccessCase, SuccessPolicy,
     TaskNode, TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle, WorkflowNodeStatus,
     WorkflowSpecBuilder, WorkflowStatus,
@@ -429,10 +429,13 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
     let _policy = spec.success_policy(
         SuccessPolicy::new(vec![SuccessCase::new([required])]).optional([optional]),
     );
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
-    let results = output(&handle).await;
-    let Some(TaskOutcome::Succeeded(required)) = results.get("e2e_sub_outputless_ok") else {
+    assert_eq!(output(&handle).await, NoWorkflowOutput);
+    let results = handle.results().await.expect("the node results");
+    let Some(NodeResult::Outcome(TaskOutcome::Succeeded(required))) =
+        results.get("e2e_sub_outputless_ok")
+    else {
         panic!("the required child reads as Succeeded");
     };
     assert_eq!(
@@ -441,9 +444,9 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
             .expect("the required child's value decodes"),
         "required_ok"
     );
-    let failed = results
-        .get("e2e_sub_outputless_fail_child")
-        .expect("the result of the failed child");
+    let Some(NodeResult::Outcome(failed)) = results.get("e2e_sub_outputless_fail_child") else {
+        panic!("the failed child has a stored result");
+    };
     let _failure = subworkflow_failure(failed, child_of(&nodes[1]));
 }
 
@@ -458,7 +461,7 @@ async fn test_parallel_subworkflows_preserve_independent_success_and_failure() {
     let failing = spec.sub_workflow(child::<SubFail>("e2e_sub_parallel_fail_child"));
     let _policy =
         spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([ok])]).optional([failing]));
-    let handle = start::<OutputlessResults>(&suite, spec).await;
+    let handle = start::<NoWorkflowOutput>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0].status, "COMPLETED");

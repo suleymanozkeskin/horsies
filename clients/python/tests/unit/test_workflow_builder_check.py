@@ -23,6 +23,7 @@ from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
@@ -913,7 +914,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         """At run time this fails the parent node, so check reports it."""
         app = _make_custom_app(('scraping', 30))
 
-        class Child(WorkflowDefinition[Any]):
+        class Child(WorkflowDefinition[NoWorkflowOutput]):
             name = 'child_refused_default'
             definition_key = 'child_refused_default.v1'
 
@@ -948,7 +949,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         that is down at boot. It does not stop the process, and it is not silent."""
         app = _make_custom_app(('scraping', 30))
 
-        class Child(WorkflowDefinition[Any]):
+        class Child(WorkflowDefinition[NoWorkflowOutput]):
             name = 'child_broken_validator'
             definition_key = 'child_broken_validator.v1'
 
@@ -987,7 +988,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         at run time. It is not a finding of this check."""
         app = _make_custom_app(('scraping', 30))
 
-        class Child(WorkflowDefinition[Any]):
+        class Child(WorkflowDefinition[NoWorkflowOutput]):
             name = 'child_raises'
             definition_key = 'child_raises.v1'
 
@@ -1071,7 +1072,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         walk, and check reports it: at run time its nesting never ends."""
         app = _make_custom_app(('scraping', 30))
 
-        class Recur(WorkflowDefinition[Any]):
+        class Recur(WorkflowDefinition[NoWorkflowOutput]):
             name = 'recur'
             definition_key = 'recur.v1'
 
@@ -1107,7 +1108,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         """
         app = _make_custom_app(('scraping', 30))
 
-        class Recur(WorkflowDefinition[Any]):
+        class Recur(WorkflowDefinition[NoWorkflowOutput]):
             name = 'recur_pv'
             definition_key = 'recur_pv.v1'
 
@@ -1125,7 +1126,7 @@ class TestRecursiveSubworkflowBindingInCheck:
                     )
                 bad = TaskNode(function=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(
-                    name=f'{cls.name}_d{depth}', nodes=[bad], output=bad,
+                    name=f'{cls.name}_d{depth}', nodes=[bad],
                 )
 
         @app.check_workflow_builder()
@@ -1149,7 +1150,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         """
         app = _make_custom_app(('scraping', 30))
 
-        class EmptyChild(WorkflowDefinition[Any]):
+        class EmptyChild(WorkflowDefinition[NoWorkflowOutput]):
             name = 'empty_child'
             definition_key = 'empty_child.v1'
 
@@ -1172,7 +1173,7 @@ class TestRecursiveSubworkflowBindingInCheck:
         """A nested static child failing with MULTIPLE errors surfaces them all."""
         app = _make_custom_app(('scraping', 30))
 
-        class MultiBadChild(WorkflowDefinition[Any]):
+        class MultiBadChild(WorkflowDefinition[NoWorkflowOutput]):
             name = 'multi_bad'
             definition_key = 'multi_bad.v1'
 

@@ -17,7 +17,7 @@ A definition with parameters implements `build_with` in place of `define`.
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, OutputlessResults, TaskError, WorkflowDefinition, WorkflowInput,
+    task, HorsiesError, NoWorkflowOutput, TaskError, WorkflowDefinition, WorkflowInput,
     WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ struct RegionParams {
 struct RegionReport;
 
 impl WorkflowDefinition for RegionReport {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = RegionParams;
 
     fn name() -> &'static str {
@@ -68,14 +68,14 @@ impl WorkflowDefinition for RegionReport {
 
 ```rust
 use horsies::{
-    HorsiesError, OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowDefinition,
+    HorsiesError, NoWorkflowOutput, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowDefinition,
     WorkflowSpecBuilder,
 };
 
 struct AllRegions;
 
 impl WorkflowDefinition for AllRegions {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -156,7 +156,7 @@ A child whose parameters take a dependency's result with `arg_from` is built whe
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, OutputlessResults, SubWorkflowParameters, TaskError, TaskOutcome,
+    task, HorsiesError, NoWorkflowOutput, SubWorkflowParameters, TaskError, TaskOutcome,
     WorkflowDefinitionConfig, WorkflowDefinition, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
@@ -174,7 +174,7 @@ struct RegionListParams {
 struct RegionFanOut;
 
 impl WorkflowDefinition for RegionFanOut {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = RegionListParams;
 
     fn name() -> &'static str {
@@ -210,7 +210,7 @@ impl WorkflowDefinition for RegionFanOut {
 struct DailyRegions;
 
 impl WorkflowDefinition for DailyRegions {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -285,7 +285,7 @@ A failed child gives its node a `TaskError` whose `sub_workflow()` returns the `
 
 ### A child with no output node
 
-A COMPLETED child with no output node stores `Ok(null)` as the result of its node. The node reads as the one value `NoWorkflowOutput`, not as `()`: a child whose output node returns `()` is a different state. A definition whose sub-workflow node is read declares `type Output = NoWorkflowOutput`. A stored value other than `null` does not read as `NoWorkflowOutput`. A definition whose own result is read as the outcome of each node declares `type Output = OutputlessResults`.
+A COMPLETED child with no output node stores `Ok(null)` as the result of its node. The node reads as the one value `NoWorkflowOutput`, not as `()`: a child whose output node returns `()` is a different state. A definition with no output node declares `type Output = NoWorkflowOutput`, whether its sub-workflow node or its own handle is read. A stored value other than `null` does not read as `NoWorkflowOutput`.
 
 ## Nesting Limit
 

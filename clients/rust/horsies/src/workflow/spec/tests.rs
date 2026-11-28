@@ -636,7 +636,7 @@ fn every_refusal_of_the_second_gate_is_reported() {
 }
 
 /// #575: the output type of a spec is the type of its output node, or
-/// `OutputlessResults` or `NoWorkflowOutput` for a spec with no output node.
+/// `NoWorkflowOutput` for a spec with no output node.
 #[test]
 fn the_output_type_is_checked() {
     let mut builder = test_builder("out");
@@ -646,12 +646,6 @@ fn the_output_type_is_checked() {
     spec.check_output_type::<f64>().unwrap();
     assert_eq!(
         spec.check_output_type::<String>().unwrap_err().code,
-        Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
-    );
-    assert_eq!(
-        spec.check_output_type::<OutputlessResults>()
-            .unwrap_err()
-            .code,
         Some(HorsiesErrorCode::WorkflowOutputTypeMismatch)
     );
     assert_eq!(
@@ -666,7 +660,6 @@ fn the_output_type_is_checked() {
     let spec = builder.build().unwrap();
     assert!(matches!(spec.output, SpecOutput::NoOutput));
     assert_eq!(spec.success_policy, None);
-    spec.check_output_type::<OutputlessResults>().unwrap();
     spec.check_output_type::<NoWorkflowOutput>().unwrap();
     assert_eq!(
         spec.check_output_type::<f64>().unwrap_err().code,

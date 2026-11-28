@@ -21,6 +21,7 @@ from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions
 from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     TaskNode,
     SubWorkflowNode,
     WorkflowSpec,
@@ -538,7 +539,7 @@ class TestCachedSpecRejection:
         prebuilt = WorkflowSpec(name='cached', nodes=[TaskNode(function=fn_a)])
         assert prebuilt.definition_key is None
 
-        class CachedWorkflow(WorkflowDefinition[Any]):
+        class CachedWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'cached'
             definition_key = _definition_key('cached')
             fetch = TaskNode(function=fn_a)
@@ -555,7 +556,7 @@ class TestCachedSpecRejection:
         """Shared cached spec is rejected regardless of which class returns it."""
         shared = WorkflowSpec(name='shared', nodes=[TaskNode(function=fn_a)])
 
-        class WorkflowA(WorkflowDefinition[Any]):
+        class WorkflowA(WorkflowDefinition[NoWorkflowOutput]):
             name = 'a'
             definition_key = _definition_key('workflow_a')
             fetch = TaskNode(function=fn_a)
@@ -565,7 +566,7 @@ class TestCachedSpecRejection:
                 _ = app, params
                 return shared
 
-        class WorkflowB(WorkflowDefinition[Any]):
+        class WorkflowB(WorkflowDefinition[NoWorkflowOutput]):
             name = 'b'
             definition_key = _definition_key('workflow_b')
             fetch = TaskNode(function=fn_a)
@@ -591,7 +592,7 @@ class TestCachedSpecRejection:
             def get_broker(self) -> None:
                 return None
 
-        class SelfCachingWorkflow(WorkflowDefinition[Any]):
+        class SelfCachingWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'self_caching'
             definition_key = _definition_key('self_caching')
             fetch = TaskNode(function=fn_a)

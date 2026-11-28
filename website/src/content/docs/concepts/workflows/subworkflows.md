@@ -640,9 +640,9 @@ Outputless child workflows are orchestration-only when used through
 as `WorkflowDefinition[NoWorkflowOutput]`; the parent node receives
 `Succeeded(NoWorkflowOutput())`, a `TaskOutcome[NoWorkflowOutput, TaskError]`,
 when the child completes. `NoWorkflowOutput` is not `None`: a child whose output
-node returns `None` gives `Succeeded(None)`. The terminal-results map
-returned by a top-level outputless `app.workflow(...).get()` is not exposed as
-a nested subworkflow output.
+node returns `None` gives `Succeeded(None)`. A top-level outputless
+`app.workflow(...).get()` gives the same `Succeeded(NoWorkflowOutput())`; read
+the values of its nodes with `results()`, `nodes()` or `result_for()`.
 
 ### 6.6 Limits
 

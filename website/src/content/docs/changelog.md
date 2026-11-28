@@ -183,6 +183,20 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Python, Rust): a workflow with no output node declares
+  `NoWorkflowOutput`, and `get()` of its handle gives `NoWorkflowOutput`.**
+  Python declares `WorkflowDefinition[NoWorkflowOutput]` and Rust declares
+  `type Output = NoWorkflowOutput`; the sub-workflow node of the definition
+  reads the same value. `get()` gives `Succeeded(NoWorkflowOutput)` or the
+  stored error. The terminal-node map is removed: Rust `OutputlessResults` and
+  Python `WorkflowTerminalResults`. The value of each node comes from
+  `results()`, `nodes()` and `result_for()`; a SKIPPED node has no stored
+  result, so `results()` leaves it out and `nodes()` shows its status.
+  `app.workflow(..., output=None)` returns `WorkflowSpec[NoWorkflowOutput]`.
+  Python refuses `WorkflowDefinition[Any]` and a subclass with no generic
+  parameter when the definition has no `config.output` (HRS-025); Rust
+  refuses any `Output` other than `NoWorkflowOutput` for a definition with
+  no output node (HRS-025). The core stores the same result as before.
 - **A send refuses a `timeout_ms` that no worker accepts.** A present
   `timeout_ms` that is not an int, is below 1000 ms or is above 4294967295 ms
   is refused at the send with `VALIDATION_FAILED` before any statement, and

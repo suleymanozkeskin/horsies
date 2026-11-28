@@ -5,11 +5,10 @@
 // public members, so a reference of another build is a check finding, not a type error (one TypeScript type serves
 // every build).
 
-import type { JsonValue } from "../codec/json-value.ts";
 import type { ContextUse } from "../contract/define-task.ts";
 import type { IsUpstreamOutcome, ParameterSchemas } from "../contract/schema.ts";
 import type { AnyWire, EmptyObject, Flat, ValueOf } from "../wire/infer.ts";
-import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
+import type { TaskError } from "../wire/task-error.ts";
 import type { ParameterSent, SenderMayLeaveOut } from "../zod/infer.ts";
 
 /** Type-only key of the types of a node. It does not exist at run time. */
@@ -140,20 +139,9 @@ export interface BuildReturn {
 
 /** What a build of a workflow with no `outputType` returns: no output node, and a success policy. */
 export interface BuildReturnWithoutOutput extends BuildReturn {
-  /** No output node: the workflow's result is the outcome of each terminal node. */
+  /** No output node: the workflow's result is `NoWorkflowOutput`. */
   readonly output?: never;
 }
-
-/**
- * The result of a workflow with no output node, as `get` reads it: the outcome of each terminal node, by node id
- * (Python's `WorkflowTerminalResults`, Rust's `OutputlessResults`). Each value is untyped JSON and each custom code is
- * open, because the nodes run many tasks. A node entry that does not read is a failed outcome with the built-in code
- * `RESULT_DESERIALIZATION_ERROR` and the node id in `data.node_id`; the other entries stay readable.
- */
-export type WorkflowTerminalResults = {
-  readonly kind: "terminalResults";
-  readonly byNodeId: ReadonlyMap<string, TaskOutcome<JsonValue, string>>;
-};
 
 /**
  * The success value of a sub-workflow node whose child has no output node, and of an `h.taskOutcome` parameter of
@@ -191,14 +179,14 @@ export type NodeById<N, Id extends string> =
   N extends NodeRef<unknown, string, infer NodeId> ? (Id extends NodeId ? N : never) : never;
 
 /**
- * The output value that `get` reads for a workflow: the output type of its output node, or `WorkflowTerminalResults`
+ * The output value that `get` reads for a workflow: the output type of its output node, or `NoWorkflowOutput`
  * for a workflow with no `outputType`. For a build return that may or may not hold an output node, either one.
  */
 export type WorkflowOutput<R extends BuildReturn> = R extends { readonly output: AnyNode }
   ? NodeOutput<R["output"]>
   : R extends BuildReturnWithoutOutput
-    ? WorkflowTerminalResults
-    : NodeOutput<OutputNode<R>> | WorkflowTerminalResults;
+    ? NoWorkflowOutput
+    : NodeOutput<OutputNode<R>> | NoWorkflowOutput;
 
 /**
  * The success value of a sub-workflow node of a workflow, and of an `h.taskOutcome` parameter of it: the output type
