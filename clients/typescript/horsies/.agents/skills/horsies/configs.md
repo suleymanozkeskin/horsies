@@ -466,7 +466,10 @@ I/O and stops at the first phase that refuses:
 2. Workflows: each listed workflow with no params and each check case is
    built and checked (`HRS-028`, `HRS-029`, the spec checks), and the walk
    into its sub-workflows refuses a nesting that fails for certain
-   (`HRS-036`, `HRS-037`). The builds run in the check's process.
+   (`HRS-036`, `HRS-037`). The walk of one root builds at most
+   `MAX_CHECK_SUBWORKFLOW_BUILDS` children (`MAX_WORKFLOW_NODES` times
+   `MAX_SUBWORKFLOW_DEPTH`, 320,000); past it, `HRS-039` and the walk of
+   that root stops. The builds run in the check's process.
 3. Implementations: each listed contract has an implementation in this
    entry (`HRS-300`), so a passing check means that a worker start from the
    same entry passes the same rule.

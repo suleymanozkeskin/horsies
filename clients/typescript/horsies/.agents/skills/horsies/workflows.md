@@ -296,8 +296,8 @@ export const allRegions = defineWorkflow(
   `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `check` reports a nesting that reaches
   it for certain (`HRS-036`) and a child that includes itself with the same
   parameters and no wait between (`HRS-037`). The walk of one root builds at
-  most `MAX_CHECK_SUBWORKFLOW_BUILDS` children (320,000: the node bound of
-  10,000 times the depth limit of 32); at the bound it stops and reports
+  most `MAX_CHECK_SUBWORKFLOW_BUILDS` children (`MAX_WORKFLOW_NODES` times
+  `MAX_SUBWORKFLOW_DEPTH`, 320,000); at the bound it stops and reports
   `HRS-039`.
 - A failed child fails its node with `SUB_WORKFLOW_FAILED`. The node's
   `error.subWorkflow` holds the child's `workflowId` and its `summary`
@@ -574,7 +574,10 @@ its `HRS-nnn` code; the check fails.
   each sub-workflow node with static parameters (a node fed by an upstream
   node is not walked) and reports a nesting only when no node on the path
   waits: past depth 32 (`HRS-036`), or a sub-workflow that includes itself
-  with the same parameters (`HRS-037`).
+  with the same parameters (`HRS-037`). The walk of one root builds at most
+  `MAX_CHECK_SUBWORKFLOW_BUILDS` children (`MAX_WORKFLOW_NODES` times
+  `MAX_SUBWORKFLOW_DEPTH`, 320,000); past it, one `HRS-039` for that root and
+  the walk of that root stops. Other roots go on.
 
 ## Validation Codes
 
@@ -599,7 +602,7 @@ its `HRS-nnn` code; the check fails.
 | `HRS-033` | An `onError` that is not `"fail"` or `"pause"` |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or includes itself with the same parameters |
 | `HRS-038` | More than 10,000 nodes |
-| `HRS-039` | The nesting walk of one root reached its bound of 320,000 child builds (10,000 nodes times the depth limit of 32) |
+| `HRS-039` | The nesting walk of one root reached `MAX_CHECK_SUBWORKFLOW_BUILDS` child builds (`MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`, 320,000) |
 | `HRS-302` | A node of a task that the app does not list |
 
 ## Common Pitfalls
