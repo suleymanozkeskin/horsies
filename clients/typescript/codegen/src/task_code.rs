@@ -152,7 +152,7 @@ fn bracket_list(items: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use horsies_core::catalog::{
-        CallForms, CatalogMember, CodeCatalog, PythonEnumBase, TerminalStates,
+        CallForms, CatalogMember, CodeCatalog, EnumValues, TerminalStates,
     };
 
     use super::*;
@@ -164,9 +164,9 @@ mod tests {
         members: &'static [CatalogMember],
     ) -> CodeCatalog {
         CodeCatalog {
-            python_module: module,
-            python_class: class,
-            python_base: PythonEnumBase::StrEnum,
+            module,
+            type_name: class,
+            values: EnumValues::EqualText,
             doc: "",
             members,
             terminal_states: TerminalStates::NotALifecycle,
@@ -190,7 +190,7 @@ mod tests {
 
     /// Three catalogs in two modules; the second module name sorts first.
     const SAMPLE: CodeUnion = CodeUnion {
-        python_name: "SampleCode",
+        alias_name: "SampleCode",
         doc: "",
         catalogs: &[
             catalog("task_codes", "OutcomeCode", OUTCOME_MEMBERS),

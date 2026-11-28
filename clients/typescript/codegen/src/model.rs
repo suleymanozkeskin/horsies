@@ -1,18 +1,17 @@
 //! The adapter over the codegen model of horsies-core.
 //!
-//! Some fields and types of the model have Python names: `python_module`,
-//! `python_class`, `python_name`, `python_type`, `PythonValue` and
-//! `PythonItem`. This module is the only renderer code that reads them. It
-//! gives the rest of the renderer neutral names, so a rename in the core
-//! changes this module's functions only. The renderer reads every other
+//! This module is the only renderer code that reads the model's field
+//! names and its value types (`CoreValueType`, `CoreItemType`). It gives the
+//! rest of the renderer its own names, so a rename in the core changes this
+//! module's functions only. The renderer reads every other
 //! part of the model directly. A test module builds literal model values
 //! with the core's own field names, because a renderer test renders the
 //! core's types.
 //!
-//! A field name does not change a value: `python_module` holds a short
+//! The `module` field holds a short
 //! group name (`broker`, `task_send_errors`), which is also the stem of the
 //! TypeScript module. The renderer does not read the facts that only
-//! Python needs (`python_base`, the base class of a Python enum).
+//! Python needs (`values`, whether enum members equal their text).
 
 use horsies_core::catalog::CodeCatalog;
 use horsies_core::error_catalog::{
@@ -21,31 +20,32 @@ use horsies_core::error_catalog::{
 };
 use horsies_core::events::{CodeUnion, VariantType};
 use horsies_core::manifest_schema::{
-    IntBound, ManifestField, ManifestType, PythonItem, PythonValue, TaggedVariant,
+    IntBound, ItemType as CoreItemType, ManifestField, ManifestType, TaggedVariant,
+    ValueType as CoreValueType,
 };
 
 // Code catalogs.
 
 /// The module of a code catalog: a group name such as `status`. Pure.
 pub fn catalog_module(catalog: &CodeCatalog) -> &'static str {
-    catalog.python_module
+    catalog.module
 }
 
 /// The type name of a code catalog, such as `TaskStatus`. Pure.
 pub fn catalog_type_name(catalog: &CodeCatalog) -> &'static str {
-    catalog.python_class
+    catalog.type_name
 }
 
 // Error catalogs.
 
 /// The module of an error catalog, such as `task_send_errors`. Pure.
 pub fn error_catalog_module(catalog: &ErrorCatalog) -> &'static str {
-    catalog.python_module
+    catalog.module
 }
 
 /// The type name of an error class, such as `TaskSendEnqueueFailed`. Pure.
 pub fn error_class_type_name(class: &ErrorClass) -> &'static str {
-    class.python_class
+    class.type_name
 }
 
 /// Whether the cause slot of an error class always holds a cause.
@@ -88,15 +88,15 @@ pub fn class_slot(slot: &ErrorSlot) -> ClassSlot {
         ErrorSlot::AlwaysRetryable => ClassSlot::AlwaysRetryable,
         ErrorSlot::Field {
             name,
-            python_type,
+            slot_type,
             repr,
         } => ClassSlot::Field {
             name,
-            slot_type: python_type,
+            slot_type,
             display: repr,
         },
-        ErrorSlot::Exception { python_type } => ClassSlot::Cause {
-            cause_type: match python_type {
+        ErrorSlot::Exception { cause_type } => ClassSlot::Cause {
+            cause_type: match cause_type {
                 ExceptionType::Exception => CauseSlot::Required,
                 ExceptionType::ExceptionOrNoCause => CauseSlot::Optional,
             },
@@ -111,39 +111,39 @@ pub fn class_slots(class: &ErrorClass) -> Vec<ClassSlot> {
 
 /// The module of an error union: the module of its catalog. Pure.
 pub fn error_union_module(union: &ErrorUnion) -> &'static str {
-    union.python_module
+    union.module
 }
 
 /// The module of a code subset: the module of the catalog that uses it.
 /// Pure.
 pub fn code_subset_module(subset: &CodeSubset) -> &'static str {
-    subset.python_module
+    subset.module
 }
 
 /// The type name of an exception class of the core, such as
 /// `OutcomeDecodeError`. Pure.
 pub fn exception_class_type_name(class: &ExceptionClass) -> &'static str {
-    class.python_class
+    class.type_name
 }
 
 /// The module of a record that a field of an error class holds. Pure.
 pub fn record_module(record: &RecordClass) -> &'static str {
-    record.python_module
+    record.module
 }
 
 /// The type name of a record, such as `TaskSendPayload`. Pure.
 pub fn record_type_name(record: &RecordClass) -> &'static str {
-    record.python_class
+    record.type_name
 }
 
 /// The type of a field of a record. Pure.
 pub fn record_field_type(field: &RecordField) -> RecordFieldType {
-    field.python_type
+    field.field_type
 }
 
 /// The module of a named text type, such as `retention_class`. Pure.
 pub fn new_type_module(new_type: &TextNewType) -> &'static str {
-    new_type.python_module
+    new_type.module
 }
 
 // Manifests, the workflow spec data and the schedule pattern.
@@ -187,41 +187,41 @@ pub enum ValueType {
 }
 
 /// The item type of the model's `item`. Pure.
-pub fn item_type(item: PythonItem) -> ItemType {
+pub fn item_type(item: CoreItemType) -> ItemType {
     match item {
-        PythonItem::Bool => ItemType::Bool,
-        PythonItem::Str => ItemType::Str,
-        PythonItem::Int(bound) => ItemType::Int(bound),
-        PythonItem::Named(name) => ItemType::Named(name),
-        PythonItem::TimeOfDay => ItemType::TimeOfDay,
-        PythonItem::Duration(bound) => ItemType::Duration(bound),
+        CoreItemType::Bool => ItemType::Bool,
+        CoreItemType::Str => ItemType::Str,
+        CoreItemType::Int(bound) => ItemType::Int(bound),
+        CoreItemType::Named(name) => ItemType::Named(name),
+        CoreItemType::TimeOfDay => ItemType::TimeOfDay,
+        CoreItemType::Duration(bound) => ItemType::Duration(bound),
     }
 }
 
 /// The type of a manifest field. Pure.
 pub fn field_value_type(field: &ManifestField) -> ValueType {
     match field.value {
-        PythonValue::Bool => ValueType::Bool,
-        PythonValue::Str => ValueType::Str,
-        PythonValue::Int(bound) => ValueType::Int(bound),
-        PythonValue::Named(name) => ValueType::Named(name),
-        PythonValue::List(item) => ValueType::List(item_type(item)),
-        PythonValue::Map(item) => ValueType::Map(item_type(item)),
-        PythonValue::Optional(item) => ValueType::Optional(item_type(item)),
-        PythonValue::TimeOfDay => ValueType::TimeOfDay,
-        PythonValue::Duration(bound) => ValueType::Duration(bound),
+        CoreValueType::Bool => ValueType::Bool,
+        CoreValueType::Str => ValueType::Str,
+        CoreValueType::Int(bound) => ValueType::Int(bound),
+        CoreValueType::Named(name) => ValueType::Named(name),
+        CoreValueType::List(item) => ValueType::List(item_type(item)),
+        CoreValueType::Map(item) => ValueType::Map(item_type(item)),
+        CoreValueType::Optional(item) => ValueType::Optional(item_type(item)),
+        CoreValueType::TimeOfDay => ValueType::TimeOfDay,
+        CoreValueType::Duration(bound) => ValueType::Duration(bound),
     }
 }
 
 /// The type name of a manifest type: a record, a tagged union or a choice.
 /// A field names a type by this name (`ValueType::Named`). Pure.
 pub fn manifest_type_name(manifest_type: &ManifestType) -> &'static str {
-    manifest_type.python_name
+    manifest_type.type_name
 }
 
 /// The type name of one variant of a tagged manifest type. Pure.
 pub fn tagged_variant_type_name(variant: &TaggedVariant) -> &'static str {
-    variant.python_class
+    variant.type_name
 }
 
 // Events.
@@ -229,13 +229,13 @@ pub fn tagged_variant_type_name(variant: &TaggedVariant) -> &'static str {
 /// The name of the union of the catalogs of a code union, such as
 /// `BuiltInTaskCode`. Pure.
 pub fn code_union_alias_name(union: &CodeUnion) -> &'static str {
-    union.python_name
+    union.alias_name
 }
 
 /// The type name of one variant of a closed event type: the type name,
 /// then the variant name. Pure.
 pub fn event_variant_type_name(variant: &VariantType) -> &'static str {
-    variant.python_class
+    variant.type_name
 }
 
 /// A variant of a closed event type whose interface is named `type_name`,
@@ -248,7 +248,7 @@ pub const fn event_variant(
 ) -> VariantType {
     VariantType {
         tag,
-        python_class: type_name,
+        type_name,
         doc: "",
         fields,
     }
@@ -273,7 +273,7 @@ mod tests {
         max: 100,
     };
 
-    fn field(value: PythonValue) -> ManifestField {
+    fn field(value: CoreValueType) -> ManifestField {
         ManifestField {
             name: "field",
             doc: "",
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn each_error_slot_has_its_neutral_slot() {
         let class = ErrorClass {
-            python_class: "Sample",
+            type_name: "Sample",
             doc: "",
             slots: &[
                 ErrorSlot::CodeMember {
@@ -318,14 +318,14 @@ mod tests {
                 ErrorSlot::AlwaysRetryable,
                 ErrorSlot::Field {
                     name: "message",
-                    python_type: SlotType::Str,
+                    slot_type: SlotType::Str,
                     repr: SlotRepr::Hidden,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::Exception,
+                    cause_type: ExceptionType::Exception,
                 },
                 ErrorSlot::Exception {
-                    python_type: ExceptionType::ExceptionOrNoCause,
+                    cause_type: ExceptionType::ExceptionOrNoCause,
                 },
             ],
         };
@@ -381,24 +381,24 @@ mod tests {
     #[test]
     fn each_manifest_value_has_its_value_type() {
         let cases = [
-            (PythonValue::Bool, ValueType::Bool),
-            (PythonValue::Str, ValueType::Str),
-            (PythonValue::Int(BOUND), ValueType::Int(BOUND)),
-            (PythonValue::Named("Queues"), ValueType::Named("Queues")),
+            (CoreValueType::Bool, ValueType::Bool),
+            (CoreValueType::Str, ValueType::Str),
+            (CoreValueType::Int(BOUND), ValueType::Int(BOUND)),
+            (CoreValueType::Named("Queues"), ValueType::Named("Queues")),
             (
-                PythonValue::List(PythonItem::Int(BOUND)),
+                CoreValueType::List(CoreItemType::Int(BOUND)),
                 ValueType::List(ItemType::Int(BOUND)),
             ),
             (
-                PythonValue::Map(PythonItem::Named("TaskManifest")),
+                CoreValueType::Map(CoreItemType::Named("TaskManifest")),
                 ValueType::Map(ItemType::Named("TaskManifest")),
             ),
             (
-                PythonValue::Optional(PythonItem::Str),
+                CoreValueType::Optional(CoreItemType::Str),
                 ValueType::Optional(ItemType::Str),
             ),
-            (PythonValue::TimeOfDay, ValueType::TimeOfDay),
-            (PythonValue::Duration(BOUND), ValueType::Duration(BOUND)),
+            (CoreValueType::TimeOfDay, ValueType::TimeOfDay),
+            (CoreValueType::Duration(BOUND), ValueType::Duration(BOUND)),
         ];
         for (value, expected) in cases {
             assert_eq!(field_value_type(&field(value)), expected);
@@ -408,12 +408,12 @@ mod tests {
     #[test]
     fn each_manifest_item_has_its_item_type() {
         let cases = [
-            (PythonItem::Bool, ItemType::Bool),
-            (PythonItem::Str, ItemType::Str),
-            (PythonItem::Int(BOUND), ItemType::Int(BOUND)),
-            (PythonItem::Named("Weekday"), ItemType::Named("Weekday")),
-            (PythonItem::TimeOfDay, ItemType::TimeOfDay),
-            (PythonItem::Duration(BOUND), ItemType::Duration(BOUND)),
+            (CoreItemType::Bool, ItemType::Bool),
+            (CoreItemType::Str, ItemType::Str),
+            (CoreItemType::Int(BOUND), ItemType::Int(BOUND)),
+            (CoreItemType::Named("Weekday"), ItemType::Named("Weekday")),
+            (CoreItemType::TimeOfDay, ItemType::TimeOfDay),
+            (CoreItemType::Duration(BOUND), ItemType::Duration(BOUND)),
         ];
         for (item, expected) in cases {
             assert_eq!(item_type(item), expected);
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn manifest_types_and_variants_have_their_type_names() {
         let variant = TaggedVariant {
-            python_class: "CustomQueues",
+            type_name: "CustomQueues",
             tag_value: "CUSTOM",
             doc: "",
             fields: VariantFields::Own(&[]),
@@ -443,7 +443,7 @@ mod tests {
         );
         let variant = VariantType {
             tag: "BuiltIn",
-            python_class: "AttemptErrorCodeBuiltIn",
+            type_name: "AttemptErrorCodeBuiltIn",
             doc: "",
             fields: &[],
         };

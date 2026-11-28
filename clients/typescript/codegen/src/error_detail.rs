@@ -324,8 +324,8 @@ mod tests {
     }
 
     const PROBE_ERROR: ExceptionClass = ExceptionClass {
-        python_module: "probe_errors",
-        python_class: "ProbeReadError",
+        module: "probe_errors",
+        type_name: "ProbeReadError",
         doc: "",
     };
 
@@ -466,8 +466,8 @@ mod tests {
     #[should_panic(expected = "the exception class ProbeFailure does not end in Error")]
     fn a_core_exception_class_without_the_suffix_is_a_defect() {
         let _cause = generated_cause(&ExceptionClass {
-            python_module: "probe_errors",
-            python_class: "ProbeFailure",
+            module: "probe_errors",
+            type_name: "ProbeFailure",
             doc: "",
         });
     }

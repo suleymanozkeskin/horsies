@@ -139,7 +139,7 @@ impl RawCatalogError {
     /// slot. Pure.
     pub fn of<E: ErrorClassValues>(subject: &str, error: &E) -> Self {
         Self {
-            class: ErrorEnum::python_class(error).to_owned(),
+            class: ErrorEnum::type_name(error).to_owned(),
             slots: error
                 .slot_values()
                 .into_iter()
@@ -169,7 +169,7 @@ fn slot_value(subject: &str, value: SlotData<'_>) -> RawSlotValue {
             text: text_of_uuid(id),
         },
         SlotData::CodeMember { catalog, value } => RawSlotValue::CodeMember {
-            catalog: catalog.python_class.to_owned(),
+            catalog: catalog.type_name.to_owned(),
             value: value.to_owned(),
         },
         SlotData::Exception(exception) => RawSlotValue::Exception {
@@ -236,7 +236,7 @@ fn exception_record(subject: &str, exception: ExceptionValue) -> ExceptionRecord
             cause: CauseRecord::new(subject, text, retryable, cause),
         },
         ExceptionValue::Generated { class, text } => ExceptionRecord::Generated {
-            class: class.python_class.to_owned(),
+            class: class.type_name.to_owned(),
             text,
         },
         ExceptionValue::ClientClass { class, text } => ExceptionRecord::ClientClass {
