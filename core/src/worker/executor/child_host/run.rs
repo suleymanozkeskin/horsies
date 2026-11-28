@@ -27,10 +27,10 @@ use crate::core::codec::JsonText;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalCode, TaskError};
 use crate::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
-use crate::core::task::fencing::FencingToken;
+use crate::core::task::fencing::TaskAttempt;
 use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
-use crate::events::{AttemptNumber, QueueName};
+use crate::events::{AttemptNumber, MaxRetries, QueueName};
 use crate::worker::execution::{
     build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
 };
@@ -58,6 +58,8 @@ pub(super) struct RunFacts {
     pub(super) task_name: String,
     pub(super) queue_name: QueueName,
     pub(super) attempt: AttemptNumber,
+    /// The retry budget of the task row.
+    pub(super) max_retries: MaxRetries,
     pub(super) worker_id: String,
     pub(super) claimed_at: DateTime<Utc>,
     /// Whether the stop before start cancels the task when no node links it
@@ -66,9 +68,10 @@ pub(super) struct RunFacts {
 }
 
 impl RunFacts {
-    /// The fencing token of the run: the task id and the attempt number.
-    pub(super) fn fencing_token(&self) -> FencingToken {
-        FencingToken::new(self.task_id, self.attempt)
+    /// The attempt facts of the run: the task id, the attempt number and the
+    /// retry budget. Its fencing token is the task id and the attempt number.
+    pub(super) fn task_attempt(&self) -> TaskAttempt {
+        TaskAttempt::new(self.task_id, self.attempt, self.max_retries)
     }
 }
 
@@ -532,7 +535,7 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
 
 /// The body of blocking task `task_name` (defined in `module`) on the
 /// calling thread, inside `span` (the span of the run's body scope), with
-/// `token` as the fencing token and `cancel` as the cancel signal of the
+/// `attempt` as the attempt facts and `cancel` as the cancel signal of the
 /// thread while the body runs ([`in_blocking_run`]): the body reads
 /// `run_cancel_state` and `run_cancel_signal` there. A panic is
 /// `UNHANDLED_EXCEPTION` with its record ([`panic_error`]).
@@ -542,10 +545,10 @@ pub(super) fn run_blocking_body(
     task_name: &str,
     module: TaskModule,
     span: &tracing::Span,
-    token: FencingToken,
+    attempt: TaskAttempt,
     cancel: RunCancelSignal,
 ) -> TaskResult<Vec<u8>> {
-    let body = || in_blocking_run(token, cancel, || as_blocking_body(|| task.execute(input)));
+    let body = || in_blocking_run(attempt, cancel, || as_blocking_body(|| task.execute(input)));
     match span.in_scope(|| catch_body_panic(body)) {
         Ok(result) => result,
         Err(record) => TaskResult::Err(panic_error(task_name, module, record)),

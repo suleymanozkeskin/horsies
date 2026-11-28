@@ -1,7 +1,7 @@
 // The run controls of `TaskRuntime.forTest`: a runtime for a test of a task body, with no worker, no database and no
 // addon.
 //
-// - `taskId` and the attempt are the test's; `fencingToken` is `{ taskId, value: attempt }`.
+// - `taskId`, the attempt and the retry budget are the test's (`MaxRetries.NONE` when it gives none); `fencingToken` is `{ taskId, value: attempt }`.
 // - `cancelState()` gives the test's cancel state for the whole call; `notRequested` when the test gives none.
 // - `signal` fires before the body starts when the cancel state is `requested`, with the reason `{ cause }` of that
 //   state, as after the cancel of a run. It never fires when the cancel state is `notRequested`.
@@ -19,6 +19,7 @@ import { engineKeysKeptText, type JsonValue } from "../codec/json-value.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import type { TaskId } from "../contract/ids.ts";
 import type { AttemptNumber } from "../child/attempt.ts";
+import { MaxRetries } from "../child/retry-budget.ts";
 import type { CancelState, RunControls } from "../child/runtime.ts";
 import { NOT_REQUESTED } from "../child/runtime.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -53,6 +54,8 @@ export interface StoredWorkflowContext {
 export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
   readonly taskId: TaskId;
   readonly attempt: AttemptNumber;
+  /** The retry budget of the task: `MaxRetries.parse(3)` with `attempt` 2 tests a run with 2 retries left. Left out: `MaxRetries.NONE`. */
+  readonly maxRetries?: MaxRetries;
   /** The app state of the test: `[[Db, fakePool]]`. */
   readonly state?: TestStateEntries<Keys>;
   /** The workflow context of the run, in its stored form. Left out: `noContext`, as a run outside a workflow. */
@@ -78,6 +81,7 @@ export function testRunControls<Keys extends readonly AnyStateKey[]>(options: Te
   return Object.freeze({
     taskId: options.taskId,
     attempt: options.attempt,
+    maxRetries: options.maxRetries ?? MaxRetries.NONE,
     signal: testSignal(cancelState),
     cancelState: () => cancelState,
     spawn: <T>(_name: string, work: (signal: AbortSignal) => Promise<T>) => ok(startedTestWork(work, cancelState)),

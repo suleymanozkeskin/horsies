@@ -2,17 +2,20 @@
 //!
 //! A body that takes `TaskRuntime` as its first parameter gets the app's
 //! state, the typed functions and the workflow builders of the app, the
-//! cancel signal and the cancel state of its run, the fencing token of its
-//! run, and a way to start work that belongs to its run. The app builds the
+//! cancel signal and the cancel state of its run, the fencing token and the
+//! attempt facts of its run (task id, attempt number, retry budget), and a
+//! way to start work that belongs to its run. The app builds the
 //! runtime when the task registers, so every worker child, which runs
 //! `main` again, has its own.
 
 use std::future::Future;
 use std::sync::Arc;
 
+use horsies_core::events::{AttemptNumber, MaxRetries, RetriesLeft};
 use horsies_core::{
-    run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, FencingToken,
-    FencingTokenRefused, RunCancelState, RunSignalRefused, RunSpawnRefused,
+    run_cancel_signal, run_cancel_state, run_fencing_token, run_task_attempt, spawn_in_run,
+    FencingToken, FencingTokenRefused, RunCancelState, RunSignalRefused, RunSpawnRefused,
+    TaskAttemptRefused,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -238,6 +241,52 @@ impl TaskRuntime {
         run_fencing_token()
     }
 
+    /// The id of the task of the current run. It is the same on every
+    /// attempt, and the same as `TaskHandle::task_id`: a stable key for an
+    /// idempotent write to another system.
+    ///
+    /// Errors: [`TaskAttemptRefused::NotInARun`] outside a run, as
+    /// [`Self::fencing_token`].
+    pub fn task_id(&self) -> Result<uuid::Uuid, TaskAttemptRefused> {
+        run_task_attempt().map(|facts| facts.task_id())
+    }
+
+    /// The attempt number of the current run: 1 is the first run, 2 the
+    /// first retry. The same numbering as the attempt rows of the task.
+    ///
+    /// Errors: [`TaskAttemptRefused::NotInARun`] outside a run.
+    pub fn attempt(&self) -> Result<AttemptNumber, TaskAttemptRefused> {
+        run_task_attempt().map(|facts| facts.attempt())
+    }
+
+    /// The retry budget of the task: the retries that follow its first
+    /// attempt, from 0.
+    ///
+    /// Errors: [`TaskAttemptRefused::NotInARun`] outside a run.
+    pub fn max_retries(&self) -> Result<MaxRetries, TaskAttemptRefused> {
+        run_task_attempt().map(|facts| facts.max_retries())
+    }
+
+    /// The retries left after the current run: `max_retries - (attempt - 1)`,
+    /// and 0 when the attempt is past the budget. A non-retryable error code
+    /// or `good_until` can end the retries before it reaches 0, so the last
+    /// attempt is not known in advance.
+    ///
+    /// ```ignore
+    /// #[horsies::task("charge", timeout_ms = 30_000)]
+    /// async fn charge(rt: TaskRuntime, order: Order) -> Result<(), TaskError<ChargeCode>> {
+    ///     let key = rt
+    ///         .task_id()
+    ///         .map_err(|refused| TaskError::custom(ChargeCode::NoRun, refused.to_string()))?;
+    ///     payments.charge(&order, &format!("charge-{key}")).await
+    /// }
+    /// ```
+    ///
+    /// Errors: [`TaskAttemptRefused::NotInARun`] outside a run.
+    pub fn retries_left(&self) -> Result<RetriesLeft, TaskAttemptRefused> {
+        run_task_attempt().map(|facts| facts.retries_left())
+    }
+
     /// Start `future` as work of the current run, named `name` in the
     /// reports of the run. The child waits for such work when the body
     /// returns, cancels it after the grace, and reports work that does not
@@ -312,6 +361,15 @@ mod tests {
     async fn outside_a_run_the_fencing_token_is_refused() {
         let runtime = app().task_runtime();
         assert_eq!(runtime.fencing_token(), Err(FencingTokenRefused::NotInARun));
+    }
+
+    #[tokio::test]
+    async fn outside_a_run_the_attempt_facts_are_refused() {
+        let runtime = app().task_runtime();
+        assert_eq!(runtime.task_id(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.attempt(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.max_retries(), Err(TaskAttemptRefused::NotInARun));
+        assert_eq!(runtime.retries_left(), Err(TaskAttemptRefused::NotInARun));
     }
 
     #[tokio::test]

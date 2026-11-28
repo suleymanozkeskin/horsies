@@ -45,7 +45,8 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.task_runtime import (
-    FencingToken,
+    AttemptNumber,
+    MaxRetries,
     RunCancelCell,
     TaskRuntime,
     run_task_runtime,
@@ -1279,12 +1280,23 @@ def _task_call_result(
             )
 
 
-def run_runtime(task_id: uuid.UUID, attempt: int, cancel: RunCancelCell) -> TaskRuntime:
-    """The ``TaskRuntime`` of attempt ``attempt`` of task ``task_id``, from
-    the run frame, whose ``cancel_state`` reads ``cancel``: the cell of the
-    run, which the child requests at an operator cancel or a deadline. The
-    core holds the attempt of a frame to 1 to ``MAX_ATTEMPT``. Pure."""
-    return run_task_runtime(FencingToken(task_id=task_id, value=attempt), cancel)
+def run_runtime(
+    task_id: uuid.UUID,
+    attempt: int,
+    max_retries: int,
+    cancel: RunCancelCell,
+) -> TaskRuntime:
+    """The ``TaskRuntime`` of attempt ``attempt`` of task ``task_id`` with the
+    retry budget ``max_retries``, from the run frame, whose ``cancel_state``
+    reads ``cancel``: the cell of the run, which the child requests at an
+    operator cancel or a deadline. The core holds the attempt of a frame to
+    1 to ``MAX_ATTEMPT`` and the budget to 0 to ``MAX_TASK_RETRIES``. Pure."""
+    return run_task_runtime(
+        task_id,
+        AttemptNumber(value=attempt),
+        MaxRetries(value=max_retries),
+        cancel,
+    )
 
 
 def _prepare_task_call(
@@ -1767,6 +1779,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     queue_name: str,
     attempt: int,
     trace: RunTrace,
+    max_retries: int = 0,
 ) -> RunReturn:
     """``run_isolated_task`` with a cancel that no operator cancel reaches:
     a run in this process outside the frame loop of a child (the tests and
@@ -1782,6 +1795,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
         orphan_self_heal=orphan_self_heal,
         queue_name=queue_name,
         attempt=attempt,
+        max_retries=max_retries,
         trace=trace,
         cancel=RunCancel(),
     )
@@ -1799,6 +1813,7 @@ def run_isolated_task(
     orphan_self_heal: bool,
     queue_name: str,
     attempt: int,
+    max_retries: int,
     trace: RunTrace,
     cancel: RunCancel,
 ) -> RunReturn:
@@ -1818,7 +1833,9 @@ def run_isolated_task(
     run, whose parent the send's carrier ``trace`` gives
     (``_run_isolated_after_running``). ``queue_name`` and ``attempt`` come
     with the run from the worker, and the workflow node from the start, for
-    the span and the log records of the body.
+    the span and the log records of the body. ``attempt`` and
+    ``max_retries`` (the retry budget of the row) also give the facts that
+    the body reads from its ``TaskRuntime``.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
     ``RecoveryConfig.terminate_orphaned_workflow_tasks``): with it, the
@@ -1908,7 +1925,7 @@ def run_isolated_task(
             workflow=started.workflow,
             trace=trace,
         ),
-        run_runtime(task_id, attempt, cancel.cell),
+        run_runtime(task_id, attempt, max_retries, cancel.cell),
         cancel,
     )
     cancel.end_body()

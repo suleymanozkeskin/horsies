@@ -367,6 +367,7 @@ impl SharedPool {
                     task_name: task.task_name.clone(),
                     queue_name: QueueName::cut(&task.queue_name),
                     attempt: task.retry.attempt(),
+                    max_retries: task.retry.max_retries_allowed(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,

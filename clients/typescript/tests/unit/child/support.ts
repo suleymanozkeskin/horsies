@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { runBody, type StoredBodyOutcome } from "../../../horsies/src/child/body.ts";
 import type { BodyEnd, BodyObservation } from "../../../horsies/src/child/body-observer.ts";
 import { attemptFromCore } from "../../../horsies/src/child/attempt.ts";
+import { maxRetriesFromCore } from "../../../horsies/src/child/retry-budget.ts";
 import { type LoopHolder, type LoopMarks, type RunNative, RunTable } from "../../../horsies/src/child/run-table.ts";
 import { type RunControls, taskRuntimeOf, type TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { StateValues } from "../../../horsies/src/child/state.ts";
@@ -108,6 +109,7 @@ export function tableRun(
     taskId: taskIdFromCore(RUN_TASK_ID, "test"),
     taskName: "test_task",
     attempt: attemptFromCore(2, "test"),
+    maxRetries: maxRetriesFromCore(3, "test"),
   });
 
   return { table, controls, runtime: taskRuntimeOf(controls, NO_WORKFLOW_CONTEXT), runKey };

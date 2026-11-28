@@ -262,8 +262,8 @@ mod tests {
         );
     }
 
-    /// 38 members, `RetrievalCode.ASYNC_CONTEXT` included: the blocking-form
-    /// mark does not remove a built-in code.
+    /// Every member of the four catalogs, `RetrievalCode.ASYNC_CONTEXT`
+    /// included: the blocking-form mark does not remove a built-in code.
     #[test]
     fn the_model_s_built_in_code_values_hold_every_member() {
         let text = built_in_code_values(&BUILT_IN_TASK_CODES);
@@ -272,7 +272,34 @@ mod tests {
             .iter()
             .map(|catalog| catalog.members.len())
             .sum();
-        assert_eq!(members, 38);
+        let expected_elements: Vec<String> = BUILT_IN_TASK_CODES
+            .catalogs
+            .iter()
+            .flat_map(|catalog| {
+                let (_module, type_name) = catalog_type_reference(catalog);
+                catalog
+                    .members
+                    .iter()
+                    .map(move |member| format!("  {}.{},", type_name, member.name))
+            })
+            .collect();
+        let rendered_elements: Vec<String> = text
+            .lines()
+            .filter(|line| line.starts_with("  ") && line.ends_with(','))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(rendered_elements, expected_elements);
+        let expected_values: Vec<String> = BUILT_IN_TASK_CODES
+            .catalogs
+            .iter()
+            .flat_map(|catalog| {
+                catalog
+                    .members
+                    .iter()
+                    .map(|member| string_literal(member.value))
+            })
+            .collect();
+        assert!(text.contains(&format!("readonly [{}]", expected_values.join(", "))));
         assert_eq!(text.lines().count(), members + 3);
         assert!(text.contains(" \"ASYNC_CONTEXT\", "));
         assert!(text.contains("\n  RetrievalCode.ASYNC_CONTEXT,\n"));

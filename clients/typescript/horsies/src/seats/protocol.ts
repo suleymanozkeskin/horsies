@@ -107,6 +107,7 @@ export type MainToSeat =
       readonly inputJson: string;
       readonly taskId: string;
       readonly attempt: number;
+      readonly maxRetries: number;
       readonly facts: BodyFactsRecord;
     }
   | {
@@ -218,6 +219,7 @@ export function parseMainToSeat(message: object): MainToSeat {
         inputJson: textField(message, "inputJson"),
         taskId: textField(message, "taskId"),
         attempt: wholeNumberField(message, "attempt"),
+        maxRetries: wholeNumberField(message, "maxRetries"),
         facts: factsOf(objectField(message, "facts")),
       };
     case "cancel":

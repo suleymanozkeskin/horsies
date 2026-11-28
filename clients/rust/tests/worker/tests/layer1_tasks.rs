@@ -1241,3 +1241,53 @@ async fn test_fencing_token_rises_on_retry() {
     let info = handle.info(ALL_PARTS).await.expect("read the info");
     assert_eq!((info.status, info.retry_count), (TaskStatus::Completed, 1));
 }
+
+/// A first run reads attempt 1 and all its retries left: the task has a
+/// budget of one retry.
+#[tokio::test]
+#[serial]
+async fn test_attempt_facts_of_a_first_run() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(fencing::attempt_first::function)
+        .send(())
+        .await
+        .expect("send e2e_attempt_first");
+    assert_eq!(
+        succeeded(&handle, RESULT_WAIT).await,
+        fencing::AttemptRead {
+            task_id: handle.task_id().to_string(),
+            attempt: 1,
+            max_retries: 1,
+            retries_left: 1,
+        }
+    );
+}
+
+/// The retry of a task reads attempt 2, the same task id and no retries
+/// left.
+#[tokio::test]
+#[serial]
+async fn test_attempt_facts_of_a_retry() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(fencing::attempt_retry::function)
+        .send(fencing::attempt_retry::Input {
+            marker: Uuid::new_v4().simple().to_string(),
+        })
+        .await
+        .expect("send e2e_attempt_retry");
+    let run = succeeded(&handle, RESULT_WAIT).await;
+    assert_eq!(run.counted_run, 2);
+    assert_eq!(
+        run.read,
+        fencing::AttemptRead {
+            task_id: handle.task_id().to_string(),
+            attempt: 2,
+            max_retries: 1,
+            retries_left: 0,
+        }
+    );
+}

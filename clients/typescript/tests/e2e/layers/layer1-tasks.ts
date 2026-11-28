@@ -653,6 +653,18 @@ describe("layer 1: tasks", () => {
 
     assert.deepEqual([info.status, info.retryCount], ["COMPLETED", 1]);
   });
+
+  e2eTest("the runtime gives maxRetries and retriesLeft: attempt 1 holds the whole budget, the retry holds none", "default", async (suite) => {
+    await suite.worker("isolated-1");
+
+    const marker = randomUUID();
+    const handle = await sentHandle("e2e_retry_facts", suite.app.send(fencing.retryFacts, { marker }));
+    const run = await succeeded(handle, RESULT_WAIT_MS);
+
+    // The policy has 1 interval, so the budget is 1: attempt 1 has 1 retry left and attempt 2 has none.
+    assert.deepEqual(run, { attempt: 2, maxRetries: 1, retriesLeft: 0 });
+    assert.deepEqual(suite.markers.read(`${marker}${fencing.RETRY_FACTS_MARKER_SUFFIX}`), { kind: "found", text: "1 1 1\n2 1 0\n" });
+  });
 });
 
 /** The parts of a `<pid>:<start ms>:<end ms>` stamp. */

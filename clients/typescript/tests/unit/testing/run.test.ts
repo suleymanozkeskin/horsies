@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 
 import { servedMembers } from "../../../horsies/src/child/app-members.ts";
 import { AttemptNumber } from "../../../horsies/src/child/attempt.ts";
+import { MaxRetries } from "../../../horsies/src/child/retry-budget.ts";
 import { TaskRuntime, type WorkflowTaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
 import { implementationOf } from "../../../horsies/src/contract/implementation.ts";
@@ -52,6 +53,12 @@ function attempt(value: number): AttemptNumber {
   return parsed.ok ? parsed.value : assert.fail(parsed.error.reason);
 }
 
+function budget(value: number): MaxRetries {
+  const parsed = MaxRetries.parse(value);
+
+  return parsed.ok ? parsed.value : assert.fail(parsed.error.reason);
+}
+
 function runtime(): WorkflowTaskRuntime {
   return TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(3) });
 }
@@ -66,6 +73,24 @@ describe("TaskRuntime.forTest", () => {
     assert.equal(forTest.signal.aborted, false);
     assert.deepEqual(forTest.cancelState(), { kind: "notRequested" });
     assert.equal(await (spawned.ok ? spawned.value : Promise.reject(new Error("refused"))), "done");
+  });
+
+  test("with no maxRetries, the budget is 0: the attempt and no retries left", () => {
+    const forTest = runtime();
+
+    assert.deepEqual([forTest.attempt, forTest.maxRetries, forTest.retriesLeft], [3, 0, 0]);
+  });
+
+  test("a first attempt with a budget of 3 has 3 retries left", () => {
+    const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), maxRetries: budget(3) });
+
+    assert.deepEqual([forTest.attempt, forTest.maxRetries, forTest.retriesLeft], [1, 3, 3]);
+  });
+
+  test("a retry uses one: attempt 2 with a budget of 3 has 2 left; attempt 4 has none; past the budget stays 0", () => {
+    const left = [2, 4, 6].map((value) => TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(value), maxRetries: budget(3) }).retriesLeft);
+
+    assert.deepEqual(left, [2, 0, 0]);
   });
 
   test("a notRequested cancel state: the state reads notRequested, and neither signal fires", async () => {

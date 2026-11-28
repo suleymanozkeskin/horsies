@@ -28,6 +28,7 @@ import type { AppContext } from "../app/context.ts";
 import { appInternals } from "../app/internals.ts";
 import { type ProviderMember, servedMembers } from "../child/app-members.ts";
 import { type AttemptNumber, attemptFromCore } from "../child/attempt.ts";
+import { type MaxRetries, maxRetriesFromCore } from "../child/retry-budget.ts";
 import { runBody, type StoredBodyOutcome } from "../child/body.ts";
 import { installProcessEvents, type ProcessEventHooks } from "../child/process-events.ts";
 import type { LoopHolder, LoopMarks } from "../child/run-table.ts";
@@ -204,6 +205,7 @@ class SeatRuns implements SeatRunHandler {
 
     const taskId = taskIdFromCore(message.taskId, "seat run");
     const attempt = attemptFromCore(message.attempt, "seat run");
+    const maxRetries = maxRetriesFromCore(message.maxRetries, "seat run");
     const controller = new AbortController();
     const observation = seatBodyObserverOf(this.#context).enter(message.facts);
 
@@ -216,7 +218,7 @@ class SeatRuns implements SeatRunHandler {
         // the body; the main thread passes the text of the core's post to the isolate as it came, with the workflow
         // context member of a task that takes it.
         inputJson: jsonTextCheckedByCore(message.inputJson),
-        controls: this.#controls(taskId, attempt, controller),
+        controls: this.#controls(taskId, attempt, maxRetries, controller),
       },
       implementation,
       compiled: compiled.value,
@@ -294,12 +296,13 @@ class SeatRuns implements SeatRunHandler {
     this.#channel.post({ kind: "result", protocol: SEAT_PROTOCOL_VERSION, runKey, outcome: seatOutcomeOf(outcome) });
   }
 
-  #controls(taskId: TaskId, attempt: AttemptNumber, controller: AbortController): RunControls {
+  #controls(taskId: TaskId, attempt: AttemptNumber, maxRetries: MaxRetries, controller: AbortController): RunControls {
     const marker = this.#channel.marker;
 
     return Object.freeze({
       taskId,
       attempt,
+      maxRetries,
       signal: controller.signal,
       cancelState: () => cancelStateOf(marker.cancelCells, marker.seatIndex),
       spawn: (): never => this.#defect(new ClientDefect({ subject: "runtime.spawn", rule: "the runtime of a SHARED_THREAD body has no spawn" })),

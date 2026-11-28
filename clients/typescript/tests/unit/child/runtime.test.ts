@@ -17,6 +17,12 @@ describe("the runtime of a run", () => {
     assert.deepEqual(runtime.fencingToken, { taskId: RUN_TASK_ID, value: 2 });
   });
 
+  test("the attempt and the retry facts come from the run: attempt 2 of a budget of 3 has 2 retries left", () => {
+    const { runtime } = tableRun();
+
+    assert.deepEqual([runtime.attempt, runtime.maxRetries, runtime.retriesLeft], [2, 3, 2]);
+  });
+
   test("the signal fires with DEADLINE or OPERATOR, and the first cause stays", () => {
     const deadline = tableRun();
 

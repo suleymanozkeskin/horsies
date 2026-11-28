@@ -529,7 +529,7 @@ export interface BuildReturnWithoutOutput extends BuildReturn {
 }
 
 // @public
-export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "DATABASE_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CONTEXT_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "NODE_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "UNKNOWN_CUSTOM_CODE", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUB_WORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
+export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "DATABASE_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CONTEXT_MISSING_ID", "NODE_NOT_IN_CONTEXT", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "NODE_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "UNKNOWN_CUSTOM_CODE", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUB_WORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
 
 // @public (undocumented)
 export type BuiltInTaskCode = OperationalCode | ContractCode | RetrievalCode | OutcomeCode;
@@ -811,7 +811,7 @@ export type ContextReadError =
 * end.
 */
     {
-    readonly kind: "notInContext";
+    readonly kind: "nodeNotInContext";
     readonly nodeId: string;
 }
 /** The stored value does not read with the contract's types. `cause` holds no value. */
@@ -836,6 +836,7 @@ export type ContextUseOf<C extends boolean> = [C] extends [true] ? "takesContext
 export const ContractCode: {
     readonly RETURN_TYPE_MISMATCH: "RETURN_TYPE_MISMATCH";
     readonly WORKFLOW_CONTEXT_MISSING_ID: "WORKFLOW_CONTEXT_MISSING_ID";
+    readonly NODE_NOT_IN_CONTEXT: "NODE_NOT_IN_CONTEXT";
     readonly NO_TYPE_AVAILABLE: "NO_TYPE_AVAILABLE";
 };
 
@@ -2024,6 +2025,25 @@ export const MAX_TASK_PAGE_REACH = 500;
 
 // @public (undocumented)
 export const MAX_WORKFLOW_RUNS_LIMIT = 200;
+
+// @public
+export type MaxRetries = number & {
+    readonly [maxRetriesBrand]: "MaxRetries";
+};
+
+// @public
+export const MaxRetries: {
+    readonly parse: (value: number) => Result<MaxRetries, MaxRetriesRefused>;
+    readonly MIN: number;
+    readonly MAX: number;
+    readonly NONE: MaxRetries;
+};
+
+// @public
+export type MaxRetriesRefused = {
+    readonly kind: "notARetryBudget";
+    readonly reason: string;
+};
 
 // @public
 export type Measure = {
@@ -3254,6 +3274,11 @@ export type RetentionPeriod = {
     readonly days: number;
 };
 
+// @public
+export type RetriesLeft = number & {
+    readonly [retriesLeftBrand]: "RetriesLeft";
+};
+
 // @public (undocumented)
 export const RetrievalCode: {
     readonly WAIT_TIMEOUT: "WAIT_TIMEOUT";
@@ -4463,9 +4488,12 @@ export interface TaskRowInfo {
 
 // @public
 export class TaskRuntime {
+    readonly attempt: AttemptNumber;
     readonly cancelState: () => CancelState;
     readonly fencingToken: FencingToken;
     static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): WorkflowTaskRuntime;
+    readonly maxRetries: MaxRetries;
+    readonly retriesLeft: RetriesLeft;
     readonly signal: AbortSignal;
     readonly spawn: <T>(name: string, work: SpawnedWork<T>) => Result<Promise<T>, SpawnRefused>;
     readonly state: <T>(key: StateKey<T>) => T;
@@ -4710,6 +4738,7 @@ export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
     // (undocumented)
     readonly attempt: AttemptNumber;
     readonly cancelState?: CancelState;
+    readonly maxRetries?: MaxRetries;
     readonly state?: TestStateEntries<Keys>;
     // (undocumented)
     readonly taskId: TaskId;
@@ -4725,7 +4754,7 @@ export type TestStateEntries<Keys extends readonly AnyStateKey[]> = {
 export type TestStateEntry<K extends AnyStateKey> = readonly [key: K, value: StateValueOf<K>];
 
 // @public
-export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "fencingToken" | "signal" | "cancelState" | "state">;
+export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "attempt" | "maxRetries" | "retriesLeft" | "fencingToken" | "signal" | "cancelState" | "state">;
 
 // @public
 export type ThreadWorkflowTaskRuntime = ThreadTaskRuntime & Pick<WorkflowTaskRuntime, "workflowContext">;

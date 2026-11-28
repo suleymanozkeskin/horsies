@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalCode;
-use crate::events::{AttemptNumber, AttemptStart, OperatorCancelEnd, RunTrace};
+use crate::events::{AttemptNumber, AttemptStart, MaxRetries, OperatorCancelEnd, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
     BodyEnd, CancelledBody, FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason,
@@ -39,6 +39,23 @@ impl RetryFacts {
     /// The attempt that this claim runs ([`attempt_of`]).
     pub fn attempt(&self) -> AttemptNumber {
         attempt_of(self.retry_count)
+    }
+}
+
+impl RetryFacts {
+    /// The retry budget of the row: `max_retries`, which the table holds
+    /// from 0 to 20 (`horsies_tasks_retry_range`).
+    pub fn max_retries_allowed(&self) -> MaxRetries {
+        match u32::try_from(self.max_retries)
+            .ok()
+            .and_then(|count| MaxRetries::try_from(count).ok())
+        {
+            Some(budget) => budget,
+            None => unreachable!(
+                "the table holds max_retries from 0 to MAX_TASK_RETRIES: {}",
+                self.max_retries
+            ),
+        }
     }
 }
 

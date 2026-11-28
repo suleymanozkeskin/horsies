@@ -26,7 +26,8 @@ use crate::core::codec::check_json_text;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::{PostgresConfig, PostgresConfigError, SessionDatabase};
 use crate::core::mask_database_url;
-use crate::events::{AttemptNumber, QueueName, RunTrace, TraceCarrierText};
+use crate::core::task::fencing::TaskAttempt;
+use crate::events::{AttemptNumber, MaxRetries, QueueName, RunTrace, TraceCarrierText};
 
 /// The database URL a child connects with. It holds a password, so it
 /// travels in the init frame (never in argv, which `ps` shows) and its debug
@@ -308,6 +309,8 @@ pub struct RunFrame {
     pub queue_name: QueueName,
     /// The attempt that the claim runs: the retry count of the row plus 1.
     pub attempt: AttemptNumber,
+    /// The retry budget of the task row (`max_retries`), from 0.
+    pub max_retries: MaxRetries,
     /// The worker that holds the claim. The child fences each write of the
     /// attempt on it and on `claimed_at`.
     pub worker_id: String,
@@ -324,6 +327,14 @@ pub struct RunFrame {
     pub input: TaskInputText,
 }
 
+impl RunFrame {
+    /// The attempt facts of the run: its task id, attempt number and retry
+    /// budget.
+    pub(crate) fn task_attempt(&self) -> TaskAttempt {
+        TaskAttempt::new(self.task_id, self.attempt, self.max_retries)
+    }
+}
+
 /// Run one task on a free seat of a shared child. Every frame of the child
 /// about this run carries `dispatch`. The body is the task input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +346,8 @@ pub struct SharedRunFrame {
     pub queue_name: QueueName,
     /// As [`RunFrame::attempt`].
     pub attempt: AttemptNumber,
+    /// As [`RunFrame::max_retries`].
+    pub max_retries: MaxRetries,
     pub worker_id: String,
     pub claimed_at: DateTime<Utc>,
     /// As [`RunFrame::orphan_self_heal`].
@@ -419,6 +432,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         queue_name: &'a str,
         attempt: u32,
+        max_retries: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -431,6 +445,7 @@ enum ParentWire<'a> {
         task_name: &'a str,
         queue_name: &'a str,
         attempt: u32,
+        max_retries: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -731,6 +746,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 queue_name: run.queue_name.as_str(),
                 attempt: run.attempt.get(),
+                max_retries: run.max_retries.get(),
                 worker_id: &run.worker_id,
                 // The claim generation keeps every sub-second digit, so the
                 // child fences on the exact value.
@@ -748,6 +764,7 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 task_name: &run.task_name,
                 queue_name: run.queue_name.as_str(),
                 attempt: run.attempt.get(),
+                max_retries: run.max_retries.get(),
                 worker_id: &run.worker_id,
                 claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
@@ -1099,6 +1116,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         "task_name",
         "queue_name",
         "attempt",
+        "max_retries",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1110,6 +1128,7 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         task_name: fields.owned_text("task_name")?,
         queue_name: fields.bounded_text("queue_name")?,
         attempt: config_count(fields, "attempt")?,
+        max_retries: config_count(fields, "max_retries")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
@@ -1127,6 +1146,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "task_name",
         "queue_name",
         "attempt",
+        "max_retries",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1139,6 +1159,7 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         task_name: fields.owned_text("task_name")?,
         queue_name: fields.bounded_text("queue_name")?,
         attempt: config_count(fields, "attempt")?,
+        max_retries: config_count(fields, "max_retries")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),

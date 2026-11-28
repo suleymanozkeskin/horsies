@@ -538,7 +538,7 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 **Important:** `workflow_context_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
 
-**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_context.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
+**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_context.result_for()`. Accessing a node that has an id but is not in the list (or whose dependency did not finish) raises `NodeNotInContext`, with the code `ContractCode.NODE_NOT_IN_CONTEXT` and the message `"TaskNode id '{id}' not in workflow context"`. A node with no `node_id` raises `WorkflowContextMissingId`, with the code `ContractCode.WORKFLOW_CONTEXT_MISSING_ID`. Both are `RuntimeError` subclasses that carry `code`.
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns the read error `RESULT_NOT_READY` if the task hasn't completed.
 

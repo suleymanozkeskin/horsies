@@ -122,7 +122,7 @@ A send through an app that does not register the task returns `TaskSendError::Va
 
 ## Task Runtime
 
-A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel and the fencing token of its run, and starts work that belongs to its run.
+A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel, the fencing token and the attempt facts of its run, and starts work that belongs to its run.
 
 ```rust
 use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
@@ -161,6 +161,10 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 | `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause }` with a `CancelCause` (`Operator` or `Deadline`), or `NotInARun` |
 | `spawn(name, future)` | `Result<JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id and the value of the run. See [Fencing Token](#fencing-token) |
+| `task_id()` | `Result<Uuid, TaskAttemptRefused>`: the id of the task, the same on every attempt: a stable idempotency key for a side effect |
+| `attempt()` | `Result<AttemptNumber, TaskAttemptRefused>`: 1 is the first run, 2 the first retry (`.get()`) |
+| `max_retries()` | `Result<MaxRetries, TaskAttemptRefused>`: the retry budget of the task, 0 to 20 (`.get()`) |
+| `retries_left()` | `Result<RetriesLeft, TaskAttemptRefused>`: `max_retries - (attempt - 1)`, and 0 past the budget. A non-retryable error code or `good_until` can end the retries before it reaches 0, so the last attempt is not known in advance |
 | `task_function::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` (`NotRegistered`, `OtherTypes`) |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime: its task nodes resolve against that app. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
 

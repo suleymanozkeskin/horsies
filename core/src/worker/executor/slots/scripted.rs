@@ -171,6 +171,7 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         task_name: task.task_name.clone(),
         queue_name: crate::events::QueueName::cut(&task.queue_name),
         attempt: task.retry.attempt(),
+        max_retries: task.retry.max_retries_allowed(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,

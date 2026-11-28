@@ -33,6 +33,7 @@ from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowMetadata,
     WorkflowContextMissingId,
+    NodeNotInContext,
     WorkflowContext,
 )
 from horsies.core.models.workflow.handle import (
@@ -87,6 +88,7 @@ __all__ = [
     'SubWorkflowSummary',
     'WorkflowMetadata',
     'WorkflowContextMissingId',
+    'NodeNotInContext',
     'WorkflowContext',
     # handle
     'WorkflowNodeInfo',

@@ -22,13 +22,13 @@ use super::add_frames;
 
 const TASK_ID: &str = "0190f2d8-7c1e-7a3b-9f00-000000000001";
 
-const RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00.123456Z","orphan_self_heal":true,"work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#;
+const RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"max_retries":3,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00.123456Z","orphan_self_heal":true,"work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#;
 
-const TRACED_RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"run"},"trace":{"kind":"carrier","text":"{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"}}"#;
+const TRACED_RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"max_retries":3,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"run"},"trace":{"kind":"carrier","text":"{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"}}"#;
 
-const REFUSED_RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"refusal","refusal":{"kind":"value_invalid","reason":"timeout_ms is -1"}},"trace":{"kind":"no_carrier"}}"#;
+const REFUSED_RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.add","queue_name":"default","attempt":1,"max_retries":3,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"refusal","refusal":{"kind":"value_invalid","reason":"timeout_ms is -1"}},"trace":{"kind":"no_carrier"}}"#;
 
-const SHARED_RUN_META: &str = r#"{"kind":"shared_run","dispatch":7,"task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.fetch","queue_name":"emails","attempt":2,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"task","timeout_ms":5000,"cancel_grace_ms":250},"trace":{"kind":"no_carrier"}}"#;
+const SHARED_RUN_META: &str = r#"{"kind":"shared_run","dispatch":7,"task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.fetch","queue_name":"emails","attempt":2,"max_retries":3,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"task","timeout_ms":5000,"cancel_grace_ms":250},"trace":{"kind":"no_carrier"}}"#;
 
 const INIT_META: &str = r#"{"kind":"init","protocol":4,"program":{"kind":"python","app_locator":"app.main:app","imports":["app.tasks"],"sys_path_roots":["/srv/app"],"parent_sys_path":["/srv/app"],"parent_argv":["horsies","worker"]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-child-1","child_kind":{"kind":"shared_async","seats":4,"pool":{"min_size":0,"max_size":2,"check":false},"executor_threads":3,"task_send_pool":1}}"#;
 
@@ -122,6 +122,7 @@ assert frame.task_id == uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000001')
 assert frame.task_name == 'app.add'
 assert frame.queue_name == 'default'
 assert frame.attempt == 1
+assert frame.max_retries == 3
 assert frame.worker_id == 'w-1'
 assert frame.claimed_at == datetime.datetime(2026, 11, 17, 10, 0, 0, 123456, tzinfo=datetime.UTC)
 assert frame.orphan_self_heal is True
@@ -437,6 +438,7 @@ fn the_reader_gives_each_frame_once_in_order_however_the_bytes_arrive() {
     assert kinds == ['RunFrame', 'SharedRunFrame', 'StopFrame'], (size, kinds)
     assert frames[1].dispatch == 7
     assert (frames[1].queue_name, frames[1].attempt) == ('emails', 2)
+    assert frames[1].max_retries == 3
     assert frames[1].orphan_self_heal is False
     assert isinstance(frames[1].work, core.AsyncTaskWork)
     assert (frames[1].work.timeout_ms, frames[1].work.cancel_grace_ms) == (5000, 250)

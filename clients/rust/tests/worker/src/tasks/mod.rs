@@ -85,6 +85,8 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _fence_shared_thread = fencing::fence_shared_thread::register(app)?;
     let _fence_reads_twice = fencing::fence_reads_twice::register(app)?;
     let _fence_retry = fencing::fence_retry::register(app)?;
+    let _attempt_first = fencing::attempt_first::register(app)?;
+    let _attempt_retry = fencing::attempt_retry::register(app)?;
 
     let _cancel_isolated_async = cancel::cancel_isolated_async::register(app)?;
     let _cancel_isolated_blocking = cancel::cancel_isolated_blocking::register(app)?;

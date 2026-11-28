@@ -32,6 +32,7 @@ import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { ChildMembersView } from "./app-members.ts";
 import { attemptFromCore } from "./attempt.ts";
+import { maxRetriesFromCore } from "./retry-budget.ts";
 import { refusedCodeParts, runBody, type StoredBodyOutcome } from "./body.ts";
 import type { BodyObservation, BodyObserver } from "./body-observer.ts";
 import type { LoopMarks, RunNative, RunTable } from "./run-table.ts";
@@ -110,7 +111,8 @@ function startRun(serve: ChildServe, observations: RunObservations, post: Extrac
 
   const taskId = taskIdFromCore(post.taskId, "runBody");
   const attempt = attemptFromCore(post.attempt, "runBody");
-  const controls = serve.table.enter({ runKey: post.runKey, taskId, taskName: post.taskName, attempt });
+  const maxRetries = maxRetriesFromCore(post.maxRetries, "runBody");
+  const controls = serve.table.enter({ runKey: post.runKey, taskId, taskName: post.taskName, attempt, maxRetries });
   const observation = serve.observer.enter(post.facts);
 
   observations.set(post.runKey, observation);

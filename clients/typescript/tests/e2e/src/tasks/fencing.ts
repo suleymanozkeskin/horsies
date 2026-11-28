@@ -3,7 +3,7 @@
 // reads it twice and in work that it started, and one that a retry runs again.
 
 import { defineTask, h, type Horsies, type TaskRuntime } from "#horsies";
-import { markerErrorText, nextAttempt } from "../markers.ts";
+import { appendLine, markerErrorText, nextAttempt } from "../markers.ts";
 
 /** A fencing token that a body read: the task id and the value. */
 const fence = h.object({ taskId: h.string(), value: h.int() });
@@ -49,8 +49,28 @@ export const fenceRetry = defineTask({
   retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
+/** The suffix of the marker that each run of `retryFacts` appends a line to: `<attempt> <maxRetries> <retriesLeft>`. */
+export const RETRY_FACTS_MARKER_SUFFIX = "-retry-facts";
+
+/** The retry facts of a run: the first run for `marker` fails with `TRANSIENT`; both runs write their facts to a marker. */
+export const retryFacts = defineTask({
+  name: "e2e_retry_facts",
+  input: { marker: h.string() },
+  output: h.object({ attempt: h.int(), maxRetries: h.int(), retriesLeft: h.int() }),
+  errorCodes: FENCE_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TRANSIENT"] },
+});
+
 /** Every contract of this module. */
-export const FENCING_CONTRACTS = [fenceIsolatedAsync, fenceIsolatedSync, fenceSharedAsync, fenceSharedThread, fenceReadsTwice, fenceRetry] as const;
+export const FENCING_CONTRACTS = [
+  fenceIsolatedAsync,
+  fenceIsolatedSync,
+  fenceSharedAsync,
+  fenceSharedThread,
+  fenceReadsTwice,
+  fenceRetry,
+  retryFacts,
+] as const;
 
 function fenceOf(runtime: Pick<TaskRuntime, "fencingToken">): Fence {
   return { taskId: runtime.fencingToken.taskId, value: runtime.fencingToken.value };
@@ -84,5 +104,15 @@ export function implementFencing(app: Horsies): void {
     return counted.value === 1
       ? runtime.err({ code: "TRANSIENT", message: `run 1 read the fence value ${String(read.value)}` })
       : runtime.ok({ fence: read, countedRun: counted.value });
+  });
+  app.implement(retryFacts, ({ marker }, runtime) => {
+    const facts = { attempt: runtime.attempt, maxRetries: runtime.maxRetries, retriesLeft: runtime.retriesLeft };
+    const written = appendLine(`${marker}${RETRY_FACTS_MARKER_SUFFIX}`, `${String(facts.attempt)} ${String(facts.maxRetries)} ${String(facts.retriesLeft)}`);
+
+    if (!written.ok) {
+      return runtime.err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
+    }
+
+    return facts.attempt === 1 ? runtime.err({ code: "TRANSIENT", message: "run 1 fails" }) : runtime.ok(facts);
   });
 }

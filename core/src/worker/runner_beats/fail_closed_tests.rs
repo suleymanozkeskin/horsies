@@ -1103,6 +1103,7 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         task_name: claimed.task_name.clone(),
         queue_name: crate::events::QueueName::cut(&claimed.queue_name),
         attempt: claimed.retry.attempt(),
+        max_retries: claimed.retry.max_retries_allowed(),
         worker_id: WORKER.to_owned(),
         claimed_at: claimed.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
