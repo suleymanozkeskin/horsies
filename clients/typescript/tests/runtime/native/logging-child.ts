@@ -11,7 +11,9 @@ import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
-import { configureLogging } from "../../../horsies/src/logging.ts";
+import { ChildEnd } from "../../../horsies/src/child/exit.ts";
+import { processChildModeDeps } from "../../../horsies/src/child/host.ts";
+import { configureLogging, logWarning } from "../../../horsies/src/logging.ts";
 import { addonSettlement, settlingCallback } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
@@ -21,6 +23,7 @@ import type { NativeSendRules, NativeTaskOptions } from "../../../horsies/src/na
 import { checkAppConfig, checkTaskOptions, prepareSendFacts } from "../../../horsies/src/native/sends/sends.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { probeAddon } from "./callback-probe.ts";
+import { EXIT_RECORD_CODE, EXIT_RECORD_MESSAGE } from "./logging-cases.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -61,6 +64,8 @@ async function runCase(name: string | undefined): Promise<string> {
       return firstPayloadWarning();
     case "command-json-lines":
       return commandJsonLines();
+    case "child-exit-after-record":
+      return childExitAfterRecord();
     case undefined:
     default:
       return `unknown case ${String(name)}`;
@@ -154,6 +159,34 @@ function defectRecordToSink(): string {
   envelopeValue({ kind: "thrown", thrown: { code: "CLIENT_DEFECT", subject: "taskId", rule: "a UUID" } });
 
   return "no abort";
+}
+
+/**
+ * A core record, then at once the exit rule of a child with the process deps of child mode: the rule waits until the
+ * sink took the record (written with a sync write), then ends the process with `EXIT_RECORD_CODE`. `process.exit`
+ * does not drain the log channel, so with no wait the batch that the forwarder handed to the sink is lost.
+ */
+async function childExitAfterRecord(): Promise<string> {
+  configureLogging({
+    levels: { default: "WARNING" },
+    sink: {
+      kind: "function",
+      sink: (records) => {
+        for (const record of records) {
+          writeSync(1, `SINK ${record.level} ${record.logger} ${record.message}\n`);
+        }
+      },
+    },
+  });
+  logWarning("horsies.worker", EXIT_RECORD_MESSAGE);
+
+  const deps = processChildModeDeps();
+
+  await new ChildEnd({ flush: async () => undefined, logRecords: deps.logRecords, wait: deps.wait, exit: deps.exit }).end(
+    EXIT_RECORD_CODE,
+  );
+
+  return "no exit";
 }
 
 /**

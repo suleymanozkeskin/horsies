@@ -82,6 +82,9 @@ function fakeDeps(native: FakeChildNative): ChildModeDeps & Recorded {
     wait: async (milliseconds) => {
       flushes.push(`wait ${String(milliseconds)}`);
     },
+    logRecords: async () => {
+      flushes.push("log records");
+    },
     exit: (code) => {
       throw new Ended(code);
     },
@@ -217,7 +220,7 @@ describe("child mode", () => {
     }
   });
 
-  test("the exit waits for the flush, at most the flush bound, then ends with the host's code", async () => {
+  test("the exit waits for the flush and the log records, at most the flush bound, then ends with the host's code", async () => {
     const native = new FakeChildNative();
     const deps = fakeDeps(native);
     const running = runChildMode(implementedApp(), CHILD_ARGUMENTS, deps);
@@ -225,7 +228,7 @@ describe("child mode", () => {
     await settled();
     native.endServe(0);
     assert.equal(await endedCode(running), 0);
-    assert.deepEqual(deps.flushes, [`wait ${String(CHILD_EXIT_FLUSH_BOUND_MS)}`]);
+    assert.deepEqual(deps.flushes, ["log records", `wait ${String(CHILD_EXIT_FLUSH_BOUND_MS)}`]);
   });
 });
 

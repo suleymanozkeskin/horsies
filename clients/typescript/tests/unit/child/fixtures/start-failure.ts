@@ -37,6 +37,8 @@ void runChildMode(created.value, ["--horsies-child", "3", "4242"], {
     new Promise((resolve) => {
       setTimeout(resolve, milliseconds);
     }),
+  // No addon is loaded here, so no core log record waits.
+  logRecords: async () => undefined,
   exit: (code) => process.exit(code),
   reportDefect: (defect) => {
     process.stderr.write(`defect: ${defect.message}\n`);
