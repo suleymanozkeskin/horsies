@@ -345,8 +345,7 @@ impl ManifestValue for HandlerNameText {
 #[serde(deny_unknown_fields)]
 pub struct HandlerManifest {
     /// The name of the handler: the value of the `handler` label of
-    /// `horsies.telemetry.handler.errors` and
-    /// `horsies.telemetry.handler.dropped`. Each name is once in the
+    /// the handler errors and handler dropped metrics. Each name is once in the
     /// manifest.
     pub name: HandlerNameText,
     /// The one event type that the handler takes.
@@ -515,9 +514,9 @@ pub struct WorkerDatabaseManifest {
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
+    /// TCP keepalives of every core connection.
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python `tcp_user_timeout`).
+    /// TCP user timeout of every core connection.
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -713,7 +712,7 @@ pub enum Preload {
     NoPreload,
 }
 
-/// The settings of one worker (Python `WorkerProfile`), every value given.
+/// The settings of one worker, every value given.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -743,7 +742,7 @@ pub enum QueueConcurrency {
     NoLimit,
 }
 
-/// One custom queue of the app (Python `CustomQueueConfig`).
+/// One custom queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -754,7 +753,7 @@ pub struct CustomQueueManifest {
     pub max_concurrency: QueueConcurrency,
 }
 
-/// The queues of the app (Python `AppConfig.queue_mode`). A worker serves
+/// The queues of the app. A worker serves
 /// every queue of the app.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
@@ -767,7 +766,7 @@ pub enum Queues {
     Default,
 }
 
-/// The lease of a claim (Python `AppConfig.claim_lease_ms`).
+/// The lease of a claim.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -779,7 +778,7 @@ pub enum ClaimLease {
     Milliseconds { ms: Milliseconds },
 }
 
-/// The most RUNNING tasks of the cluster (Python `AppConfig.cluster_wide_cap`).
+/// The most RUNNING tasks of the cluster.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]

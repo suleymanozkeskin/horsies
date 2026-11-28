@@ -154,8 +154,7 @@ impl ManifestValue for TcpUserTimeoutMs {
     });
 }
 
-/// TCP keepalives of every core connection, checked form (Python
-/// `TcpKeepalivesOff`, `TcpKeepalivesOn`).
+/// TCP keepalives of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -202,8 +201,7 @@ impl TcpKeepalivesConfig {
     }
 }
 
-/// The TCP user timeout of every core connection, checked form (Python
-/// `TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter`).
+/// The TCP user timeout of every core connection, checked form.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]

@@ -104,25 +104,24 @@ pub struct DatabaseManifest {
     pub session_database: SessionDatabase,
     /// The main URL points at a PgBouncer transaction-pool endpoint.
     pub pgbouncer_transaction_mode: bool,
-    /// Ping a pooled connection before use (Python's rule: only after it
+    /// Ping a pooled connection before use (only after it
     /// waited in the pool for more than 1 s).
     pub pool_pre_ping: bool,
     /// Connections the pool keeps. Always a number: the core bounds its
-    /// connections, so SQLAlchemy's `pool_size=0` (no limit) has no form here.
+    /// connections, so a pool size of 0 (no limit) has no form here.
     pub pool_size: PoolSize,
-    /// Connections past `pool_size`. Always a number: SQLAlchemy's
-    /// `max_overflow=-1` (no limit) has no form here.
+    /// Connections past `pool_size`. Always a number: an overflow
+    /// of -1 (no limit) has no form here.
     pub max_overflow: PoolConnections,
     /// The longest a checkout waits for a free connection. 0 means a checkout
-    /// does not wait: it fails at once when no connection is free, as
-    /// SQLAlchemy's `pool_timeout=0`.
+    /// does not wait: it fails at once when no connection is free.
     pub pool_timeout_seconds: WholeSeconds,
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
+    /// TCP keepalives of every core connection.
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python `tcp_user_timeout`).
+    /// TCP user timeout of every core connection.
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -262,14 +261,13 @@ impl WholeSeconds {
     }
 }
 
-/// When the pool replaces a connection by its age (SQLAlchemy's
-/// `pool_recycle`).
+/// When the pool replaces a connection by its age.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PoolRecycle {
-    /// A connection is never replaced by age (SQLAlchemy's `pool_recycle=-1`).
+    /// A connection is never replaced by age.
     #[serde(deserialize_with = "no_member_after_the_tag")]
     Never,
     /// A connection older than `seconds` is replaced at its next checkout; 0
@@ -295,8 +293,6 @@ impl ManifestValue for WholeSeconds {
 
 /// Schema behaviour of a handle.
 ///
-/// Python's `SchemaMode` has the same three members, with the manifest text
-/// as their values.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -728,7 +724,7 @@ mod tests {
             r#"{"kind": "AFTER_SECONDS", "seconds": -5}"#
         )
         .starts_with("database.pool_recycle"));
-        // The bare number of SQLAlchemy is not a manifest form.
+        // The bare number of a client pool is not a manifest form.
         assert!(refused_path("pool_recycle", "-1").starts_with("database.pool_recycle"));
     }
 

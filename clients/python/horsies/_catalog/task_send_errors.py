@@ -69,7 +69,7 @@ class TaskSendSuppressed:
 class TaskSendAsyncContext:
     """A sync send ran inside a running event loop. Nothing was written.
 
-    The payload is prepared. ``resend_async(err)`` completes the same
+    The payload is prepared. the async resend completes the same
     dispatch with the same task id. A sync resend from the same loop returns
     this error again.
     """
@@ -93,8 +93,8 @@ class TaskSendAsyncContext:
 class TaskSendValidationFailed:
     """The input was refused before anything was written.
 
-    ``cause`` is the exception of the cause, or ``NoCause()`` when a check refused the
-    input without a Python exception. The resend methods refuse this error.
+    ``cause`` is the exception of the cause, or ``NoCause`` when a check refused the
+    input without an exception. The resend methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
@@ -116,7 +116,7 @@ class TaskSendEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause. ``resend(err)``
     sends the same task id and payload again; the broker returns the existing
-    task for a duplicate. ``cause`` is ``NoCause()`` when the broker found
+    task for a duplicate. ``cause`` is ``NoCause`` when the broker found
     the failure by a data check.
     """
 

@@ -542,8 +542,7 @@ pub struct TextNewType {
 pub const RETENTION_CLASS_KEY: TextNewType = TextNewType {
     module: "retention_class",
     name: "RetentionClassKey",
-    doc: "The key of a finite period class. ``period_class_key`` of\n\
-          ``horsies.core.history.periods`` builds it.\n\
+    doc: "The key of a finite period class.\n\
           \n\
           The enqueue paths take this type, so a raw string key is a type error at\n\
           a typed call site, not a row that has no partition later. Like\n\

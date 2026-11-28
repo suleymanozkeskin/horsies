@@ -17,11 +17,10 @@ use crate::failure_cause::FailureCause;
 
 /// Categorized broker operation failure codes.
 ///
-/// The members are Python's, in Python's order
-/// (`clients/python/horsies/core/brokers/result_types.py`). The nine operation codes from
-/// `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
-/// Python, `DatabaseOperationFailed`. A client produces `NO_DATABASE` and
-/// `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
+/// The nine operation codes from `SCHEMA_INIT_FAILED` to
+/// `LISTENER_SUBSCRIBE_FAILED` share one variant, `DatabaseOperationFailed`.
+/// A client produces `NO_DATABASE` and `NO_TYPE_AVAILABLE`; only a client
+/// with a sync call form produces `ASYNC_CONTEXT`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
@@ -54,7 +53,8 @@ pub enum DatabaseErrorCode {
     /// retry limit that cannot be stored; nothing was written.
     InvalidTaskOptions,
     /// A sync facade was called on a thread that runs an event loop. Its wait
-    /// would stall that loop, so nothing ran. Python client only.
+    /// would stall that loop, so nothing ran. A client with no sync call form
+    /// never gives it.
     #[code_catalog(blocking_form_only)]
     AsyncContext,
     /// An argument of the call was refused before anything ran. Nothing was
@@ -76,9 +76,8 @@ impl std::fmt::Display for DatabaseErrorCode {
 }
 
 /// The codes of the broker operations whose failure is one variant,
-/// [`DatabaseOperationError::OperationFailed`], that keeps the code (Python
-/// `DatabaseOperationFailedCode`, a `Literal` subset of `DatabaseErrorCode`).
-/// The members are Python's, in Python's order.
+/// [`DatabaseOperationError::OperationFailed`], that keeps the code
+/// (`DatabaseOperationFailedCode`, a subset of `DatabaseErrorCode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DatabaseOperationFailedCode {
     SchemaInitFailed,
@@ -173,7 +172,7 @@ pub enum DatabaseOperationError {
     ///
     /// ``retryable`` is the core's classification of the cause. An enqueue
     /// again with the same task id and payload is safe: the broker returns the
-    /// existing task for a duplicate. ``cause`` is ``NoCause()`` when the
+    /// existing task for a duplicate. ``cause`` is ``NoCause`` when the
     /// broker found the failure by a data check (the conflicting row was gone).
     #[error_class(
         class = "DatabaseEnqueueFailed",
@@ -222,8 +221,8 @@ pub enum DatabaseOperationError {
     },
     /// Stored JSON failed strict validation. The stored data is unchanged.
     ///
-    /// The same read fails again. ``cause`` is ``NoCause()`` when a shape
-    /// check found the failure without a Python exception.
+    /// The same read fails again. ``cause`` is ``NoCause`` when a shape
+    /// check found the failure without an exception.
     #[error_class(
         class = "DatabaseInvalidJsonPayload",
         code = "InvalidJsonPayload",
@@ -240,7 +239,7 @@ pub enum DatabaseOperationError {
     /// The task options are not valid JSON or carry a retry limit that cannot be stored.
     ///
     /// Nothing was written. The same options are refused again. ``cause``
-    /// is ``NoCause()`` when a check refused the options without a Python
+    /// is ``NoCause`` when a check refused the options without an
     /// exception.
     #[error_class(
         class = "DatabaseInvalidTaskOptions",
@@ -259,8 +258,8 @@ pub enum DatabaseOperationError {
     /// An argument of the call was refused before anything ran. Nothing was written.
     ///
     /// The message names the argument and the rule. The same arguments are
-    /// refused again. ``cause`` is ``NoCause()`` when a check refused the
-    /// argument without a Python exception.
+    /// refused again. ``cause`` is ``NoCause`` when a check refused the
+    /// argument without an exception.
     #[error_class(
         class = "DatabaseInvalidInput",
         code = "InvalidInput",
@@ -278,7 +277,7 @@ pub enum DatabaseOperationError {
     /// A sync facade was called on a thread that runs an event loop. Nothing ran.
     ///
     /// A sync call on that thread returns the same error; call the
-    /// ``*_async`` form.
+    /// async form.
     #[error_class(class = "DatabaseAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
         #[error_slot(slot_type = "Str", hidden)]

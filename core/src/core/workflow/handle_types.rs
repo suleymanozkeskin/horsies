@@ -5,8 +5,6 @@ use crate::broker::BrokerError;
 use crate::failure_cause::FailureCause;
 use crate::workflow_engine::error::WorkflowError;
 ///
-/// Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
-///
 /// Two error strategies by return type:
 ///
 /// 1. **Wrap strategy** — methods that do not read an outcome
@@ -15,7 +13,7 @@ use crate::workflow_engine::error::WorkflowError;
 ///
 /// 2. **Read strategy** — the reads of an outcome (`WorkflowHandle::get`,
 ///    `WorkflowHandle::result_for`) return the outcome or a read error:
-///    Python `ReadResult`, Rust `Result<TaskOutcome, WorkflowReadError>`. A
+///    Rust `Result<TaskOutcome, WorkflowReadError>`. A
 ///    failed read is the read error (`DATABASE_ERROR` for an infrastructure or
 ///    query failure), apart from the outcome of the workflow or the node,
 ///    instead of `HandleResult::Err(...)`.
@@ -227,7 +225,7 @@ pub enum WorkflowHandleError {
     },
     /// A sync method was called on a thread that runs an event loop. Nothing ran.
     ///
-    /// Its wait would stall that loop. Call the ``*_async`` form; a sync call on
+    /// Its wait would stall that loop. Call the async form; a sync call on
     /// that thread returns this error again.
     #[error_class(
         class = "WorkflowHandleAsyncContext",

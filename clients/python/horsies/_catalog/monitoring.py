@@ -24,7 +24,7 @@ class MonitoringQueryErrorCode(StrEnum):
     """Stored history data does not decode: a status that is not a task
     status, an attempt snapshot or archive envelope that does not decode.
     Not retryable: a repeat gives the same result until the stored row
-    changes (Python `clients/python/horsies/monitoring/errors.py:26-98`).
+    changes.
     """
 
 
@@ -52,8 +52,7 @@ class TaskActionErrorCode(StrEnum):
     """Stored task data does not parse: a history status that is not a task
     status, or a cancel outcome row that does not decode. Nothing changed:
     the cancel refused the task. Not retryable: a repeat gives the same
-    result until the stored row changes (Python
-    `clients/python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    result until the stored row changes.
     """
 
 
@@ -62,9 +61,9 @@ class MonitoringQueryRefusalCode(StrEnum):
     a window, a page or a limit that the core refuses, or a value that the
     client's types let through and the core cannot take (a count that is not
     a whole number, a task index outside 32 bits, text that is not
-    well-formed). The Python client has no code for these inputs: its parse
-    functions answer `WindowRefused` and `PageRefused`, and its types cannot
-    hold the other values.
+    well-formed). A client whose parse functions answer `WindowRefused` and
+    `PageRefused`, and whose types cannot hold the other values, has no code
+    for these inputs.
     """
 
     INVALID_INPUT = 'INVALID_INPUT'

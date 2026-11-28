@@ -48,9 +48,9 @@ impl std::fmt::Display for HorsiesErrorCategory {
 /// HRS-023 and HRS-106 are retired and are not used again.
 ///
 /// This enum is the one list of the codes of both clients. `horsies-codegen`
-/// renders it as `horsies._catalog.error_codes.HorsiesErrorCode`, the Python
-/// `HorsiesErrorCode`: the member name is the variant name in SCREAMING_SNAKE_CASE,
-/// the value is the `HRS-nnn` code, and the docstring is the variant doc.
+/// renders it for each client: the member name is the variant name in
+/// SCREAMING_SNAKE_CASE, the value is the `HRS-nnn` code, and the member doc
+/// is the variant doc.
 #[derive(
     Debug,
     Clone,
@@ -219,7 +219,7 @@ pub enum HorsiesErrorCode {
     /// `execution=SHARED_ASYNC` on a function defined with `def`.
     #[code_catalog(value = "HRS-107")]
     TaskSharedAsyncRequiresAsyncDef,
-    /// `execution=SHARED_THREAD` on a function defined with `async def`.
+    /// `execution=SHARED_THREAD` on an async function.
     #[code_catalog(value = "HRS-108")]
     TaskSharedThreadRequiresDef,
     /// `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms`.
@@ -315,22 +315,23 @@ pub enum HorsiesErrorCode {
     #[code_catalog(value = "HRS-221")]
     ConfigInvalidTraceLink,
     /// An event handler registration names a value that is not an event
-    /// type. Only the Python client refuses with it: the Rust registration
-    /// takes the event type as a type parameter.
+    /// type. Only a client that reads the event type from an annotation refuses
+    /// with it: the Rust registration takes the event type as a type parameter.
     #[code_catalog(value = "HRS-222")]
     EventHandlerUnknownEventType,
     /// An event handler cannot take the events of its type: a value that is
     /// not a function or a bound method, a generator function, a function
     /// that does not take a call with one event, or an event parameter
-    /// annotated with another event type. Only the Python client refuses
-    /// with it: the Rust compiler checks the handler.
+    /// annotated with another event type. Only a client that reads the handler
+    /// at run time refuses with it: the Rust compiler checks the handler.
     #[code_catalog(value = "HRS-223")]
     EventHandlerInvalidSignature,
     /// An earlier event handler of the app has the same name.
     #[code_catalog(value = "HRS-224")]
     EventHandlerDuplicateName,
     /// The name of an event handler is empty, longer than 255 characters, or
-    /// `(unknown)`; in Python, also a function with no module name.
+    /// `(unknown)`; for a handler read at run time, also a function with no
+    /// module name.
     #[code_catalog(value = "HRS-225")]
     EventHandlerInvalidName,
     /// The app has 32 event handlers already, the most that one handler

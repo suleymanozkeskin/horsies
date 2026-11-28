@@ -16,8 +16,8 @@ __all__ = ['WorkflowStartValidationFailed', 'WorkflowStartIdConflict', 'Workflow
 class WorkflowStartValidationFailed:
     """The spec, its args or the retry input was refused. Nothing was written.
 
-    The same start is refused again. ``cause`` is ``NoCause()`` when a
-    check refused the input without a Python exception. The resend methods
+    The same start is refused again. ``cause`` is ``NoCause`` when a
+    check refused the input without an exception. The resend methods
     refuse this error.
     """
 
@@ -121,7 +121,7 @@ class WorkflowStartEnqueueFailed:
 class WorkflowStartAsyncContext:
     """Sync ``start()`` or ``resend_start()`` was called on a thread that runs an event loop.
 
-    Nothing was written: the wait would stall that loop. ``resend_start_async(err)``
+    Nothing was written: the wait would stall that loop. the async resend
     starts the workflow with the same id; a sync call on that thread returns
     this error again.
     """

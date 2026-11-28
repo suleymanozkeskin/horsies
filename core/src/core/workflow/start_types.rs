@@ -10,8 +10,6 @@ use crate::FailureCause;
 
 /// Categorized workflow start failure codes.
 ///
-/// The members are Python's, in Python's order
-/// (`clients/python/horsies/core/workflows/start_types.py`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_start", values = "equal_text")]
 pub enum WorkflowStartErrorCode {
@@ -66,8 +64,8 @@ impl std::fmt::Display for WorkflowStartErrorCode {
 pub enum WorkflowStartError {
     /// The spec, its args or the retry input was refused. Nothing was written.
     ///
-    /// The same start is refused again. ``cause`` is ``NoCause()`` when a
-    /// check refused the input without a Python exception. The resend methods
+    /// The same start is refused again. ``cause`` is ``NoCause`` when a
+    /// check refused the input without an exception. The resend methods
     /// refuse this error.
     // `workflow_id` is the id of the start: the caller's id, or the id
     // minted for it, as in Python.
@@ -158,7 +156,7 @@ pub enum WorkflowStartError {
     },
     /// Sync ``start()`` or ``resend_start()`` was called on a thread that runs an event loop.
     ///
-    /// Nothing was written: the wait would stall that loop. ``resend_start_async(err)``
+    /// Nothing was written: the wait would stall that loop. the async resend
     /// starts the workflow with the same id; a sync call on that thread returns
     /// this error again.
     // The Rust client's blocking starts give it on a thread that runs a

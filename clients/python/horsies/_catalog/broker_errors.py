@@ -57,7 +57,7 @@ class DatabaseEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause. An enqueue
     again with the same task id and payload is safe: the broker returns the
-    existing task for a duplicate. ``cause`` is ``NoCause()`` when the
+    existing task for a duplicate. ``cause`` is ``NoCause`` when the
     broker found the failure by a data check (the conflicting row was gone).
     """
 
@@ -124,8 +124,8 @@ class DatabaseIdempotencyKeyConflict:
 class DatabaseInvalidJsonPayload:
     """Stored JSON failed strict validation. The stored data is unchanged.
 
-    The same read fails again. ``cause`` is ``NoCause()`` when a shape
-    check found the failure without a Python exception.
+    The same read fails again. ``cause`` is ``NoCause`` when a shape
+    check found the failure without an exception.
     """
 
     code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.INVALID_JSON_PAYLOAD
@@ -147,7 +147,7 @@ class DatabaseInvalidTaskOptions:
     """The task options are not valid JSON or carry a retry limit that cannot be stored.
 
     Nothing was written. The same options are refused again. ``cause``
-    is ``NoCause()`` when a check refused the options without a Python
+    is ``NoCause`` when a check refused the options without an
     exception.
     """
 
@@ -170,8 +170,8 @@ class DatabaseInvalidInput:
     """An argument of the call was refused before anything ran. Nothing was written.
 
     The message names the argument and the rule. The same arguments are
-    refused again. ``cause`` is ``NoCause()`` when a check refused the
-    argument without a Python exception.
+    refused again. ``cause`` is ``NoCause`` when a check refused the
+    argument without an exception.
     """
 
     code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.INVALID_INPUT
@@ -193,7 +193,7 @@ class DatabaseAsyncContext:
     """A sync facade was called on a thread that runs an event loop. Nothing ran.
 
     A sync call on that thread returns the same error; call the
-    ``*_async`` form.
+    async form.
     """
 
     code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.ASYNC_CONTEXT
