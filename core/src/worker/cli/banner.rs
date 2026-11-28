@@ -13,6 +13,7 @@ use crate::core::config::app::AppConfig;
 use crate::core::config::queue::QueueMode;
 use crate::core::config::worker_profile::WorkerProfile;
 
+use crate::core::config::worker_profile::describe_task_limit;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
 use crate::worker::worker_state::ClaimColumns;
@@ -114,17 +115,17 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     );
     write_kv(&mut buf, "seats", &info.profile.seat_count().to_string());
 
-    // Claim limits of the profile; no per-worker limit is the seat count
+    // Claim limits of the profile
     let claim = ClaimColumns::of_profile(info.profile);
     write_kv(
         &mut buf,
         "max_claim_batch",
-        &claim.max_claim_batch.to_string(),
+        &describe_task_limit(claim.claim.per_queue_per_pass),
     );
     write_kv(
         &mut buf,
         "max_claim_per_worker",
-        &claim.max_claim_per_worker.to_string(),
+        &describe_task_limit(claim.claim.claimed_per_worker),
     );
 
     // Broker URL (password masked)

@@ -44,7 +44,6 @@ export const refundPayment = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: z.string().min(1), amountCents: z.int().positive(), disputedAt: hz.instant() },
   output: PaymentRefund,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -56,7 +55,6 @@ export const reconcilePayments = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { window: h.string() },
   output: ReconciliationReport,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 

@@ -11,6 +11,8 @@ A cancel reaches a task body through its runtime: `runtime.signal` fires, and `r
 
 ## When the Signal Fires
 
+<!-- members: CancelCause -->
+
 | Cause | When | Classes |
 |-------|------|---------|
 | `"OPERATOR"` | An operator cancels the running task: `app.monitoring.cancelTask` with the policy `"includeRunning"`, or the web UI. See [Monitoring Queries](/horsies/typescript/monitoring/monitoring-queries/) | Every class |

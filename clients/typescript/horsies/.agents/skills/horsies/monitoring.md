@@ -98,8 +98,9 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   instant is a `Temporal.Instant`.
 - `WorkerStateSnapshot` also gives `childCount`, `claimLimits`
   (`ClaimLimits`: `perQueuePerPass` and `claimedPerWorker`, each a
-  `TaskLimit`; `claimedPerWorker` is the limit that the worker resolved,
-  the seat count when its profile sets none), `clusterWideCap`
+  `TaskLimit`; `claimedPerWorker` is `noTaskLimit` when its profile sets
+  none, and the worker then holds at most its seat count, the sum of
+  `capacity` over `executionClassBudgets`), `clusterWideCap`
   (`ClusterCapSetting`) and `executionClassBudgets`
   (`ExecutionClassBudget[]`). `StaleTaskRow` and `ExpiredTaskRow` name the
   task `taskId`; `StaleTaskRow.lastHeartbeatAt` is a `LastBeat`.

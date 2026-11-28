@@ -19,7 +19,6 @@ export const sendOrderEmail = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: h.string(), capture: h.taskOutcome(capturePayment) },
   output: EmailReceipt,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -31,7 +30,6 @@ export const sendShippingSms = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: h.string(), trackingCode: h.string() },
   output: ShippingNotice,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -43,7 +41,6 @@ export const marketingBlast = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { segment: h.string() },
   output: MarketingBlast,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 

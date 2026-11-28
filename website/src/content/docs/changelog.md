@@ -15,6 +15,15 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **Worker snapshot: the claimed limit of the profile, not the seat count.**
+  A worker whose profile sets no `claimed_per_worker` limit writes
+  `max_claim_per_worker = 0` to its snapshot (it wrote the seat count).
+  `WorkerStateSnapshot.claim_limits.claimed_per_worker` reads as
+  `NoTaskLimit` for that worker and as `TaskLimit(tasks)` for a set limit, so
+  "no limit, N seats" and "a limit of N" read apart. The effective limit with
+  no limit is the seat count: the sum of the `capacity` values in
+  `execution_class_budgets`. No schema change. Snapshots that a worker of an
+  earlier build wrote keep the seat count and read as a limit.
 - **A node result read tells no workflow, no node and no result apart.**
   The core's `PostgresBroker::workflow_node_result_read` gives `NodeResultRead`:
   `WorkflowAbsent`, `NodeAbsent`, `NotStored` or `Stored`. The new retrieval
@@ -957,17 +966,6 @@ there is no migration contract between pre-1.0 versions.
   value changes; the stored error code of a task (`{"user": ...}`) does
   not change. A Rust or Python `match` on these variants takes the new
   names.
-- **A key conflict of a send has `retryable = True`.** Python
-  `TaskSendIdempotencyKeyConflict` has the class variable
-  `retryable: ClassVar[bool] = True`: the conflict clears when the
-  reservation ends. The retry methods accept it, as before, and
-  `resend_on_transient_err` does not send it again, as before. The Rust
-  `TaskSendError::retryable()` is `true` for it, as before. Codegen model:
-  `ErrorSlot::AlwaysRetryable`, which the `ErrorCatalog` derive sets for a
-  variant with `#[error_class(always_retryable)]`; a variant takes at most
-  one of `never_retryable` and `always_retryable`. Code that matches on
-  `ErrorSlot` takes the new variant.
-
 - **Breaking: the web API refuses an unknown key in an action body.**
   `POST /api/tasks/{id}/cancel` takes the key `policy` (no body, or a JSON
   object), and `POST /api/workflows/{id}/pause`, `/resume` and
@@ -987,6 +985,20 @@ there is no migration contract between pre-1.0 versions.
   before every check of the body, as before. `CancelTaskBody` refuses an
   unknown key for any serde reader (`#[serde(deny_unknown_fields)]`). The web
   UI sends known keys only.
+- **Breaking: the web API refuses an unknown query parameter.** A route that
+  reads query parameters refuses a parameter that it does not know with 422,
+  before it reads any parameter: `GET /api/tasks`, `/api/tasks/status-counts`,
+  `/api/tasks/facets`, `/api/tasks/breakdown`, `/api/workflows`,
+  `/api/workers/ping` and `/api/workers/{worker_id}/history`. The response has
+  one issue, for the first unknown parameter in query order: `type`
+  `extra_forbidden`, `loc` `["query", name]`, `input` the value of its first
+  occurrence, and `ctx.known_keys` the parameters that the route knows, in
+  declaration order; `msg` names the parameter and the known parameters.
+  Before, a misspelled filter or paging parameter read as not given, and the
+  route answered with unfiltered or default data. A route that reads no query
+  parameter (for example `GET /api/workers`) ignores a parameter, as before.
+  The web UI sends known parameters only.
+
 - **Breaking: one name per concept for tasks, sends, reads, schedules,
   reruns and events (Python, Rust, core).** The entries below list each
   rename. No old name stays as an alias. Before the upgrade, drain the
@@ -1289,6 +1301,18 @@ there is no migration contract between pre-1.0 versions.
   it for reads and for actions, as the TypeScript client does. Every value
   of a repeated header is checked. A value with all members present, such as
   `alice, bob`, is still allowed.
+- **The monitoring page escapes the custom stylesheet URL and the mount path.**
+  `custom_css_url` and the mount path are written into the `<link href>` and
+  `<base href>` attributes of the page with `&`, `"`, `'`, `<` and `>` escaped.
+  A value with a quote no longer ends the attribute.
+- **A refused caller gets the access refusal before any database state.** The
+  monitoring handler answers a request that the access policy refuses with 403
+  `Not authorized.` before it connects its broker. Before, with the database
+  down, the Python mount and the Rust mount answered 503 or 500 with the
+  connect error text to a caller that the policy refuses. The core exports
+  `horsies_core::web::refusal_by_policy(need, grant)` for a host that builds
+  the handler on demand: it gives the 403 for a refused request and `None` for
+  any other. A refused act on `/api/meta` is not a refusal; the route reports it.
 
 ## 0.8.1 — 2026-11-25
 

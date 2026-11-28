@@ -27,7 +27,7 @@ use crate::broker::health::WORKER_PING_CHANNEL;
 use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
 use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
-use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
+use crate::core::config::worker_profile::{describe_task_limit, SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
     startup_verdict, CoverageRequest, CoverageSerialization, StartupCoverageOutcome,
 };
@@ -1581,8 +1581,8 @@ impl Worker {
                 .cluster_wide_cap
                 .claim_parameter()
                 .map_or_else(|| "unlimited".to_owned(), |cap| cap.to_string()),
-            claim.max_claim_per_worker,
-            claim.max_claim_batch,
+            describe_task_limit(claim.claim.claimed_per_worker),
+            describe_task_limit(claim.claim.per_queue_per_pass),
         );
         let plan = children.service().plan();
         tracing::info!("Claim plan: {}", describe_claim_plan(plan));

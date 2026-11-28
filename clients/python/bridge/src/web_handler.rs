@@ -26,10 +26,10 @@ use horsies_core::db::Transience;
 use horsies_core::monitoring::database_failure_status;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded, FoldedNames};
 use horsies_core::web::{
-    route_access, AccessGrant as CoreGrant, AccessNeed, Actions, Bytes, EventFrames,
-    EventStreamItem, Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig,
-    MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts, TraceLink, TraceLinkTemplate,
-    Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    refusal_by_policy, route_access, AccessGrant as CoreGrant, AccessNeed, Actions, Bytes,
+    EventFrames, EventStreamItem, Method, MonitoringHandler as CoreHandler,
+    MonitoringHandlerConfig, MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts,
+    TraceLink, TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -443,9 +443,20 @@ impl<'py> IntoPyObject<'py> for SubscribeOutcome {
 
 async fn handle_operation(
     state: Arc<HandlerState>,
+    actions: Actions,
     core: &'static Core,
     request: MonitoringRequest,
 ) -> HandleOutcome {
+    // A refused caller gets the refusal before the broker connects, so the
+    // answer shows nothing of the database.
+    if let Some(refusal) = refusal_by_policy(
+        route_access(actions, &request.parts.method, &request.parts.path).need,
+        request.grant,
+    )
+    .await
+    {
+        return HandleOutcome::Response(MonitoringResponse::of(refusal));
+    }
     let built = match state.built(core).await {
         Ok(built) => built,
         Err(error) => return HandleOutcome::Response(MonitoringResponse::broker_failed(&error)),
@@ -639,7 +650,7 @@ impl MonitoringHandler {
             core,
             "MonitoringHandler.handle_async",
             kind,
-            handle_operation(Arc::clone(&self.state), core, request),
+            handle_operation(Arc::clone(&self.state), self.actions, core, request),
         )
     }
 

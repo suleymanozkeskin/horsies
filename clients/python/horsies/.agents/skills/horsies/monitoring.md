@@ -125,7 +125,11 @@ class MonitoringAuthorizationPolicy(Protocol):
 Built-ins: `AllowAll`, `ViewOnly`, `TrustedHeader(header_name, actions=Actions.ENABLED | Actions.DISABLED)`.
 Every `/api` route requires `can_view` (false → 403). Mutating routes also
 require `can_act` **and** the header `X-Horsies-Intent: action` (CSRF guard —
-not authentication). Implement the protocol to delegate to a host session/RBAC.
+not authentication). A refused caller gets the 403 before the database is
+touched, so the answer never shows a connect error. A read route refuses an unknown
+query parameter with 422 `extra_forbidden` (`loc` `["query", name]`, `ctx.known_keys`
+the known parameters); the table is on the docs page `monitoring/action-semantics`.
+Implement the protocol to delegate to a host session/RBAC.
 
 ## Schema Compatibility — the No-DDL Rule
 
@@ -205,8 +209,9 @@ list_schedules(app)                                  # next run, then name; at m
   serves no class.
 - A snapshot's `child_count` counts its children; `claim_limits` is a
   `ClaimLimits(per_queue_per_pass, claimed_per_worker)`, each `TaskLimit(tasks)`
-  or `NoTaskLimit()`. `claimed_per_worker` is the limit that the worker
-  resolved: its seat count when its profile sets none.
+  or `NoTaskLimit()`. `claimed_per_worker` is `NoTaskLimit()` when the
+  profile sets none; the effective limit is then the seat count, the sum of the
+  `capacity` values in `execution_class_budgets`.
 - A snapshot's `profile` is `SnapshotProfileNamed(name)` (the worker profile that
   the worker runs) or `SnapshotProfileNotRecorded()` (a worker of a build before
   schema migration 1004 wrote the snapshot). Match both variants. Web:

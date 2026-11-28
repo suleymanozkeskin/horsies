@@ -330,6 +330,8 @@ export const scheduled = Horsies.create({
 
 `schemaMode` is the schema mode of the core handle of the app. The producer, the scheduler, `web` and the task sends of each worker child use it.
 
+<!-- members: SchemaMode -->
+
 | Value | Does |
 |-------|------|
 | `"MIGRATE_AND_VALIDATE"` | The default. Installs and checks the schema |
@@ -350,6 +352,8 @@ The connection of the worker itself always migrates and validates. `check --live
 A log sink function gets the records, so the format does not apply to it.
 
 ## Refusal Codes
+
+<!-- members: HorsiesErrorCode subset -->
 
 | Code | Refused |
 |------|---------|

@@ -136,8 +136,8 @@ describe("child mode", () => {
     assert.deepEqual(native.schemaModes, ["MIGRATE_AND_VALIDATE"]);
     assert.deepEqual(native.serves[0]?.plan, {
       tasks: [
-        { name: "ping", form: "ASYNC", context: "NO_CONTEXT" },
-        { name: "charge", form: "ASYNC", context: "NO_CONTEXT" },
+        { name: "ping", form: "ASYNC", context: "NO_CONTEXT", errorCodes: [] },
+        { name: "charge", form: "ASYNC", context: "NO_CONTEXT", errorCodes: ["CARD_DECLINED", "BANK_DOWN"] },
       ],
       startHooks: [CHILD_KIND_HOOK_NAME, "provide #1 openPool", "onChildStart #1 warmCache"],
       producerManifestJson: '{"manifest":"of the app"}',

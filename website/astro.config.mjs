@@ -40,11 +40,6 @@ export default defineConfig({
 		'/rust/scheduling/schedule-patterns': '/horsies/rust/scheduling/schedule-config/',
 		'/rust/monitoring/web-ui-deployment': '/horsies/rust/monitoring/web-ui-mount/',
 		'/rust/operations/cutover-runbook': '/horsies/rust/migrations/switching-to-0-8-0/',
-		'/rust/quick-start/01-configuring-horsies': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/02-producing-tasks': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/03-defining-workflows': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/04-scheduling': '/horsies/rust/quick-start/getting-started/',
-		'/rust/quick-start/05-workflow-patterns': '/horsies/rust/quick-start/getting-started/',
 	},
 	integrations: [
 		starlight({
@@ -271,6 +266,7 @@ export default defineConfig({
 								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
 								{ label: 'Code Change Examples', slug: 'operations/code-change-examples' },
 								{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
+								{ label: 'Send from an HTTP Route', slug: 'guides/send-from-http-route' },
 								{ label: 'Testing', slug: 'operations/testing' },
 								{ label: 'CLI Reference', slug: 'cli' },
 							],
@@ -286,6 +282,12 @@ export default defineConfig({
 							label: 'Quick Start',
 							items: [
 								{ label: 'Getting Started', slug: 'rust/quick-start/getting-started' },
+								{ label: 'Configuring Horsies', slug: 'rust/quick-start/01-configuring-horsies' },
+								{ label: 'Producing Tasks', slug: 'rust/quick-start/02-producing-tasks' },
+								{ label: 'Defining Workflows', slug: 'rust/quick-start/03-defining-workflows' },
+								{ label: 'Scheduling', slug: 'rust/quick-start/04-scheduling' },
+								{ label: 'Workflow Patterns', slug: 'rust/quick-start/05-workflow-patterns' },
+								{ label: 'Showcase Application', slug: 'rust/quick-start/06-showcase' },
 							],
 						},
 						{
@@ -345,6 +347,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Rerun in Your Transaction', slug: 'rust/operations/rerun-in-your-transaction' },
 								{ label: 'Async Frameworks', slug: 'rust/guides/async-frameworks' },
+								{ label: 'Send from an HTTP Route', slug: 'rust/guides/send-from-http-route' },
 								{ label: 'Testing', slug: 'rust/operations/testing' },
 								{ label: 'CLI Reference', slug: 'rust/cli' },
 							],

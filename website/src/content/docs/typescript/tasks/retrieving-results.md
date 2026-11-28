@@ -110,6 +110,8 @@ A task that was cancelled reads as the outcome `failed` with the built-in code `
 
 `TaskAbsenceReason` tells why the task is held nowhere:
 
+<!-- members: TaskAbsenceReason -->
+
 | Value | Meaning |
 |-------|---------|
 | `"PREDATES_RETAINED_HISTORY"` | The task is older than the oldest history that retention keeps: retention can have removed it |

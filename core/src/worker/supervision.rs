@@ -281,8 +281,7 @@ mod tests {
             ),
             crate::worker::worker_state::ClaimColumns {
                 processes: 1,
-                max_claim_batch: 0,
-                max_claim_per_worker: 1,
+                claim: crate::core::config::worker_profile::ClaimLimits::default(),
             },
             "default".to_owned(),
             Utc::now(),
