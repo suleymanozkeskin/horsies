@@ -74,13 +74,23 @@ pub const CRON_DAY_OF_MONTH: IntBound = IntBound {
 /// The numeric fields of a cron pattern, which [`CronNumericTerm`] serves.
 const CRON_NUMERIC_FIELDS: [IntBound; 3] = [CRON_MINUTE, CRON_HOUR, CRON_DAY_OF_MONTH];
 
-/// The ordinal span of the month field of a cron pattern (January is 1,
-/// December 12).
-pub const CRON_MONTH_SPAN: i64 = 11;
+/// The first ordinal of the month field of a cron pattern (January).
+pub const CRON_MONTH_FIRST: i64 = 1;
 
-/// The ordinal span of the day-of-week field of a cron pattern (Monday is 0,
-/// Sunday 6).
-pub const CRON_WEEKDAY_SPAN: i64 = 6;
+/// The last ordinal of the month field of a cron pattern (December).
+pub const CRON_MONTH_LAST: i64 = 12;
+
+/// The first ordinal of the day-of-week field of a cron pattern (Monday).
+pub const CRON_WEEKDAY_FIRST: i64 = 0;
+
+/// The last ordinal of the day-of-week field of a cron pattern (Sunday).
+pub const CRON_WEEKDAY_LAST: i64 = 6;
+
+/// The ordinal span of the month field of a cron pattern.
+pub const CRON_MONTH_SPAN: i64 = CRON_MONTH_LAST - CRON_MONTH_FIRST;
+
+/// The ordinal span of the day-of-week field of a cron pattern.
+pub const CRON_WEEKDAY_SPAN: i64 = CRON_WEEKDAY_LAST - CRON_WEEKDAY_FIRST;
 
 /// A value, a range start or a range end of a [`CronNumericTerm`]: every
 /// value of a numeric field. [`CronSchedule::validate`] checks the domain of
@@ -146,7 +156,7 @@ const fn larger_span(first: i64, second: i64) -> u64 {
 
 /// The domain of a cron field, signed as the terms hold their values. Each
 /// cron bound is below 60. Pure.
-const fn signed_domain(bound: IntBound) -> (i64, i64) {
+pub const fn signed_domain(bound: IntBound) -> (i64, i64) {
     (bound.min as i64, bound.max as i64)
 }
 
@@ -878,8 +888,8 @@ fn validate_numeric_terms(
 /// Validate enum-domain terms: range ordering (no wrap-around) and step span.
 ///
 /// Enum values are in-domain by construction, so only ordering and step bounds
-/// need checking. `span` is the field's ordinal span (11 for month, 6 for
-/// day-of-week).
+/// need checking. `span` is the field's ordinal span (`CRON_MONTH_SPAN` for month,
+/// `CRON_WEEKDAY_SPAN` for day-of-week).
 fn validate_enum_terms<T: CronOrdinal + std::fmt::Debug>(
     terms: &[CronEnumTerm<T>],
     field: &str,
@@ -992,7 +1002,7 @@ fn validate_satisfiable(month: &[CronEnumTerm<Month>], day: &DaySelector) -> Res
             return Ok(())
         }
     };
-    let month_set = expand_enum_field(month, 1, 12);
+    let month_set = expand_enum_field(month, CRON_MONTH_FIRST, CRON_MONTH_LAST);
     let (day_lo, day_hi) = signed_domain(CRON_DAY_OF_MONTH);
     let dom_set = expand_numeric_field(day_of_month, day_lo, day_hi);
     let feasible = month_set
@@ -1052,7 +1062,8 @@ pub fn expand_numeric_field(terms: &[CronNumericTerm], lo: i64, hi: i64) -> Hash
 
 /// Expand enum terms into the concrete set of ordinals in `[lo, hi]`.
 ///
-/// Month ordinals are 1–12, weekday ordinals 0–6. Shared by validation and the
+/// Month ordinals run from `CRON_MONTH_FIRST` to `CRON_MONTH_LAST`, weekday
+/// ordinals from `CRON_WEEKDAY_FIRST` to `CRON_WEEKDAY_LAST`. Shared by validation and the
 /// scheduler matcher.
 pub fn expand_enum_field<T: CronOrdinal>(
     terms: &[CronEnumTerm<T>],

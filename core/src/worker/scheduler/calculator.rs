@@ -1,11 +1,16 @@
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
+use std::collections::HashSet;
 
-use crate::core::config::schedule::{expand_enum_field, expand_numeric_field};
-use crate::core::config::{
-    CronSchedule, DailySchedule, DaySelector, HourlySchedule, IntervalSchedule, MonthlySchedule,
-    SchedulePattern, WeeklySchedule,
+use crate::core::config::schedule::{
+    expand_enum_field, expand_numeric_field, signed_domain, CRON_DAY_OF_MONTH, CRON_HOUR,
+    CRON_MINUTE, CRON_MONTH_FIRST, CRON_MONTH_LAST, CRON_WEEKDAY_FIRST, CRON_WEEKDAY_LAST,
 };
+use crate::core::config::{
+    CronNumericTerm, CronSchedule, DailySchedule, DaySelector, HourlySchedule, IntervalSchedule,
+    MonthlySchedule, SchedulePattern, WeeklySchedule,
+};
+use crate::manifest_schema::IntBound;
 
 /// One 400-year Gregorian cycle, as an exclusive day-offset bound. The calendar
 /// repeats identically every 146097 days, so any satisfiable cron schedule
@@ -169,6 +174,12 @@ fn try_monthly_candidate(
     tz.from_local_datetime(&datetime).earliest()
 }
 
+/// Expand numeric terms over the whole domain of `field`. Pure.
+fn expand_cron_numeric(terms: &[CronNumericTerm], field: IntBound) -> HashSet<i64> {
+    let (lo, hi) = signed_domain(field);
+    expand_numeric_field(terms, lo, hi)
+}
+
 /// Build a per-date predicate from a [`DaySelector`].
 ///
 /// Term sets are expanded once here (not per candidate day). Weekday ordinals
@@ -178,19 +189,19 @@ fn build_day_matcher(day: &DaySelector) -> Box<dyn Fn(NaiveDate) -> bool> {
     match day {
         DaySelector::EveryDay => Box::new(|_| true),
         DaySelector::ByMonthDay { day_of_month } => {
-            let dom = expand_numeric_field(day_of_month, 1, 31);
+            let dom = expand_cron_numeric(day_of_month, CRON_DAY_OF_MONTH);
             Box::new(move |date| dom.contains(&(date.day() as i64)))
         }
         DaySelector::ByWeekday { day_of_week } => {
-            let dow = expand_enum_field(day_of_week, 0, 6);
+            let dow = expand_enum_field(day_of_week, CRON_WEEKDAY_FIRST, CRON_WEEKDAY_LAST);
             Box::new(move |date| dow.contains(&(date.weekday().num_days_from_monday() as i64)))
         }
         DaySelector::EitherDay {
             day_of_month,
             day_of_week,
         } => {
-            let dom = expand_numeric_field(day_of_month, 1, 31);
-            let dow = expand_enum_field(day_of_week, 0, 6);
+            let dom = expand_cron_numeric(day_of_month, CRON_DAY_OF_MONTH);
+            let dow = expand_enum_field(day_of_week, CRON_WEEKDAY_FIRST, CRON_WEEKDAY_LAST);
             Box::new(move |date| {
                 dom.contains(&(date.day() as i64))
                     || dow.contains(&(date.weekday().num_days_from_monday() as i64))
@@ -200,8 +211,8 @@ fn build_day_matcher(day: &DaySelector) -> Box<dyn Fn(NaiveDate) -> bool> {
             day_of_month,
             day_of_week,
         } => {
-            let dom = expand_numeric_field(day_of_month, 1, 31);
-            let dow = expand_enum_field(day_of_week, 0, 6);
+            let dom = expand_cron_numeric(day_of_month, CRON_DAY_OF_MONTH);
+            let dow = expand_enum_field(day_of_week, CRON_WEEKDAY_FIRST, CRON_WEEKDAY_LAST);
             Box::new(move |date| {
                 dom.contains(&(date.day() as i64))
                     && dow.contains(&(date.weekday().num_days_from_monday() as i64))
@@ -216,15 +227,15 @@ fn build_day_matcher(day: &DaySelector) -> Box<dyn Fn(NaiveDate) -> bool> {
 /// candidate wall-clock time via `from_local_datetime(..).earliest()` so DST
 /// gaps (nonexistent local times) are skipped. Fires at second :00.
 fn next_cron(cron: &CronSchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
-    let mut minutes: Vec<i64> = expand_numeric_field(&cron.minute, 0, 59)
+    let mut minutes: Vec<i64> = expand_cron_numeric(&cron.minute, CRON_MINUTE)
         .into_iter()
         .collect();
     minutes.sort_unstable();
-    let mut hours: Vec<i64> = expand_numeric_field(&cron.hour, 0, 23)
+    let mut hours: Vec<i64> = expand_cron_numeric(&cron.hour, CRON_HOUR)
         .into_iter()
         .collect();
     hours.sort_unstable();
-    let month_set = expand_enum_field(&cron.month, 1, 12);
+    let month_set = expand_enum_field(&cron.month, CRON_MONTH_FIRST, CRON_MONTH_LAST);
     let day_matches = build_day_matcher(&cron.day);
 
     let base_date = local.date_naive();
