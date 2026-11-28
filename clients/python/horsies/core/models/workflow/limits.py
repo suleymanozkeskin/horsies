@@ -13,7 +13,10 @@ Both bounds fail closed:
 
 from __future__ import annotations
 
-from horsies._catalog.workflow_bounds import MAX_SUBWORKFLOW_DEPTH as _MAX_SUBWORKFLOW_DEPTH
+from horsies._catalog.workflow_bounds import (
+    MAX_SUBWORKFLOW_DEPTH as _MAX_SUBWORKFLOW_DEPTH,
+    MAX_WORKFLOW_NODES as _MAX_WORKFLOW_NODES,
+)
 
 MAX_SUBWORKFLOW_DEPTH = _MAX_SUBWORKFLOW_DEPTH
 """The greatest depth of a child workflow, from horsies-core.
@@ -22,5 +25,5 @@ A top-level workflow has depth 0. A child workflow has the depth of its
 parent plus 1.
 """
 
-MAX_WORKFLOW_NODES = 10_000
-"""The most nodes that one ``WorkflowSpec`` holds."""
+MAX_WORKFLOW_NODES = _MAX_WORKFLOW_NODES
+"""The most nodes that one ``WorkflowSpec`` holds, from horsies-core."""

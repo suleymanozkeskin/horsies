@@ -8,9 +8,13 @@ from __future__ import annotations
 from typing import Final
 
 __all__ = [
+    'MAX_WORKFLOW_NODES',
     'MAX_SUBWORKFLOW_DEPTH',
     'MAX_CHECK_SUBWORKFLOW_BUILDS',
 ]
+
+MAX_WORKFLOW_NODES: Final = 10000
+"""The most nodes that one `WorkflowSpec` holds."""
 
 MAX_SUBWORKFLOW_DEPTH: Final = 32
 """The greatest depth of a child workflow.

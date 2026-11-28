@@ -7,6 +7,7 @@
 //! fails when a core value changes and the module is not written again.
 
 use horsies_core::core::config::broker::{BROKER_MAX_OVERFLOW_DEFAULT, BROKER_POOL_SIZE_DEFAULT};
+use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
     CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MEMORY_LIMIT_EXIT_CODE,
@@ -338,7 +339,12 @@ pub const SCHEDULE_DEFAULTS: ConstantModule = ConstantModule {
     constants: &SCHEDULE_DEFAULT_CONSTANTS,
 };
 
-const WORKFLOW_BOUND_CONSTANTS: [CoreConstant; 2] = [
+const WORKFLOW_BOUND_CONSTANTS: [CoreConstant; 3] = [
+    CoreConstant {
+        name: "MAX_WORKFLOW_NODES",
+        doc: "The most nodes that one `WorkflowSpec` holds.",
+        value: CoreValue::Integer(MAX_WORKFLOW_NODES as i64),
+    },
     CoreConstant {
         name: "MAX_SUBWORKFLOW_DEPTH",
         doc: "The greatest depth of a child workflow.\n\
@@ -576,8 +582,12 @@ mod tests {
             "\nMAX_SUBWORKFLOW_DEPTH: Final = {MAX_SUBWORKFLOW_DEPTH}\n"
         )));
         assert!(rendered.contains(&format!(
+            "\nMAX_WORKFLOW_NODES: Final = {MAX_WORKFLOW_NODES}\n"
+        )));
+        assert!(rendered.contains(&format!(
             "\nMAX_CHECK_SUBWORKFLOW_BUILDS: Final = {MAX_CHECK_SUBWORKFLOW_BUILDS}\n"
         )));
+        assert_eq!(MAX_WORKFLOW_NODES, 10_000);
         assert_eq!(MAX_SUBWORKFLOW_DEPTH, 32);
         assert_eq!(MAX_CHECK_SUBWORKFLOW_BUILDS, 320_000);
     }
