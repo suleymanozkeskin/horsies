@@ -553,7 +553,7 @@ The Python API (typed `result_for`, `NodeKey`, `node_id_from_text`) is in [Workf
 
 ### WorkflowMetadata (Metadata Only)
 
-A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_context_from`. The Python example is in [WorkflowMetadata](/horsies/concepts/workflows/workflow-examples/#workflowmeta).
+A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_context_from`. The Python example is in [WorkflowMetadata](/horsies/concepts/workflows/workflow-examples/#workflowmetadata).
 
 ### Comparison: args_from vs workflow_context_from
 

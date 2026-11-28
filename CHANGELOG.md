@@ -938,17 +938,6 @@ and there is no migration contract between pre-1.0 versions.
   value changes; the stored error code of a task (`{"user": ...}`) does
   not change. A Rust or Python `match` on these variants takes the new
   names.
-- **A key conflict of a send has `retryable = True`.** Python
-  `TaskSendIdempotencyKeyConflict` has the class variable
-  `retryable: ClassVar[bool] = True`: the conflict clears when the
-  reservation ends. The retry methods accept it, as before, and
-  `resend_on_transient_err` does not send it again, as before. The Rust
-  `TaskSendError::retryable()` is `true` for it, as before. Codegen model:
-  `ErrorSlot::AlwaysRetryable`, which the `ErrorCatalog` derive sets for a
-  variant with `#[error_class(always_retryable)]`; a variant takes at most
-  one of `never_retryable` and `always_retryable`. Code that matches on
-  `ErrorSlot` takes the new variant.
-
 - **Breaking: the web API refuses an unknown key in an action body.**
   `POST /api/tasks/{id}/cancel` takes the key `policy` (no body, or a JSON
   object), and `POST /api/workflows/{id}/pause`, `/resume` and
