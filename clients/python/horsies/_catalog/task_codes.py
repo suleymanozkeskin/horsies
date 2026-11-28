@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 __all__ = ['OperationalCode', 'ContractCode', 'RetrievalCode', 'OutcomeCode']
 
 
-class OperationalCode(str, Enum):
+class OperationalCode(StrEnum):
     """Something actually broke in execution.
 
     Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
@@ -61,7 +61,7 @@ class OperationalCode(str, Enum):
     """A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code."""
 
 
-class ContractCode(str, Enum):
+class ContractCode(StrEnum):
     """A code/typing/usage contract was violated.
 
     Typical caller behavior: fix code or type assumptions, do not blindly retry.
@@ -78,7 +78,7 @@ class ContractCode(str, Enum):
     """
 
 
-class RetrievalCode(str, Enum):
+class RetrievalCode(StrEnum):
     """The caller cannot get the value right now or cannot locate it.
 
     Typical caller behavior: wait, poll again, handle missing value as normal flow.
@@ -124,7 +124,7 @@ class RetrievalCode(str, Enum):
     """
 
 
-class OutcomeCode(str, Enum):
+class OutcomeCode(StrEnum):
     """A non-bug execution outcome or control-flow result.
 
     Typical caller behavior: branch on outcome, continue control flow.

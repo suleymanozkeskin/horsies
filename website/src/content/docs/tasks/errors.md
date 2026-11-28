@@ -8,7 +8,7 @@ tags: [errors, BuiltInTaskCode, HorsiesErrorCode, reference]
 
 # Errors Reference
 
-Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The two clients use the same codes and names.
+Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The three clients use the same codes and names.
 
 The API of the error types is on the client pages: [Error Types](/horsies/tasks/error-types/) (Python) and [Task Errors](/horsies/rust/tasks/errors/) (Rust).
 
@@ -32,7 +32,7 @@ Errors from task execution, broker, and worker internals.
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `retry_for` |
 | `DATABASE_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
-| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use, or a stored `retry_policy` that does not validate as `RetryPolicy` (this failure does not retry). No user code ran. A stored-data cause does not clear on a retry | Yes, if in `retry_for` |
+| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use, a stored `retry_policy` that does not validate as `RetryPolicy` (this failure does not retry), or an `args_from` result whose stored error holds a custom code that the upstream task does not declare. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after it went to ENQUEUED, while its task was built or enqueued | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |

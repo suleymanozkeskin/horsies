@@ -50,6 +50,7 @@ from horsies._catalog.monitoring_errors import (
     TaskActionIsWorkflowTask as TaskActionIsWorkflowTask,
     TaskActionNotCancellable as TaskActionNotCancellable,
     TaskActionNotFound as TaskActionNotFound,
+    TaskActionOutcomeUnknown as TaskActionOutcomeUnknown,
     TaskActionStoredDataInvalid as TaskActionStoredDataInvalid,
 )
 from horsies._core import CoreError, TaskCancelledRecord
@@ -117,6 +118,7 @@ def _cancel_answer(
             | TaskActionNotCancellable()
             | TaskActionIsWorkflowTask()
             | TaskActionDatabaseOperationFailed()
+            | TaskActionOutcomeUnknown()
             | TaskActionStoredDataInvalid()
         ):
             return Err(outcome)

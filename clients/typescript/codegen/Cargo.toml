@@ -12,7 +12,7 @@ name = "horsies-typescript-codegen"
 path = "src/main.rs"
 
 [dependencies]
-horsies-core = { path = "../../../core" }
+horsies-core = { path = "../../../core", features = ["web"] }
 
 [lints]
 workspace = true

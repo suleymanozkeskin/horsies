@@ -16,10 +16,11 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::core::config::worker_profile::input::TaskLimitSetting;
 use horsies_core::{
-    checked_history_limit, worker_history_limit_refused, BrokerOperationSource, BudgetLoad,
-    ClearableBootCause, DatabaseOperationError, DownSlot, Execution, ExecutionClassBudget,
-    ExecutionClassCoverage, ExecutionClassReport, PendingStream, SlotHealth, SnapshotProfile,
-    StreamCoverage, StreamCoverageState, StreamWait, WorkerExecutionClassLoad, WorkerStateSnapshot,
+    checked_history_limit, worker_history_limit_over_bound, worker_history_limit_refused,
+    BrokerOperationSource, BudgetLoad, ClearableBootCause, DatabaseOperationError, DownSlot,
+    Execution, ExecutionClassBudget, ExecutionClassCoverage, ExecutionClassReport, PendingStream,
+    SlotHealth, SnapshotProfile, StreamCoverage, StreamCoverageState, StreamWait,
+    WorkerExecutionClassLoad, WorkerStateSnapshot,
 };
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -516,12 +517,12 @@ impl ToRecord for ExecutionClassReport {
 /// The history limit of a Python value, with the answer of Python's read
 /// for each value (`get_worker_state_history_async`), before any connect:
 /// `None` reads every retained row; an `int` that fits in 64 bits follows
-/// the core's rule ([`checked_history_limit`]: 0 or less is refused). The
-/// values that Python's statement refused answer as Python did: an `int`
-/// below the 64-bit range and `False` are 0 or less, so the core's
-/// refusal; an `int` above the range and `True` are
+/// the core's rule ([`checked_history_limit`]: 0 or less, or above
+/// `WORKER_HISTORY_ROW_BOUND`, is refused). An `int` below the 64-bit range
+/// and `False` are 0 or less, so the core's refusal; an `int` above the
+/// range is above the bound, so the core's refusal; `True` is
 /// `MONITORING_QUERY_FAILED`, not retryable (PostgreSQL refused the `LIMIT`
-/// value). Another type raises `TypeError`: the public parameter is
+/// value, as Python's statement did). Another type raises `TypeError`: the public parameter is
 /// `int | None`. Reads the value only.
 pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, BrokerFailure>> {
     if value.is_none() {
@@ -552,7 +553,10 @@ pub fn history_limit(value: &Bound<'_, PyAny>) -> PyResult<Result<Option<i64>, B
                     HISTORY_SUBJECT,
                     worker_history_limit_refused(&text),
                 ))),
-                false => Ok(Err(limit_statement_refused(&text))),
+                false => Ok(Err(BrokerFailure::of_operation_error(
+                    HISTORY_SUBJECT,
+                    worker_history_limit_over_bound(&text),
+                ))),
             }
         }
     }
@@ -733,12 +737,29 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_above_the_range_and_true_are_a_query_failure() {
-        let (code, message, retryable) = failure_of("2 ** 70");
+    fn a_limit_above_the_bound_is_the_core_refusal() {
+        assert_eq!(limit_of("10000").ok(), Some(Some(10_000)));
+        for (source, shown) in [
+            ("10001", "10001".to_owned()),
+            ("2 ** 70", (1_u128 << 70).to_string()),
+        ] {
+            assert_eq!(
+                failure_of(source),
+                (
+                    "INVALID_INPUT".to_owned(),
+                    format!("limit must be at most 10000 when set, got {shown}"),
+                    false
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn true_is_a_query_failure() {
+        let (code, message, retryable) = failure_of("True");
         assert_eq!(code, "MONITORING_QUERY_FAILED");
         assert!(message.starts_with("get_worker_state_history failed: limit "));
         assert!(!retryable);
-        assert_eq!(failure_of("True").0, "MONITORING_QUERY_FAILED");
     }
 
     #[test]

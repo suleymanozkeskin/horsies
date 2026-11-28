@@ -31,6 +31,8 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
 | Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
+| The cancel statement failed before the server committed it (`DATABASE_OPERATION_FAILED`) | 503 when the cause may clear, else 500, with a `detail` message. Nothing changes |
+| The cancel statement was sent and its reply was lost (`OUTCOME_UNKNOWN`) | 503 when the cause may clear, else 500, with a `detail` message. The cancel may have committed: cancel again, and a committed cancel answers 409 `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 
 A committed `CANCELLED` is final. Every lifecycle transition is a CAS with an
 expected status, so claim, finalize, auto-retry, and the reaper all no-op

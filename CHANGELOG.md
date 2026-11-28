@@ -27,6 +27,33 @@ and there is no migration contract between pre-1.0 versions.
   handle typed `NoWorkflowOutput` reads such a workflow as
   `Succeeded(NoWorkflowOutput)` or its stored error. A stored value other than
   `null` does not read as `NoWorkflowOutput`.
+- **Cancel: the unknown outcome has its own error.** `TaskActionError` has the
+  new variant `OutcomeUnknown` (code `OUTCOME_UNKNOWN`; Python class
+  `TaskActionOutcomeUnknown`, member `TaskActionErrorCode.OUTCOME_UNKNOWN`),
+  with `message`, `retryable`, `task_id` and `cause`. The cancel statement
+  was sent and its reply was lost: the cancel may have committed. A cancel
+  again tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with
+  `CANCELLED`. `DATABASE_OPERATION_FAILED` now means that nothing changed:
+  the statement was not sent, the server refused it, or the connect failed.
+  The web route answers both with 503 when the cause may clear, else 500. In
+  the core, `CancelTaskError::OutcomeUnknown(StatementFailure)` is the new
+  variant, and `TaskActionError::cancel_outcome_unknown` builds the error.
+- **Monitoring reads and waits have bounds, in the core.** A call past a
+  bound is refused with `INVALID_INPUT` (`DatabaseInvalidInput` in Python,
+  `DatabaseOperationError::InvalidInput` in Rust), and nothing runs:
+  - `WORKER_PING_WAIT_BOUND` (60 s): `ping_workers` with a longer wait. The
+    upper bound of Python's `wait_ms` was `2**64 - 1`; it is 60,000.
+  - `WORKER_HISTORY_ROW_BOUND` (10,000): `get_worker_state_history` with a
+    `WorkerHistoryLimitNewest` / `WorkerHistoryLimit::Newest` count above the
+    bound. `WorkerHistoryLimitAllRetained` / `WorkerHistoryLimit::AllRetained`
+    reads at most the bound and is refused for a worker that holds more
+    retained snapshots: no snapshots are returned in part.
+  - `MAX_OPEN_EVENT_STREAMS` (256): `MonitoringHandler::subscribe_events`
+    keeps at most this many event streams open. A stream requested past the
+    bound is the degraded frame and the end, with a warning in the log; the
+    core's `try_subscribe_events` returns `EventStreamsRefused { open, bound }`.
+    Python's `subscribe_events_async` answers `EventStreamRefused`. A stream
+    that ends frees its place.
 - **Core: public constants for the client checks.**
   `horsies_core` exports the idempotency key bound
   (`IDEMPOTENCY_KEY_MAX_BYTES`, 255 UTF-8 bytes), the route of
@@ -95,6 +122,35 @@ and there is no migration contract between pre-1.0 versions.
 - The Rust sub-workflow node read of a child with no output node no longer
   fails with `ResultDeserializationError` when the node is typed
   `NoWorkflowOutput`.
+- **Python: the built-in code enums print their code text.** The generated
+  code enums (`OperationalCode`, `ContractCode`, `RetrievalCode`,
+  `OutcomeCode`, `HorsiesErrorCode`, `DatabaseErrorCode`,
+  `TaskSendErrorCode`, `SeatRelayCode`, `WorkflowStartErrorCode`,
+  `WorkflowHandleErrorCode`, `MonitoringQueryErrorCode`,
+  `TaskActionErrorCode`, `MonitoringQueryRefusalCode`, `RerunErrorCode`) and
+  the generated text enums `TaskAbsenceReason`, `TaskAttemptOutcome`,
+  `WorkflowStatus` and `WorkflowNodeStatus` are `StrEnum` in place of
+  `(str, Enum)`. `str(code)` and `f"{code}"` give the code text
+  (`DATABASE_ERROR`); on Python 3.13 they gave `OperationalCode.DATABASE_ERROR`.
+  Matching, comparison, hashing and the stored text do not change.
+  `TaskStatus` stays a plain `Enum`. Enums that user code declares are not
+  affected.
+- **An upstream error with a code that the upstream task does not declare
+  refuses the input of the downstream task (Python and Rust).** A node input
+  that is an upstream outcome (`TaskOutcome` in Python, `TaskOutcome<S, E>` in
+  Rust) fails the run with `WORKER_SERIALIZATION_ERROR` when the stored error
+  of a task node holds a custom code that the upstream task does not declare
+  (`error_codes=` in Python, the declared codes of the code type in Rust). The
+  body does not run. An upstream task that declares no code reads any code, and
+  a sub-workflow node is not checked. The workflow context read and the result
+  read already refuse the same case.
+- **Rust: `check --live` connects with an observe-only handle.**
+  `Horsies::check_live` builds a handle of its own with
+  `SchemaMode::ObserveOnly`, as the Python and TypeScript checks do, runs the
+  connectivity check and the worker connection check on it, and closes it. The
+  app's handle does not connect and its schema mode does not apply. The result
+  of the check does not change.
+
 - **The Rust client's `sqlx` feature needs sqlx 0.9, and the minimum Rust
   is 1.95.** The `sqlx` feature of `horsies` builds against sqlx 0.9 (it was
   0.8). `rust-version` of `horsies` is `1.95` (it was `1.91`), and the

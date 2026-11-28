@@ -52,7 +52,10 @@ pub fn render_module(module: &str, catalogs: &[CodeCatalog]) -> String {
         "\"\"\"Code catalogs of the `{module}` area: {}.\"\"\"\n\n",
         classes.join(", ")
     ));
-    text.push_str("from __future__ import annotations\n\nfrom enum import Enum\n\n");
+    text.push_str(&format!(
+        "from __future__ import annotations\n\nfrom enum import {}\n\n",
+        enum_imports(catalogs)
+    ));
     let exported: Vec<String> = catalogs
         .iter()
         .flat_map(exported_names)
@@ -66,6 +69,22 @@ pub fn render_module(module: &str, catalogs: &[CodeCatalog]) -> String {
     text
 }
 
+/// The names that a module imports from `enum`, in alphabetical order: the
+/// base classes that its catalogs use.
+fn enum_imports(catalogs: &[CodeCatalog]) -> &'static str {
+    let uses_plain = catalogs
+        .iter()
+        .any(|catalog| catalog.python_base == PythonEnumBase::PlainEnum);
+    let uses_text = catalogs
+        .iter()
+        .any(|catalog| catalog.python_base == PythonEnumBase::StrEnum);
+    match (uses_plain, uses_text) {
+        (true, true) => "Enum, StrEnum",
+        (true, false) => "Enum",
+        (false, true) | (false, false) => "StrEnum",
+    }
+}
+
 /// The module names of one catalog: the class, then the terminal constant
 /// of a lifecycle.
 fn exported_names(catalog: &CodeCatalog) -> Vec<&'static str> {
@@ -77,7 +96,7 @@ fn exported_names(catalog: &CodeCatalog) -> Vec<&'static str> {
 
 fn render_class(catalog: &CodeCatalog) -> String {
     let base = match catalog.python_base {
-        PythonEnumBase::StrEnum => "str, Enum",
+        PythonEnumBase::StrEnum => "StrEnum",
         PythonEnumBase::PlainEnum => "Enum",
     };
     let mut text = format!("class {}({base}):\n", catalog.python_class);
@@ -184,7 +203,7 @@ mod tests {
         let rendered = render_class(&catalog("status", "Status", PythonEnumBase::StrEnum));
         assert_eq!(
             rendered,
-            "class Status(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n"
+            "class Status(StrEnum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n"
         );
     }
 
@@ -193,7 +212,7 @@ mod tests {
         let rendered = render_class(&lifecycle_catalog());
         assert_eq!(
             rendered,
-            "class Status(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n\n    @property\n    def is_terminal(self) -> bool:\n        \"\"\"Whether this status represents a final state (no further transitions).\"\"\"\n        return self in STATUS_TERMINAL_STATES\n\n\nSTATUS_TERMINAL_STATES: frozenset[Status] = frozenset(\n    {\n        Status.RUNNING,\n    }\n)\n"
+            "class Status(StrEnum):\n    \"\"\"Task status.\"\"\"\n\n    PENDING = 'PENDING'\n    \"\"\"Waits for a worker.\"\"\"\n\n    RUNNING = 'RUNNING'\n\n    @property\n    def is_terminal(self) -> bool:\n        \"\"\"Whether this status represents a final state (no further transitions).\"\"\"\n        return self in STATUS_TERMINAL_STATES\n\n\nSTATUS_TERMINAL_STATES: frozenset[Status] = frozenset(\n    {\n        Status.RUNNING,\n    }\n)\n"
         );
     }
 
@@ -220,7 +239,7 @@ mod tests {
         };
         assert_eq!(
             render_class(&codes),
-            "class HorsiesErrorCode(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    WORKFLOW_NO_NAME = 'HRS-001'\n    \"\"\"The workflow has no name.\"\"\"\n"
+            "class HorsiesErrorCode(StrEnum):\n    \"\"\"Task status.\"\"\"\n\n    WORKFLOW_NO_NAME = 'HRS-001'\n    \"\"\"The workflow has no name.\"\"\"\n"
         );
     }
 
@@ -232,7 +251,7 @@ mod tests {
         let catalog = <HorsiesErrorCode as CodeEnum>::CATALOG;
         let modules = group_by_module(CODE_CATALOGS);
         let rendered = render_module("error_codes", &modules["error_codes"]);
-        assert!(rendered.contains("\n\n\nclass HorsiesErrorCode(str, Enum):\n"));
+        assert!(rendered.contains("\n\n\nclass HorsiesErrorCode(StrEnum):\n"));
         let mut expected_lines = Vec::new();
         for (code, member) in <HorsiesErrorCode as CodeEnum>::VARIANTS
             .iter()
@@ -263,6 +282,15 @@ mod tests {
             name.push(character.to_ascii_uppercase());
         }
         name
+    }
+
+    #[test]
+    fn a_module_imports_the_bases_that_its_catalogs_use() {
+        let text = catalog("a", "A", PythonEnumBase::StrEnum);
+        let plain = catalog("a", "B", PythonEnumBase::PlainEnum);
+        assert!(render_module("a", &[text]).contains("\nfrom enum import StrEnum\n"));
+        assert!(render_module("a", &[plain]).contains("\nfrom enum import Enum\n"));
+        assert!(render_module("a", &[text, plain]).contains("\nfrom enum import Enum, StrEnum\n"));
     }
 
     #[test]
