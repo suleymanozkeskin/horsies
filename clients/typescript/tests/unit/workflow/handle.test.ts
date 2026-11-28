@@ -615,7 +615,7 @@ describe("the workflow context", () => {
     assert.equal(context().hasSummary("count"), false);
   });
 
-  test("summaryFor: the stored summary, or notInContext", () => {
+  test("summaryFor: the stored summary, or nodeNotInContext", () => {
     assert.deepEqual(context().summaryFor("failedChild"), {
       ok: true,
       value: {
@@ -628,7 +628,7 @@ describe("the workflow context", () => {
         skippedNodes: 0,
       },
     });
-    assert.deepEqual(context().summaryFor("count"), { ok: false, error: { kind: "notInContext", nodeId: "count" } });
+    assert.deepEqual(context().summaryFor("count"), { ok: false, error: { kind: "nodeNotInContext", nodeId: "count" } });
   });
 
   test("outputFor: the child's output read with its declared output", () => {
@@ -639,10 +639,10 @@ describe("the workflow context", () => {
     assert.deepEqual(context().outputFor("failedChild", child), { ok: true, value: { kind: "notRecorded" } });
   });
 
-  test("outputFor: notInContext for a node with no summary", () => {
+  test("outputFor: nodeNotInContext for a node with no summary", () => {
     assert.deepEqual(context().outputFor("count", child), {
       ok: false,
-      error: { kind: "notInContext", nodeId: "count" },
+      error: { kind: "nodeNotInContext", nodeId: "count" },
     });
   });
 
@@ -679,7 +679,7 @@ describe("the workflow context", () => {
     });
     assert.deepEqual(context.value.resultFor("none", count), {
       ok: false,
-      error: { kind: "notInContext", nodeId: "none" },
+      error: { kind: "nodeNotInContext", nodeId: "none" },
     });
     assert.equal(context.value.resultFor("bad", count).ok, false);
   });

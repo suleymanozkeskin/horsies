@@ -51,7 +51,8 @@ Errors from type/schema validation and structural contracts.
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | The task returned a value that does not fit its declared type, or something that is not a task result (in Python: not an `Ok` or an `Err`), including `None` | Yes, if in `retry_for` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's or workflow's declared success type locally registered | No |
-| `WORKFLOW_CONTEXT_MISSING_ID` | Workflow context is missing required ID | No |
+| `WORKFLOW_CONTEXT_MISSING_ID` | A workflow context read got a node that has no `node_id` | No |
+| `NODE_NOT_IN_CONTEXT` | A workflow context read got a node that has an id, but the context holds no entry for it: the node is not in `workflow_context_from`, or its dependency did not finish | No |
 
 A return that is not a task result has `variant` `'not_a_task_result'`, an empty `validation_errors` and a count of 0. It no longer goes through `exception_mapper` or `default_unhandled_error_code`, so it is not retried unless a policy lists `RETURN_TYPE_MISMATCH`.
 
@@ -99,7 +100,7 @@ Terminal outcome codes for tasks and workflows.
 Workflow-specific error codes are distributed across the four families above:
 
 - **OperationalCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
-- **ContractCode**: `WORKFLOW_CONTEXT_MISSING_ID`
+- **ContractCode**: `WORKFLOW_CONTEXT_MISSING_ID`, `NODE_NOT_IN_CONTEXT`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`, `NODE_NOT_FOUND`
 - **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUB_WORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
 

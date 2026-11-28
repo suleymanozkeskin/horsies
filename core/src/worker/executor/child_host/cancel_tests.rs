@@ -9,6 +9,12 @@
 //! its run, as a host registers the promise of a body, and keeps it outside
 //! its future. The cancel rounds ask that work to stop and keep it; the run
 //! reports it as left or stuck, and keeps its seat until the host ends it.
+//!
+//! The stopped host core: each serve loop reads the host's core before the
+//! start write and before the finalizing marker. A stopped core refuses the
+//! start, or keeps the body's result with no marker; the frame says
+//! `ends_itself`, and the serve loop ends with `CoreStopped`. A running core
+//! serves on.
 
 use std::future::Future;
 use std::os::unix::net::UnixStream;
@@ -22,13 +28,16 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
+use super::host_core::{HostCoreState, HostCoreStop, HostCoreWatch};
 use super::link::{read_frame, FrameWriter};
 use super::run::HostContext;
 use super::run_work::{
     current_run, run_cancel_signal, run_cancel_state, CancelCause, HostStopState, HostWork,
     RunCancelState, WorkStopCause,
 };
-use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
+use super::seats::{
+    serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, TaskServeEnd,
+};
 use super::start_tests::{
     lock_the_row, remove_task, seed_claimed, until_a_backend_waits_in, WORKER_ID,
 };
@@ -43,9 +52,10 @@ use crate::process_exit::ProcessExit;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::protocol::{
-    decode_child_frame, CancelGraceMs, CancelTarget, CancelledBody, CancelledLoop, ChildFrame,
-    DispatchNumber, FrameReader, IsolatedWork, NoLeftWork, ParentFrame, RunEnd, RunFrame, RunRef,
-    SeatEnd, SharedRunFrame, SharedWork, TaskInputText, TaskTimeoutMs,
+    decode_child_frame, CancelGraceMs, CancelTarget, CancelledBody, CancelledLoop, ChildAfterFrame,
+    ChildFrame, DispatchNumber, FrameReader, IsolatedWork, LeftWorkEnd, NoLeftWork, ParentFrame,
+    RunEnd, RunFrame, RunRef, SeatEnd, SharedRunFrame, SharedWork, StopReason, TaskInputText,
+    TaskTimeoutMs,
 };
 
 /// The task of the row that `seed_claimed` writes.
@@ -366,6 +376,15 @@ impl ChildFrames {
 /// A child context on `pool` with the task `task` of [`TASK_NAME`], and the
 /// frames that it writes.
 fn context_with(pool: &TestPool, task: RegisteredTask) -> (HostContext, ChildFrames) {
+    context_with_core(pool, task, HostCoreWatch::NoHostCore)
+}
+
+/// [`context_with`] with the host core `host_core`.
+fn context_with_core(
+    pool: &TestPool,
+    task: RegisteredTask,
+    host_core: HostCoreWatch,
+) -> (HostContext, ChildFrames) {
     let mut registry = TaskRegistry::new();
     registry
         .register(TASK_NAME, task)
@@ -389,6 +408,7 @@ fn context_with(pool: &TestPool, task: RegisteredTask) -> (HostContext, ChildFra
             handler_child: super::HandlerChildApp::without_handlers(),
             event_loop: super::EventLoopWatch::RuntimeOnly,
             exit: ProcessExit::Standard,
+            host_core,
         }),
         pid: 4242,
         writer,
@@ -402,6 +422,7 @@ fn run_frame(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFrame {
         task_name: TASK_NAME.to_owned(),
         queue_name: QueueName::cut("default"),
         attempt: AttemptNumber::SMALLEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -422,6 +443,7 @@ fn shared_run_frame(run: RunRef, claimed_at: DateTime<Utc>, work: SharedWork) ->
         task_name: TASK_NAME.to_owned(),
         queue_name: QueueName::cut("default"),
         attempt: AttemptNumber::SMALLEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -527,7 +549,7 @@ async fn an_isolated_async_body_gets_the_cancel_and_the_run_ends_cancelled() {
     };
     let (end, frame) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match frame {
         ChildFrame::RunCancelled(cancelled) => {
             assert_eq!(cancelled.task_id, task_id);
@@ -574,7 +596,7 @@ async fn an_isolated_blocking_body_reads_the_operator_cancel_on_its_thread() {
     };
     let (end, frame) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert!(
         matches!(
             &frame,
@@ -619,7 +641,7 @@ async fn an_isolated_cancel_before_the_body_keeps_the_body_from_starting() {
     };
     let (end, frame) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match frame {
         ChildFrame::RunCancelled(cancelled) => {
             assert_eq!(cancelled.body, CancelledBody::NotStarted);
@@ -662,7 +684,7 @@ async fn an_isolated_cancel_of_another_task_is_ignored() {
     };
     let (end, frame) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match frame {
         ChildFrame::Result(result) => {
             assert!(matches!(result.end, RunEnd::Result(_)), "{result:?}");
@@ -699,7 +721,7 @@ async fn an_isolated_child_ignores_a_late_cancel_and_refuses_a_shared_target() {
             .expect("the serve loop reads");
     };
     let (end, ()) = tokio::join!(serve, script);
-    assert_eq!(end, ServeEnd::BadParentFrame);
+    assert_eq!(end, TaskServeEnd::BadParentFrame);
 }
 
 /// A shared async body gets the operator cancel: `cancel_fired`, then the
@@ -744,7 +766,7 @@ async fn a_shared_async_body_gets_the_cancel_and_reports_cancel_fired_first() {
     };
     let (end, (fired, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(fired, ChildFrame::CancelFired(run));
     match ended {
         ChildFrame::SharedResult(result) => {
@@ -800,7 +822,7 @@ async fn a_shared_async_body_that_ignores_the_cancel_is_dropped_after_the_grace(
     };
     let (end, reported) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(reported[0], ChildFrame::CancelFired(run));
     assert_eq!(reported[1], ChildFrame::SecondCancel(run));
     match &reported[2] {
@@ -853,7 +875,7 @@ async fn a_shared_async_cancel_after_the_deadline_is_ignored() {
     };
     let (end, reported) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(reported[0], ChildFrame::DeadlineFired(run));
     assert_eq!(reported[1], ChildFrame::SecondCancel(run));
     match &reported[2] {
@@ -891,7 +913,7 @@ async fn a_shared_cancel_of_an_unknown_run_is_ignored() {
             .expect("the serve loop reads");
     };
     let (end, ()) = tokio::join!(serve, script);
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
 }
 
 /// A shared thread body reads the operator cancel in its cancel state; the
@@ -933,7 +955,7 @@ async fn a_shared_thread_body_reads_the_cancel_and_ends_cancelled() {
     };
     let (end, (fired, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(fired, ChildFrame::CancelFired(run));
     match ended {
         ChildFrame::SharedResult(result) => {
@@ -984,7 +1006,7 @@ async fn a_shared_thread_deadline_sets_the_deadline_cause_and_a_later_cancel_is_
     };
     let (end, (deadline, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(deadline, ChildFrame::DeadlineFired(run));
     match ended {
         ChildFrame::SharedResult(result) => assert_eq!(result.end, SeatEnd::TimedOut),
@@ -1064,7 +1086,7 @@ async fn a_shared_cancel_before_the_body_keeps_the_body_from_starting(kind: Shar
     };
     let (end, (fired, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped, "{kind:?}");
+    assert_eq!(end, TaskServeEnd::Stopped, "{kind:?}");
     assert_eq!(fired, ChildFrame::CancelFired(run), "{kind:?}");
     match ended {
         ChildFrame::SharedResult(result) => {
@@ -1135,7 +1157,7 @@ async fn a_shared_async_run_keeps_its_seat_until_the_host_ends_its_work() {
     };
     let (end, (reported, stop, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert_eq!(reported[0], ChildFrame::DeadlineFired(run));
     assert_eq!(reported[1], ChildFrame::SecondCancel(run));
     match &reported[2] {
@@ -1209,7 +1231,7 @@ async fn a_shared_async_run_stops_left_host_work_with_the_left_work_cause() {
     };
     let (end, (reported, stop, ended)) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     assert!(
         matches!(&reported[0], ChildFrame::LeftoverCancel(cancel) if cancel.run == run),
         "{:?}",
@@ -1282,7 +1304,7 @@ async fn a_shared_async_run_whose_host_work_ends_in_the_grace_reports_no_left_wo
     };
     let (end, ended) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match ended {
         ChildFrame::SharedResult(result) => {
             assert_eq!(result.run, run);
@@ -1326,7 +1348,7 @@ async fn an_isolated_run_whose_host_work_ended_reports_its_result() {
     };
     let (end, ended) = tokio::join!(serve, script);
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match ended {
         ChildFrame::Result(result) => {
             assert_eq!(result.task_id, task_id);
@@ -1371,7 +1393,7 @@ async fn an_isolated_run_reports_left_host_work_that_does_not_end_as_stuck() {
     let (end, (reported, stop)) = tokio::join!(serve, script);
     slot.end();
 
-    assert_eq!(end, ServeEnd::Stopped);
+    assert_eq!(end, TaskServeEnd::Stopped);
     match &reported[0] {
         ChildFrame::BodyReturned(returned) => {
             assert_eq!(returned.task_id, task_id);
@@ -1392,6 +1414,377 @@ async fn an_isolated_run_reports_left_host_work_that_does_not_end_as_stuck() {
             cause: WorkStopCause::LeftWork
         }
     );
+    assert_eq!(finalizing_at(&pool, task_id).await, None);
+    remove_task(&pool, task_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// The stopped host core
+// ---------------------------------------------------------------------------
+
+/// The subject and the cause of the panic of the host core in these tests.
+const STOP_SUBJECT: &str = "thread host-core-test";
+const STOP_CAUSE: &str = "planned panic of the host core";
+
+/// The state of the host core of a test, which a body can stop.
+#[derive(Clone)]
+struct CoreSwitch {
+    state: Arc<Mutex<HostCoreState>>,
+}
+
+impl CoreSwitch {
+    fn running() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HostCoreState::Running)),
+        }
+    }
+
+    fn stopped() -> Self {
+        let switch = Self::running();
+        switch.stop();
+        switch
+    }
+
+    fn stop(&self) {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) =
+            HostCoreState::Stopped(HostCoreStop {
+                subject: STOP_SUBJECT.to_owned(),
+                cause: STOP_CAUSE.to_owned(),
+            });
+    }
+
+    fn watch(&self) -> HostCoreWatch {
+        let state = Arc::clone(&self.state);
+        HostCoreWatch::Host(Arc::new(move || {
+            state.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        }))
+    }
+}
+
+/// When the host core of a test stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreStop {
+    /// Before the run frame comes.
+    BeforeTheStart,
+    /// While the body runs, before it returns.
+    DuringTheBody,
+    /// Never: the core runs.
+    Never,
+}
+
+/// A body that stops the host core when its test says so, then returns a
+/// value.
+struct StopsTheCore {
+    log: BodyLog,
+    switch: CoreSwitch,
+    stop: CoreStop,
+}
+
+impl StopsTheCore {
+    fn run(&self) -> RawTaskResult {
+        self.log.note_start();
+        match self.stop {
+            CoreStop::DuringTheBody => self.switch.stop(),
+            CoreStop::BeforeTheStart | CoreStop::Never => {}
+        }
+        returns_one()
+    }
+}
+
+impl AsyncTaskFn for StopsTheCore {
+    fn execute(&self, _args: &[u8]) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>> {
+        Box::pin(async move { self.run() })
+    }
+}
+
+impl BlockingTaskFn for StopsTheCore {
+    fn execute(&self, _args: &[u8]) -> RawTaskResult {
+        self.run()
+    }
+}
+
+/// Which serve loop a test of the host core drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServedKind {
+    Isolated,
+    SharedAsync,
+    SharedThread,
+}
+
+/// What the end frame of a run reports, whatever the child kind.
+#[derive(Debug)]
+struct ReportedEnd {
+    end: RunEnd,
+    started: AttemptStart,
+    child: ChildAfterFrame,
+}
+
+fn reported_end(frame: ChildFrame) -> ReportedEnd {
+    match frame {
+        ChildFrame::Result(result) => ReportedEnd {
+            end: result.end,
+            started: result.started_at,
+            child: result.child,
+        },
+        ChildFrame::SharedResult(result) => match result.end {
+            SeatEnd::Finished(end) => ReportedEnd {
+                end,
+                started: result.started_at,
+                child: result.child,
+            },
+            other => panic!("expected a finished shared run, got {other:?}"),
+        },
+        other => panic!("expected the end of the run, got {other:?}"),
+    }
+}
+
+/// Serve one run of a seeded row in a child of `kind` whose host core stops
+/// as `stop` says; give the end of the serve, the reported end of the run,
+/// and the task id. The bodies note their start in `log`.
+async fn serve_with_core(
+    pool: &TestPool,
+    kind: ServedKind,
+    stop: CoreStop,
+    log: &BodyLog,
+) -> (TaskServeEnd, ReportedEnd, Uuid) {
+    let (task_id, generation) = seed_claimed(pool, false).await;
+    let switch = match stop {
+        CoreStop::BeforeTheStart => CoreSwitch::stopped(),
+        CoreStop::DuringTheBody | CoreStop::Never => CoreSwitch::running(),
+    };
+    let body = StopsTheCore {
+        log: log.clone(),
+        switch: switch.clone(),
+        stop,
+    };
+    let run = RunRef {
+        dispatch: dispatch(11),
+        task_id,
+    };
+    let (task, frame) = match kind {
+        ServedKind::Isolated => (
+            async_task(body),
+            ParentFrame::Run(run_frame(task_id, generation)),
+        ),
+        ServedKind::SharedAsync => (
+            async_task(body),
+            ParentFrame::SharedRun(shared_run_frame(
+                run,
+                generation,
+                async_work(LONG_TIMEOUT_MS),
+            )),
+        ),
+        ServedKind::SharedThread => (
+            blocking_task(body),
+            ParentFrame::SharedRun(shared_run_frame(
+                run,
+                generation,
+                thread_work(LONG_TIMEOUT_MS),
+            )),
+        ),
+    };
+    let (context, mut child) = context_with_core(pool, task, switch.watch());
+    let (parent, mut frames) = mpsc::channel(16);
+    let serve = async {
+        match kind {
+            ServedKind::Isolated => serve_isolated(context, &mut frames).await,
+            ServedKind::SharedAsync => {
+                let watch = PollWatch::without_thread(Instant::now());
+                serve_shared_async(context, watch, &mut frames, 2).await
+            }
+            ServedKind::SharedThread => serve_shared_thread(context, &mut frames, 2).await,
+        }
+    };
+    let script = async {
+        parent.send(frame).await.expect("the serve loop reads");
+        let ended = child.next().await;
+        match stop {
+            CoreStop::Never => parent
+                .send(ParentFrame::Stop)
+                .await
+                .expect("the serve loop reads"),
+            // The serve loop ends by itself after the frame.
+            CoreStop::BeforeTheStart | CoreStop::DuringTheBody => {}
+        }
+        ended
+    };
+    let (end, ended) = tokio::join!(serve, script);
+    (end, reported_end(ended), task_id)
+}
+
+/// The start time of the live row of `task_id`.
+async fn started_at_of(pool: &TestPool, task_id: Uuid) -> Option<DateTime<Utc>> {
+    sql::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the start time")
+}
+
+/// A stopped host core refuses the start: no start write, no body, the end
+/// `OWNERSHIP_UNCONFIRMED` with `ends_itself`, and the serve ends.
+async fn a_stopped_host_core_refuses_the_start(kind: ServedKind) {
+    let pool = migrated_pool().await;
+    let log = BodyLog::default();
+    let (end, reported, task_id) =
+        serve_with_core(&pool, kind, CoreStop::BeforeTheStart, &log).await;
+
+    assert_eq!(end, TaskServeEnd::CoreStopped, "{kind:?}");
+    assert_eq!(
+        reported.end,
+        RunEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed),
+        "{kind:?}"
+    );
+    assert_eq!(reported.started, AttemptStart::NotReported, "{kind:?}");
+    assert_eq!(reported.child, ChildAfterFrame::EndsItself, "{kind:?}");
+    assert_eq!(log.starts(), 0, "{kind:?}");
+    assert_eq!(started_at_of(&pool, task_id).await, None, "{kind:?}");
+    remove_task(&pool, task_id).await;
+}
+
+/// A host core that stops during the body keeps the body's result, writes
+/// no marker, and ends the child after the frame.
+async fn a_host_core_stopped_in_the_body_keeps_the_result(kind: ServedKind) {
+    let pool = migrated_pool().await;
+    let log = BodyLog::default();
+    let (end, reported, task_id) =
+        serve_with_core(&pool, kind, CoreStop::DuringTheBody, &log).await;
+
+    assert_eq!(end, TaskServeEnd::CoreStopped, "{kind:?}");
+    assert!(
+        matches!(reported.end, RunEnd::Result(_)),
+        "{kind:?}: {reported:?}"
+    );
+    assert!(
+        matches!(reported.started, AttemptStart::Reported { .. }),
+        "{kind:?}"
+    );
+    assert_eq!(reported.child, ChildAfterFrame::EndsItself, "{kind:?}");
+    assert_eq!(log.starts(), 1, "{kind:?}");
+    assert_eq!(finalizing_at(&pool, task_id).await, None, "{kind:?}");
+    remove_task(&pool, task_id).await;
+}
+
+/// A running host core serves on: the marker, `serves_on`, and the stop
+/// frame ends the serve.
+async fn a_running_host_core_serves_on(kind: ServedKind) {
+    let pool = migrated_pool().await;
+    let log = BodyLog::default();
+    let (end, reported, task_id) = serve_with_core(&pool, kind, CoreStop::Never, &log).await;
+
+    assert_eq!(end, TaskServeEnd::Stopped, "{kind:?}");
+    assert!(
+        matches!(reported.end, RunEnd::Result(_)),
+        "{kind:?}: {reported:?}"
+    );
+    assert_eq!(reported.child, ChildAfterFrame::ServesOn, "{kind:?}");
+    assert!(finalizing_at(&pool, task_id).await.is_some(), "{kind:?}");
+    remove_task(&pool, task_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_isolated_child_with_a_stopped_host_core_refuses_the_start() {
+    a_stopped_host_core_refuses_the_start(ServedKind::Isolated).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_async_child_with_a_stopped_host_core_refuses_the_start() {
+    a_stopped_host_core_refuses_the_start(ServedKind::SharedAsync).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_thread_child_with_a_stopped_host_core_refuses_the_start() {
+    a_stopped_host_core_refuses_the_start(ServedKind::SharedThread).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_isolated_child_ends_after_the_body_when_its_host_core_stopped() {
+    a_host_core_stopped_in_the_body_keeps_the_result(ServedKind::Isolated).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_async_child_ends_after_the_body_when_its_host_core_stopped() {
+    a_host_core_stopped_in_the_body_keeps_the_result(ServedKind::SharedAsync).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_thread_child_ends_after_the_body_when_its_host_core_stopped() {
+    a_host_core_stopped_in_the_body_keeps_the_result(ServedKind::SharedThread).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_isolated_child_with_a_running_host_core_serves_on() {
+    a_running_host_core_serves_on(ServedKind::Isolated).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_async_child_with_a_running_host_core_serves_on() {
+    a_running_host_core_serves_on(ServedKind::SharedAsync).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_thread_child_with_a_running_host_core_serves_on() {
+    a_running_host_core_serves_on(ServedKind::SharedThread).await;
+}
+
+/// An async body that hands host-held work to a plain OS thread, which ends
+/// it after [`HOST_WORK_END_DELAY`], stops the host core, and returns: the
+/// work is left.
+struct LeavesWorkAndStopsTheCore {
+    log: BodyLog,
+    switch: CoreSwitch,
+}
+
+impl AsyncTaskFn for LeavesWorkAndStopsTheCore {
+    fn execute(&self, _args: &[u8]) -> Pin<Box<dyn Future<Output = RawTaskResult> + Send + '_>> {
+        Box::pin(async move {
+            let work = register_host_work();
+            let _host = std::thread::spawn(move || {
+                std::thread::sleep(HOST_WORK_END_DELAY);
+                work.end();
+            });
+            self.log.note_start();
+            self.switch.stop();
+            returns_one()
+        })
+    }
+}
+
+/// An isolated body that left work and stopped the host core: the work
+/// ends in the grace, no marker is written, `left_work_ended` goes out, and
+/// the serve ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_isolated_child_ends_after_its_left_work_when_its_host_core_stopped() {
+    let pool = migrated_pool().await;
+    let (task_id, generation) = seed_claimed(&pool, false).await;
+    let log = BodyLog::default();
+    let switch = CoreSwitch::running();
+    let task = async_task(LeavesWorkAndStopsTheCore {
+        log: log.clone(),
+        switch: switch.clone(),
+    });
+    let (context, mut child) = context_with_core(&pool, task, switch.watch());
+    let (parent, mut frames) = mpsc::channel(16);
+    let serve = serve_isolated(context, &mut frames);
+    let script = async {
+        parent
+            .send(ParentFrame::Run(run_frame(task_id, generation)))
+            .await
+            .expect("the serve loop reads");
+        (child.next().await, child.next().await)
+    };
+    let (end, (returned, ended)) = tokio::join!(serve, script);
+
+    assert_eq!(end, TaskServeEnd::CoreStopped);
+    match returned {
+        ChildFrame::BodyReturned(frame) => assert_eq!(frame.task_id, task_id),
+        other => panic!("expected body_returned, got {other:?}"),
+    }
+    match ended {
+        ChildFrame::LeftWorkEnded(frame) => assert_eq!(frame.end, LeftWorkEnd::InGrace),
+        other => panic!("expected left_work_ended, got {other:?}"),
+    }
+    assert_eq!(log.starts(), 1);
     assert_eq!(finalizing_at(&pool, task_id).await, None);
     remove_task(&pool, task_id).await;
 }

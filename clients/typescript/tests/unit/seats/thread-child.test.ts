@@ -103,7 +103,7 @@ function threadDeps(native: FakeChildNative): ChildModeDeps & Recorded {
 }
 
 function runBodyPost(runKey: bigint): ChildPost {
-  return { kind: "runBody", runKey, taskName: "crunch", inputJson: '{"n":1}', taskId: TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
+  return { kind: "runBody", runKey, taskName: "crunch", inputJson: '{"n":1}', taskId: TASK_ID, attempt: 1, maxRetries: 0, facts: { kind: "notRecorded" } };
 }
 
 /** A served thread child of `seats` seats whose hook 0 ran with every isolate ready. */

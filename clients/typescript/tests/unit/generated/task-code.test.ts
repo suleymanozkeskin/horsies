@@ -15,14 +15,15 @@ import {
 
 describe("task codes", () => {
   test("the built-in codes are the members of the four catalogs, in order", () => {
-    expect([...BUILT_IN_TASK_CODES]).toEqual([
+    const members = [
       ...Object.values(OperationalCode),
       ...Object.values(ContractCode),
       ...Object.values(RetrievalCode),
       ...Object.values(OutcomeCode),
-    ]);
-    expect(BUILT_IN_TASK_CODES).toHaveLength(38);
-    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(38);
+    ];
+
+    expect([...BUILT_IN_TASK_CODES]).toEqual(members);
+    expect(new Set(BUILT_IN_TASK_CODES).size).toBe(members.length);
     expect(Object.isFrozen(BUILT_IN_TASK_CODES)).toBe(true);
   });
 
@@ -30,6 +31,15 @@ describe("task codes", () => {
     const asyncContext: BuiltInTaskCode = RetrievalCode.ASYNC_CONTEXT;
 
     expect(BUILT_IN_TASK_CODES).toContain(asyncContext);
+  });
+
+  test("the contract codes name a node with no id and a node that is not in the context apart", () => {
+    expect(Object.values(ContractCode)).toEqual([
+      "RETURN_TYPE_MISMATCH",
+      "WORKFLOW_CONTEXT_MISSING_ID",
+      "NODE_NOT_IN_CONTEXT",
+      "NO_TYPE_AVAILABLE",
+    ]);
   });
 
   test("the reserved names are not built-in codes", () => {

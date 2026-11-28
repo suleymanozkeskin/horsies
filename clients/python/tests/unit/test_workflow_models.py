@@ -33,7 +33,10 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     WorkflowDefinitionConfig,
     node_id_from_text,
+    NodeNotInContext,
+    WorkflowContextMissingId,
 )
+from horsies._catalog.task_codes import ContractCode
 from horsies.core.errors import HorsiesErrorCode, HorsiesError, MultipleValidationErrors
 
 
@@ -2027,11 +2030,15 @@ class TestWorkflowContext:
         node: TaskNode[int] = TaskNode(function=mock_task)
         # node.node_id is None (not assigned)
 
-        with pytest.raises(RuntimeError, match='TaskNode node_id is not set'):
+        with pytest.raises(
+            WorkflowContextMissingId, match='TaskNode node_id is not set'
+        ) as raised:
             ctx.result_for(node)
+        assert raised.value.code is ContractCode.WORKFLOW_CONTEXT_MISSING_ID
 
     def test_result_for_raises_on_missing_result(self) -> None:
-        """result_for(node) raises KeyError if result not in context."""
+        """result_for(node) raises NodeNotInContext (NODE_NOT_IN_CONTEXT) if the
+        node has an id and its result is not in context."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             node_index=1,
@@ -2043,8 +2050,9 @@ class TestWorkflowContext:
         node: TaskNode[int] = TaskNode(function=mock_task)
         node.node_id = 'node-0'
 
-        with pytest.raises(KeyError, match='not in workflow context'):
+        with pytest.raises(NodeNotInContext, match='not in workflow context') as raised:
             ctx.result_for(node)
+        assert raised.value.code is ContractCode.NODE_NOT_IN_CONTEXT
 
     def test_has_result(self) -> None:
         """has_result(node) returns True if result exists."""
@@ -3369,7 +3377,8 @@ class TestWorkflowContextSummary:
             ctx.summary_for(node)
 
     def test_summary_for_raises_on_missing_summary(self) -> None:
-        """summary_for(node) raises KeyError if summary not in context."""
+        """summary_for(node) raises NodeNotInContext if the summary is not in
+        context."""
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             node_index=1,
@@ -3389,8 +3398,9 @@ class TestWorkflowContextSummary:
 
         node = SubWorkflowNode(workflow_definition=ChildWorkflow, node_id='sub-node')
 
-        with pytest.raises(KeyError, match='not in workflow context'):
+        with pytest.raises(NodeNotInContext, match='not in workflow context') as raised:
             ctx.summary_for(node)
+        assert raised.value.code is ContractCode.NODE_NOT_IN_CONTEXT
 
     def test_has_summary_true(self) -> None:
         """has_summary returns True when summary exists."""

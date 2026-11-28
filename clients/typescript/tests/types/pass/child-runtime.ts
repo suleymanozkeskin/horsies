@@ -1,7 +1,7 @@
 // Compile-pass cases of the task runtime: `TaskRuntime.forTest` with typed state entries, `state(key)` gives the
 // key's value type, and the runtime type of a body by its execution class.
 
-import { type AttemptNumber, type StateKey, TaskRuntime, type ThreadTaskRuntime } from "../../../horsies/src/child/public.ts";
+import { type AttemptNumber, MaxRetries, type RetriesLeft, type StateKey, TaskRuntime, type ThreadTaskRuntime } from "../../../horsies/src/child/public.ts";
 import type { TaskId } from "../../../horsies/src/contract/ids.ts";
 import type { RuntimeOf } from "../../../horsies/src/contract/public.ts";
 
@@ -33,3 +33,13 @@ export const isolated = expectType<Equal<RuntimeOf<"ISOLATED">, TaskRuntime>>();
 export const sharedAsync = expectType<Equal<RuntimeOf<"SHARED_ASYNC">, TaskRuntime>>();
 
 export const sharedThread = expectType<Equal<RuntimeOf<"SHARED_THREAD">, ThreadTaskRuntime>>();
+
+export const attemptOfRuntime: AttemptNumber = runtime.attempt;
+
+export const maxRetriesOfRuntime: MaxRetries = runtime.maxRetries;
+
+export const retriesLeftOfRuntime: RetriesLeft = runtime.retriesLeft;
+
+export const threadRetriesLeft = (thread: ThreadTaskRuntime): RetriesLeft => thread.retriesLeft;
+
+export const withBudget: TaskRuntime = TaskRuntime.forTest({ taskId, attempt, maxRetries: MaxRetries.NONE });

@@ -23,11 +23,11 @@ use crate::broker::claims::WorkflowNodeIndex;
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::task::error::{OperationalCode, TaskError};
-use crate::core::task::fencing::FencingToken;
+use crate::core::task::fencing::TaskAttempt;
 use crate::core::task::fn_trait::{
     AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMetadata, TaskModule,
 };
-use crate::events::{QueueName, TraceCarrierText};
+use crate::events::{MaxRetries, QueueName, TraceCarrierText};
 use crate::worker::executor::protocol::{IsolatedWork, RunEnd, RunFrame, TaskInputText};
 
 /// The task name of the row that `seed_claimed` writes.
@@ -298,6 +298,7 @@ fn facts(task_id: Uuid) -> RunFacts {
         task_name: "app.tasks.scoped".to_owned(),
         queue_name: QueueName::cut(SCOPE_QUEUE),
         attempt: third_attempt(),
+        max_retries: MaxRetries::SMALLEST,
         worker_id: "scope-worker".to_owned(),
         claimed_at: Utc::now(),
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -433,7 +434,7 @@ async fn isolated_run_with(
     let facts = facts(Uuid::new_v4());
     let open = scope.open(&facts, Execution::Isolated, source(&RunTrace::NoCarrier));
     let task = make_task(&seen_inside, result);
-    let run_scope = RunScope::new(facts.fencing_token());
+    let run_scope = RunScope::new(facts.task_attempt());
     match cancel {
         CancelBeforeBody::NoCancel => {}
         CancelBeforeBody::OperatorCancel => {
@@ -566,7 +567,7 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
         "app.tasks.scoped",
         TaskModule::default(),
         &span,
-        FencingToken::new(task_id, AttemptNumber::SMALLEST),
+        TaskAttempt::new(task_id, AttemptNumber::SMALLEST, MaxRetries::SMALLEST),
         RunCancelSignal::new(),
     );
     assert!(matches!(result, TaskResult::Ok(_)));
@@ -594,6 +595,7 @@ async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier()
         task_name: SEEDED_TASK_NAME.to_owned(),
         queue_name: QueueName::cut(SCOPE_QUEUE),
         attempt: third_attempt(),
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at: generation,
         orphan_self_heal: OrphanSelfHeal::Off,

@@ -15,6 +15,68 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **`StoredTime` stores a time of day in Python's text (Rust).**
+  `horsies::StoredTime` wraps a chrono `NaiveTime`. It writes `09:10:12` for a
+  whole second, `09:10:12.500000` for a fraction (6 digits) and 9 digits for a
+  part below the microsecond. chrono's own serde form writes a whole
+  millisecond with 3 digits (`09:10:12.500`). The read takes any count of
+  fraction digits. A plain `NaiveTime` keeps chrono's text.
+- **`TaskRuntime` gives the attempt facts of the run.** `task_id` is the
+  same on every attempt of a task. `attempt` is the attempt number: 1 is the
+  first run, 2 the first retry. `max_retries` is the retry budget of the task
+  (0 to 20). `retries_left` is `max_retries - (attempt - 1)`, and 0 past the
+  budget; a non-retryable error code or `good_until` can end the retries
+  before it reaches 0. They add no database round trip: the parent sends
+  `max_retries` in the run frame, beside the attempt that it already sent
+  (`max_retries` is a new field of the `run` and `shared_run` frames).
+  - Python: `runtime.task_id` (`uuid.UUID`), `runtime.attempt`
+    (`AttemptNumber`), `runtime.max_retries` (`MaxRetries`),
+    `runtime.retries_left` (`RetriesLeft`). `MaxRetries.parse(number)` gives
+    `Ok(MaxRetries)` for 0 to 20 or `Err(MaxRetriesRefused)`.
+    `TaskRuntime.for_test(task_id=..., attempt=..., max_retries=...)` takes
+    the facts (default 1 and 0). `run_task_runtime` takes the task id, the
+    attempt number and the retry budget in place of a `FencingToken`;
+    `runtime.fencing_token` is built from the task id and the attempt number.
+  - Rust: `TaskRuntime::task_id()`, `attempt()` (`AttemptNumber`),
+    `max_retries()` (`MaxRetries`) and `retries_left()` (`RetriesLeft`), each
+    `Result<_, TaskAttemptRefused>`; outside a run they give
+    `TaskAttemptRefused::NotInARun`. `horsies_core::run_task_attempt()` gives
+    the `TaskAttempt` of a run. `RunFrame` and `SharedRunFrame` carry
+    `max_retries`.
+  - There is no global `current_attempt()`: the injected runtime is the only
+    way to read the facts.
+- **A named code for a node that is not in the workflow context.** The new
+  `ContractCode` member `NODE_NOT_IN_CONTEXT` (Rust `NodeNotInContext`)
+  means: the node has an id, but the context holds no entry for it (it is not
+  in `workflow_context_from`, or its dependency did not finish). Python
+  `WorkflowContext.result_for` and `summary_for` raise `NodeNotInContext`
+  (a `RuntimeError` with `code`) in place of a bare `KeyError`.
+  `WORKFLOW_CONTEXT_MISSING_ID` now means only "the node has no `node_id`";
+  Python `WorkflowContextMissingId` carries that `code`. The core's
+  `WorkflowContext::result_for`, `summary_for` and `output_for` give
+  `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
+- **Child host: the stop of a host core ends the child.** `ChildApp` has
+  the new field `host_core: HostCoreWatch`: `NoHostCore` (a Rust binary), or
+  `Host` with a read that gives `HostCoreState::Running` or
+  `Stopped(HostCoreStop { subject, cause })`. A task child reads it before
+  each start write and before each finalizing marker. A stopped host core
+  refuses the start (`OWNERSHIP_UNCONFIRMED`, no attempt charged), or keeps
+  the result of the body and writes no marker; the frame says
+  `child: ends_itself`, and the child exits with the new
+  `ChildHostExit::CoreStopped` (code 80). A shared child ends after the first
+  such frame. A TypeScript task child gives the state of its bridge core: a
+  panic in a core background task of the child stops its core and no longer
+  aborts the child, which ends with code 80 at the next start, after a body
+  that returned, or at a core call that the stopped core refuses during a
+  body.
+- **Core: one builder of the producer manifest and one reservation window constant.**
+  `horsies_core::manifest` gives `producer_manifest(&PostgresConfig, SchemaMode)`,
+  `send_manifest`, `session_database_manifest`, `core_database_url`,
+  `core_scheme_url` and `ReservationWindowMicros::DEFAULT` (24 hours, the window
+  of the broker). The builder gives every refusal in field order as a
+  `BrokerSettingRefused` with its catalog code: `HRS-213` for `pool_size` and
+  `max_overflow`, `HRS-215` for a TCP keepalive or user timeout value. The Rust
+  client calls the builder; its own copies are removed.
 - **Worker snapshot: the claimed limit of the profile, not the seat count.**
   A worker whose profile sets no `claimed_per_worker` limit writes
   `max_claim_per_worker = 0` to its snapshot (it wrote the seat count).
@@ -135,6 +197,23 @@ there is no migration contract between pre-1.0 versions.
   parameter when the definition has no `config.output` (HRS-025); Rust
   refuses any `Output` other than `NoWorkflowOutput` for a definition with
   no output node (HRS-025). The core stores the same result as before.
+- **A send refuses a `timeout_ms` that no worker accepts.** A present
+  `timeout_ms` that is not an int, is below 1000 ms or is above 4294967295 ms
+  is refused at the send with `VALIDATION_FAILED` before any statement, and
+  nothing is written. The text is the text of the worker's dispatch read:
+  `task_options refused for <task>: stored timeout_ms is a str, not an int`,
+  `... is below 1000 ms`, or `... is above the limit of 4294967295 ms (about
+  49.7 days)`. A run no longer fails with `WORKER_SERIALIZATION_ERROR` for
+  such a value. `null` and an absent `timeout_ms` are not refused here. A
+  schedule keeps its outcome.
+- **A workflow start refuses a shared-class task node with no `timeout_ms`.**
+  A `SHARED_ASYNC` or `SHARED_THREAD` task node whose merged task options have
+  no `timeout_ms` (absent or `null`) is refused at the start with the start's
+  validation error, which names the node (`workflow node <index> (<task>)
+  refused: task_options refused: timeout_ms is absent for execution
+  <class>; a shared class requires timeout_ms`). Nothing is written. An
+  `ISOLATED` node needs no timeout. The Python task decorator and the Rust
+  task macro refuse the same declaration at registration.
 - **Breaking: the task record has one `result` field with three states.**
   `TaskInfo.result` is a `ResultSlot` in Python and Rust. Python
   `TaskInfo.raw_result`, `TaskInfo.decoded_result` and

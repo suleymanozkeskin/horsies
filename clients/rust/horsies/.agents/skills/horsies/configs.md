@@ -120,7 +120,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationRepor
 
 | Config | Refusal of `Horsies::new` |
 |---|---|
-| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` "invalid database config: database.<field>: ..." with no code |
+| `database.pool_size` outside 1 to 10,000, or `database.max_overflow` above 10,000 | `HorsiesError` `HRS-213` (`ConfigInvalidDatabasePool`) "invalid database config: database.<field>: ...", one refusal for each value |
 | A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary. Do not set `preload`: the default is `ChildPreload::NoPreload` |
 
 ### Queues

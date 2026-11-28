@@ -4,6 +4,8 @@ export const MAX_ATTEMPT = 2_147_483_648;
 
 export const MAX_RETRY_COUNT = 2_147_483_647;
 
+export const MAX_TASK_RETRIES = 20;
+
 export const MAX_EVENT_TASK_NAME_CHARS = 255;
 
 export const MAX_EVENT_QUEUE_NAME_CHARS = 52;

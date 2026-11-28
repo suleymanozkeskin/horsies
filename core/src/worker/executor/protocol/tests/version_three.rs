@@ -102,6 +102,7 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             task_name: "app.tasks.add".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -112,7 +113,7 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"run"},"#,
@@ -129,6 +130,7 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             task_name: "app.tasks.fetch".to_owned(),
             queue_name: default_queue(),
             attempt: AttemptNumber::SMALLEST,
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
@@ -142,7 +144,7 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             concat!(
                 r#"{"kind":"shared_run","dispatch":4,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
+                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":true,"#,
                 r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
@@ -162,6 +164,7 @@ fn run_meta_without_trace() -> Value {
         "task_name": "t",
         "queue_name": "default",
         "attempt": 1,
+        "max_retries": 0,
         "worker_id": "w",
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
@@ -265,6 +268,7 @@ fn a_shared_run_frame_without_its_trace_is_refused() {
         "task_name": "t",
         "queue_name": "default",
         "attempt": 1,
+        "max_retries": 0,
         "worker_id": "w",
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
@@ -290,6 +294,7 @@ fn the_run_frames_carry_the_queue_and_the_attempt() {
             task_name: "app.tasks.add".to_owned(),
             queue_name: QueueName::new("emails".to_owned()).unwrap(),
             attempt: AttemptNumber::try_from(3).unwrap(),
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -300,7 +305,7 @@ fn the_run_frames_carry_the_queue_and_the_attempt() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","queue_name":"emails","attempt":3,"#,
+                r#""task_name":"app.tasks.add","queue_name":"emails","attempt":3,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#,
@@ -315,6 +320,7 @@ fn the_run_frames_carry_the_queue_and_the_attempt() {
             task_name: "app.tasks.fetch".to_owned(),
             queue_name: QueueName::new("emails".to_owned()).unwrap(),
             attempt: AttemptNumber::try_from(2).unwrap(),
+            max_retries: crate::events::MaxRetries::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -328,7 +334,7 @@ fn the_run_frames_carry_the_queue_and_the_attempt() {
             concat!(
                 r#"{"kind":"shared_run","dispatch":4,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","queue_name":"emails","attempt":2,"#,
+                r#""task_name":"app.tasks.fetch","queue_name":"emails","attempt":2,"max_retries":0,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
@@ -349,6 +355,7 @@ fn the_largest_attempt_and_queue_name_round_trip_in_both_run_frames() {
         task_name: "t".to_owned(),
         queue_name: queue_name.clone(),
         attempt: AttemptNumber::LARGEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at: claim_time(),
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -362,6 +369,7 @@ fn the_largest_attempt_and_queue_name_round_trip_in_both_run_frames() {
         task_name: "t".to_owned(),
         queue_name,
         attempt: AttemptNumber::LARGEST,
+        max_retries: crate::events::MaxRetries::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at: claim_time(),
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -395,6 +403,7 @@ fn shared_run_meta() -> Value {
         "task_name": "t",
         "queue_name": "default",
         "attempt": 1,
+        "max_retries": 0,
         "worker_id": "w",
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
@@ -416,6 +425,25 @@ fn assert_run_field_refusals(key: &str, cases: &[(Option<Value>, MalformedFrame)
             );
         }
     }
+}
+
+#[test]
+fn each_malformed_max_retries_is_refused_with_its_field() {
+    let field = || "max_retries".to_owned();
+    assert_run_field_refusals(
+        "max_retries",
+        &[
+            (None, MalformedFrame::MissingField { field: field() }),
+            (
+                Some(json!(21)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+            (
+                Some(json!(-1)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+        ],
+    );
 }
 
 #[test]

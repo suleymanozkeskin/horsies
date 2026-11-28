@@ -17,6 +17,11 @@
 //!   writes its abort line and aborts; under `STOP_CORE` its core stops.
 //! - With no running log bridge the call throws `CLIENT_DEFECT`: no
 //!   forwarder runs to panic, and nothing is armed.
+//!
+//! `probeReadTaskChildCore`: the read of the core that the child host of a
+//! task child makes before each start write and each finalizing marker
+//! (`task_child_core_state`), so a native test drives the task child rule
+//! with no parent: the first read enters the rule.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -26,6 +31,7 @@ use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::logging::bridge::{running_log, CoreLogRecord};
 use crate::logging::levels::RecordLevel;
+use crate::process_core::runtime::task_child_core_state;
 
 /// The probe that the forwarder of this process reads at each batch.
 pub static FORWARDER_PANIC_PROBE: PanicProbe = PanicProbe::new();
@@ -106,6 +112,29 @@ pub fn probe_panic_log_forwarder(text: String) -> Envelope<()> {
             WAKE_MESSAGE.to_owned(),
         ));
         Envelope::Value(())
+    })
+}
+
+/// The state of the core that the child host of a task child reads.
+#[napi(string_enum = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskChildCoreRead {
+    Running,
+    Stopped,
+}
+
+/// Read the core as the child host of a task child does: the first read
+/// enters the task child rule of the panic rule. Starts nothing.
+#[napi(
+    js_name = "probeReadTaskChildCore",
+    ts_return_type = "NativeEnvelope<TaskChildCoreRead>"
+)]
+pub fn probe_read_task_child_core() -> Envelope<TaskChildCoreRead> {
+    sync_call("probe_read_task_child_core", || {
+        Envelope::Value(match task_child_core_state() {
+            horsies_core::HostCoreState::Running => TaskChildCoreRead::Running,
+            horsies_core::HostCoreState::Stopped(_) => TaskChildCoreRead::Stopped,
+        })
     })
 }
 

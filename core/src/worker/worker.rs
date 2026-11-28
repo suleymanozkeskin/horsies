@@ -3443,6 +3443,9 @@ mod tests {
         }
     }
 
+    /// The longest that the test waits for the child to write its pid file.
+    const PID_FILE_WAIT: Duration = Duration::from_secs(30);
+
     /// Python `test_worker_helpers.py::TestStopDuringStart::test_a_start_that_ends_stopped_still_stops_the_children`:
     /// a stop while the first child boots ends the start with no error, and
     /// the child is stopped and reaped before the start returns. The child
@@ -3460,11 +3463,18 @@ mod tests {
             program: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                format!("echo $$ > '{}'; exec sleep 60", pid_file.display()).into(),
+                // The pid goes to a temporary file in the same folder and is
+                // renamed: a rename is atomic, so a reader sees no pid file
+                // or a whole pid, never an empty file.
+                format!(
+                    "echo $$ > '{pid}.tmp' && mv '{pid}.tmp' '{pid}'; exec sleep 60",
+                    pid = pid_file.display()
+                )
+                .into(),
             ],
         });
         let stop_after_spawn = async {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let deadline = tokio::time::Instant::now() + PID_FILE_WAIT;
             while !pid_file.exists() && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -3482,11 +3492,14 @@ mod tests {
             Ok(Some(_)) => panic!("the start ended before the stop"),
             Err(error) => panic!("a stop during the start is no failure: {error}"),
         }
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .expect("the child wrote its pid")
-            .trim()
-            .parse()
-            .expect("the pid file holds a pid");
+        let pid_text = match std::fs::read_to_string(&pid_file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                panic!("the child never wrote its pid within {PID_FILE_WAIT:?}")
+            }
+            Err(error) => panic!("read the pid file: {error}"),
+        };
+        let pid: i32 = pid_text.trim().parse().expect("the pid file holds a pid");
         // SAFETY: signal 0 sends nothing; it only checks that the process
         // exists.
         let exists = unsafe { libc::kill(pid, 0) } == 0;
@@ -4306,6 +4319,7 @@ mod tests {
             task_name: task.task_name.clone(),
             queue_name: crate::events::QueueName::cut(&task.queue_name),
             attempt: task.retry.attempt(),
+            max_retries: task.retry.max_retries_allowed(),
             worker_id: "worker-1".to_owned(),
             claimed_at: task.claimed_at,
             orphan_self_heal: self_heal,

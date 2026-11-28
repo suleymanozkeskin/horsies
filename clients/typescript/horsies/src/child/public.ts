@@ -1,4 +1,4 @@
-// The public names of the task child: the runtime of a body, its types, the attempt number, app state, and the start
+// The public names of the task child: the runtime of a body, its types, the attempt number, the retry budget, app state, and the start
 // hooks. `src/index.ts` exports this module.
 
 export {
@@ -16,6 +16,8 @@ export {
 } from "./runtime.ts";
 
 export { AttemptNumber, type AttemptRefused } from "./attempt.ts";
+
+export { MaxRetries, type MaxRetriesRefused, type RetriesLeft } from "./retry-budget.ts";
 
 export type { AnyStateKey, StateKey, StateValueOf } from "./state.ts";
 

@@ -24,7 +24,7 @@ const SETTLE_BOUND_MS = 15_000;
 const ENTRY: string = fileURLToPath(new URL("fixtures/seat-entry.ts", import.meta.url));
 
 function runPost(runKey: bigint, taskName: string): SeatRunPost {
-  return { kind: "runBody", runKey, taskName, inputJson: "{}", taskId: TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
+  return { kind: "runBody", runKey, taskName, inputJson: "{}", taskId: TASK_ID, attempt: 1, maxRetries: 0, facts: { kind: "notRecorded" } };
 }
 
 /** The settles of a pool of fixture isolates. */

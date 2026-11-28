@@ -29,8 +29,9 @@
 //! grace to end before the child drops them (Python: the cancel of the task,
 //! then the second cancel after the grace).
 //!
-//! Each run has one fencing token ([`run_fencing_token`]): the task id and
-//! the attempt number of its run frame. The async body and the work it
+//! Each run has one set of attempt facts ([`run_task_attempt`]): the task id,
+//! the attempt number and the retry budget of its run frame. Its fencing
+//! token ([`run_fencing_token`]) is the task id and the attempt number. The async body and the work it
 //! starts with [`spawn_in_run`] read the token and the signal from the run;
 //! a blocking body reads them from its thread, which [`in_blocking_run`]
 //! marks while the body runs.
@@ -65,7 +66,9 @@ use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
-use crate::core::task::fencing::{FencingToken, FencingTokenRefused};
+use crate::core::task::fencing::{
+    FencingToken, FencingTokenRefused, TaskAttempt, TaskAttemptRefused,
+};
 pub(super) use crate::worker::executor::protocol::ISOLATED_LEFTOVER_GRACE;
 use crate::worker::executor::protocol::{
     BlockedWhere, LeftoverName, LoopHoldsTasks, StuckWork, MAX_LEFTOVER_TASK_NAMES,
@@ -92,7 +95,7 @@ tokio::task_local! {
 enum BlockingRun {
     NoRun,
     Run {
-        token: FencingToken,
+        attempt: TaskAttempt,
         cancel: RunCancelSignal,
     },
 }
@@ -107,7 +110,7 @@ thread_local! {
 /// when `body` ends, also when it panics. No borrow of the thread value is
 /// held while `body` runs.
 pub(super) fn in_blocking_run<R>(
-    token: FencingToken,
+    attempt: TaskAttempt,
     cancel: RunCancelSignal,
     body: impl FnOnce() -> R,
 ) -> R {
@@ -119,7 +122,7 @@ pub(super) fn in_blocking_run<R>(
             }
         }
     }
-    let earlier = BLOCKING_RUN.with(|run| run.replace(BlockingRun::Run { token, cancel }));
+    let earlier = BLOCKING_RUN.with(|run| run.replace(BlockingRun::Run { attempt, cancel }));
     let _restore = Restore(Some(earlier));
     body()
 }
@@ -139,16 +142,30 @@ fn blocking_run() -> BlockingRun {
 ///
 /// Errors: [`FencingTokenRefused::NotInARun`].
 pub fn run_fencing_token() -> Result<FencingToken, FencingTokenRefused> {
-    RUN_SCOPE
-        .try_with(|scope| scope.token)
-        .or_else(|_outside_async_run| blocking_run_token())
+    match run_task_attempt() {
+        Ok(attempt) => Ok(attempt.fencing_token()),
+        Err(TaskAttemptRefused::NotInARun) => Err(FencingTokenRefused::NotInARun),
+    }
 }
 
-/// The fencing token of the blocking body that runs on the calling thread.
-fn blocking_run_token() -> Result<FencingToken, FencingTokenRefused> {
+/// The attempt facts of the current run (task id, attempt number, retry
+/// budget), read where [`run_fencing_token`] reads the token: by the async
+/// body, by work that the body started with [`spawn_in_run`], or on the
+/// thread of a blocking body. Every read in one run gives the same facts.
+/// Pure read.
+///
+/// Errors: [`TaskAttemptRefused::NotInARun`].
+pub fn run_task_attempt() -> Result<TaskAttempt, TaskAttemptRefused> {
+    RUN_SCOPE
+        .try_with(|scope| scope.attempt)
+        .or_else(|_outside_async_run| blocking_run_attempt())
+}
+
+/// The attempt facts of the blocking body that runs on the calling thread.
+fn blocking_run_attempt() -> Result<TaskAttempt, TaskAttemptRefused> {
     match blocking_run() {
-        BlockingRun::Run { token, .. } => Ok(token),
-        BlockingRun::NoRun => Err(FencingTokenRefused::NotInARun),
+        BlockingRun::Run { attempt, .. } => Ok(attempt),
+        BlockingRun::NoRun => Err(TaskAttemptRefused::NotInARun),
     }
 }
 
@@ -637,25 +654,25 @@ pub(super) struct RunScope {
     shared: Arc<ScopeShared>,
     timing: PollTiming,
     cancel: RunCancelSignal,
-    token: FencingToken,
+    attempt: TaskAttempt,
 }
 
 impl RunScope {
-    /// A run with the fencing token `token` and a new cancel signal, whose
-    /// polls are not timed (an isolated child).
-    pub(super) fn new(token: FencingToken) -> Self {
-        Self::with_timing(PollTiming::Untimed, token, RunCancelSignal::new())
+    /// A run of the attempt `attempt` with a new cancel signal, whose polls
+    /// are not timed (an isolated child).
+    pub(super) fn new(attempt: TaskAttempt) -> Self {
+        Self::with_timing(PollTiming::Untimed, attempt, RunCancelSignal::new())
     }
 
-    /// A run with the fencing token `token` and the cancel signal `cancel`,
+    /// A run of the attempt `attempt` with the cancel signal `cancel`,
     /// whose body and work are timed in `polls` (a shared async child). The
     /// seat makes the signal before the start write, so a `cancel_run` that
     /// comes before the body starts reaches it.
-    pub(super) fn timed(polls: RunPolls, token: FencingToken, cancel: RunCancelSignal) -> Self {
-        Self::with_timing(PollTiming::Timed(polls), token, cancel)
+    pub(super) fn timed(polls: RunPolls, attempt: TaskAttempt, cancel: RunCancelSignal) -> Self {
+        Self::with_timing(PollTiming::Timed(polls), attempt, cancel)
     }
 
-    fn with_timing(timing: PollTiming, token: FencingToken, cancel: RunCancelSignal) -> Self {
+    fn with_timing(timing: PollTiming, attempt: TaskAttempt, cancel: RunCancelSignal) -> Self {
         Self {
             shared: Arc::new(ScopeShared {
                 work: Mutex::new(ScopeWork {
@@ -667,13 +684,13 @@ impl RunScope {
             }),
             timing,
             cancel,
-            token,
+            attempt,
         }
     }
 
-    /// The fencing token of the run.
-    pub(super) fn fencing_token(&self) -> FencingToken {
-        self.token
+    /// The attempt facts of the run.
+    pub(super) fn task_attempt(&self) -> TaskAttempt {
+        self.attempt
     }
 
     /// The cancel signal of the run, for the thread of a blocking body.
@@ -1055,7 +1072,7 @@ pub struct RunHandle {
 impl fmt::Debug for RunHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RunHandle")
-            .field("token", &self.scope.token)
+            .field("attempt", &self.scope.attempt)
             .finish_non_exhaustive()
     }
 }
@@ -1157,11 +1174,15 @@ impl HostWork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::AttemptNumber;
+    use crate::events::{AttemptNumber, MaxRetries};
 
     /// The token of a run of attempt 1 of a new task.
-    fn test_token() -> FencingToken {
-        FencingToken::new(uuid::Uuid::new_v4(), AttemptNumber::SMALLEST)
+    fn test_token() -> TaskAttempt {
+        TaskAttempt::new(
+            uuid::Uuid::new_v4(),
+            AttemptNumber::SMALLEST,
+            MaxRetries::SMALLEST,
+        )
     }
 
     #[tokio::test]
@@ -1461,11 +1482,13 @@ mod tests {
     /// that the body started with `spawn_in_run`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_body_and_its_work_read_the_token_of_the_run() {
-        let token = FencingToken::new(
+        let attempt = TaskAttempt::new(
             uuid::Uuid::new_v4(),
             AttemptNumber::try_from(2).expect("2 is an attempt"),
+            MaxRetries::try_from(3).expect("3 is a retry budget"),
         );
-        let scope = RunScope::new(token);
+        let token = attempt.fencing_token();
+        let scope = RunScope::new(attempt);
         let body = scope.spawn_body("app.tasks.body", async {
             let first = run_fencing_token();
             let second = run_fencing_token();
@@ -1478,7 +1501,35 @@ mod tests {
         assert_eq!(first, Ok(token));
         assert_eq!(second, Ok(token));
         assert_eq!(from_work, Ok(token));
-        assert_eq!(scope.fencing_token(), token);
+        assert_eq!(scope.task_attempt().fencing_token(), token);
+    }
+
+    /// The body and its work read the attempt facts of the run: the attempt
+    /// number and the retry budget of its frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_body_and_its_work_read_the_attempt_facts_of_the_run() {
+        let attempt = TaskAttempt::new(
+            uuid::Uuid::new_v4(),
+            AttemptNumber::try_from(2).expect("2 is an attempt"),
+            MaxRetries::try_from(3).expect("3 is a retry budget"),
+        );
+        let scope = RunScope::new(attempt);
+        let body = scope.spawn_body("app.tasks.body", async {
+            let from_body = run_task_attempt();
+            let work = spawn_in_run("reader", async { run_task_attempt() })
+                .expect("a body may start work");
+            (from_body, work.await.expect("the work ends"))
+        });
+        let (from_body, from_work) = body.await.expect("the body ends");
+        assert_eq!(from_body, Ok(attempt));
+        assert_eq!(from_work, Ok(attempt));
+        assert_eq!(attempt.attempt().get(), 2);
+        assert_eq!(attempt.retries_left().get(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_attempt_facts_read_outside_a_run_are_refused() {
+        assert_eq!(run_task_attempt(), Err(TaskAttemptRefused::NotInARun));
     }
 
     /// Work that the body starts with plain `tokio::spawn` is not in the run,
@@ -1506,13 +1557,16 @@ mod tests {
         let second_body = second.spawn_body("app.tasks.second", async { run_fencing_token() });
         assert_eq!(
             first_body.await.expect("the body ends"),
-            Ok(first.fencing_token())
+            Ok(first.task_attempt().fencing_token())
         );
         assert_eq!(
             second_body.await.expect("the body ends"),
-            Ok(second.fencing_token())
+            Ok(second.task_attempt().fencing_token())
         );
-        assert_ne!(first.fencing_token(), second.fencing_token());
+        assert_ne!(
+            first.task_attempt().fencing_token(),
+            second.task_attempt().fencing_token()
+        );
     }
 
     /// The thread of a blocking body has the token while the body runs; the
@@ -1520,22 +1574,23 @@ mod tests {
     /// reaches a thread that the body starts.
     #[test]
     fn a_blocking_body_has_the_token_on_its_thread_while_it_runs() {
-        let token = test_token();
+        let attempt = test_token();
+        let token = attempt.fencing_token();
         let signal = RunCancelSignal::new();
         assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
-        let inside = in_blocking_run(token, signal.clone(), || {
+        let inside = in_blocking_run(attempt, signal.clone(), || {
             (run_fencing_token(), run_fencing_token())
         });
         assert_eq!(inside, (Ok(token), Ok(token)));
         assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
-        let other_thread = in_blocking_run(token, signal.clone(), || {
+        let other_thread = in_blocking_run(attempt, signal.clone(), || {
             std::thread::spawn(run_fencing_token)
                 .join()
                 .expect("the thread ends")
         });
         assert_eq!(other_thread, Err(FencingTokenRefused::NotInARun));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            in_blocking_run(token, signal.clone(), || panic!("body panic"));
+            in_blocking_run(attempt, signal.clone(), || panic!("body panic"));
         }));
         assert!(panicked.is_err());
         assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));

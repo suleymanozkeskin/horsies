@@ -177,6 +177,7 @@ def _run(
             orphan_self_heal=True,
             queue_name='default',
             attempt=1,
+            max_retries=0,
             trace=NoTraceCarrier(),
             cancel=cancel,
         )

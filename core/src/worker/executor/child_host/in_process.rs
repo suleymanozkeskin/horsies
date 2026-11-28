@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use super::body_scope::BodyScope;
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
+use super::host_core::HostCoreWatch;
 use super::link::{read_frame, FrameWriter};
 use super::run::HostContext;
 use super::run_work::RunScope;
-use super::seats::run_isolated;
+use super::seats::{run_isolated, RunAfter};
 use crate::broker::PostgresBroker;
 use crate::core::registry::task::TaskRegistry;
-use crate::core::task::fencing::FencingToken;
 use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     decode_child_frame, ChildFrame, FrameReader, RunEnd, RunFrame,
@@ -64,12 +64,18 @@ pub(crate) async fn run_isolated_in_process_scoped(
             handler_child: super::HandlerChildApp::without_handlers(),
             event_loop: super::EventLoopWatch::RuntimeOnly,
             exit: ProcessExit::Standard,
+            host_core: HostCoreWatch::NoHostCore,
         }),
         pid: IN_PROCESS_PID,
         writer,
     };
-    let scope = RunScope::new(FencingToken::new(run.task_id, run.attempt));
-    run_isolated(&context, run, &scope).await;
+    let scope = RunScope::new(run.task_attempt());
+    let after = run_isolated(&context, run, &scope).await;
+    assert_eq!(
+        after,
+        RunAfter::ServesOn,
+        "a child with no host core serves on"
+    );
     let frame = tokio::task::spawn_blocking(move || {
         let mut reader = FrameReader::new();
         let mut stream = &theirs;

@@ -78,7 +78,7 @@ describe("the memory cap of a seat isolate", () => {
 
     const facts = { kind: "notRecorded" } as const;
 
-    started.pool.run({ kind: "runBody", runKey: 1n, taskName: "allocate", inputJson: "{}", taskId: TASK_ID, attempt: 1, facts });
+    started.pool.run({ kind: "runBody", runKey: 1n, taskName: "allocate", inputJson: "{}", taskId: TASK_ID, attempt: 1, maxRetries: 0, facts });
 
     const outcome = await settledOutcome(outcomes, 1n);
 
@@ -87,7 +87,7 @@ describe("the memory cap of a seat isolate", () => {
       outcome.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
       /^Seat isolate 0 exited with code \d+ before the task ended: Error: .*memory limit/,
     );
-    started.pool.run({ kind: "runBody", runKey: 2n, taskName: "probe", inputJson: "{}", taskId: TASK_ID, attempt: 1, facts });
+    started.pool.run({ kind: "runBody", runKey: 2n, taskName: "probe", inputJson: "{}", taskId: TASK_ID, attempt: 1, maxRetries: 0, facts });
     assert.deepEqual(await settledOutcome(outcomes, 2n), { kind: "value", json: "1" });
     assert.deepEqual(ends, []);
   });

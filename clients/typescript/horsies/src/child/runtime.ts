@@ -1,6 +1,9 @@
-// The `runtime` object of a task body: the task id, the fencing token, the cancel signal and its state, tracked work
+// The `runtime` object of a task body: the task id, the attempt and the retry facts, the fencing token, the cancel signal and its state, tracked work
 // (`spawn`), and the app state of this process.
 //
+// - `attempt` is the attempt number, 1 on the first run. `maxRetries` is the retry budget of the task, 0 to 20.
+//   `retriesLeft` is `maxRetries - (attempt - 1)`, and 0 past the budget; it is not an `is_last` flag: a code that the
+//   retry policy does not retry, or `goodUntil`, can end the retries before it reaches 0.
 // - `signal` fires at an operator cancel in every class, and at the deadline in `SHARED_ASYNC` (in `ISOLATED` the
 //   worker kills the child at the deadline). Its reason is `{ cause: "DEADLINE" }` or `{ cause: "OPERATOR" }`; the
 //   first cause stays.
@@ -25,6 +28,7 @@ import { testRunControls, type TestRuntimeOptions, testWorkflowContext } from ".
 import type { Result } from "../wire/result.ts";
 import type { RuntimeWorkflowContext } from "../workflow/context.ts";
 import type { AttemptNumber } from "./attempt.ts";
+import { type MaxRetries, type RetriesLeft, retriesLeftOf } from "./retry-budget.ts";
 import type { AnyStateKey, StateKey } from "./state.ts";
 
 /** Why the cancel signal of a run fired. */
@@ -52,6 +56,7 @@ export type SpawnedWork<T> = (signal: AbortSignal) => Promise<T>;
 export interface RunControls {
   readonly taskId: TaskId;
   readonly attempt: AttemptNumber;
+  readonly maxRetries: MaxRetries;
   readonly signal: AbortSignal;
   cancelState(): CancelState;
   spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused>;
@@ -65,6 +70,15 @@ let constructRuntime: (controls: RunControls, context: RuntimeWorkflowContext) =
 export class TaskRuntime {
   /** The id of the task. */
   readonly taskId: TaskId;
+  /** The attempt number: 1 on the first run, greater for each retry. */
+  readonly attempt: AttemptNumber;
+  /** The retry budget of the task: the retries that follow its first attempt, from 0 to `MaxRetries.MAX`. */
+  readonly maxRetries: MaxRetries;
+  /**
+   * The retries left after this attempt: `maxRetries - (attempt - 1)`, and 0 past the budget. It is not a last-attempt
+   * flag: a code that the retry policy does not retry, or `goodUntil`, can end the retries before it reaches 0.
+   */
+  readonly retriesLeft: RetriesLeft;
   /** `{ taskId, value }`: `value` is the attempt number, greater for each later attempt of the task. */
   readonly fencingToken: FencingToken;
   /** Fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run. */
@@ -89,6 +103,9 @@ export class TaskRuntime {
 
   private constructor(controls: RunControls, context: RuntimeWorkflowContext) {
     this.taskId = controls.taskId;
+    this.attempt = controls.attempt;
+    this.maxRetries = controls.maxRetries;
+    this.retriesLeft = retriesLeftOf(controls.maxRetries, controls.attempt);
     this.fencingToken = Object.freeze({ taskId: controls.taskId, value: controls.attempt });
     this.signal = controls.signal;
     this.cancelState = (): CancelState => controls.cancelState();
@@ -102,7 +119,8 @@ export class TaskRuntime {
   }
 
   /**
-   * A runtime for a test of a task body, with no worker, no database and no addon: the task id and the attempt of
+   * A runtime for a test of a task body, with no worker, no database and no addon: the task id, the attempt and the retry budget
+   * (`MaxRetries.NONE` when it has none) of
    * `options`; the cancel state of `options` (`notRequested` when it has none), whose `requested` form also fires the
    * signal and the signal of spawned work before they start; `spawn` that runs its work at once; `state` from the
    * entries of `options`, each a key that `app.provide` returned and a value of the key's type; `workflowContext` read
@@ -116,7 +134,7 @@ export class TaskRuntime {
 }
 
 /** The runtime of a `SHARED_THREAD` body: it has no `spawn`. */
-export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "fencingToken" | "signal" | "cancelState" | "state">;
+export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "attempt" | "maxRetries" | "retriesLeft" | "fencingToken" | "signal" | "cancelState" | "state">;
 
 /** The runtime of an `ISOLATED` or `SHARED_ASYNC` body of a task with `workflowContext: true`. */
 export type WorkflowTaskRuntime = TaskRuntime & {

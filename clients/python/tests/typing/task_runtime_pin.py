@@ -32,6 +32,9 @@ from horsies import (
     Execution,
     FencingToken,
     Horsies,
+    MaxRetries,
+    MaxRetriesRefused,
+    RetriesLeft,
     RunCancelState,
     TaskError,
     TaskNode,
@@ -159,6 +162,15 @@ def the_test_helper_takes_an_attempt_number(task_id: uuid.UUID, attempt: Attempt
     assert_type(TaskRuntime.for_test(task_id=task_id), TaskRuntime)
     assert_type(TaskRuntime.for_test(task_id=task_id, attempt=attempt), TaskRuntime)
     TaskRuntime.for_test(task_id=task_id, attempt=2)  # pyright: ignore[reportArgumentType]
+    TaskRuntime.for_test(task_id=task_id, max_retries=3)  # pyright: ignore[reportArgumentType]
+    assert_type(MaxRetries.parse(3), Result[MaxRetries, MaxRetriesRefused])
+
+
+def the_attempt_facts_are_typed(runtime: TaskRuntime) -> None:
+    assert_type(runtime.task_id, uuid.UUID)
+    assert_type(runtime.attempt, AttemptNumber)
+    assert_type(runtime.max_retries, MaxRetries)
+    assert_type(runtime.retries_left, RetriesLeft)
 
 
 def the_cancel_state_is_closed(task_id: uuid.UUID, runtime: TaskRuntime) -> None:

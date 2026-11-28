@@ -610,9 +610,9 @@ export class SeatPool {
     clearCancel(this.#cells, seat);
     this.#seats[seat] = { kind: "running", isolate: state.isolate, run, startedAt: this.#deps.now() };
 
-    const { runKey, taskName, inputJson, taskId, attempt, facts } = run.post;
+    const { runKey, taskName, inputJson, taskId, attempt, maxRetries, facts } = run.post;
 
-    state.isolate.post({ kind: "run", protocol: SEAT_PROTOCOL_VERSION, runKey, taskName, inputJson, taskId, attempt, facts });
+    state.isolate.post({ kind: "run", protocol: SEAT_PROTOCOL_VERSION, runKey, taskName, inputJson, taskId, attempt, maxRetries, facts });
 
     switch (run.cancel.kind) {
       case "notRequested":

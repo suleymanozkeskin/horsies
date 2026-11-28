@@ -50,11 +50,11 @@ pub use schema::{
 };
 pub use values::{
     AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildResult,
-    CustomCodeText, OperatorCancelEnd, Priority, QueueName, RetryCount, RunTrace, SlotDownCause,
-    SlotIndex, TaskName, TraceCarrierText, WorkerDecision, WorkerIdText, WorkflowPlace,
-    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
-    MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
-    MAX_RETRY_COUNT, MAX_SLOT_INDEX,
+    CustomCodeText, MaxRetries, OperatorCancelEnd, Priority, QueueName, RetriesLeft, RetryCount,
+    RunTrace, SlotDownCause, SlotIndex, TaskName, TraceCarrierText, WorkerDecision, WorkerIdText,
+    WorkflowPlace, BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS,
+    MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS,
+    MAX_EVENT_WORKER_ID_CHARS, MAX_RETRY_COUNT, MAX_SLOT_INDEX, MAX_TASK_RETRIES,
 };
 
 // The closed types of other modules that event fields hold: the core's own

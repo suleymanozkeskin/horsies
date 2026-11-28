@@ -38,6 +38,7 @@ async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
 - The parameters form the input, stored as Python stores keyword arguments: a generated `Input` struct with one field per parameter, keyed by the parameter's name, a single parameter of any type included. `validate_order` stores `{"order": {"order_id": "...", "total_cents": ...}}`; `fn double(x: i64)` stores `{"x": 2}`. No parameter, or one parameter written `()`, is the input `()`: a send and a workflow node store `{}`, as Python stores no keyword arguments.
 - A parameter whose value is stored needs a name: `_` is a compile error for it.
 - A date-time of type `horsies::StoredDateTime<T>` (`T` is a chrono `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text: `2026-08-12T09:10:12.500000Z`. chrono's own serde form writes a whole millisecond with 3 digits (`…12.500Z`). Both clients read either text to the same value; use `StoredDateTime` in a parameter, the output type or a field of either when the stored bytes must equal Python's.
+- A time of day of type `horsies::StoredTime` (it wraps a chrono `NaiveTime`) is stored in Python's text by the same rule: `09:10:12` for a whole second, `09:10:12.500000` for a fraction. chrono's own serde form writes a whole millisecond with 3 digits (`09:10:12.500`). Both clients read either text to the same value.
 - A first parameter of type `horsies::TaskRuntime` is not input: the body gets the runtime of the app. See [Task Runtime](#task-runtime).
 - A task with no codes of its own uses `TaskError<std::convert::Infallible>`. `TaskError` without its code type is a compile error.
 
@@ -122,7 +123,7 @@ A send through an app that does not register the task returns `TaskSendError::Va
 
 ## Task Runtime
 
-A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel and the fencing token of its run, and starts work that belongs to its run.
+A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel, the fencing token and the attempt facts of its run, and starts work that belongs to its run.
 
 ```rust
 use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
@@ -161,6 +162,10 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 | `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause }` with a `CancelCause` (`Operator` or `Deadline`), or `NotInARun` |
 | `spawn(name, future)` | `Result<JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id and the value of the run. See [Fencing Token](#fencing-token) |
+| `task_id()` | `Result<Uuid, TaskAttemptRefused>`: the id of the task, the same on every attempt: a stable idempotency key for a side effect |
+| `attempt()` | `Result<AttemptNumber, TaskAttemptRefused>`: 1 is the first run, 2 the first retry (`.get()`) |
+| `max_retries()` | `Result<MaxRetries, TaskAttemptRefused>`: the retry budget of the task, 0 to 20 (`.get()`) |
+| `retries_left()` | `Result<RetriesLeft, TaskAttemptRefused>`: `max_retries - (attempt - 1)`, and 0 past the budget. A non-retryable error code or `good_until` can end the retries before it reaches 0, so the last attempt is not known in advance |
 | `task_function::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` (`NotRegistered`, `OtherTypes`) |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime: its task nodes resolve against that app. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
 

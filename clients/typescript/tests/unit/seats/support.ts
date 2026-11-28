@@ -103,7 +103,7 @@ const NOT_RECORDED: BodyFactsRecord = { kind: "notRecorded" };
 
 /** A `run` message of `taskName` with the input text `inputJson`. */
 export function runMessage(runKey: bigint, taskName: string, inputJson: string, facts: BodyFactsRecord = NOT_RECORDED): MainToSeat {
-  return { kind: "run", protocol: SEAT_PROTOCOL_VERSION, runKey, taskName, inputJson, taskId: TASK_ID, attempt: 1, facts };
+  return { kind: "run", protocol: SEAT_PROTOCOL_VERSION, runKey, taskName, inputJson, taskId: TASK_ID, attempt: 1, maxRetries: 0, facts };
 }
 
 /** A `cancel` message of the run `runKey`. */

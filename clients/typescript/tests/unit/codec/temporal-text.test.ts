@@ -170,6 +170,15 @@ describe("time of day", () => {
     assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12.000000001")), '"09:10:12.000000001"');
   });
 
+  test("Python's two texts of a time of day, 09:10:12.500000 and 09:10:12, read and write back unchanged", () => {
+    for (const text of ["09:10:12.500000", "09:10:12"]) {
+      const value = Temporal.PlainTime.from(text);
+
+      assert(sameValue(read(h.plainTime(), text), value), text);
+      assert.equal(written(h.plainTime(), value), JSON.stringify(text));
+    }
+  });
+
   test("each text form reads: 1 to 9 fraction digits", () => {
     for (const text of ["09:10:12", "09:10:12.5", "09:10:12.500", "09:10:12.500000", "09:10:12.123456789"]) {
       assert(sameValue(read(h.plainTime(), text), Temporal.PlainTime.from(text)), text);

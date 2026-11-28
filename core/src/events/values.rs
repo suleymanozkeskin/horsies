@@ -58,6 +58,10 @@ pub const MAX_ATTEMPT: u32 = i32::MAX as u32 + 1;
 /// The largest retry count: the largest Postgres `integer`.
 pub const MAX_RETRY_COUNT: u32 = i32::MAX as u32;
 
+/// The largest retry budget of a task: `max_retries` of a task row is held
+/// from 0 to this number by the table (`horsies_tasks_retry_range`).
+pub const MAX_TASK_RETRIES: u32 = 20;
+
 /// The largest slot index. Slots are numbered from 0 across kinds: the
 /// isolated slots, then the shared async slots, then the shared thread
 /// slots.
@@ -83,6 +87,13 @@ pub type WorkerIdText = BoundedText<MAX_EVENT_WORKER_ID_CHARS>;
 
 /// The number of an attempt of a task, from 1: its retry count plus 1.
 pub type AttemptNumber = BoundedU32<1, MAX_ATTEMPT>;
+
+/// The retry budget of a task: how many retries follow its first attempt,
+/// from 0.
+pub type MaxRetries = BoundedU32<0, MAX_TASK_RETRIES>;
+
+/// The retries that a task has left after an attempt, from 0.
+pub type RetriesLeft = BoundedU32<0, MAX_TASK_RETRIES>;
 
 /// The retry count of a task after a retry was scheduled, from 1.
 pub type RetryCount = BoundedU32<1, MAX_RETRY_COUNT>;

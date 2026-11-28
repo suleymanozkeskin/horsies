@@ -147,6 +147,10 @@ The decorator gives a `RuntimeTaskFunction` for a `def` function and an `AsyncRu
 
 | Member | Type | Description |
 |--------|------|-------------|
+| `task_id` | `uuid.UUID` | The id of the task. The same on every attempt, and the same as `TaskHandle.task_id`: a stable idempotency key for a side effect |
+| `attempt` | `AttemptNumber` | The number of this attempt. 1 is the first run, 2 the first retry (`attempt.value`) |
+| `max_retries` | `MaxRetries` | The retry budget of the task: the retries that follow its first attempt, 0 to 20 (`max_retries.value`) |
+| `retries_left` | `RetriesLeft` | `max_retries - (attempt - 1)`, and 0 past the budget (`retries_left.value`). A non-retryable error code or `good_until` can end the retries before it reaches 0, so the last attempt is not known in advance |
 | `fencing_token` | `FencingToken` | The fencing token of this attempt. See [Fencing Token](#fencing-token) |
 | `cancel_state()` | `RunCancelState` | Whether a cancel of this run was requested, and why. See [Cancellation](#cancellation) |
 

@@ -57,7 +57,7 @@ export type BodyFactsRecord =
 /**
  * What the core posts to the JavaScript main thread of a child:
  * - `runBody`: run the body of `taskName` for the run `runKey` with the stored input text; `attempt` is the fencing
- *   token's value, from 1;
+ *   token's value, from 1, and `maxRetries` is the retry budget of the task row, from 0 to 20;
  * - `cancelRun`: the cancel signal of the run fired;
  * - `stopWork`: a cancel round asks the spawned work `workKey` to stop.
  */
@@ -69,6 +69,7 @@ export type ChildPost =
       readonly inputJson: string;
       readonly taskId: string;
       readonly attempt: number;
+      readonly maxRetries: number;
       readonly facts: BodyFactsRecord;
     }
   | { readonly kind: "cancelRun"; readonly runKey: bigint; readonly cause: CancelCauseName }
@@ -141,7 +142,8 @@ export type ChildExitName =
   | "BAD_ARGUMENTS"
   | "BOOT_FAILED"
   | "PROTOCOL_MISMATCH"
-  | "CHILD_HOOK_FAILED";
+  | "CHILD_HOOK_FAILED"
+  | "CORE_STOPPED";
 
 /** The end of the serve: the exit code of the process and its name. */
 export interface ChildServeEnd {

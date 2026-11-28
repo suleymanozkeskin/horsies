@@ -184,8 +184,8 @@ def summarize_rows(
 ```
 
 - The key's type argument (`list[int]`) is not checked against the node. Keep it equal to the node's `TaskNode[T]`.
-- The node must be in `workflow_context_from`. A missing result raises `KeyError`.
-- `NodeKey("fetch")` for an id that no node has also raises `KeyError`. Keep the id in one shared constant.
+- The node must be in `workflow_context_from`. A node with an id that is not in the context raises `NodeNotInContext` (`ContractCode.NODE_NOT_IN_CONTEXT`); a node with no `node_id` raises `WorkflowContextMissingId` (`ContractCode.WORKFLOW_CONTEXT_MISSING_ID`).
+- `NodeKey("fetch")` for an id that no node has also raises `NodeNotInContext`. Keep the id in one shared constant.
 
 ## SubWorkflowNode
 
@@ -551,7 +551,7 @@ class WorkflowContext(BaseModel):
 2. Every node in `workflow_context_from` must also be in `waits_for` (HRS-009).
 3. If `workflow_context_from` is set but param is missing: HRS-010.
 
-**Scope:** Only nodes in `workflow_context_from` are accessible. Others raise `KeyError`.
+**Scope:** Only nodes in `workflow_context_from` are accessible. Others raise `NodeNotInContext`.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python

@@ -36,11 +36,12 @@ use horsies_core::{
     RegisteredTask, TaskOptions,
 };
 
-use crate::config::producer_manifest;
+use crate::app::broker_refusal_errors;
 use crate::process_state::refuse_in_a_fork;
 use crate::{
     AppConfig, AppRole, Horsies, HorsiesError, HorsiesErrorCode, SchemaMode, ValidationReport,
 };
+use horsies_core::manifest::producer_manifest;
 
 /// The check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +187,7 @@ impl Horsies {
 /// and the config validation does not.
 fn live_check_handle(config: &AppConfig) -> Result<CoreConnection, ValidationReport> {
     let manifest = producer_manifest(&config.database, SchemaMode::ObserveOnly)
-        .map_err(|refused| ValidationReport::of(CHECK, vec![refused.to_horsies_error()]))?;
+        .map_err(|refusals| ValidationReport::of(CHECK, broker_refusal_errors(&refusals)))?;
     Ok(CoreConnection::new(
         manifest,
         PoolProfile::Producer,

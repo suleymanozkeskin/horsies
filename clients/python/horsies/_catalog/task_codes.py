@@ -70,6 +70,13 @@ class ContractCode(StrEnum):
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
 
     WORKFLOW_CONTEXT_MISSING_ID = 'WORKFLOW_CONTEXT_MISSING_ID'
+    """A workflow context read was asked for a node that has no `node_id`."""
+
+    NODE_NOT_IN_CONTEXT = 'NODE_NOT_IN_CONTEXT'
+    """A workflow context read was asked for a node that has an id, but the
+    context holds no entry for it: the node is not named in the task
+    node's `workflow_context_from`, or its dependency did not finish.
+    """
 
     NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
     """A handle-level read (`TaskHandle.get`, `WorkflowHandle.get`) asked for a typed value, but the ok

@@ -9,6 +9,7 @@ import { DEV_ADDON_PATH_VARIABLE, requireDevAddon } from "../../../horsies/src/n
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { coreState, environmentCount, setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
 import { manifestJson } from "./manifest.ts";
+import { panicForwarder, readCore, startTaskChild, waitForTheEnd } from "./task-child-rule.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -24,6 +25,12 @@ async function runCase(name: string | undefined): Promise<string> {
       setPanicRule("ABORT_PROCESS");
 
       return defect();
+    case "task-child-panic-before-read":
+      return panicBeforeRead();
+    case "task-child-defect-after-read":
+      startTaskChild();
+
+      return `${readCore()} ${defect()}`;
     case "second-environment":
       return secondEnvironment();
     case "never-connected-close":
@@ -49,6 +56,15 @@ function panicRuleFixed(): string {
   } catch (cause) {
     return cause instanceof Error && "current" in cause ? `${cause.name} ${String(cause.current)}` : String(cause);
   }
+}
+
+/** A background panic in a task child before the child host read its core: the rule is `ABORT_PROCESS`, so it aborts. */
+async function panicBeforeRead(): Promise<string> {
+  startTaskChild();
+  panicForwarder();
+  await waitForTheEnd();
+
+  return "no abort";
 }
 
 function defect(): string {

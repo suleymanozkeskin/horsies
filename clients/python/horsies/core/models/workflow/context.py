@@ -7,6 +7,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    ClassVar,
     Generic,
     Literal,
     Self,
@@ -16,6 +17,8 @@ from typing import (
 )
 
 from pydantic import BaseModel
+
+from horsies._catalog.task_codes import ContractCode
 
 from .enums import CodeT, OkT, OkT_co, WorkflowStatus
 from .nodes import NodeKey
@@ -189,7 +192,30 @@ class WorkflowMetadata:
 
 
 class WorkflowContextMissingId(RuntimeError):
-    """Raised when TaskNode node_id is missing for WorkflowContext.result_for()."""
+    """Raised by ``WorkflowContext.result_for`` and ``summary_for`` when the
+    node has no ``node_id``.
+
+    Attributes:
+        code: ``ContractCode.WORKFLOW_CONTEXT_MISSING_ID``.
+    """
+
+    code: ClassVar[Literal[ContractCode.WORKFLOW_CONTEXT_MISSING_ID]] = (
+        ContractCode.WORKFLOW_CONTEXT_MISSING_ID
+    )
+
+
+class NodeNotInContext(RuntimeError):
+    """Raised by ``WorkflowContext.result_for`` and ``summary_for`` when the
+    node has a ``node_id`` but the context holds no entry for it: the node is
+    not named in ``workflow_context_from``, or its dependency did not finish.
+
+    Attributes:
+        code: ``ContractCode.NODE_NOT_IN_CONTEXT``.
+    """
+
+    code: ClassVar[Literal[ContractCode.NODE_NOT_IN_CONTEXT]] = (
+        ContractCode.NODE_NOT_IN_CONTEXT
+    )
 
 
 # =============================================================================
@@ -537,8 +563,8 @@ class WorkflowContext(BaseModel):
             ``Failed(task_error)``.
 
         Raises:
-            KeyError: If the node's result is not in this context.
-            RuntimeError: If the node has no node_id assigned.
+            NodeNotInContext: If the node's result is not in this context.
+            WorkflowContextMissingId: If the node has no node_id assigned.
         """
 
         node_id: str | None
@@ -554,7 +580,7 @@ class WorkflowContext(BaseModel):
             )
 
         if node_id not in self._results_by_id:
-            raise KeyError(
+            raise NodeNotInContext(
                 f"TaskNode id '{node_id}' not in workflow context. "
                 'Ensure the node is included in workflow_context_from.'
             )
@@ -595,8 +621,8 @@ class WorkflowContext(BaseModel):
             The stored raw summary is not mutated.
 
         Raises:
-            KeyError: If the node's summary is not in this context.
-            RuntimeError: If the node has no node_id assigned.
+            NodeNotInContext: If the node's summary is not in this context.
+            WorkflowContextMissingId: If the node has no node_id assigned.
             pydantic.ValidationError: If the raw output payload doesn't
                 satisfy the child workflow's declared output type.
         """
@@ -608,7 +634,7 @@ class WorkflowContext(BaseModel):
             )
 
         if node_id not in self._summaries_by_id:
-            raise KeyError(
+            raise NodeNotInContext(
                 f"SubWorkflowNode id '{node_id}' not in workflow context summaries. "
                 'Ensure the node is included in workflow_context_from.'
             )

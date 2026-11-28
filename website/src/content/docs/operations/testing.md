@@ -130,7 +130,7 @@ def test_workflow_context() -> None:
 | `results_by_node_id` | `dict[str, TaskOutcome[Any, TaskError]]` | Upstream outcomes (`Succeeded(value)` or `Failed(task_error)`), keyed by `node_id` |
 | `summaries_by_node_id` | `dict[str, SubWorkflowSummary[Any]] \| None` | Subworkflow summaries, keyed by `node_id`. Default `None` |
 
-`result_for(node)` raises `KeyError` for a node whose id is not in `results_by_node_id`.
+`result_for(node)` raises `NodeNotInContext` (code `ContractCode.NODE_NOT_IN_CONTEXT`) for a node whose id is not in `results_by_node_id`, and `WorkflowContextMissingId` (code `ContractCode.WORKFLOW_CONTEXT_MISSING_ID`) for a node with no `node_id`.
 
 ### Pass a Task Runtime
 
@@ -139,7 +139,7 @@ A task whose first parameter is `runtime: TaskRuntime` takes the runtime first i
 ```python
 import uuid
 
-from horsies import AttemptNumber, Err, FencingToken, Ok, Result, TaskError, TaskRuntime
+from horsies import AttemptNumber, Err, FencingToken, MaxRetries, Ok, Result, TaskError, TaskRuntime
 
 
 @app.task('stamp')
@@ -154,9 +154,15 @@ def test_task_runtime() -> None:
             pass
         case Err(err_value=refused):
             raise AssertionError(refused.reason)
+    match MaxRetries.parse(3):
+        case Ok(ok_value=budget):
+            pass
+        case Err(err_value=refused):
+            raise AssertionError(refused.reason)
     task_id = uuid.uuid4()
-    runtime = TaskRuntime.for_test(task_id=task_id, attempt=second_attempt)
+    runtime = TaskRuntime.for_test(task_id=task_id, attempt=second_attempt, max_retries=budget)
     assert runtime.fencing_token == FencingToken(task_id=task_id, value=2)
+    assert runtime.retries_left.value == 2
     assert stamp(runtime, label='order') == Ok('order:2')
 ```
 
@@ -164,9 +170,10 @@ def test_task_runtime() -> None:
 | --------- | ---- | ----------- |
 | `task_id` | `uuid.UUID` | The task id of the token |
 | `attempt` | `AttemptNumber` | The attempt number. Default: the first attempt (1). A test of a retry passes 2 |
+| `max_retries` | `MaxRetries` | The retry budget of the task. Default: `MaxRetries(value=0)`. `retries_left` follows from `attempt` and `max_retries` |
 | `cancel_state` | `RunCancelState` | The cancel state of the run for the whole call. Default: `CancelNotRequested()`. A test of the stop path passes `CancelRequested(cause=CancelCause.OPERATOR)`. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) |
 
-`AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
+`AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `MaxRetries.parse(number)` returns `Ok(MaxRetries)` for a number from 0 to 20, and `Err(MaxRetriesRefused)` for another number. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
 
 ### Refuse a TaskOutcome Kwarg on `.send()`
 

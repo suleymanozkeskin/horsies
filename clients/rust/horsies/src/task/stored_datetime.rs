@@ -1,5 +1,5 @@
-//! `StoredDateTime<T>`: a chrono date-time that a task input or a task
-//! result stores in Python's text.
+//! `StoredDateTime<T>` and `StoredTime`: a chrono date-time or time of day
+//! that a task input or a task result stores in Python's text.
 //!
 //! Python stores a date-time of a task input or result in pydantic's JSON
 //! form: the fraction of the second with 6 digits when the microsecond is not
@@ -7,9 +7,11 @@
 //! form writes a whole millisecond with 3 digits (`2026-08-12T09:10:12.500Z`).
 //! Both clients read both texts to the same instant. A value of
 //! `StoredDateTime` writes Python's text, so the two clients store the same
-//! bytes for it.
+//! bytes for it. The time of day (`datetime.time`) has the same rule:
+//! `09:10:12.500000` in Python, `09:10:12.500` in chrono's serde form, and
+//! `StoredTime` writes Python's.
 
-use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeZone, Timelike};
+use chrono::{DateTime, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Timelike};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Nanoseconds in one second.
@@ -27,6 +29,15 @@ const NAIVE_MICROSECONDS: &str = "%Y-%m-%dT%H:%M:%S%.6f";
 /// A naive date-time with 9 fraction digits.
 const NAIVE_NANOSECONDS: &str = "%Y-%m-%dT%H:%M:%S%.9f";
 
+/// A time of day with no fraction of the second.
+const TIME_WHOLE_SECOND: &str = "%H:%M:%S";
+
+/// A time of day with 6 fraction digits.
+const TIME_MICROSECONDS: &str = "%H:%M:%S%.6f";
+
+/// A time of day with 9 fraction digits.
+const TIME_NANOSECONDS: &str = "%H:%M:%S%.9f";
+
 /// A chrono date-time that is stored in Python's text.
 ///
 /// - `StoredDateTime<DateTime<Tz>>`: RFC 3339, with the offset `Z` when it
@@ -42,6 +53,17 @@ const NAIVE_NANOSECONDS: &str = "%Y-%m-%dT%H:%M:%S%.9f";
 /// `async fn report(day: StoredDateTime<DateTime<Utc>>)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoredDateTime<T>(pub T);
+
+/// A chrono time of day that is stored in Python's text: `09:10:12`,
+/// `09:10:12.500000`, or `09:10:12.654321001` for a part below the
+/// microsecond, which Python cannot hold (the fraction of
+/// [`StoredDateTime`]).
+///
+/// The read is chrono's: any count of fraction digits. Use it in place of
+/// `chrono::NaiveTime` in a task's parameters, its output type, or a field of
+/// either: `async fn open_at(time: StoredTime)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoredTime(pub NaiveTime);
 
 /// The fraction of the second in Python's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +98,14 @@ impl Fraction {
         }
     }
 
+    fn time_pattern(self) -> &'static str {
+        match self {
+            Self::WholeSecond => TIME_WHOLE_SECOND,
+            Self::Microseconds => TIME_MICROSECONDS,
+            Self::Nanoseconds => TIME_NANOSECONDS,
+        }
+    }
+
     fn naive_pattern(self) -> &'static str {
         match self {
             Self::WholeSecond => NAIVE_WHOLE_SECOND,
@@ -99,6 +129,13 @@ impl Serialize for StoredDateTime<NaiveDateTime> {
     }
 }
 
+impl Serialize for StoredTime {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let pattern = Fraction::of(self.0.nanosecond()).time_pattern();
+        serializer.collect_str(&self.0.format(pattern))
+    }
+}
+
 impl<'de, Tz> Deserialize<'de> for StoredDateTime<DateTime<Tz>>
 where
     Tz: TimeZone,
@@ -112,6 +149,12 @@ where
 impl<'de> Deserialize<'de> for StoredDateTime<NaiveDateTime> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         NaiveDateTime::deserialize(deserializer).map(Self)
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredTime {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        NaiveTime::deserialize(deserializer).map(Self)
     }
 }
 
@@ -200,5 +243,50 @@ mod tests {
         let naive: StoredDateTime<NaiveDateTime> =
             serde_json::from_str(r#""2026-08-12T09:10:12.500""#).expect("a date-time reads");
         assert_eq!(naive, StoredDateTime(utc(500_000_000).naive_utc()));
+    }
+
+    fn time_of_day(nanoseconds: u32) -> NaiveTime {
+        NaiveTime::from_hms_nano_opt(9, 10, 12, nanoseconds).expect("a valid time")
+    }
+
+    fn time_text(value: NaiveTime) -> String {
+        serde_json::to_string(&StoredTime(value)).expect("a time encodes")
+    }
+
+    #[test]
+    fn a_whole_second_time_has_no_fraction() {
+        assert_eq!(time_text(time_of_day(0)), r#""09:10:12""#);
+    }
+
+    /// chrono's own text is `09:10:12.500`; pydantic's is `.500000`.
+    #[test]
+    fn a_whole_millisecond_time_has_6_digits() {
+        assert_eq!(time_text(time_of_day(500_000_000)), r#""09:10:12.500000""#);
+    }
+
+    #[test]
+    fn a_microsecond_time_has_6_digits() {
+        assert_eq!(time_text(time_of_day(654_321_000)), r#""09:10:12.654321""#);
+        assert_eq!(time_text(time_of_day(1_000)), r#""09:10:12.000001""#);
+    }
+
+    #[test]
+    fn a_time_below_the_microsecond_has_9_digits() {
+        assert_eq!(
+            time_text(time_of_day(654_321_001)),
+            r#""09:10:12.654321001""#
+        );
+    }
+
+    #[test]
+    fn the_time_read_takes_any_count_of_fraction_digits() {
+        for written in [
+            r#""09:10:12.500""#,
+            r#""09:10:12.500000""#,
+            r#""09:10:12.5""#,
+        ] {
+            let read: StoredTime = serde_json::from_str(written).expect("a time reads");
+            assert_eq!(read, StoredTime(time_of_day(500_000_000)), "{written}");
+        }
     }
 }

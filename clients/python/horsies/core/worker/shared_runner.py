@@ -326,7 +326,7 @@ async def _seat_steps(
             frame.task_name,
             frame.input,
             OnSharedSeat(),
-            run_runtime(frame.task_id, frame.attempt, cancel.cell),
+            run_runtime(frame.task_id, frame.attempt, frame.max_retries, cancel.cell),
         )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):

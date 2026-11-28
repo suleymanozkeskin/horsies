@@ -375,13 +375,6 @@ const KNOWN_SITES: &[Known] = &[
         allowed: Allowed::NotUserValue("the args_from map of a node: kwarg name to node index"),
     },
     Known {
-        file: "clients/rust/horsies/src/config.rs",
-        item: "core_database_url",
-        kind: SiteKind::FromValue,
-        count: 1,
-        allowed: Allowed::NotUserValue("a database URL text"),
-    },
-    Known {
         file: "clients/rust/horsies/src/workflow/handle.rs",
         item: "node_info",
         kind: SiteKind::FromValue,
@@ -1323,7 +1316,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 31);
+    assert_eq!(KNOWN_SITES.len(), 30);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);

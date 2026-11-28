@@ -1,6 +1,7 @@
 // The `child` area of the addon with a built addon: the read of the child-mode arguments, the answers of the settle,
 // cancel-state and spawn calls for a run that is not in the table, and the child host entry in child processes (a
-// socket that is not open, a parent that is gone, the backstop, a second serve, the loop marks before a serve).
+// socket that is not open, a parent that is gone, the backstop, a second serve, the loop marks before a serve, the task
+// child rule after the first read of the core).
 //
 // Runs only where a built addon exists (`HORSIES_NATIVE_ADDON_PATH`). Run it under the memory watchdog (2 GiB, with
 // a wall-time bound). No case connects to a database.
@@ -71,6 +72,18 @@ describe("the child area of the addon", () => {
 
   test("a second serve in a process is a defect", () => {
     assert.equal(runChildCase(SCRIPT, "second-serve", CHILD_CASE_BOUND_MS).stdout, "ClientDefect");
+  });
+
+  test("a background panic after the first read of the core stops it, and a core call ends the child with 80", () => {
+    const ended = runChildCase(SCRIPT, "task-child-panic-after-read", CHILD_CASE_BOUND_MS);
+
+    assert.equal(ended.status, 80, ended.stderr);
+    assert.equal(ended.stdout, "");
+    assert.match(ended.stderr, /horsies: the core stopped in process \d+: panic in thread horsies-log-forwarder: planned forwarder panic/u);
+    assert.match(
+      ended.stderr,
+      /horsies: At a core call of this child: the core of this child stopped after a panic in a core background task \(thread horsies-log-forwarder: planned forwarder panic.*; the child ends itself with exit code 80/u,
+    );
   });
 
   test("a loop mark before the serve is a defect", () => {
