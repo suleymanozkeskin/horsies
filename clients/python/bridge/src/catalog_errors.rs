@@ -127,11 +127,7 @@ fn slot_object<'py>(
 /// Failure exits: those of the class import, and the exception of a
 /// constructor that refuses the values.
 fn payload_object<'py>(py: Python<'py>, payload: &TaskSendPayload) -> PyResult<Bound<'py, PyAny>> {
-    let class = catalog_class(
-        py,
-        TASK_SEND_PAYLOAD.module,
-        TASK_SEND_PAYLOAD.type_name,
-    )?;
+    let class = catalog_class(py, TASK_SEND_PAYLOAD.module, TASK_SEND_PAYLOAD.type_name)?;
     let fields = PyDict::new(py);
     for field in payload.record_values() {
         fields.set_item(field.name, record_value_object(py, field.value)?)?;

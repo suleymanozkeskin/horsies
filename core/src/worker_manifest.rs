@@ -49,7 +49,7 @@ use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
-use crate::manifest_schema::{IntBound, ManifestValue, ItemType, ValueType};
+use crate::manifest_schema::{IntBound, ItemType, ManifestValue, ValueType};
 use crate::telemetry::labels::DeclaredSource;
 use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};

@@ -709,7 +709,9 @@ mod tests {
         }
         assert!(text.contains("forCronEnumTerm<T>{"), "{text}");
         assert!(
-            text.contains("value:<Vec<T>as::horsies_core::manifest_schema::ManifestValue>::VALUE_TYPE"),
+            text.contains(
+                "value:<Vec<T>as::horsies_core::manifest_schema::ManifestValue>::VALUE_TYPE"
+            ),
             "{text}"
         );
     }

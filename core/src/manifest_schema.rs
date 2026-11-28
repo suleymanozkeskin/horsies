@@ -536,22 +536,13 @@ impl ManifestModule {
                     | ValueType::Named(_)
                     | ValueType::TimeOfDay
                     | ValueType::List(
-                        ItemType::Bool
-                        | ItemType::Str
-                        | ItemType::Named(_)
-                        | ItemType::TimeOfDay,
+                        ItemType::Bool | ItemType::Str | ItemType::Named(_) | ItemType::TimeOfDay,
                     )
                     | ValueType::Map(
-                        ItemType::Bool
-                        | ItemType::Str
-                        | ItemType::Named(_)
-                        | ItemType::TimeOfDay,
+                        ItemType::Bool | ItemType::Str | ItemType::Named(_) | ItemType::TimeOfDay,
                     )
                     | ValueType::Optional(
-                        ItemType::Bool
-                        | ItemType::Str
-                        | ItemType::Named(_)
-                        | ItemType::TimeOfDay,
+                        ItemType::Bool | ItemType::Str | ItemType::Named(_) | ItemType::TimeOfDay,
                     ) => continue,
                 };
                 if !bounds.iter().any(|known| known.name == bound.name) {
@@ -661,9 +652,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{name} is not a manifest type"));
                 sample_type(sampling, manifest_type, depth + 1)
             }
-            ValueType::List(item) => {
-                Value::Array(vec![sample(sampling, item.value(), depth + 1)])
-            }
+            ValueType::List(item) => Value::Array(vec![sample(sampling, item.value(), depth + 1)]),
             ValueType::Map(item) => {
                 let mut object = Map::new();
                 object.insert(
@@ -1233,10 +1222,7 @@ mod tests {
                             ("step", ValueType::Int(CRON_ENUM_STEP)),
                         ],
                     ),
-                    (
-                        "enum_step",
-                        vec![("step", ValueType::Int(CRON_ENUM_STEP))]
-                    ),
+                    ("enum_step", vec![("step", ValueType::Int(CRON_ENUM_STEP))]),
                 ],
                 "{name}"
             );
@@ -1258,10 +1244,7 @@ mod tests {
                 ("step", vec![("step", ValueType::Int(CRON_NUMERIC_STEP))]),
                 (
                     "values",
-                    vec![(
-                        "values",
-                        ValueType::List(ItemType::Int(CRON_NUMERIC_VALUE))
-                    )],
+                    vec![("values", ValueType::List(ItemType::Int(CRON_NUMERIC_VALUE)))],
                 ),
                 (
                     "range",
@@ -1372,7 +1355,10 @@ mod tests {
                 ("time", ValueType::TimeOfDay),
             ]
         );
-        assert_eq!(<NaiveTime as ManifestValue>::VALUE_TYPE, ValueType::TimeOfDay);
+        assert_eq!(
+            <NaiveTime as ManifestValue>::VALUE_TYPE,
+            ValueType::TimeOfDay
+        );
     }
 
     #[test]

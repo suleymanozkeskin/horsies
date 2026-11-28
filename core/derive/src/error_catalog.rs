@@ -289,12 +289,10 @@ fn variant_cause<'a>(
             "a #[error_slot(cause)] field needs cause = \"...\" on its variant",
         )),
         (CauseSlot::Required | CauseSlot::Optional, [cause]) => Ok(Some(*cause)),
-        (CauseSlot::Required | CauseSlot::Optional, [_, ..]) => {
-            Err(syn::Error::new_spanned(
-                &variant.ident,
-                "a variant has at most one #[error_slot(cause)] field",
-            ))
-        }
+        (CauseSlot::Required | CauseSlot::Optional, [_, ..]) => Err(syn::Error::new_spanned(
+            &variant.ident,
+            "a variant has at most one #[error_slot(cause)] field",
+        )),
     }
 }
 
@@ -472,7 +470,9 @@ fn slot_of_field(attrs: &[Attribute], name: &Ident) -> syn::Result<FieldSlot> {
                 "skip" => skip = true,
                 "cause" => cause = true,
                 _ => {
-                    return Err(meta.error("the error_slot keys are slot_type, hidden, skip and cause"))
+                    return Err(
+                        meta.error("the error_slot keys are slot_type, hidden, skip and cause")
+                    )
                 }
             }
             Ok(())
@@ -954,6 +954,9 @@ mod tests {
             }
         })
         .expect_err("the derive refuses the enum");
-        assert!(error.contains("one of slot_type, cause and skip"), "{error}");
+        assert!(
+            error.contains("one of slot_type, cause and skip"),
+            "{error}"
+        );
     }
 }

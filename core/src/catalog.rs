@@ -159,12 +159,7 @@ mod tests {
         );
         for (variant, member) in E::VARIANTS.iter().zip(E::CATALOG.members) {
             assert_eq!(variant.wire_value(), member.value);
-            assert_eq!(
-                text_form(variant),
-                member.value,
-                "{}",
-                E::CATALOG.type_name
-            );
+            assert_eq!(text_form(variant), member.value, "{}", E::CATALOG.type_name);
         }
     }
 
@@ -217,10 +212,7 @@ mod tests {
         // clients/typescript/horsies/src/send/errors.ts. The Python and Rust
         // clients have no seat relay.
         assert_eq!(SeatRelayCode::SeatRelayFull.wire_value(), "SEAT_RELAY_FULL");
-        assert_eq!(
-            <SeatRelayCode as CodeEnum>::CATALOG.module,
-            "task_send"
-        );
+        assert_eq!(<SeatRelayCode as CodeEnum>::CATALOG.module, "task_send");
     }
 
     #[test]
@@ -537,11 +529,7 @@ mod tests {
     fn class_names_are_unique_and_names_and_values_are_unique_per_class() {
         let mut classes = HashSet::new();
         for catalog in CODE_CATALOGS {
-            assert!(
-                classes.insert(catalog.type_name),
-                "{}",
-                catalog.type_name
-            );
+            assert!(classes.insert(catalog.type_name), "{}", catalog.type_name);
             let mut names = HashSet::new();
             let mut values = HashSet::new();
             for member in catalog.members {
@@ -573,11 +561,7 @@ mod tests {
                     .all(|character| character.is_ascii_alphanumeric() || character == '_')
         };
         for catalog in CODE_CATALOGS {
-            assert!(
-                identifier(catalog.module),
-                "{}",
-                catalog.module
-            );
+            assert!(identifier(catalog.module), "{}", catalog.module);
             assert!(identifier(catalog.type_name), "{}", catalog.type_name);
             for member in catalog.members {
                 assert!(identifier(member.name), "{}", member.name);
@@ -642,9 +626,7 @@ mod tests {
                         .members
                         .iter()
                         .find(|member| member.value == value)
-                        .unwrap_or_else(|| {
-                            panic!("{}: {value} is not a member", class.type_name)
-                        })
+                        .unwrap_or_else(|| panic!("{}: {value} is not a member", class.type_name))
                         .forms
                 })
                 .collect(),
@@ -659,12 +641,7 @@ mod tests {
             for class in catalog.classes {
                 let forms = code_slot_forms(catalog, class);
                 if forms.contains(&CallForms::BlockingFormOnly) {
-                    assert_eq!(
-                        forms,
-                        [CallForms::BlockingFormOnly],
-                        "{}",
-                        class.type_name
-                    );
+                    assert_eq!(forms, [CallForms::BlockingFormOnly], "{}", class.type_name);
                     marked.push(class.type_name);
                 }
             }

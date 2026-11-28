@@ -60,9 +60,7 @@ pub fn error_modules() -> BTreeMap<&'static str, ErrorModule> {
             .push(*record);
     }
     for union in ERROR_UNIONS {
-        module_entry(&mut modules, union.module)
-            .unions
-            .push(*union);
+        module_entry(&mut modules, union.module).unions.push(*union);
     }
     modules
 }
@@ -223,12 +221,9 @@ fn render_imports(contents: &ErrorModule, classes: &[&ErrorClass]) -> String {
             RecordFieldType::DateTime | RecordFieldType::OptionalDateTime
         )
     });
-    let uses_retention_key = record_fields.iter().any(|field| {
-        matches!(
-            field.field_type,
-            RecordFieldType::OptionalRetentionClassKey
-        )
-    });
+    let uses_retention_key = record_fields
+        .iter()
+        .any(|field| matches!(field.field_type, RecordFieldType::OptionalRetentionClassKey));
     let uses_default_retention_key = record_fields
         .iter()
         .any(|field| field.default == FieldDefault::DefaultRetentionClassKey);

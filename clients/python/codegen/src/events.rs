@@ -323,10 +323,7 @@ fn render_value_type(named: &NamedType) -> String {
                     variant.fields,
                 ));
             }
-            let members: Vec<&str> = variants
-                .iter()
-                .map(|variant| variant.type_name)
-                .collect();
+            let members: Vec<&str> = variants.iter().map(|variant| variant.type_name).collect();
             text.push_str("\n\n");
             text.push_str(&render_union_alias(named.name, &members));
             text.push_str(&docstring(named.doc, "").unwrap_or_default());

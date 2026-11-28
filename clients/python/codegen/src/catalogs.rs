@@ -23,10 +23,7 @@ const IS_TERMINAL_DOC: &str =
 pub fn group_by_module(catalogs: &[CodeCatalog]) -> BTreeMap<&'static str, Vec<CodeCatalog>> {
     let mut modules: BTreeMap<&'static str, Vec<CodeCatalog>> = BTreeMap::new();
     for catalog in catalogs {
-        modules
-            .entry(catalog.module)
-            .or_default()
-            .push(*catalog);
+        modules.entry(catalog.module).or_default().push(*catalog);
     }
     modules
 }
@@ -43,10 +40,7 @@ pub fn render_package_init(modules: &BTreeMap<&'static str, Vec<CodeCatalog>>) -
 
 /// The text of one catalog module.
 pub fn render_module(module: &str, catalogs: &[CodeCatalog]) -> String {
-    let classes: Vec<&str> = catalogs
-        .iter()
-        .map(|catalog| catalog.type_name)
-        .collect();
+    let classes: Vec<&str> = catalogs.iter().map(|catalog| catalog.type_name).collect();
     let mut text = format!("{GENERATED_HEADER}\n");
     text.push_str(&format!(
         "\"\"\"Code catalogs of the `{module}` area: {}.\"\"\"\n\n",

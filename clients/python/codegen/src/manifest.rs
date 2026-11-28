@@ -12,8 +12,8 @@
 //! defect of the caller, and the renderer stops with a panic that names it.
 
 use horsies_core::manifest_schema::{
-    ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, ValueType,
-    TaggedVariant, VariantFields,
+    ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType,
+    TaggedVariant, ValueType, VariantFields,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -150,11 +150,7 @@ fn render_all_list(module: &ManifestModule, dump: &str, bounds: &[IntBound]) -> 
     let mut names: Vec<String> = Vec::new();
     for manifest_type in module.types {
         if let ManifestShape::Tagged { variants, .. } = manifest_type.shape {
-            names.extend(
-                variants
-                    .iter()
-                    .map(|variant| variant.type_name.to_owned()),
-            );
+            names.extend(variants.iter().map(|variant| variant.type_name.to_owned()));
         }
         names.push(manifest_type.type_name.to_owned());
     }
@@ -215,10 +211,7 @@ fn render_tagged(
             fields,
         ));
     }
-    let members: Vec<&str> = variants
-        .iter()
-        .map(|variant| variant.type_name)
-        .collect();
+    let members: Vec<&str> = variants.iter().map(|variant| variant.type_name).collect();
     text.push_str(&format!(
         "\n\ntype {} = {}\n",
         manifest_type.type_name,
@@ -341,7 +334,7 @@ pub(crate) fn snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use horsies_core::manifest_schema::{
-        MemberDefault, ItemType, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+        ItemType, MemberDefault, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
         WORKFLOW_SPEC_DATA,
     };
 
