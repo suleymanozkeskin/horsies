@@ -24,4 +24,6 @@ pub use horsies_core::RetentionDays;
 /// facts of its state. `resend` accepts the two that are sent again
 /// (`resend_target`): `AsyncContext` and `EnqueueFailed`. It refuses
 /// `IdempotencyKeyConflict`: a repeat of the same send does not complete it.
-pub use horsies_core::{TaskSendError, TaskSendErrorCode, TaskSendPayload};
+pub use horsies_core::{
+    BrokerRefusalCause, EnqueueFailureCause, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+};

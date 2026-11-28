@@ -114,8 +114,9 @@ pub enum MonitoringQueryError {
     /// ``cause`` is the ``HistoryContractError``: for example a history
     /// status that is not a ``TaskStatus`` member, an attempt snapshot that
     /// does not decode, or an EXPLAIN payload that the row estimate cannot
-    /// read. A repeat gives the same result until the stored row or the
-    /// server changes.
+    /// read. Not retryable: the same read returns this error until the
+    /// stored row is repaired or the server changes. A repeat does not change
+    /// either.
     #[error("{message}")]
     #[error_class(
         class = "MonitoringQueryHistoryContractViolation",

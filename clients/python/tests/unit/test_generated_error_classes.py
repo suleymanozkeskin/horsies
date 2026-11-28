@@ -214,7 +214,7 @@ class SendClassShape(NamedTuple):
 
 SEND_SHAPES: Final[tuple[SendClassShape, ...]] = (
     SendClassShape(task_send_types.TaskSendSuppressed, task_send_errors.TaskSendSuppressed, (('message', False),), 'SEND_SUPPRESSED', SendRetry.ABSENT),
-    SendClassShape(task_send_types.TaskSendAsyncContext, task_send_errors.TaskSendAsyncContext, (('task_id', True), ('payload', False), ('message', False)), 'ASYNC_CONTEXT', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendAsyncContext, task_send_errors.TaskSendAsyncContext, (('task_id', True), ('payload', False), ('message', False)), 'ASYNC_CONTEXT', SendRetry.NEVER),
     SendClassShape(task_send_types.TaskSendValidationFailed, task_send_errors.TaskSendValidationFailed, (('message', False), ('cause', False)), 'VALIDATION_FAILED', SendRetry.ABSENT),
     SendClassShape(task_send_types.TaskSendEnqueueFailed, task_send_errors.TaskSendEnqueueFailed, (('task_id', True), ('payload', False), ('message', False), ('retryable', True), ('cause', False)), 'ENQUEUE_FAILED', SendRetry.FIELD),
     SendClassShape(task_send_types.TaskSendPayloadMismatch, task_send_errors.TaskSendPayloadMismatch, (('task_id', True), ('payload', False), ('message', False)), 'PAYLOAD_MISMATCH', SendRetry.ABSENT),

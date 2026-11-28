@@ -47,8 +47,9 @@ class MonitoringQueryHistoryContractViolation:
     ``cause`` is the ``HistoryContractError``: for example a history
     status that is not a ``TaskStatus`` member, an attempt snapshot that
     does not decode, or an EXPLAIN payload that the row estimate cannot
-    read. A repeat gives the same result until the stored row or the
-    server changes.
+    read. Not retryable: the same read returns this error until the
+    stored row is repaired or the server changes. A repeat does not change
+    either.
     """
 
     code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION
@@ -70,7 +71,8 @@ class TaskActionNotFound:
     """No task has this id. Nothing changed.
 
     Neither the live table nor history holds the task (retention can
-    remove it).
+    remove it). Not retryable: the same call returns this error until a
+    task with this id exists. A repeat does not create it.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.TASK_NOT_FOUND
@@ -196,8 +198,9 @@ class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the cancel refused the task.
 
     ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
-    example a history status that is not a task status. A repeat gives the
-    same result until the stored row changes.
+    example a history status that is not a task status. Not retryable: the
+    same call returns this error until the stored row is repaired. A repeat
+    does not repair it.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.STORED_DATA_INVALID
