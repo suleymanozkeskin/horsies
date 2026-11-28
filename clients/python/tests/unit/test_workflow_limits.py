@@ -15,6 +15,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
@@ -80,7 +81,7 @@ class TestNestingFindingsInCheck:
     def test_a_nesting_past_the_depth_limit_is_reported_once(self) -> None:
         app = _app()
 
-        class Deeper(WorkflowDefinition[Any]):
+        class Deeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'deeper'
             definition_key = 'tests.limits.deeper.v1'
 
@@ -113,7 +114,7 @@ class TestNestingFindingsInCheck:
     ) -> None:
         app = _app()
 
-        class Same(WorkflowDefinition[Any]):
+        class Same(WorkflowDefinition[NoWorkflowOutput]):
             name = 'same'
             definition_key = 'tests.limits.same.v1'
 
@@ -174,7 +175,7 @@ class TestNestingBehindADependency:
     def test_a_self_nesting_behind_a_dependency_passes(self) -> None:
         app = _app()
 
-        class Gated(WorkflowDefinition[Any]):
+        class Gated(WorkflowDefinition[NoWorkflowOutput]):
             name = 'gated'
             definition_key = 'tests.limits.gated.v1'
 
@@ -202,7 +203,7 @@ class TestNestingBehindADependency:
     def test_a_nesting_past_the_limit_behind_dependencies_passes(self) -> None:
         app = _app()
 
-        class GatedDeeper(WorkflowDefinition[Any]):
+        class GatedDeeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'gated_deeper'
             definition_key = 'tests.limits.gated_deeper.v1'
 
@@ -233,7 +234,7 @@ class TestNestingBehindADependency:
         """Once the definition starts, nothing between its two occurrences waits."""
         app = _app()
 
-        class Same(WorkflowDefinition[Any]):
+        class Same(WorkflowDefinition[NoWorkflowOutput]):
             name = 'same_after_gate'
             definition_key = 'tests.limits.same_after_gate.v1'
 
@@ -267,7 +268,7 @@ class TestNestingBehindADependency:
         """The depth that the chain reaches depends on the result of the gate."""
         app = _app()
 
-        class Deeper(WorkflowDefinition[Any]):
+        class Deeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'deeper_after_gate'
             definition_key = 'tests.limits.deeper_after_gate.v1'
 
