@@ -163,6 +163,38 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Rust): `TaskSendError` holds a typed exception cause.**
+  `TaskSendError::ValidationFailed.cause` is a `BrokerRefusalCause` (it was a
+  `FailureCause`): `Check` is Python's `NoCause()`, `ValueRule(text)` is the
+  `ValueError` of a rule, `JsonUnreadable(text)` is the `SerializationError` of
+  a text that does not read as JSON. `TaskSendError::EnqueueFailed.cause` is an
+  `EnqueueFailureCause` (new): `Error { text, retryable, failure }` is the
+  core's class of the failed enqueue, `Check` is a conflict whose row was gone
+  before the compare (Python's `NoCause()`). Both types are exported from
+  `horsies_core` and `horsies`. `TaskSendError::failure_cause()` still gives a
+  `FailureCause`. The slot values of every `TaskSendError` class come from
+  `#[derive(ErrorClassValues)]`; `send_failure_exception` and
+  `SendFailureException` are removed. A caller that built a send error with a
+  `FailureCause` passes the matching cause type; a caller that read `cause`
+  matches on it.
+- **Breaking (Rust core): the field of the send-time refusal
+  `DeclaredOptionRefusal::RetryCodeNotDeclared` is `retry_code`.** It was
+  `code`. The rerun refusal `RerunError::RetryCodeNotDeclared` already names
+  the same concept `retry_code`. The message of the refusal does not change.
+- **The error catalog states the retry rule of each class in its text, and
+  `TaskSendAsyncContext` has `retryable`.** `retryable` means that the same
+  call, repeated with no other change, can succeed. `WorkflowHandleNotFound` and
+  `TaskActionNotFound` (a row that does not exist),
+  `WorkflowHandleStoredDataInvalid`, `TaskActionStoredDataInvalid` and
+  `MonitoringQueryHistoryContractViolation` (stored data that an operator must
+  repair) and `WorkflowHandleResumeRecoveryFailed` (a repeated `resume`
+  returns `Ok(False)`) need a change outside the call, so they stay
+  `retryable = False`: no flag value of these six classes changes, and the
+  text of each now says "Not retryable" and names the change. The generated
+  Python class `TaskSendAsyncContext` has `retryable: ClassVar[bool] = False`,
+  as `WorkflowHandleAsyncContext`, `WorkflowStartAsyncContext` and
+  `DatabaseAsyncContext` have; `TaskSendError::retryable()` already gave
+  `false` for it.
 - **Breaking: the task record has one `result` field with three states.**
   `TaskInfo.result` is a `ResultSlot` in Python and Rust. Python
   `TaskInfo.raw_result`, `TaskInfo.decoded_result` and

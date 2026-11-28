@@ -118,7 +118,7 @@ The attribute generates a module with the name of the function. The module holds
 | `validate_order::function(&runtime)` | The `TaskFunction` from a `TaskRuntime`; `Err(TaskFunctionNotFound)` when the app did not register the task with these types |
 | `validate_order::fields::order()` | The field token of the parameter `order` (`InputField<validate_order::Input, Order>`), for a workflow node's `set` and `arg_from` |
 
-A send through an app that does not register the task returns `TaskSendError::ValidationFailed` with the cause `PreconditionFailed`. The message names the task. Nothing is written. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
+A send through an app that does not register the task returns `TaskSendError::ValidationFailed` with the cause `BrokerRefusalCause::Check`. The message names the task. Nothing is written. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
 
 ## Task Runtime
 

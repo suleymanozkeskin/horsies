@@ -56,7 +56,7 @@ The generated module of a task has two sends:
 | `send_receipt::send(&app, order_id)` | Now, through `app` |
 | `send_receipt::with_options(options).send(&app, order_id)` | With `TaskSendOptions`, through `app` |
 
-The module holds no state. Each send finds the task's typed function in the app that it names, so two apps in one process share no registration. A send through an app that does not register the task returns `ValidationFailed` with the cause `PreconditionFailed`. Nothing is written.
+The module holds no state. Each send finds the task's typed function in the app that it names, so two apps in one process share no registration. A send through an app that does not register the task returns `ValidationFailed` with the cause `BrokerRefusalCause::Check`. Nothing is written.
 
 ## What a Send Does
 
@@ -119,7 +119,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
-- `ValidationFailed` with the cause `PreconditionFailed` is also the answer of a generated send through an app that does not register the task.
+- `ValidationFailed` with the cause `BrokerRefusalCause::Check` is also the answer of a generated send through an app that does not register the task. The `cause` of `ValidationFailed` is a `BrokerRefusalCause`: `Check` (Python `NoCause()`), `ValueRule(text)` (a `ValueError` of a rule) or `JsonUnreadable(text)` (a `SerializationError`). The `cause` of `EnqueueFailed` is an `EnqueueFailureCause`: `Error { text, retryable, failure }` (the core's class of the failure) or `Check` (Python `NoCause()`). `error.failure_cause()` gives the `FailureCause` of either.
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the classification of the cause.
 - `AsyncContext` is the error of a blocking send on a thread that runs a runtime. The async sends do not return it. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread).
 - `PayloadMismatch`: the task id exists with another command or idempotency key; nothing was written.

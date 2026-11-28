@@ -54,9 +54,9 @@ use std::time::Duration;
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
     process_role, thread_role, BrokerError, BrokerOperationSource, DatabaseErrorCode,
-    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, ExecutionClassCoverage,
-    ExecutionClassReport, FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole,
-    WorkerPong, WorkerStateSnapshot,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, EnqueueFailureCause,
+    ExecutionClassCoverage, ExecutionClassReport, FailureCause, ProcessRole, SendKind,
+    TaskSendError, ThreadRole, WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -221,12 +221,17 @@ fn start_failed_send(
     payload: horsies_core::TaskSendPayload,
     failed: &RuntimeStartFailed,
 ) -> TaskSendError {
+    let message = format!("the send did not start: {failed}");
     TaskSendError::EnqueueFailed {
         task_id,
         payload: Box::new(payload),
-        message: format!("the send did not start: {failed}"),
+        message: message.clone(),
         retryable: true,
-        cause: FailureCause::PreconditionFailed,
+        cause: EnqueueFailureCause::Error {
+            text: message,
+            retryable: true,
+            failure: FailureCause::PreconditionFailed,
+        },
     }
 }
 
@@ -701,7 +706,7 @@ mod tests {
             "{message}"
         );
         assert!(*retryable);
-        assert_eq!(*cause, FailureCause::PreconditionFailed);
+        assert_eq!(cause.failure_cause(), FailureCause::PreconditionFailed);
     }
 
     #[test]

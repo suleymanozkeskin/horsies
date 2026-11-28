@@ -20,7 +20,8 @@ use horsies::{
     WorkflowSpecBuilder, WorkflowStartError,
 };
 use horsies_core::{
-    CoverageOutcome, CoverageRequest, CoverageSerialization, FailureCause, PostgresBroker,
+    BrokerRefusalCause, CoverageOutcome, CoverageRequest, CoverageSerialization, FailureCause,
+    PostgresBroker,
 };
 use uuid::Uuid;
 
@@ -332,7 +333,7 @@ async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothin
     };
     match &refused {
         TaskSendError::ValidationFailed { cause, .. } => {
-            assert_eq!(*cause, FailureCause::PreconditionFailed, "{refused}");
+            assert_eq!(*cause, BrokerRefusalCause::Check, "{refused}");
         }
         other => panic!("expected VALIDATION_FAILED, got {other}"),
     }

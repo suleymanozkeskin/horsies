@@ -106,7 +106,7 @@ pub enum DeclaredOptionRefusal {
     RetryCodeNotCustomCode { refused: CustomCodeRefused },
     /// A custom retry code that the task's declared list does not hold
     /// (`HRS-102`).
-    RetryCodeNotDeclared { code: String },
+    RetryCodeNotDeclared { retry_code: String },
     /// A timeout below [`MIN_TASK_TIMEOUT_MS`] (`HRS-102`).
     TimeoutBelowMinimum,
     /// A class that needs a timeout, with none (`HRS-109`).
@@ -277,7 +277,7 @@ fn retry_code(code: &str, scope: &RetryCodeScope) -> Result<TaskErrorCode, Decla
         RetryCodeScope::Declared(declared) => match declared.iter().any(|known| known == code) {
             true => Ok(TaskErrorCode::Custom(user)),
             false => Err(DeclaredOptionRefusal::RetryCodeNotDeclared {
-                code: code.to_owned(),
+                retry_code: code.to_owned(),
             }),
         },
     }
@@ -525,7 +525,7 @@ mod tests {
         });
         assert!(matches!(
             refusals.as_slice(),
-            [DeclaredOptionRefusal::RetryCodeNotDeclared { code }] if code == "PROVIDER_DOWN"
+            [DeclaredOptionRefusal::RetryCodeNotDeclared { retry_code }] if retry_code == "PROVIDER_DOWN"
         ));
         let options = accepted(DeclaredTaskOptions {
             retry,

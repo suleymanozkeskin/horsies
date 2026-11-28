@@ -37,7 +37,7 @@ use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
+    child_producer, mint_task_id, BrokerRefusalCause, CheckedSend, ChildProducer, Execution,
     PayloadPolicy, RetentionConfig, SendKind, TaskOptions, TaskSendError, TaskSendPayload,
 };
 use serde::de::DeserializeOwned;
@@ -421,7 +421,7 @@ where
     fn validation_failed(&self, message: &str) -> TaskSendError {
         TaskSendError::ValidationFailed {
             message: format!("{message} (task {})", self.task_name),
-            cause: FailureCause::PreconditionFailed,
+            cause: BrokerRefusalCause::Check,
         }
     }
 }
@@ -563,7 +563,7 @@ mod tests {
     use std::convert::Infallible;
 
     use horsies_core::core::python_text::python_isoformat_utc;
-    use horsies_core::EnqueueRetention;
+    use horsies_core::{EnqueueFailureCause, EnqueueRetention, FailureCause};
     use serde::Deserialize;
 
     use super::*;
@@ -877,7 +877,11 @@ mod tests {
             payload: Box::new(payload),
             message: "connection refused".to_owned(),
             retryable: true,
-            cause: FailureCause::Connection,
+            cause: EnqueueFailureCause::Error {
+                text: "connection refused".to_owned(),
+                retryable: true,
+                failure: FailureCause::Connection,
+            },
         }
     }
 
@@ -949,7 +953,7 @@ mod tests {
             (
                 TaskSendError::ValidationFailed {
                     message: "bad".to_owned(),
-                    cause: FailureCause::PreconditionFailed,
+                    cause: BrokerRefusalCause::Check,
                 },
                 "VALIDATION_FAILED",
             ),
@@ -1061,7 +1065,7 @@ mod tests {
             key_conflict(),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
-                cause: FailureCause::PreconditionFailed,
+                cause: BrokerRefusalCause::Check,
             },
         ] {
             let mut kinds = Vec::new();
@@ -1161,7 +1165,7 @@ mod tests {
     }
 
     /// A generated send through an app that does not register the task is
-    /// `VALIDATION_FAILED` with the cause `PreconditionFailed`, before any
+    /// `VALIDATION_FAILED` with the cause `Check`, before any
     /// I/O, also when another app of the process registers it.
     #[tokio::test]
     async fn a_generated_send_through_an_app_without_the_task_is_validation_failed() {
@@ -1170,7 +1174,7 @@ mod tests {
         let refused = generated_send::send(&without, 7).await.unwrap_err();
         match &refused {
             TaskSendError::ValidationFailed { message, cause } => {
-                assert_eq!(*cause, FailureCause::PreconditionFailed);
+                assert_eq!(*cause, BrokerRefusalCause::Check);
                 assert!(message.contains("task 'generated_send'"), "{message}");
             }
             other => panic!("expected VALIDATION_FAILED, got {other}"),
@@ -1183,7 +1187,7 @@ mod tests {
             matches!(
                 refused,
                 TaskSendError::ValidationFailed {
-                    cause: FailureCause::PreconditionFailed,
+                    cause: BrokerRefusalCause::Check,
                     ..
                 }
             ),

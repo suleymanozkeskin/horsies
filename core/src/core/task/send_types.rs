@@ -6,12 +6,9 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::{BrokerCheckCause, BrokerError, BrokerRefusalCause};
+use crate::broker::{BrokerError, BrokerRefusalCause};
 use crate::core::config::EnqueueRetention;
-use crate::error_catalog::{
-    ErrorClassValues, ErrorEnum, ExceptionCause, ExceptionValue, RecordFieldValue, RecordValue,
-    SlotData, SlotValue,
-};
+use crate::error_catalog::{ExceptionCause, ExceptionValue, RecordFieldValue, RecordValue};
 use crate::FailureCause;
 
 /// Categorized task send failure codes.
@@ -138,7 +135,9 @@ impl TaskSendPayload {
 /// The `///` lines of each variant are the docstring of its generated
 /// Python class (`horsies._catalog.task_send_errors`); Rust notes are `//`
 /// comments.
-#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[derive(
+    Debug, Clone, horsies_core_derive::ErrorCatalog, horsies_core_derive::ErrorClassValues,
+)]
 #[error_catalog(
     module = "task_send_errors",
     code = "TaskSendErrorCode",
@@ -163,7 +162,7 @@ pub enum TaskSendError {
     /// this error again.
     // The Rust client's blocking forms give it on a thread that runs a tokio
     // runtime; the core's enqueue never does.
-    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext")]
+    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext", never_retryable)]
     AsyncContext {
         #[error_slot(python = "Uuid")]
         task_id: Uuid,
@@ -185,8 +184,10 @@ pub enum TaskSendError {
     ValidationFailed {
         #[error_slot(python = "Str", hidden)]
         message: String,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// What refused the input: a rule, a text that does not read as JSON,
+        /// or a check of the core.
+        #[error_slot(cause)]
+        cause: BrokerRefusalCause,
     },
     /// The broker or the database failed during enqueue. The row may or may not exist.
     ///
@@ -209,8 +210,9 @@ pub enum TaskSendError {
         message: String,
         #[error_slot(python = "Bool")]
         retryable: bool,
-        #[error_slot(skip)]
-        cause: FailureCause,
+        /// The exception of the failure.
+        #[error_slot(cause)]
+        cause: EnqueueFailureCause,
     },
     /// The task id exists with a different command or idempotency key. Nothing was written.
     ///
@@ -278,10 +280,9 @@ impl TaskSendError {
 
     /// Whether the condition may clear, so the same send can succeed later.
     /// Only an enqueue failure carries a driver classification; every
-    /// refusal, the key conflict included, stays. An
-    /// async context does not clear on its thread (Python
-    /// `TaskSendAsyncContext`, which carries no retry flag): the async forms
-    /// complete the send.
+    /// refusal, the key conflict included, stays. An async context does
+    /// not clear on its thread (its class has `retryable = False`): the
+    /// async forms complete the send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
@@ -312,10 +313,9 @@ impl TaskSendError {
     /// failed precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
-                cause.clone()
-            }
+            Self::EnqueueFailed { cause, .. } => cause.failure_cause(),
             Self::Suppressed { .. }
+            | Self::ValidationFailed { .. }
             | Self::AsyncContext { .. }
             | Self::PayloadMismatch { .. }
             | Self::PayloadTooLarge { .. }
@@ -378,194 +378,65 @@ impl std::fmt::Display for TaskSendError {
 
 impl std::error::Error for TaskSendError {}
 
-/// The instance slot values of each class, written by hand:
-/// `ValidationFailed` and `EnqueueFailed` keep the [`FailureCause`] of the
-/// failure, not the typed cause that `#[derive(ErrorClassValues)]` reads.
-/// The `cause` slot of the two comes from [`refusal_exception`] and
-/// [`enqueue_exception`]. A client that holds the broker error of a failed
-/// enqueue gives the exact `exception` with [`send_failure_exception`].
-/// The tests keep the slot names and their order equal to the class slots
-/// of [`ErrorEnum::ERROR_CATALOG`].
-impl ErrorClassValues for TaskSendError {
-    fn slot_values(&self) -> Vec<SlotValue<'_>> {
-        match self {
-            Self::Suppressed { message } => vec![slot("message", SlotData::Str(message))],
-            Self::AsyncContext {
-                task_id,
-                payload,
-                message,
-            }
-            | Self::PayloadMismatch {
-                task_id,
-                payload,
-                message,
-            } => vec![
-                slot("task_id", SlotData::Uuid(*task_id)),
-                slot("payload", SlotData::TaskSendPayload(payload)),
-                slot("message", SlotData::Str(message)),
-            ],
-            Self::ValidationFailed { message, cause } => vec![
-                slot("message", SlotData::Str(message)),
-                slot("cause", SlotData::Exception(refusal_exception(cause))),
-            ],
-            Self::EnqueueFailed {
-                task_id,
-                payload,
-                message,
-                retryable,
-                cause,
-            } => vec![
-                slot("task_id", SlotData::Uuid(*task_id)),
-                slot("payload", SlotData::TaskSendPayload(payload)),
-                slot("message", SlotData::Str(message)),
-                slot("retryable", SlotData::Bool(*retryable)),
-                slot(
-                    "cause",
-                    SlotData::Exception(enqueue_exception(message, *retryable, cause)),
-                ),
-            ],
-            Self::PayloadTooLarge {
-                message,
-                size_bytes,
-                limit_bytes,
-            } => vec![
-                slot("message", SlotData::Str(message)),
-                slot("size_bytes", SlotData::Int(i128::from(*size_bytes))),
-                slot("limit_bytes", SlotData::Int(i128::from(*limit_bytes))),
-            ],
-            Self::IdempotencyKeyConflict {
-                task_id,
-                payload,
-                message,
-                owner_task_id,
-            } => vec![
-                slot("task_id", SlotData::Uuid(*task_id)),
-                slot("payload", SlotData::TaskSendPayload(payload)),
-                slot("message", SlotData::Str(message)),
-                slot("owner_task_id", SlotData::Uuid(*owner_task_id)),
-            ],
-        }
-    }
-}
-
-/// The slot `name` with `value`. Pure.
-fn slot<'a>(name: &'static str, value: SlotData<'a>) -> SlotValue<'a> {
-    SlotValue { name, value }
-}
-
-/// The `exception` of a refusal before the write (`VALIDATION_FAILED`):
-/// `NoCause()` for each cause. Pure.
+/// The cause of `ENQUEUE_FAILED`: the `exception` of the generated class
+/// `TaskSendEnqueueFailed`.
 ///
-/// Python stores `NoCause()`, the `ValueError` of a rule or the
-/// `SerializationError` of a JSON text. A [`FailureCause`] holds no rule
-/// text and no reader text, so `NoCause()` is the one form that needs no
-/// other fact. It is Python's form for a refusal of a value that reads, a
-/// value that does not serialize, a reservation window out of range, and a
-/// retention period that the config does not register (a refusal of the
-/// client before the enqueue). It is not Python's form
-/// for a refusal by a rule of the version-1 command or of the idempotency
-/// key (Python: `ValueError` with the rule) and for a text that does not
-/// read as JSON (Python: `SerializationError` with the reader's error). No
-/// producer gives a server error or no answer as the cause of a refusal.
-fn refusal_exception(cause: &FailureCause) -> ExceptionValue {
-    match cause {
-        FailureCause::Server(_)
-        | FailureCause::Connection
-        | FailureCause::ContractViolation
-        | FailureCause::PreconditionFailed => ExceptionValue::NoCause,
-    }
-}
-
-/// The `exception` of a failed enqueue (`ENQUEUE_FAILED`): the core's class
-/// of `cause`, with `message` as its text and the error's retry flag. Pure.
-///
-/// [`send_error_from_enqueue`] sets `message` to the text of the broker
-/// error and `retryable` to its retry rule, so the value is the exception
-/// that Python stores for the same broker error. It is not Python's form
-/// for a conflict whose row was gone before the compare
-/// ([`BrokerError::EnqueueConflictUnverifiable`]; Python: `NoCause()`): a
-/// [`FailureCause`] does not tell it from another failed precondition.
-fn enqueue_exception(message: &str, retryable: bool, cause: &FailureCause) -> ExceptionValue {
-    match cause {
-        FailureCause::Server(_)
-        | FailureCause::Connection
-        | FailureCause::ContractViolation
-        | FailureCause::PreconditionFailed => ExceptionValue::CoreFailure {
-            text: message.to_owned(),
-            retryable,
-            cause: cause.clone(),
-        },
-    }
-}
-
-/// The `cause` slot of the send error of a failed enqueue.
+/// Python stores the exception of the broker class of the failure
+/// ([`crate::DatabaseOperationError::enqueue_error`]). Its two forms are the
+/// core's class of the error and `NoCause()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendFailureException {
-    /// The class of the send error has a `cause` slot
-    /// (`VALIDATION_FAILED`, `ENQUEUE_FAILED`): the exception that Python
-    /// stores for the same broker error.
-    Slot(ExceptionValue),
-    /// The class of the send error has no `cause` slot
-    /// (`PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`).
-    NoSlot,
+pub enum EnqueueFailureCause {
+    /// An error of the enqueue: the core's class of what it met, with the
+    /// error's own text and retry rule. [`send_error_from_enqueue`] sets
+    /// `text` to the `message` of the send error and `retryable` to its
+    /// `retryable`.
+    Error {
+        text: String,
+        retryable: bool,
+        failure: FailureCause,
+    },
+    /// A check of the core found the failure; no error was raised: a
+    /// conflict whose row was gone before the compare
+    /// ([`BrokerError::EnqueueConflictUnverifiable`]).
+    Check,
 }
 
-/// The `exception` of the send error that [`send_error_from_enqueue`]
-/// makes of `error`, in the form that Python stores. Python's send path
-/// (`_map_broker_err` in `clients/python/horsies/core/task_decorator.py`)
-/// copies the `exception` of the broker class of the failure
-/// ([`crate::DatabaseOperationError::enqueue_error`]); this function uses the
-/// same causes:
-/// - a refusal before any statement: the cause of the refusal
-///   ([`BrokerRefusalCause::of_enqueue_refusal`]): a `ValueError` with the
-///   rule of the version-1 command or of the scoped idempotency key, a
-///   `SerializationError` with the reader's error of a text that does not
-///   read as JSON, `NoCause()` for a rule that refused a value that reads;
-/// - a value that does not serialize, or a reservation window out of
-///   range: `NoCause()` (a check of the core);
-/// - a conflict whose row was gone before the compare: `NoCause()` (the
-///   broker found it by a data check);
-/// - a task id with another command, a key that another task holds: no
-///   `cause` slot;
-/// - every other error: the core's class of the error, with its text and
-///   its retry rule.
-///
-/// Pure.
-pub fn send_failure_exception(error: &BrokerError) -> SendFailureException {
-    match error {
-        BrokerError::EnqueueContract(refusal) => SendFailureException::Slot(
-            BrokerRefusalCause::of_enqueue_refusal(&refusal.cause).exception_value(),
-        ),
-        BrokerError::Serialization(_) | BrokerError::InvalidIdempotencyReservationWindow(_) => {
-            SendFailureException::Slot(BrokerRefusalCause::Check.exception_value())
+impl EnqueueFailureCause {
+    /// What the enqueue met; a check is a failed precondition. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::Error { failure, .. } => failure.clone(),
+            Self::Check => FailureCause::PreconditionFailed,
         }
-        BrokerError::EnqueueConflictUnverifiable { .. } => {
-            SendFailureException::Slot(BrokerCheckCause::Check.exception_value())
+    }
+
+    /// The cause of the failed enqueue `error`: its text, its retry rule and
+    /// its [`BrokerError::failure_cause`]. Pure.
+    fn of_error(error: &BrokerError) -> Self {
+        Self::Error {
+            text: error.to_string(),
+            retryable: error.is_retryable(),
+            failure: error.failure_cause(),
         }
-        BrokerError::PayloadMismatch { .. } | BrokerError::IdempotencyKeyConflict { .. } => {
-            SendFailureException::NoSlot
+    }
+}
+
+/// An error of the enqueue is the core's class of its cause, with its text
+/// and its retry rule; a check of the core is `NoCause()`.
+impl ExceptionCause for EnqueueFailureCause {
+    fn exception_value(&self) -> ExceptionValue {
+        match self {
+            Self::Error {
+                text,
+                retryable,
+                failure,
+            } => ExceptionValue::CoreFailure {
+                text: text.clone(),
+                retryable: *retryable,
+                cause: failure.clone(),
+            },
+            Self::Check => ExceptionValue::NoCause,
         }
-        BrokerError::SchemaRefused(_)
-        | BrokerError::InvalidWorkflowNodeStatus
-        | BrokerError::IncompleteTaskHistoryCutover
-        | BrokerError::InvalidStatus(_)
-        | BrokerError::InvalidExecutionClass(_)
-        | BrokerError::ConnectionFailed(_)
-        | BrokerError::InvalidConnectionSettings(_)
-        | BrokerError::RetentionClassKey(_)
-        | BrokerError::ListenerClosed
-        | BrokerError::InstallLock(_)
-        | BrokerError::InstallCoverage(_)
-        | BrokerError::ClientFamilyMismatch { .. }
-        | BrokerError::UnknownStoredFamily(_)
-        | BrokerError::TerminalizationContract(_)
-        | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidClaimArgument(_)
-        | BrokerError::ClaimContract(_)
-        | BrokerError::Statement(_)
-        | BrokerError::PoolSettings(_)
-        | BrokerError::ProcessRuntime(_)
-        | BrokerError::RowDecode(_) => SendFailureException::Slot(error.exception_value()),
     }
 }
 
@@ -582,8 +453,10 @@ pub fn send_failure_exception(error: &BrokerError) -> SendFailureException {
 ///   flag; a conflict whose row vanished before the compare and a retention
 ///   class key that no class derives are not retryable.
 ///
-/// `cause` of `VALIDATION_FAILED` and `ENQUEUE_FAILED` is the cause of
-/// `error` ([`BrokerError::failure_cause`]).
+/// `cause` of `VALIDATION_FAILED` is the form of Python's `exception`
+/// ([`BrokerRefusalCause`]); `cause` of `ENQUEUE_FAILED` is
+/// [`EnqueueFailureCause`]. A payload mismatch and a key conflict have no
+/// `cause`.
 pub fn send_error_from_enqueue(
     task_id: Uuid,
     payload: TaskSendPayload,
@@ -591,11 +464,22 @@ pub fn send_error_from_enqueue(
 ) -> TaskSendError {
     let message = error.to_string();
     match error {
-        BrokerError::EnqueueContract(_)
-        | BrokerError::Serialization(_)
-        | BrokerError::InvalidIdempotencyReservationWindow(_) => TaskSendError::ValidationFailed {
+        BrokerError::EnqueueContract(refusal) => TaskSendError::ValidationFailed {
             message,
-            cause: error.failure_cause(),
+            cause: BrokerRefusalCause::of_enqueue_refusal(&refusal.cause),
+        },
+        BrokerError::Serialization(_) | BrokerError::InvalidIdempotencyReservationWindow(_) => {
+            TaskSendError::ValidationFailed {
+                message,
+                cause: BrokerRefusalCause::Check,
+            }
+        }
+        BrokerError::EnqueueConflictUnverifiable { .. } => TaskSendError::EnqueueFailed {
+            task_id,
+            payload: Box::new(payload),
+            message,
+            retryable: error.is_retryable(),
+            cause: EnqueueFailureCause::Check,
         },
         BrokerError::PayloadMismatch { .. } => TaskSendError::PayloadMismatch {
             task_id,
@@ -618,7 +502,6 @@ pub fn send_error_from_enqueue(
         | BrokerError::InvalidExecutionClass(_)
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
-        | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::RetentionClassKey(_)
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
@@ -637,7 +520,7 @@ pub fn send_error_from_enqueue(
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
-            cause: error.failure_cause(),
+            cause: EnqueueFailureCause::of_error(error),
         },
     }
 }
@@ -651,6 +534,7 @@ pub type TaskSendResult<T> = Result<T, TaskSendError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_catalog::{ErrorClassValues, ErrorEnum, SlotData};
 
     #[test]
     fn error_code_display() {
@@ -686,7 +570,11 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "connection refused".to_owned(),
             retryable: true,
-            cause: FailureCause::Connection,
+            cause: EnqueueFailureCause::Error {
+                text: "connection refused".to_owned(),
+                retryable: true,
+                failure: FailureCause::Connection,
+            },
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive input
@@ -730,8 +618,9 @@ mod tests {
     }
 
     /// The fixed `retryable` of a class in the catalog is the value of
-    /// `retryable()` for a value of that class: the key conflict is the only
-    /// class with a fixed value, and it never clears.
+    /// `retryable()` for a value of that class: the key conflict and the
+    /// async context are the only classes with a fixed value, and neither
+    /// clears.
     #[test]
     fn the_fixed_retry_slot_of_a_class_is_the_retry_rule_of_its_value() {
         use crate::error_catalog::ErrorSlot;
@@ -741,6 +630,11 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "the key is held".to_owned(),
             owner_task_id: Uuid::from_u128(2),
+        };
+        let async_context = TaskSendError::AsyncContext {
+            task_id: Uuid::from_u128(3),
+            payload: Box::new(sample_payload()),
+            message: "blocking send on a runtime thread".to_owned(),
         };
         let fixed: Vec<(&str, &ErrorSlot)> = TaskSendError::ERROR_CATALOG
             .classes
@@ -762,9 +656,13 @@ mod tests {
 
         assert_eq!(
             fixed,
-            [(conflict.python_class(), &ErrorSlot::NeverRetryable)]
+            [
+                (async_context.python_class(), &ErrorSlot::NeverRetryable),
+                (conflict.python_class(), &ErrorSlot::NeverRetryable),
+            ]
         );
         assert!(!conflict.retryable());
+        assert!(!async_context.retryable());
     }
 
     /// A refused input is never replayed: the same input meets the same
@@ -1087,23 +985,27 @@ mod tests {
         );
     }
 
-    /// Each cause of a refusal is `NoCause()`. For a refusal of a value
-    /// that reads, a value that does not serialize and a reservation window
-    /// out of range, that is Python's form. A rule of the version-1 command
-    /// or of the idempotency key and a text that does not read as JSON are
-    /// not: Python keeps the rule or the reader's error, which the cause
-    /// does not hold.
+    /// The cause of a refusal is the form of Python's `exception`: `NoCause()`
+    /// for a check, the client's `SerializationError` with the reader's text,
+    /// the client's `ValueError` with the rule's text.
     #[test]
-    fn a_validation_failure_has_no_cause_for_each_cause() {
-        use crate::broker::{EnqueueRefusal, EnqueueRefusalCause};
-        use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
-        use crate::core::history::identity::keys::IdempotencyKeyError;
-
-        for cause in [
-            server_cause(),
-            FailureCause::Connection,
-            FailureCause::ContractViolation,
-            FailureCause::PreconditionFailed,
+    fn a_validation_failure_has_the_exception_of_its_refusal_cause() {
+        for (cause, exception) in [
+            (BrokerRefusalCause::Check, ExceptionValue::NoCause),
+            (
+                BrokerRefusalCause::JsonUnreadable("EOF at 1".to_owned()),
+                ExceptionValue::ClientClass {
+                    class: crate::error_catalog::ClientExceptionClass::SerializationError,
+                    text: "EOF at 1".to_owned(),
+                },
+            ),
+            (
+                BrokerRefusalCause::ValueRule("a rule".to_owned()),
+                ExceptionValue::ClientClass {
+                    class: crate::error_catalog::ClientExceptionClass::ValueError,
+                    text: "a rule".to_owned(),
+                },
+            ),
         ] {
             let error = TaskSendError::ValidationFailed {
                 message: "refused".to_owned(),
@@ -1113,13 +1015,23 @@ mod tests {
                 named_slots(&error),
                 [
                     ("message", SlotData::Str("refused")),
-                    ("cause", SlotData::Exception(ExceptionValue::NoCause)),
+                    ("cause", SlotData::Exception(exception)),
                 ],
                 "{cause:?}"
             );
+            assert_eq!(error.failure_cause(), FailureCause::PreconditionFailed);
         }
+    }
 
-        let exact: [fn() -> BrokerError; 3] = [
+    /// The exception of a validation failure that the core makes of a broker
+    /// error is Python's form for the same error.
+    #[test]
+    fn a_validation_failure_of_a_broker_error_has_pythons_exception() {
+        use crate::broker::{EnqueueRefusal, EnqueueRefusalCause};
+        use crate::core::history::enqueue::{EnqueuePreparationError, SendPart};
+        use crate::core::history::identity::keys::IdempotencyKeyError;
+
+        let errors: [fn() -> BrokerError; 6] = [
             || BrokerError::Serialization(serde_json::from_str::<u8>("x").expect_err("not JSON")),
             || BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
             || {
@@ -1128,15 +1040,6 @@ mod tests {
                     "bad options".to_owned(),
                 ))
             },
-        ];
-        for broker_error in exact {
-            let error =
-                send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &broker_error());
-            assert_eq!(error.code(), TaskSendErrorCode::ValidationFailed);
-            assert_eq!(exception_of(&error), python_exception(broker_error()));
-        }
-
-        let rule_or_reader: [fn() -> BrokerError; 3] = [
             || BrokerError::EnqueueContract(EnqueueRefusal::empty_retention_class_key()),
             || {
                 BrokerError::EnqueueContract(EnqueueRefusal::from(
@@ -1153,35 +1056,57 @@ mod tests {
                 })
             },
         ];
-        for broker_error in rule_or_reader {
+        for broker_error in errors {
             let error =
                 send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &broker_error());
-            assert_eq!(exception_of(&error), ExceptionValue::NoCause);
-            assert!(matches!(
-                python_exception(broker_error()),
-                ExceptionValue::ClientClass { .. }
-            ));
+            assert_eq!(error.code(), TaskSendErrorCode::ValidationFailed);
+            assert_eq!(exception_of(&error), python_exception(broker_error()));
         }
     }
 
-    /// Each cause of a failed enqueue is the core's class of the cause,
-    /// with the message and the retry flag. For a broker error that is
-    /// Python's form, apart from a conflict whose row was gone before the
-    /// compare: Python has `NoCause()`, which the cause does not tell apart.
+    /// An error of the enqueue is the core's class of what it met, with the
+    /// cause's text and retry rule; a check is `NoCause()`.
     #[test]
-    fn an_enqueue_failure_has_the_core_class_of_each_cause() {
+    fn an_enqueue_failure_has_the_exception_of_its_cause() {
         let payload = sample_payload();
-        for (cause, retryable) in [
-            (server_cause(), true),
-            (FailureCause::Connection, true),
-            (FailureCause::ContractViolation, false),
-            (FailureCause::PreconditionFailed, false),
+        for (cause, exception, failure_cause) in [
+            (
+                EnqueueFailureCause::Error {
+                    text: "the write failed".to_owned(),
+                    retryable: true,
+                    failure: server_cause(),
+                },
+                ExceptionValue::CoreFailure {
+                    text: "the write failed".to_owned(),
+                    retryable: true,
+                    cause: server_cause(),
+                },
+                server_cause(),
+            ),
+            (
+                EnqueueFailureCause::Error {
+                    text: "the row is wrong".to_owned(),
+                    retryable: false,
+                    failure: FailureCause::ContractViolation,
+                },
+                ExceptionValue::CoreFailure {
+                    text: "the row is wrong".to_owned(),
+                    retryable: false,
+                    cause: FailureCause::ContractViolation,
+                },
+                FailureCause::ContractViolation,
+            ),
+            (
+                EnqueueFailureCause::Check,
+                ExceptionValue::NoCause,
+                FailureCause::PreconditionFailed,
+            ),
         ] {
             let error = TaskSendError::EnqueueFailed {
                 task_id: Uuid::from_u128(4),
                 payload: Box::new(payload.clone()),
                 message: "the write failed".to_owned(),
-                retryable,
+                retryable: true,
                 cause: cause.clone(),
             };
             assert_eq!(
@@ -1190,47 +1115,36 @@ mod tests {
                     ("task_id", SlotData::Uuid(Uuid::from_u128(4))),
                     ("payload", SlotData::TaskSendPayload(&payload)),
                     ("message", SlotData::Str("the write failed")),
-                    ("retryable", SlotData::Bool(retryable)),
-                    (
-                        "cause",
-                        SlotData::Exception(ExceptionValue::CoreFailure {
-                            text: "the write failed".to_owned(),
-                            retryable,
-                            cause: cause.clone(),
-                        })
-                    ),
+                    ("retryable", SlotData::Bool(true)),
+                    ("cause", SlotData::Exception(exception)),
                 ],
                 "{cause:?}"
             );
+            assert_eq!(error.failure_cause(), failure_cause, "{cause:?}");
         }
+    }
 
-        let exact: [fn() -> BrokerError; 4] = [
+    /// The exception of an enqueue failure that the core makes of a broker
+    /// error is Python's form for the same error, the conflict whose row was
+    /// gone included.
+    #[test]
+    fn an_enqueue_failure_of_a_broker_error_has_pythons_exception() {
+        let errors: [fn() -> BrokerError; 5] = [
             || not_sent(crate::db::NotSentCause::ConnectionClosed),
             || BrokerError::ConnectionFailed("connection refused".to_owned()),
             || BrokerError::InvalidStatus("BOGUS".to_owned()),
             || BrokerError::InvalidWorkflowNodeStatus,
+            || BrokerError::EnqueueConflictUnverifiable {
+                task_id: Uuid::from_u128(1),
+                task_name: "my_task".to_owned(),
+            },
         ];
-        for broker_error in exact {
+        for broker_error in errors {
             let error =
                 send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &broker_error());
             assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
             assert_eq!(exception_of(&error), python_exception(broker_error()));
         }
-
-        let unverifiable = || BrokerError::EnqueueConflictUnverifiable {
-            task_id: Uuid::from_u128(1),
-            task_name: "my_task".to_owned(),
-        };
-        let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &unverifiable());
-        assert!(matches!(
-            exception_of(&error),
-            ExceptionValue::CoreFailure {
-                retryable: false,
-                cause: FailureCause::PreconditionFailed,
-                ..
-            }
-        ));
-        assert_eq!(python_exception(unverifiable()), ExceptionValue::NoCause);
     }
 
     #[test]
@@ -1300,12 +1214,11 @@ mod tests {
         })
     }
 
-    /// The exception that [`send_failure_exception`] gives for `error`,
-    /// after a check that it is Python's form for the same error.
+    /// The exception of the send error that [`send_error_from_enqueue`] makes
+    /// of `error`, after a check that it is Python's form for the same error.
     fn exact_exception(error: fn() -> BrokerError) -> ExceptionValue {
-        let SendFailureException::Slot(exception) = send_failure_exception(&error()) else {
-            panic!("the class of the send error has a cause slot");
-        };
+        let send_error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error());
+        let exception = exception_of(&send_error);
         assert_eq!(exception, python_exception(error()));
         exception
     }
@@ -1448,11 +1361,6 @@ mod tests {
                 task_id: Uuid::from_u128(2),
             },
         ] {
-            assert_eq!(
-                send_failure_exception(&error),
-                SendFailureException::NoSlot,
-                "{error}"
-            );
             let send_error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &error);
             assert!(
                 send_error
