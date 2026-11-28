@@ -2263,7 +2263,7 @@ mod tests {
 
     /// One value of each workflow start class.
     fn every_start_error() -> Vec<WorkflowStartError> {
-        let name = "report".to_owned;
+        let name = || "report".to_owned();
         vec![
             WorkflowStartError::ValidationFailed {
                 message: "refused".to_owned(),

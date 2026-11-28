@@ -8,7 +8,9 @@ use uuid::Uuid;
 
 use crate::broker::{BrokerError, BrokerRefusalCause};
 use crate::core::config::EnqueueRetention;
-use crate::error_catalog::{ExceptionCause, ExceptionValue, RecordFieldValue, RecordValue};
+use crate::error_catalog::{
+    ErrorEnum, ExceptionCause, ExceptionValue, RecordFieldValue, RecordValue,
+};
 use crate::FailureCause;
 
 /// Categorized task send failure codes.

@@ -16,7 +16,8 @@ __all__ = ['WorkflowHandleNotFound', 'WorkflowHandleDatabaseOperationFailed', 'W
 class WorkflowHandleNotFound:
     """No workflow has this id. Nothing changed.
 
-    The same call returns this error while no workflow has this id.
+    Not retryable: the same call returns this error until a workflow with
+    this id exists. A repeat does not create it.
     """
 
     code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.WORKFLOW_NOT_FOUND
@@ -65,7 +66,8 @@ class WorkflowHandleStoredDataInvalid:
     The value is a workflow status that is not a ``WorkflowStatus``
     (``status``), or a subworkflow summary that is not valid (``tasks``).
     ``cause`` is a ``CoreContractViolation`` with the core's message.
-    The same call returns this error until the stored value changes.
+    Not retryable: the same call returns this error until the stored value
+    is repaired. A repeat does not repair it.
     """
 
     code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.STORED_DATA_INVALID
@@ -93,8 +95,9 @@ class WorkflowHandleResumeRecoveryFailed:
     transaction ran, when the completion callback saw the workflow as
     ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
     ``cause`` is the core's class of the cause (a ``CoreFailure`` leaf
-    class). The worker reaper runs the same pass over all workflows. A
-    repeated ``resume`` returns ``Ok(False)``.
+    class). The worker reaper runs the same pass over all workflows. Not
+    retryable: a repeated ``resume`` returns ``Ok(False)``, and the reaper
+    completes the pass.
     """
 
     code: ClassVar[WorkflowHandleErrorCode] = WorkflowHandleErrorCode.RESUME_RECOVERY_FAILED
