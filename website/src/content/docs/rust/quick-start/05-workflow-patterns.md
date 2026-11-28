@@ -107,13 +107,13 @@ pub fn regional_rollups_spec(mut builder: WorkflowSpecBuilder) -> Result<Workflo
 `regional_rollup` is a task of the queue `analytics`. It takes `region: String` and returns `RegionalRollup`.
 
 - No node has `waits_for`, so all nodes can run at one time. The queue `analytics` has `max_concurrency` 4.
-- The workflow has no output node. Its result is `OutputlessResults`: the outcome of each node, by node id.
+- The workflow has no output node. Its result is `NoWorkflowOutput`; `result_for` and `results()` read the value of each node.
 
 Read one node after the workflow ended:
 
 <!-- rust-check: skip partial -- a fragment that uses the spec and the types above -->
 ```rust
-let handle = app.start::<OutputlessResults>(&spec).await?;
+let handle = app.start::<NoWorkflowOutput>(&spec).await?;
 let _ended = handle.get(WaitLimit::Within(Duration::from_secs(60))).await?;
 
 for region in REGIONS {
