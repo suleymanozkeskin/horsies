@@ -9,18 +9,16 @@ import { registeredCodesOf } from "../../../horsies/src/rerun/registered-codes.t
 import { h } from "../../../horsies/src/wire/public.ts";
 
 const charge = defineTask({ name: "charge", input: {}, output: h.string(), errorCodes: ["CARD_DECLINED", "PROVIDER_DOWN"] });
-const noCodes = defineTask({ name: "no_codes", input: {}, output: h.string(), errorCodes: [] });
 const open = defineTask({ name: "open_codes", input: {}, output: h.string() });
 
 describe("registeredCodesOf", () => {
   test("gives each listed task in list order with its declared codes, and no code for a contract with no list", () => {
-    const checked = checkContractList([charge, noCodes, open], { kind: "default" });
+    const checked = checkContractList([charge, open], { kind: "default" });
 
     assert.deepEqual(checked.refusals, []);
     assert.deepEqual(registeredCodesOf(checked.entries), {
       tasks: [
         { taskName: "charge", codes: ["CARD_DECLINED", "PROVIDER_DOWN"] },
-        { taskName: "no_codes", codes: [] },
         { taskName: "open_codes", codes: [] },
       ],
     });

@@ -56,7 +56,7 @@ pub use crate::core::{
     HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError,
     OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
+    ResilienceConfigError, ResultSlot, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
     RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
     SchedulePattern, StartRefusalCause, SubWorkflowFailure, SubWorkflowParameters,
     SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
@@ -206,6 +206,15 @@ pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The bounds of a task's `timeout_ms`: the check of a declared task
 // (`core::task::declared_options`) and a client's text of its refusal.
 pub use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+// The default route of a task, the idempotency key bound and the schedule
+// defaults: each is read by the clients from here (Python through the
+// generated `_catalog`).
+pub use crate::core::config::queue::{DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY};
+pub use crate::core::config::schedule::{
+    DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED,
+    DEFAULT_SCHEDULE_TIMEZONE,
+};
+pub use crate::core::history::identity::keys::IDEMPOTENCY_KEY_MAX_BYTES;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).
@@ -229,10 +238,12 @@ pub use crate::worker::{
 
 // worker state snapshot values
 pub use crate::broker::{
-    checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
-    worker_history_limit_refused, ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget,
-    ExecutionClassBudgets, ShortageErrno, SlotHealth, SnapshotProfile,
-    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_listener_disabled, ping_min_responses_refused, ping_wait_over_bound, ping_wait_refused,
+    worker_history_limit_over_bound, worker_history_limit_refused, worker_history_over_bound,
+    ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget, ExecutionClassBudgets,
+    ShortageErrno, SlotHealth, SnapshotProfile, MAX_BOOT_FAILURE_DETAIL_CHARS,
+    WORKER_HISTORY_ROW_BOUND, WORKER_PING_WAIT_BOUND,
 };
 
 // fleet check and class report
@@ -304,8 +315,8 @@ pub use crate::failure_cause::{FailureCause, ServerErrorFacts};
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 pub use crate::workflow_engine::phase2_recovery::Phase2RecoverySummary;
 pub use crate::workflow_engine::query::{
-    NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus, WorkflowEnd,
-    WorkflowWait,
+    NodeResultRead, NodeResultsRead, NodesRead, StoredNode, StoredNodeResult, TerminalErrorStatus,
+    WorkflowEnd, WorkflowWait,
 };
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 pub use crate::workflow_engine::recovery::{

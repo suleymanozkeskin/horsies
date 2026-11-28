@@ -20,7 +20,7 @@ use crate::core::history::rerun::operations::{
     rerun_first_statement, rerun_task_in_transaction, RegisteredTaskCodes, RerunCommand,
     RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
-use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
+use crate::core::{EnqueueRetention, PostgresConfig, ResultSlot, TaskInfo};
 
 use crate::broker::core_rows::{
     column, expired_list_row, listed_worker_state_row, one_row, read_rows, scalar, stale_list_row,
@@ -32,10 +32,10 @@ use crate::broker::enqueue_task::{
 };
 use crate::broker::error::{BrokerError, EnqueueRefusal};
 use crate::broker::health::{
-    checked_history_limit, ping_min_responses_refused, ping_wait_refused,
-    read_listed_worker_states, read_worker_snapshot, read_worker_snapshots, DatabasePing,
-    ListedWorkerState, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
-    WORKER_PING_CHANNEL,
+    checked_history_limit, checked_history_rows, checked_ping_wait, history_fetch_limit,
+    ping_min_responses_refused, read_listed_worker_states, read_worker_snapshot,
+    read_worker_snapshots, DatabasePing, ListedWorkerState, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
@@ -1961,12 +1961,14 @@ impl PostgresBroker {
 
     /// Fetch task metadata.
     ///
-    /// By default, the `result` and `failed_reason` fields are excluded
-    /// (returned as `None`), matching Python's
-    /// `info(include_result=False, include_failed_reason=False)` default.
-    /// Pass `true` for either flag to include the field of a terminal task's
-    /// history row. A live task has no result, failed reason, error code or
-    /// terminal time: those fields are `None` whatever the flags say.
+    /// By default, the `result` and `failed_reason` fields are excluded:
+    /// `result` is `ResultSlot::NotRequested` and `failed_reason` is `None`,
+    /// matching Python's `info(include_result=False,
+    /// include_failed_reason=False)` default. Pass `true` for either flag to
+    /// include the field of a terminal task's history row. A live task has no
+    /// result, failed reason, error code or terminal time: with the result
+    /// flag `result` is `ResultSlot::NotStored`, and the other fields are
+    /// `None`, whatever the flags say.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,
@@ -2042,7 +2044,7 @@ impl PostgresBroker {
         match row {
             Some(r) => {
                 let mut info = r
-                    .into_task_info()
+                    .into_task_info(include_result)
                     .map_err(|error| task_info_history_error(task_id, error))?;
                 if include_attempts {
                     info.attempts = Some(
@@ -2219,9 +2221,7 @@ impl PostgresBroker {
         wait: std::time::Duration,
         min_responses: Option<usize>,
     ) -> DatabaseResult<Vec<WorkerPong>> {
-        if wait.is_zero() {
-            return Err(ping_wait_refused(&0));
-        }
+        let wait = checked_ping_wait(wait)?;
         if min_responses == Some(0) {
             return Err(ping_min_responses_refused(&0));
         }
@@ -2447,9 +2447,12 @@ impl PostgresBroker {
 
     /// State-snapshot history for one worker, newest first.
     ///
-    /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
-    /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
-    /// An unreadable stored row fails the read as in
+    /// `limit` of `None` returns all retained rows, at most
+    /// [`WORKER_HISTORY_ROW_BOUND`](crate::broker::WORKER_HISTORY_ROW_BOUND);
+    /// pass `Some(n)` to bound the fetch. A limit of 0 or less, or above the
+    /// bound, is `INVALID_INPUT`, with no database call. A worker that holds
+    /// more retained rows than the bound refuses the read of `None` with
+    /// `INVALID_INPUT`: no rows are returned in part. An unreadable stored row fails the read as in
     /// [`list_worker_states`](Self::list_worker_states). Mirrors Python's
     /// `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
@@ -2458,17 +2461,19 @@ impl PostgresBroker {
         limit: Option<i64>,
     ) -> DatabaseResult<Vec<WorkerStateSnapshot>> {
         let limit = checked_history_limit(limit)?;
+        let fetch_limit = history_fetch_limit(limit);
         let rows = self
             .read_main(
                 &GET_WORKER_STATE_HISTORY
                     .bind()
                     .value(&worker_id)
-                    .value(&limit)
+                    .value(&fetch_limit)
                     .finish(),
                 stored_worker_state,
             )
             .await
             .map_err(|error| monitoring_query_error("get_worker_state_history", error))?;
+        let rows = checked_history_rows(limit, rows)?;
         read_worker_snapshots("get_worker_state_history", rows)
     }
 
@@ -2919,8 +2924,11 @@ fn history_task_info(
     let task_id = detail.task_id;
     let status = detail.status;
     let result = match include_result {
-        false => None,
-        true => history_result_envelope(&detail)?,
+        false => ResultSlot::NotRequested,
+        true => match history_result_envelope(&detail)? {
+            None => ResultSlot::NotStored,
+            Some(envelope) => ResultSlot::Stored(envelope),
+        },
     };
     let terminal_at = detail.terminal_at;
     // The snapshot holds the attempts oldest first; a task info lists them
@@ -4450,6 +4458,19 @@ mod broker_operation_error_tests {
     }
 
     #[tokio::test]
+    async fn ping_workers_refuses_a_wait_above_the_bound_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_PING_WAIT_BOUND + Duration::from_millis(1);
+        let Err(refused) = broker.ping_workers(None, over, None).await else {
+            panic!("a wait above the bound must be refused");
+        };
+
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
+    }
+
+    #[tokio::test]
     async fn ping_workers_refuses_zero_min_responses_as_invalid_input() {
         let broker = unreachable_broker();
 
@@ -4496,6 +4517,18 @@ mod broker_operation_error_tests {
             assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput, "{limit}");
             assert!(!refused.retryable(), "{limit}");
         }
+    }
+
+    #[tokio::test]
+    async fn worker_state_history_refuses_a_limit_above_the_bound() {
+        let broker = unreachable_broker();
+
+        let over = crate::broker::WORKER_HISTORY_ROW_BOUND + 1;
+        let Err(refused) = broker.get_worker_state_history("w1", Some(over)).await else {
+            panic!("limit {over} must be refused");
+        };
+        assert_eq!(refused.code(), DatabaseErrorCode::InvalidInput);
+        assert!(!refused.retryable());
     }
 
     /// `close` returns the core pools to `Idle`, and the next operation opens
@@ -5803,19 +5836,29 @@ mod task_info_code_tests {
                 false,
             )
             .unwrap_or_else(|refused| panic!("{payload}: {refused}"));
-            assert_eq!(
-                info.result.as_ref().map(StoredEnvelopeText::as_str),
-                Some(payload),
-            );
+            match &info.result {
+                ResultSlot::Stored(envelope) => assert_eq!(envelope.as_str(), payload),
+                other => panic!("{payload}: expected a stored result, got {other:?}"),
+            }
         }
     }
 
     /// Python: a stored JSON `null` is no result.
     #[test]
-    fn a_history_result_of_null_is_no_result() {
+    fn a_history_result_of_null_is_not_stored() {
         let info = history_task_info(history_detail_with_result(b"null"), true, false, false)
             .expect("a stored null reads");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotStored);
+    }
+
+    /// A history row with no result payload stores no result.
+    #[test]
+    fn a_history_row_without_a_payload_is_not_stored() {
+        let mut detail = history_detail_with_result(b"{}");
+        detail.result_payload = None;
+        let info =
+            history_task_info(detail, true, false, false).expect("a row without a payload reads");
+        assert_eq!(info.result, ResultSlot::NotStored);
     }
 
     /// Python: a stored result that is neither an object nor `null` is
@@ -5832,7 +5875,7 @@ mod task_info_code_tests {
     fn a_history_result_is_not_read_unless_asked() {
         let info = history_task_info(history_detail_with_result(b"[]"), false, false, false)
             .expect("a result that is not read is not checked");
-        assert!(info.result.is_none());
+        assert_eq!(info.result, ResultSlot::NotRequested);
     }
 }
 

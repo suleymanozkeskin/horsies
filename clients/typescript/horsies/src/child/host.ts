@@ -94,6 +94,7 @@ import {
   settleRun,
   startHookNames,
   taskContextUseOf,
+  declaredCodesOf,
 } from "./serve.ts";
 import { StateValues } from "./state.ts";
 
@@ -370,6 +371,7 @@ export function childPlan(
       name,
       form: bodyFormOf(parts.contract),
       context: taskContextUseOf(parts.contract),
+      errorCodes: declaredCodesOf(parts.contract),
     })),
     startHooks: startHookNames(members),
     producerManifestJson: checked.manifestJson,

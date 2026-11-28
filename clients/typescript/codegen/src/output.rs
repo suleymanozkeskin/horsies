@@ -360,6 +360,7 @@ mod tests {
             "monitoring_models",
             "producer_metrics",
             "retention_class",
+            "schedule_defaults",
             "schedule_pattern",
             "scheduler_manifest",
             "send_bounds",

@@ -2,6 +2,7 @@
 // form. The checks here are TypeScript code, so they run on every thread.
 
 import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import { DEFAULT_QUEUE_NAME } from "../_catalog/send_bounds.ts";
 import {
   compileContract,
   type CompiledContract,
@@ -14,11 +15,8 @@ import type { ContractLookup, ListedLookup, ListedTask, QueueRoute } from "../se
 import { unreachable } from "../wire/unreachable.ts";
 import { refusal, type HorsiesError, type RefusalCode } from "./refusal.ts";
 
-/**
- * The one queue of the default queue mode. The Python and Rust clients hold the same value
- * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`); issue #2425 moves it to the core.
- */
-export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default" });
+/** The one queue of the default queue mode: the core's `DEFAULT_QUEUE_NAME`. */
+export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: DEFAULT_QUEUE_NAME });
 
 const NOT_LISTED: ListedLookup = Object.freeze({ kind: "notListed" });
 
@@ -113,6 +111,7 @@ function contractRefusal(refused: ContractRefused, path: string): HorsiesError {
 function contractRuleCode(rule: ContractRule): RefusalCode {
   switch (rule) {
     case "TaskName":
+    case "ErrorCodes":
       return HorsiesErrorCode.TASK_INVALID_OPTIONS;
     case "ParameterName":
     case "SchemaVendor":

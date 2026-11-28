@@ -271,12 +271,14 @@ match await app.get_result_async(task_id, wait_ms=5000):
     case Err(read_error):
         ...  # no outcome: ReadWaitTimeout, ReadNoTypeAvailable, ReadResultDeserializationError, ReadDatabaseError, ...
 
-# Task metadata with typed-decoded result: the app-level wrapper decodes
-# when the task is registered locally (decoded_result / result_decoded set).
+# Task metadata with the result decoded: TaskInfo.result is a ResultSlot.
+# The app-level read decodes the stored envelope to a TaskOutcome (an ok value
+# of a task that is not registered in this process stays plain JSON).
 info = await app.get_task_info_async(task_id, include_result=True)
 
-# Broker-level variants are RAW envelope only — decoded_result is always
-# empty there. Reach for them for cross-process monitoring/dashboards:
+# Broker-level variants hold the RAW envelope in the slot:
+# ResultSlotStored(envelope). Reach for them for cross-process
+# monitoring/dashboards:
 # app.get_broker().get_task_info_async(...) or
 # broker.get_raw_result_record_async(...)
 ```
@@ -374,7 +376,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
 - `WorkflowHandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DATABASE_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`, `INVALID_WORKFLOW_ID`
-- `ReadError` (a union, one class per read failure; each has `code` and `message`): `ReadWaitTimeout`, `ReadTaskNotFound`, `ReadWorkflowNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`, `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `cause`), `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`
+- `ReadError` (a union, one class per read failure; each has `code` and `message`): `ReadWaitTimeout`, `ReadTaskNotFound`, `ReadWorkflowNotFound`, `ReadNodeNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`, `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `cause`), `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = False`; the other send errors have no `retryable`.
 

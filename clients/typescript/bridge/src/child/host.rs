@@ -92,6 +92,10 @@ pub struct ChildTaskEntry {
     pub name: String,
     pub form: BodyForm,
     pub context: TaskContextUse,
+    /// The custom error codes that the contract declares (`errorCodes`), in
+    /// the order of the contract. Empty for a contract with no `errorCodes`:
+    /// the core then checks no upstream code of the task.
+    pub error_codes: Vec<String>,
 }
 
 /// What the package gives the child host.
@@ -391,20 +395,21 @@ fn task_registry(
 ) -> Result<TaskRegistry, NativeThrown> {
     let mut registry = TaskRegistry::new();
     for task in tasks {
+        let metadata = task_metadata(task);
         let registered = match task.form {
             BodyForm::Async => RegisteredTask::Async {
                 task: Arc::new(JsAsyncBody {
                     task_name: task.name.clone(),
                     bodies: Arc::clone(bodies),
                 }),
-                metadata: TaskMetadata::default(),
+                metadata,
             },
             BodyForm::Blocking => RegisteredTask::Blocking {
                 task: Arc::new(JsBlockingBody {
                     task_name: task.name.clone(),
                     bodies: Arc::clone(bodies),
                 }),
-                metadata: TaskMetadata::default(),
+                metadata,
             },
         };
         registry
@@ -415,6 +420,24 @@ fn task_registry(
             .map_err(|error| client_defect(&format!("the task {}: {error}", task.name)))?;
     }
     Ok(registry)
+}
+
+/// The registry metadata of `task`: its declared custom codes, which the
+/// core checks in the stored error of an upstream result. Pure.
+fn task_metadata(task: &ChildTaskEntry) -> TaskMetadata {
+    TaskMetadata::default().with_error_codes(declared_codes(&task.error_codes))
+}
+
+/// The declared codes of one task as the registry holds them. The child host
+/// reads its plan once per process (`SERVED`), so the lists that this leaks
+/// are bounded by the codes of the app's contracts and live as long as the
+/// process. No list is the empty list.
+fn declared_codes(codes: &[String]) -> &'static [&'static str] {
+    let leaked: Vec<&'static str> = codes
+        .iter()
+        .map(|code| &*Box::leak(code.clone().into_boxed_str()))
+        .collect();
+    Box::leak(leaked.into_boxed_slice())
 }
 
 /// `registered` with the context use of its entry: a task that takes the
@@ -459,6 +482,27 @@ mod tests {
             task: Arc::new(EchoBody),
             metadata: TaskMetadata::default(),
         }
+    }
+
+    fn entry_with_codes(codes: &[&str]) -> ChildTaskEntry {
+        ChildTaskEntry {
+            name: "charge".to_owned(),
+            form: BodyForm::Blocking,
+            context: TaskContextUse::NoContext,
+            error_codes: codes.iter().map(|code| (*code).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_metadata_of_a_task_holds_its_declared_codes_in_order() {
+        let metadata = task_metadata(&entry_with_codes(&["CARD_DECLINED", "BANK_DOWN"]));
+
+        assert_eq!(metadata.error_codes, ["CARD_DECLINED", "BANK_DOWN"]);
+    }
+
+    #[test]
+    fn the_metadata_of_a_task_with_no_codes_holds_none() {
+        assert!(task_metadata(&entry_with_codes(&[])).error_codes.is_empty());
     }
 
     #[test]

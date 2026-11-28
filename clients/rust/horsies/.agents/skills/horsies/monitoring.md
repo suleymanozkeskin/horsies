@@ -49,17 +49,22 @@ async fn check_health(app: &Horsies) -> Result<(), DatabaseOperationError> {
   Each read connects the app's handle and installs the schema once per
   handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
-  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait` is
-  `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
+  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait`, or a `wait` above
+  `WORKER_PING_WAIT_BOUND` (60 s), is `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
   gets `LISTENER_DISABLED`.
+- `get_worker_state_history` returns at most `WORKER_HISTORY_ROW_BOUND`
+  (10,000) snapshots. A `Newest` count above the bound is `INVALID_INPUT`;
+  `AllRetained` is `INVALID_INPUT` for a worker that holds more than the
+  bound, and returns no snapshots in part.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
   most `TASK_LIST_BOUND` (10,000) rows.
 - `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
   worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
   worker of a build before schema migration 1004 wrote the snapshot).
   `child_count` counts its children; `claim_limits` is a `ClaimLimits`
-  (`claimed_per_worker` is the limit that the worker resolved, its seat count
-  when its profile sets none); `slot_health` is `SlotHealth::AllServing` or
+  (`claimed_per_worker` is `NoTaskLimit` when the profile sets none; the
+  effective limit is then the seat count, the sum of the capacities in
+  `execution_class_budgets`); `slot_health` is `SlotHealth::AllServing` or
   `SlotHealth::SlotsDown { slots }`; `execution_class_budgets` is
   `ExecutionClassBudgets`.
 - One type per health record: the web models `WorkerStateInfo::slot_health`
@@ -185,6 +190,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
         Err(
             error @ (TaskActionError::IsWorkflowTask { .. }
             | TaskActionError::DatabaseOperationFailed { .. }
+            | TaskActionError::OutcomeUnknown { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
     }
@@ -271,7 +277,11 @@ read when the last read is 15 s old or more).
   request on the app's handle. A request whose broker cannot be built is
   answered with the cause: 503 when the cause may clear, 500 when it stays
   (a connection setting that the core refuses). The next request tries
-  again.
+  again. A request that the policy refuses is answered with 403 before
+  that build, so a refused caller never sees a connect error.
+- A read route refuses an unknown query parameter with 422 `extra_forbidden`
+  (`loc` `["query", name]`, `ctx.known_keys` the known parameters). The table
+  is on the docs page `monitoring/action-semantics`.
 - The mount runs no schema step. For a monitoring-only process, build the
   app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`.
 - A workflow resume builds the children it owes from the workflow

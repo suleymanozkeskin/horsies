@@ -14,7 +14,7 @@ import type { BodyFactsRecord, BodyCarrierRecord } from "../../../../horsies/src
 import { otelBodyObserver } from "../../../../horsies/src/telemetry/attempt-span.ts";
 import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import type { AttemptParentage } from "../../../../horsies/src/telemetry/tracing-config.ts";
-import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
+import { apiWithBrokenSpanEnd, installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, SPAN_END_BROKEN, type TestSdk } from "../support.ts";
 
 const TASK_ID = "0192f6a1-7b3c-7d4e-8f00-0123456789ab";
 
@@ -334,5 +334,31 @@ describe("the attempt span with no SDK or a broken SDK", () => {
 
     assert.equal(runs, 2);
     assert.deepEqual(written, [`attempt ${TASK_ID} Error: the SDK is broken`]);
+  });
+});
+
+describe("an attempt span that cannot end", () => {
+  let sdk: TestSdk;
+
+  beforeEach(() => {
+    sdk = installSdk();
+  });
+
+  afterEach(() => {
+    sdk.remove();
+  });
+
+  test("a throw at the end of the span is one report of a span not made per process; the body runs", async () => {
+    const { observer, written } = observerOf("childOfSend", apiWithBrokenSpanEnd());
+    let runs = 0;
+
+    for (let body = 0; body < 2; body += 1) {
+      await runBody(observer, factsWith({ kind: "noCarrier" }, NOT_IN_WORKFLOW), { kind: "returned" }, async () => {
+        runs += 1;
+      });
+    }
+
+    assert.equal(runs, 2);
+    assert.deepEqual(written, [`attempt ${TASK_ID} Error: ${SPAN_END_BROKEN}`]);
   });
 });

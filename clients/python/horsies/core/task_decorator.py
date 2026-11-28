@@ -31,6 +31,7 @@ from types import MappingProxyType
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
+from horsies._catalog.queue_defaults import DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.kwargs import (
     encode_kwargs_read_back,
@@ -135,6 +136,7 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskOptions
     from horsies.core.models.tasks import TaskError
     from horsies.core.models.tasks import TaskInfo
+    from horsies.core.models.outcome import TaskOutcome
     from horsies.core.models.workflow import (
         TaskNode,
         SubWorkflowNode,
@@ -341,7 +343,7 @@ def effective_priority(
             pre-validate the queue before calling.
     """
     if app.config.queue_mode.name == 'DEFAULT':
-        return 100  # default priority, least important
+        return DEFAULT_QUEUE_PRIORITY
     config = next(
         (q for q in (app.config.custom_queues or []) if q.name == queue_name),
         None,
@@ -365,7 +367,7 @@ def resolve_node_queue(node: 'TaskNode[Any, Any]') -> str:
     result is never ``''``. It does not check the name against the app's
     queue config: ``resolve_node_queue_and_priority`` does that.
     """
-    return node.queue or node.function.queue or 'default'
+    return node.queue or node.function.queue or DEFAULT_QUEUE_NAME
 
 
 def resolve_node_queue_and_priority(
@@ -403,7 +405,7 @@ def resolve_node_queue_and_priority(
                 ],
                 help_text='use one of the configured queue names or add this queue to app config',
             )
-    elif queue != 'default':
+    elif queue != DEFAULT_QUEUE_NAME:
         raise ConfigurationError(
             message='TaskNode has non-default queue in DEFAULT mode',
             code=HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
@@ -623,7 +625,7 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
@@ -645,11 +647,9 @@ class TaskHandle(Generic[T, C]):
                 ),
             ))
 
-        # Strict-serde phase 6: route through the app-level typed
-        # decode so ``include_result=True`` populates
-        # ``decoded_result`` / ``result_decoded`` whenever the task is
-        # locally registered. The broker-level ``get_task_info`` returns
-        # raw_result only.
+        # Route through the app-level typed decode: the ``result`` slot
+        # holds a ``TaskOutcome``. The broker-level ``get_task_info``
+        # holds the stored envelope.
         return self._app.get_task_info(
             self.task_id,
             include_result=include_result,
@@ -663,7 +663,7 @@ class TaskHandle(Generic[T, C]):
         include_result: bool = False,
         include_failed_reason: bool = False,
         include_attempts: bool = False,
-    ) -> 'DatabaseResult[TaskInfo | None]':
+    ) -> 'DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] | None]':
         """Async version of info().
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
@@ -677,7 +677,7 @@ class TaskHandle(Generic[T, C]):
                 ),
             ))
 
-        # Strict-serde phase 6: same routing as the sync variant.
+        # The same routing as the sync variant.
         return await self._app.get_task_info_async(
             self.task_id,
             include_result=include_result,

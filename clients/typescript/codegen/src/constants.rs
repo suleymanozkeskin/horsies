@@ -1,6 +1,7 @@
 //! Renders constants of horsies-core as modules of the catalog folder:
 //! `monitoring_bounds.ts`, `exit_codes.ts`, `event_bounds.ts`,
-//! `broker_bounds.ts`, `codec_bounds.ts` and `send_bounds.ts`.
+//! `broker_bounds.ts`, `codec_bounds.ts`, `send_bounds.ts` and
+//! `schedule_defaults.ts`.
 //!
 //! `constant_modules` is the list of the core constants that the
 //! TypeScript package publishes. The list is a choice of this renderer. Each
@@ -10,8 +11,9 @@
 //!
 //! Each constant is one statement, `export const NAME = <literal>;`. An
 //! integer in the safe range of a `number` is a number literal; another
-//! integer is a `bigint` literal. A text is a string literal, and a list of
-//! texts is a frozen array of string literals.
+//! integer is a `bigint` literal. A text is a string literal, a flag is
+//! `true` or `false`, and a list of texts is a frozen array of string
+//! literals.
 
 use std::time::Duration;
 
@@ -39,9 +41,13 @@ use horsies_core::monitoring::{
     MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
 use horsies_core::telemetry::labels::DeclaredSource;
+use horsies_core::web::MAX_OPEN_EVENT_STREAMS;
 use horsies_core::{
-    LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
-    TASK_LIST_BOUND,
+    DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
+    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
+    IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_WAIT_LIMIT_MS,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND, WORKER_HISTORY_ROW_BOUND,
+    WORKER_PING_WAIT_BOUND,
 };
 
 use crate::output::{catalog_file, GeneratedFile};
@@ -73,6 +79,8 @@ enum PublishedConstant {
         name: &'static str,
         value: &'static str,
     },
+    /// A flag of the core, published under `name` as `true` or `false`.
+    Flag { name: &'static str, value: bool },
     /// A list of texts of the core, in core order, published under `name` as
     /// a frozen `ReadonlyArray<string>`.
     TextList {
@@ -90,7 +98,7 @@ struct ConstantModule {
     constants: Vec<PublishedConstant>,
 }
 
-const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
+const MONITORING_CONSTANTS: [PublishedConstant; 10] = [
     PublishedConstant::WholeSeconds {
         name: "MONITORING_WINDOW_DEFAULT",
         span: match MONITORING_WINDOW_DEFAULT.to_std() {
@@ -124,6 +132,18 @@ const MONITORING_CONSTANTS: [PublishedConstant; 7] = [
     PublishedConstant::Integer {
         name: "LIST_ROW_BOUND",
         value: LIST_ROW_BOUND as i128,
+    },
+    PublishedConstant::WholeSeconds {
+        name: "WORKER_PING_WAIT_BOUND",
+        span: WORKER_PING_WAIT_BOUND,
+    },
+    PublishedConstant::Integer {
+        name: "WORKER_HISTORY_ROW_BOUND",
+        value: WORKER_HISTORY_ROW_BOUND as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MAX_OPEN_EVENT_STREAMS",
+        value: MAX_OPEN_EVENT_STREAMS as i128,
     },
 ];
 
@@ -334,13 +354,50 @@ fn codec_constants() -> Vec<PublishedConstant> {
     constants
 }
 
-/// The stem of the module of the send and wait bounds.
+/// The stem of the module of the send bounds and of the default route of a
+/// task.
 const SEND_BOUNDS_MODULE: &str = "send_bounds";
 
-const SEND_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
-    name: "MAX_WAIT_LIMIT_MS",
-    value: MAX_WAIT_LIMIT_MS as i128,
-}];
+const SEND_CONSTANTS: [PublishedConstant; 4] = [
+    PublishedConstant::Integer {
+        name: "MAX_WAIT_LIMIT_MS",
+        value: MAX_WAIT_LIMIT_MS as i128,
+    },
+    PublishedConstant::Integer {
+        name: "IDEMPOTENCY_KEY_MAX_BYTES",
+        value: IDEMPOTENCY_KEY_MAX_BYTES as i128,
+    },
+    PublishedConstant::Text {
+        name: "DEFAULT_QUEUE_NAME",
+        value: DEFAULT_QUEUE_NAME,
+    },
+    PublishedConstant::Integer {
+        name: "DEFAULT_QUEUE_PRIORITY",
+        value: DEFAULT_QUEUE_PRIORITY as i128,
+    },
+];
+
+/// The stem of the module of the defaults of a task schedule.
+const SCHEDULE_DEFAULTS_MODULE: &str = "schedule_defaults";
+
+const SCHEDULE_DEFAULT_CONSTANTS: [PublishedConstant; 4] = [
+    PublishedConstant::Flag {
+        name: "DEFAULT_SCHEDULE_ENABLED",
+        value: DEFAULT_SCHEDULE_ENABLED,
+    },
+    PublishedConstant::Text {
+        name: "DEFAULT_SCHEDULE_TIMEZONE",
+        value: DEFAULT_SCHEDULE_TIMEZONE,
+    },
+    PublishedConstant::Integer {
+        name: "DEFAULT_MAX_CATCH_UP_RUNS",
+        value: DEFAULT_MAX_CATCH_UP_RUNS as i128,
+    },
+    PublishedConstant::Integer {
+        name: "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+        value: DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i128,
+    },
+];
 
 /// Every generated module of core constants, in file order:
 ///
@@ -350,10 +407,11 @@ const SEND_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
 /// - the bounds of the values of an event, then of the event registration;
 /// - the bound of the stale and expired task reads of the broker;
 /// - the bounds and spellings of the stored forms;
-/// - the longest result wait.
+/// - the longest result wait, the key bound and the default route of a task;
+/// - the defaults of a task schedule.
 ///
 /// Pure.
-fn constant_modules() -> [ConstantModule; 6] {
+fn constant_modules() -> [ConstantModule; 7] {
     let mut event_constants = EVENT_CONSTANTS.to_vec();
     event_constants.extend(event_handler_constants());
     [
@@ -380,6 +438,10 @@ fn constant_modules() -> [ConstantModule; 6] {
         ConstantModule {
             stem: SEND_BOUNDS_MODULE,
             constants: SEND_CONSTANTS.to_vec(),
+        },
+        ConstantModule {
+            stem: SCHEDULE_DEFAULTS_MODULE,
+            constants: SCHEDULE_DEFAULT_CONSTANTS.to_vec(),
         },
     ]
 }
@@ -425,6 +487,9 @@ fn constant_statement(constant: &PublishedConstant) -> String {
         }
         PublishedConstant::Text { name, value } => {
             format!("export const {name} = {};", string_literal(value))
+        }
+        PublishedConstant::Flag { name, value } => {
+            format!("export const {name} = {value};")
         }
         PublishedConstant::TextList { name, values } => {
             let literals: Vec<String> = values.iter().map(|value| string_literal(value)).collect();
@@ -606,10 +671,19 @@ mod tests {
                 i128::from(MAX_WORKFLOW_RUNS_LIMIT),
             ),
             ("LIST_ROW_BOUND", LIST_ROW_BOUND as i128),
+            (
+                "WORKER_PING_WAIT_BOUND_SECONDS",
+                i128::from(WORKER_PING_WAIT_BOUND.as_secs()),
+            ),
+            (
+                "WORKER_HISTORY_ROW_BOUND",
+                i128::from(WORKER_HISTORY_ROW_BOUND),
+            ),
+            ("MAX_OPEN_EVENT_STREAMS", MAX_OPEN_EVENT_STREAMS as i128),
         ] {
             assert!(text.contains(&integer_statement(name, value)), "{name}");
         }
-        assert_eq!(text.matches("export const ").count(), 7);
+        assert_eq!(text.matches("export const ").count(), 10);
     }
 
     #[test]
@@ -652,6 +726,7 @@ mod tests {
                 PublishedConstant::Integer { value, .. } => value,
                 PublishedConstant::WholeSeconds { name, .. }
                 | PublishedConstant::Text { name, .. }
+                | PublishedConstant::Flag { name, .. }
                 | PublishedConstant::TextList { name, .. } => {
                     panic!("the exit code {name} is not an integer")
                 }
@@ -781,12 +856,35 @@ mod tests {
     }
 
     #[test]
-    fn the_send_bounds_hold_the_longest_wait() {
+    fn the_send_bounds_hold_the_longest_wait_the_key_bound_and_the_default_route() {
         assert_eq!(
             module_of("send_bounds"),
             format!(
-                "{GENERATED_HEADER}\n{}",
-                integer_statement("MAX_WAIT_LIMIT_MS", i128::from(MAX_WAIT_LIMIT_MS))
+                "{GENERATED_HEADER}\n{}{}{}{}",
+                integer_statement("MAX_WAIT_LIMIT_MS", i128::from(MAX_WAIT_LIMIT_MS)),
+                integer_statement(
+                    "IDEMPOTENCY_KEY_MAX_BYTES",
+                    IDEMPOTENCY_KEY_MAX_BYTES as i128
+                ),
+                text_statement("DEFAULT_QUEUE_NAME", DEFAULT_QUEUE_NAME),
+                integer_statement("DEFAULT_QUEUE_PRIORITY", DEFAULT_QUEUE_PRIORITY as i128),
+            )
+        );
+    }
+
+    #[test]
+    fn the_schedule_defaults_hold_the_enabled_flag_the_zone_the_catch_up_bound_and_the_check_interval(
+    ) {
+        assert_eq!(
+            module_of("schedule_defaults"),
+            format!(
+                "{GENERATED_HEADER}\n\nexport const DEFAULT_SCHEDULE_ENABLED = {DEFAULT_SCHEDULE_ENABLED};\n{}{}{}",
+                text_statement("DEFAULT_SCHEDULE_TIMEZONE", DEFAULT_SCHEDULE_TIMEZONE),
+                integer_statement("DEFAULT_MAX_CATCH_UP_RUNS", DEFAULT_MAX_CATCH_UP_RUNS as i128),
+                integer_statement(
+                    "DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS",
+                    DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS as i128
+                ),
             )
         );
     }
@@ -803,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn the_files_are_the_six_modules_in_order_with_distinct_names() {
+    fn the_files_are_the_seven_modules_in_order_with_distinct_names() {
         let paths: Vec<String> = generated_files()
             .iter()
             .map(|file| file.relative_path().display().to_string())
@@ -817,6 +915,7 @@ mod tests {
                 "src/_catalog/broker_bounds.ts",
                 "src/_catalog/codec_bounds.ts",
                 "src/_catalog/send_bounds.ts",
+                "src/_catalog/schedule_defaults.ts",
             ]
         );
         for module in &constant_modules() {
@@ -827,6 +926,7 @@ mod tests {
                     PublishedConstant::Integer { name, .. }
                     | PublishedConstant::WholeSeconds { name, .. }
                     | PublishedConstant::Text { name, .. }
+                    | PublishedConstant::Flag { name, .. }
                     | PublishedConstant::TextList { name, .. } => name,
                 })
                 .collect();

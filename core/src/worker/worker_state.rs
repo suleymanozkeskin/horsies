@@ -14,7 +14,7 @@ use crate::db::{
 };
 
 use crate::core::config::app::AppConfig;
-use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
+use crate::core::config::worker_profile::{ClaimLimits, TaskLimitSetting, WorkerProfile};
 use crate::core::task::execution::Execution;
 
 use crate::telemetry::worker::WorkerTelemetry;
@@ -192,37 +192,50 @@ pub fn budget_columns(service: &PoolService) -> Vec<BudgetColumn> {
         .collect()
 }
 
-/// The columns of a worker snapshot that the children and the claim limits
-/// of the worker decide.
+/// The children and the claim limits of a worker, the source of three
+/// snapshot columns.
+///
+/// The snapshot records the limits of the profile as they are. A claimed
+/// limit that the profile does not set is recorded as no limit; the
+/// effective limit is the seat count of the worker, which the snapshot holds
+/// in its class capacities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimColumns {
     /// `processes`: the children of the worker.
     pub processes: u32,
-    /// `max_claim_batch`: the most rows that one pass claims from one queue;
-    /// 0 is no limit.
-    pub max_claim_batch: u32,
-    /// `max_claim_per_worker`: the most CLAIMED rows of the worker, resolved.
-    /// With no set limit it is the seats of the worker, never 0.
-    pub max_claim_per_worker: u32,
+    /// The claim limits of the profile: `max_claim_batch` and
+    /// `max_claim_per_worker`.
+    pub claim: ClaimLimits,
 }
 
 impl ClaimColumns {
-    /// The columns of a worker that runs `profile`: its child count, its per
-    /// queue limit or 0, and its claimed limit or else its seat count
-    /// (Python: `cfg.max_claim_per_worker if > 0 else cfg.seat_count()`).
-    /// Pure.
+    /// The columns of a worker that runs `profile`. Pure.
     pub fn of_profile(profile: &WorkerProfile) -> Self {
         Self {
             processes: profile.child_count(),
-            max_claim_batch: match profile.claim.per_queue_per_pass {
-                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
-                TaskLimitSetting::NoTaskLimit {} => 0,
-            },
-            max_claim_per_worker: match profile.claim.claimed_per_worker {
-                TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
-                TaskLimitSetting::NoTaskLimit {} => profile.seat_count(),
-            },
+            claim: profile.claim,
         }
+    }
+
+    /// The column `max_claim_batch`: the limit of one pass per queue, 0 for
+    /// no limit. Pure.
+    pub fn stored_max_claim_batch(&self) -> u32 {
+        stored_task_limit(self.claim.per_queue_per_pass)
+    }
+
+    /// The column `max_claim_per_worker`: the claimed limit of the profile,
+    /// 0 for no limit. Never the seat count. Pure.
+    pub fn stored_max_claim_per_worker(&self) -> u32 {
+        stored_task_limit(self.claim.claimed_per_worker)
+    }
+}
+
+/// The stored integer of a task limit: the task count, or 0 for no limit.
+/// Pure.
+fn stored_task_limit(limit: TaskLimitSetting) -> u32 {
+    match limit {
+        TaskLimitSetting::TaskLimit { tasks } => tasks.get(),
+        TaskLimitSetting::NoTaskLimit {} => 0,
     }
 }
 
@@ -627,8 +640,8 @@ pub(crate) async fn write_snapshot(
     let metrics = read.resources;
     let recovery_value = source.recovery_value().await;
     let processes = source.claim_columns.processes as i32;
-    let max_claim_batch = source.claim_columns.max_claim_batch as i32;
-    let max_claim_per_worker = source.claim_columns.max_claim_per_worker as i32;
+    let max_claim_batch = source.claim_columns.stored_max_claim_batch() as i32;
+    let max_claim_per_worker = source.claim_columns.stored_max_claim_per_worker() as i32;
     // The column `cluster_wide_cap` stores the cap as a nullable integer:
     // NULL for no cap.
     let cluster_wide_cap = source
@@ -794,8 +807,7 @@ mod tests {
     fn isolated_claim_columns(isolated: u32) -> ClaimColumns {
         ClaimColumns {
             processes: isolated,
-            max_claim_batch: 0,
-            max_claim_per_worker: isolated,
+            claim: ClaimLimits::default(),
         }
     }
 
@@ -1170,42 +1182,42 @@ mod tests {
         assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
     }
 
-    /// `processes` is the child count,
-    /// `max_claim_batch` the per-queue limit or 0, and `max_claim_per_worker`
-    /// the claimed limit or else the seat count.
-    #[test]
-    fn the_claim_columns_of_a_profile_are_resolved_as_python() {
-        use crate::core::config::worker_profile::TaskCount;
-
-        let mut profile: WorkerProfile = serde_json::from_value(serde_json::json!({
+    fn profile_with_claim(claim: &serde_json::Value) -> WorkerProfile {
+        serde_json::from_value(serde_json::json!({
             "isolated": {"kind": "isolated_children", "count": 2},
             "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 10},
-            "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 4}
+            "shared_thread": {"kind": "shared_thread_children", "count": 2, "seats": 4},
+            "claim": claim
         }))
-        .expect("the profile is valid");
+        .expect("the profile is valid")
+    }
 
+    /// A profile with no claim limit records no limit: the claimed limit is
+    /// 0 in the column, not the seat count (20).
+    #[test]
+    fn a_profile_with_no_claim_limit_records_no_limit() {
+        let profile = profile_with_claim(&serde_json::json!({}));
+        let columns = ClaimColumns::of_profile(&profile);
+        assert_eq!(columns.processes, 5);
         assert_eq!(
-            ClaimColumns::of_profile(&profile),
-            ClaimColumns {
-                processes: 5,
-                max_claim_batch: 0,
-                max_claim_per_worker: 2 + 10 + 8,
-            },
+            columns.claim.claimed_per_worker,
+            TaskLimitSetting::NoTaskLimit {}
         );
+        assert_eq!(columns.stored_max_claim_batch(), 0);
+        assert_eq!(columns.stored_max_claim_per_worker(), 0);
+        assert_eq!(profile.seat_count(), 20);
+    }
 
-        let tasks = |count: u32| TaskLimitSetting::TaskLimit {
-            tasks: TaskCount::try_from(count).expect("a test limit is inside its bounds"),
-        };
-        profile.claim.per_queue_per_pass = tasks(3);
-        profile.claim.claimed_per_worker = tasks(7);
-        assert_eq!(
-            ClaimColumns::of_profile(&profile),
-            ClaimColumns {
-                processes: 5,
-                max_claim_batch: 3,
-                max_claim_per_worker: 7,
-            },
-        );
+    /// A profile with claim limits records them as set.
+    #[test]
+    fn a_profile_with_claim_limits_records_the_limits() {
+        let profile = profile_with_claim(&serde_json::json!({
+            "per_queue_per_pass": {"kind": "task_limit", "tasks": 3},
+            "claimed_per_worker": {"kind": "task_limit", "tasks": 7}
+        }));
+        let columns = ClaimColumns::of_profile(&profile);
+        assert_eq!(columns.stored_max_claim_batch(), 3);
+        assert_eq!(columns.stored_max_claim_per_worker(), 7);
     }
 
     /// Python `class_capacity_json(plan, capacity)` of a worker of isolated
@@ -1320,8 +1332,8 @@ mod tests {
             class_capacity,
             class_capacity_json(&budget_columns(&isolated_children(2).service()))
         );
-        // No limit is stored resolved: the seats of the worker (#804).
-        assert_eq!(max_claim_per_worker, 2);
+        // No limit is stored as no limit, not as the seats of the worker.
+        assert_eq!(max_claim_per_worker, 0);
         // No `--metrics-listen` and no handler child: both are off. No child
         // sent an unreadable RSS reading: `children_rss` names none.
         assert_eq!(

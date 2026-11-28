@@ -11,7 +11,7 @@ from horsies._catalog.error_detail import NoCause
 from horsies._catalog.monitoring import MonitoringQueryErrorCode, TaskActionErrorCode
 from horsies._catalog.status import TaskStatus
 
-__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionIsWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
+__all__ = ['MonitoringQueryDatabaseOperationFailed', 'MonitoringQueryHistoryContractViolation', 'TaskActionNotFound', 'TaskActionNotCancellable', 'TaskActionIsWorkflowTask', 'TaskActionDatabaseOperationFailed', 'TaskActionOutcomeUnknown', 'TaskActionStoredDataInvalid', 'MonitoringQueryCoreError', 'TaskActionCoreError']
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,19 +136,47 @@ class TaskActionIsWorkflowTask:
 
 @dataclass(slots=True, frozen=True)
 class TaskActionDatabaseOperationFailed:
-    """The cancel statement failed with a database or driver error, or the
-    core of this process could not run it.
+    """The cancel failed with a database or driver error, or the core of this
+    process could not run it. Nothing changed.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``cause``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with the
-    subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
-    committed and its reply was lost: a repeated cancel tells which,
-    because a committed cancel answers ``TaskActionNotCancellable`` with
-    ``CANCELLED``.
+    subject ``cancel_task``), or the ``CoreCallRefusal`` of the core
+    boundary. The statement was not sent, or the server refused it: the
+    task is as it was. A reply that was lost after the statement was sent
+    is ``TaskActionOutcomeUnknown``.
     """
 
     code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.DATABASE_OPERATION_FAILED
+    message: str = field(repr=False)
+    retryable: bool
+    task_id: uuid.UUID
+    cause: BaseException = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return self.cause
+
+
+@dataclass(slots=True, frozen=True)
+class TaskActionOutcomeUnknown:
+    """The cancel statement went to the server and its reply was lost. The
+    cancel may have committed.
+
+    A repeated cancel tells which: a committed cancel answers
+    ``TaskActionNotCancellable`` with ``CANCELLED``, and a cancel that
+    did not commit cancels the task. ``retryable`` is the core's
+    classification of the cause (``True``: the lost connection may
+    clear). ``cause`` is the core's class of the cause (a ``CoreFailure``
+    leaf class, with the subject ``cancel_task``).
+    """
+
+    code: ClassVar[TaskActionErrorCode] = TaskActionErrorCode.OUTCOME_UNKNOWN
     message: str = field(repr=False)
     retryable: bool
     task_id: uuid.UUID
@@ -199,6 +227,7 @@ type TaskActionCoreError = (
     | TaskActionNotCancellable
     | TaskActionIsWorkflowTask
     | TaskActionDatabaseOperationFailed
+    | TaskActionOutcomeUnknown
     | TaskActionStoredDataInvalid
 )
 """Every failure of a task action that the core gives: one class per state."""

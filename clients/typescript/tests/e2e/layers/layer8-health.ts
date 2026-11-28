@@ -95,15 +95,18 @@ describe("layer 8: health", () => {
     await suite.worker("isolated-1");
     await suite.worker("isolated-1");
 
-    const states = await pollFor(SNAPSHOT_WAIT_MS, "a snapshot of each worker", async () => {
+    // A snapshot counts the RUNNING rows of its worker at its write, one write each second. The latest snapshot of
+    // the worker that ran a readiness task can be one that it wrote while that task was RUNNING, until its next
+    // write. So the wait is for a snapshot of each worker that counts no running task.
+    const states = await pollFor(SNAPSHOT_WAIT_MS, "an idle snapshot of each worker", async () => {
       const read = await workerStates(suite);
 
-      return read.length === 2 ? found(read) : NOT_YET;
+      return read.length === 2 && read.every((state) => state.tasksRunning === 0) ? found(read) : NOT_YET;
     });
 
     assert.equal(new Set(states.map((state) => state.workerId)).size, 2, "one latest snapshot per worker");
-    assert.ok(states.every((state) => state.tasksRunning === 0), "both workers are idle");
     assert.ok(states.every((state) => state.pid > 0 && state.queues.includes("default")), JSON.stringify(states.map((state) => [state.pid, state.queues])));
+    assert.ok(states.every((state) => state.profile.kind === "named" && state.profile.name === "isolated-1"), JSON.stringify(states.map((state) => state.profile)));
   });
 
   e2eTest("the worker that replies to a ping has a snapshot that reads by its id; an unknown id reads as not found", "recovery", async (suite) => {
@@ -123,6 +126,7 @@ describe("layer 8: health", () => {
 
     assert.ok(read.ok && read.value.kind === "found", `read the worker state: ${read.ok ? read.value.kind : read.error.code}`);
     assert.equal(read.value.snapshot.workerId, listed.workerId);
+    assert.deepEqual(read.value.snapshot.profile, { kind: "named", name: "isolated-1" });
     assert.ok(atOrAfter(read.value.snapshot.snapshotAt, listed.snapshotAt), "the read is at least as new as the list");
 
     const unknown = await suite.app.monitoring.getWorkerState("does-not-exist");
@@ -140,6 +144,8 @@ describe("layer 8: health", () => {
 
       return read.ok && read.value.length >= 3 ? found(read.value) : NOT_YET;
     });
+
+    assert.ok(history.every((snapshot) => snapshot.profile.kind === "named" && snapshot.profile.name === "isolated-1"));
 
     for (const [index, snapshot] of history.slice(1).entries()) {
       const newer = history[index];

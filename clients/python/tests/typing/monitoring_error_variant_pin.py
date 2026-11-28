@@ -23,6 +23,7 @@ from horsies.monitoring import (
     TaskActionError,
     TaskActionNotCancellable,
     TaskActionNotFound,
+    TaskActionOutcomeUnknown,
     TaskActionStoredDataInvalid,
     TaskActionIsWorkflowTask,
 )
@@ -58,6 +59,10 @@ def query_causes_are_exceptions() -> None:
 
 def chain_the_task_action_database_cause(db_failed: TaskActionDatabaseOperationFailed) -> None:
     raise RuntimeError('cancel failed') from db_failed.cause
+
+
+def chain_the_task_action_unknown_outcome_cause(unknown: TaskActionOutcomeUnknown) -> None:
+    raise RuntimeError('cancel outcome unknown') from unknown.cause
 
 
 def chain_the_task_action_stored_data_cause(stored: TaskActionStoredDataInvalid) -> None:
@@ -103,6 +108,12 @@ def task_action_causes_are_exceptions() -> None:
         task_id=TASK_ID,
         cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
+    _ = TaskActionOutcomeUnknown(
+        message='failed',
+        retryable=True,
+        task_id=TASK_ID,
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
+    )
     _ = TaskActionStoredDataInvalid(
         message='failed',
         task_id=TASK_ID,
@@ -110,6 +121,6 @@ def task_action_causes_are_exceptions() -> None:
     )
 
 
-def the_history_status_is_parsed(info: TaskInfo) -> None:
+def the_history_status_is_parsed(info: TaskInfo[object]) -> None:
     _ = info.status is TaskStatus.COMPLETED
     _ = info.status == 'COMPLETED'  # pyright: ignore[reportUnnecessaryComparison]

@@ -184,6 +184,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
         Err(
             error @ (TaskActionError::IsWorkflowTask { .. }
             | TaskActionError::DatabaseOperationFailed { .. }
+            | TaskActionError::OutcomeUnknown { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
     }
@@ -205,7 +206,8 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | `NotFound` | `TaskNotFound` | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING with `CancelPolicy::PendingOrClaimedOnly`; `current_status` is the status that the cancel found. Nothing changed |
 | `IsWorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
-| `DatabaseOperationFailed { retryable, cause, .. }` | `DatabaseOperationFailed` | The connect or the statement failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
+| `DatabaseOperationFailed { retryable, cause, .. }` | `DatabaseOperationFailed` | The connect failed, or the statement was not sent or the server refused it; `cause` is the `Box<BrokerError>`. Nothing changed |
+| `OutcomeUnknown { retryable, cause, .. }` | `OutcomeUnknown` | The statement was sent and its reply was lost; `cause` is the `Box<BrokerError>`. The cancel may have committed. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled`, and a cancel that did not commit cancels the task |
 | `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
 
 ## Actions as the Web Routes Answer

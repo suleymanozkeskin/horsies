@@ -19,7 +19,7 @@ pub use error::{
 pub use execution::{Execution, ExecutionClass, GraceUse, InvalidExecution, TimeoutUse};
 pub use fencing::{FencingToken, FencingTokenRefused, TaskAttempt, TaskAttemptRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
-pub use info::{TaskAttemptInfo, TaskInfo};
+pub use info::{ResultSlot, TaskAttemptInfo, TaskInfo};
 pub use options::{
     check_cancel_grace_ms, BackoffStrategy, CancelGraceOutOfRange, RetryPolicy, RetryPolicyError,
     TaskOptions, DEFAULT_CANCEL_GRACE_MS,

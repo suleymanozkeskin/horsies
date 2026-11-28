@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_listener_disabled, ping_min_responses_refused, ping_wait_refused, BrokerOperationSource,
-    DatabaseOperationError, WorkerPingStep, WorkerPong,
+    checked_ping_wait, ping_listener_disabled, ping_min_responses_refused, ping_wait_over_bound,
+    ping_wait_refused, BrokerOperationSource, DatabaseOperationError, WorkerPingStep, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyInt, PyList, PyString};
@@ -97,7 +97,8 @@ fn shown(value: &Bound<'_, PyAny>) -> PyResult<String> {
 /// - a `bool`, or a value that is not an `int`: `INVALID_INPUT`, naming the
 ///   type and not the value;
 /// - 0 or less: the core's refusal with the value;
-/// - above `u64::MAX` milliseconds: `INVALID_INPUT` with the bound.
+/// - above [`WORKER_PING_WAIT_BOUND`] (or beyond `u64` milliseconds):
+///   `INVALID_INPUT` with the bound.
 ///
 /// Reads the value only.
 fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFailure>> {
@@ -116,16 +117,20 @@ fn ping_window(value: &Bound<'_, PyAny>) -> PyResult<Result<Duration, BrokerFail
             ping_wait_refused(&shown(value)?),
         )));
     }
+    let over_bound = || {
+        shown(value).map(|text| {
+            Err(BrokerFailure::of_operation_error(
+                SUBJECT,
+                ping_wait_over_bound(&text),
+            ))
+        })
+    };
     match value.extract::<u64>() {
-        Ok(milliseconds) => Ok(Ok(Duration::from_millis(milliseconds))),
-        Err(_) => Ok(Err(BrokerFailure::of_operation_error(
-            SUBJECT,
-            DatabaseOperationError::invalid_input(format!(
-                "wait_ms must be at most {}, got {}",
-                u64::MAX,
-                shown(value)?
-            )),
-        ))),
+        Ok(milliseconds) => match checked_ping_wait(Duration::from_millis(milliseconds)) {
+            Ok(window) => Ok(Ok(window)),
+            Err(_over_bound) => over_bound(),
+        },
+        Err(_) => over_bound(),
     }
 }
 
@@ -368,16 +373,22 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_above_the_millisecond_range_is_refused_with_the_bound() {
-        let (code, message) = refusal("None", "2 ** 64", "None");
-        assert_eq!(code, "INVALID_INPUT");
+    fn a_wait_above_the_bound_is_refused_with_the_bound() {
+        for wait in ["60001", "2 ** 64", "2 ** 64 - 1"] {
+            let (code, message) = refusal("None", wait, "None");
+            assert_eq!(code, "INVALID_INPUT");
+            assert!(
+                message.starts_with("wait_ms must be at most 60000, got "),
+                "{message}"
+            );
+        }
         assert_eq!(
-            message,
-            format!("wait_ms must be at most {}, got {}", u64::MAX, 1_u128 << 64)
+            refusal("None", "2 ** 64", "None").1,
+            format!("wait_ms must be at most 60000, got {}", 1_u128 << 64)
         );
         assert_eq!(
-            accepted("None", "2 ** 64 - 1", "None").window,
-            Duration::from_millis(u64::MAX)
+            accepted("None", "60000", "None").window,
+            Duration::from_millis(60_000)
         );
     }
 

@@ -919,7 +919,7 @@ fn default_drain_timeout() -> DrainTimeout {
     DrainTimeout::DEFAULT
 }
 
-fn describe_task_limit(limit: TaskLimitSetting) -> String {
+pub(crate) fn describe_task_limit(limit: TaskLimitSetting) -> String {
     match limit {
         TaskLimitSetting::TaskLimit { tasks } => format!("{} tasks", tasks.get()),
         TaskLimitSetting::NoTaskLimit {} => "no limit".to_owned(),

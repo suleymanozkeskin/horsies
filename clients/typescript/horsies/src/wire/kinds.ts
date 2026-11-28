@@ -78,9 +78,12 @@ export type UpstreamOutput =
 
 /**
  * The outcome of an upstream task or sub-workflow, which a workflow node gives to a whole input parameter: the stored
- * result envelope, whose `ok` value has the upstream output kind.
+ * result envelope, whose `ok` value has the upstream output kind and whose error is a stored task error (the core checks its custom code against the upstream task).
  */
-export type TaskOutcomeKind = { readonly node: "taskOutcome"; readonly output: UpstreamOutput };
+export type TaskOutcomeKind = {
+  readonly node: "taskOutcome";
+  readonly output: UpstreamOutput;
+};
 
 /**
  * A value that a user-side conversion turns into the stored value of `stored` and back (a zod codec). The stored text

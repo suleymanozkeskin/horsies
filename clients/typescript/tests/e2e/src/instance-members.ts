@@ -17,6 +17,7 @@ import { ADVANCED_WORKFLOWS } from "./workflows/advanced.ts";
 import { CHILD_WORKFLOWS } from "./workflows/children.ts";
 import { DATAFLOW_WORKFLOWS } from "./workflows/dataflow.ts";
 import { STRUCTURE_WORKFLOWS } from "./workflows/structure.ts";
+import { UPSTREAM_CODE_WORKFLOWS } from "./workflows/upstream-codes.ts";
 import { SUBWORKFLOW_PARENTS } from "./workflows/subworkflows.ts";
 
 /**
@@ -28,6 +29,7 @@ export const LAYER_WORKFLOWS: readonly AnyWorkflowContract[] = [
   ...DATAFLOW_WORKFLOWS,
   ...ADVANCED_WORKFLOWS,
   ...CHILD_WORKFLOWS,
+  ...UPSTREAM_CODE_WORKFLOWS,
   ...SUBWORKFLOW_PARENTS,
 ];
 

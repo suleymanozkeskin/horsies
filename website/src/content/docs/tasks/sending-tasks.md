@@ -268,7 +268,7 @@ In an async function, use `send_async()` and `resend_async()`.
 
 ### Make a Send Repeatable
 
-Pass `idempotency_key` to `with_options()`, as in the example above. A repeat of the same send returns `Ok(TaskHandle)` for the first task. A repeat with another command returns `Err(TaskSendIdempotencyKeyConflict)`, whose `owner_task_id` names the first task. A key outside 1 to 255 UTF-8 bytes returns `Err(TaskSendEnqueueFailed)` with `retryable=False`. The key rules and the reservation window are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#make-the-send-repeatable-with-an-idempotency-key).
+Pass `idempotency_key` to `with_options()`, as in the example above. A repeat of the same send returns `Ok(TaskHandle)` for the first task. A repeat with another command returns `Err(TaskSendIdempotencyKeyConflict)`, whose `owner_task_id` names the first task. A key outside 1 to 255 UTF-8 bytes returns `Err(TaskSendValidationFailed)`, and nothing is written. The key rules and the reservation window are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#make-the-send-repeatable-with-an-idempotency-key).
 
 The reservation window is the `idempotency_reservation_window` argument of `PostgresBroker`. `AppConfig` has no field for it, so `app.get_broker()` uses the default of 24 hours.
 
@@ -464,5 +464,5 @@ The codes, and which of them the resend methods accept, are in the [Errors Refer
 | `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
-| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Fetch task metadata from broker |
-| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo \| None]` | Async variant of `.info()` |
+| `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] \| None]` | Fetch task metadata from broker |
+| `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `DatabaseResult[TaskInfo[TaskOutcome[Any, TaskError]] \| None]` | Async variant of `.info()` |

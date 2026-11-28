@@ -3,11 +3,13 @@
 //!
 //! - The outcome is the cancelled record, or the raw record of the core's
 //!   `TaskActionError` (`TaskActionNotFound`, `TaskActionNotCancellable`,
-//!   `TaskActionIsWorkflowTask`, `TaskActionDatabaseOperationFailed` or
-//!   `TaskActionStoredDataInvalid`), with `cancel_task` as the subject of its
-//!   exception. The core gives each class its message.
+//!   `TaskActionIsWorkflowTask`, `TaskActionDatabaseOperationFailed`,
+//!   `TaskActionOutcomeUnknown` or `TaskActionStoredDataInvalid`), with
+//!   `cancel_task` as the subject of its exception. The core gives each class
+//!   its message.
 //! - A failed connect is `TaskActionDatabaseOperationFailed`: nothing was
-//!   sent.
+//!   sent. A statement that was sent and whose reply was lost is
+//!   `TaskActionOutcomeUnknown`.
 //! - The cancel writes in one statement. A stop of the core during the
 //!   statement leaves its outcome unknown (`CallKind::Write`); a repeat tells
 //!   which: a committed cancel answers `TaskActionNotCancellable` with
@@ -124,6 +126,9 @@ fn cancel_outcome(answer: TaskActionResult<TaskCancelled>) -> Outcome<TaskCancel
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use horsies_core::db::{CancelRequestOutcome, StatementFailure, UnknownOutcomeCause};
     use horsies_core::{BrokerError, TaskStatus};
 
     use super::*;
@@ -157,6 +162,29 @@ mod tests {
                 assert_eq!(names, ["message", "retryable", "task_id", "cause"]);
             }
             Outcome::Done(record) => panic!("a refused cancel, got {record:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancel_with_a_lost_reply_is_the_raw_record_of_the_unknown_outcome() {
+        let unknown = TaskActionError::cancel_outcome_unknown(
+            task(),
+            StatementFailure::OutcomeUnknown {
+                statement: SUBJECT,
+                cause: UnknownOutcomeCause::NoReplyWithinBound {
+                    bound: Duration::from_secs(1),
+                    grace: Duration::from_secs(1),
+                    cancel: CancelRequestOutcome::Sent,
+                },
+            },
+        );
+        match cancel_outcome(Err(unknown)) {
+            Outcome::Failed(error) => {
+                assert_eq!(error.class, "TaskActionOutcomeUnknown");
+                let names: Vec<&str> = error.slots.iter().map(|slot| slot.name.as_str()).collect();
+                assert_eq!(names, ["message", "retryable", "task_id", "cause"]);
+            }
+            Outcome::Done(record) => panic!("an unknown cancel outcome, got {record:?}"),
         }
     }
 

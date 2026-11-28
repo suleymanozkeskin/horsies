@@ -169,9 +169,6 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
     case "json":
       return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
     case "taskOutcome":
-      // A stored error whose custom code the upstream contract does not list (for example from an older deployment
-      // of the upstream task) decodes as any other custom code, so the parameter's code type does not hold for it.
-      // Whether the input decode refuses such an error instead is open (#2557).
       return decodeOutcome(outcomeValueKind(kind, path), node, path, form);
     case "conversion":
       return decodeConverted(kind, node, path, depth, form);
@@ -239,6 +236,7 @@ function decodeOutcome(
 
     case "err":
       return ok(Object.freeze({ kind: "failed", error: slots.value.error }));
+
     default:
       return unreachable(slots.value, "decodeOutcome");
   }

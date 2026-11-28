@@ -84,9 +84,17 @@ async fn print_attempts(handle: &TaskHandle<String, std::convert::Infallible>) -
 
 | Field | Reads |
 |-------|-------|
-| `result` | The stored result of a terminal task, as `TaskResult<JsonText>`: the value as its stored text (`decode::<T>()` reads it with the task's type), or the stored error |
+| `result` | The stored result of a terminal task, as a `ResultSlot<TaskResult<JsonText>>` (below) |
 | `failed_reason` | The failed reason of a failed task |
 | `attempts` | Every attempt of the task, newest first |
+
+`TaskInfo::result` is a `ResultSlot` with three variants:
+
+| Variant | Meaning |
+|---------|---------|
+| `ResultSlot::NotRequested` | `TaskInfoParts::result` was `false` |
+| `ResultSlot::NotStored` | `TaskInfoParts::result` was `true`, and the task stored no result. A live task has none |
+| `ResultSlot::Stored(result)` | `TaskInfoParts::result` was `true`, and the task stored a result: a `TaskResult<JsonText>`, the value as its stored text (`decode::<T>()` reads it with the task's type), or the stored error |
 
 The info is not kept: a status changes. Its errors are `TaskNotFound` and `DatabaseError`.
 

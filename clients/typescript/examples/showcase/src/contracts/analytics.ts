@@ -15,7 +15,6 @@ export const salesRollup = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { window: h.string() },
   output: SalesRollup,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -27,7 +26,6 @@ export const abandonedCartSweep = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { olderThanMinutes: h.int() },
   output: AbandonedCartSweep,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -39,7 +37,6 @@ export const regionalRollup = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { region: h.string() },
   output: RegionalRollup,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -51,7 +48,6 @@ export const retentionAudit = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { olderThanDays: h.int() },
   output: RetentionAudit,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -63,7 +59,6 @@ export const catalogImportChunk = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { importId: h.string(), chunkIndex: h.int() },
   output: CatalogChunk,
-  errorCodes: [],
   retryPolicy: CRASH_RETRY,
 });
 
@@ -77,7 +72,6 @@ export const flakyExport = defineTask({
   queue: QUEUE_ANALYTICS,
   input: { exportId: h.string() },
   output: ExportManifest,
-  errorCodes: [],
   retryPolicy: EXPORT_RETRY,
 });
 

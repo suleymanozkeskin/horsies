@@ -310,9 +310,9 @@ class CoreHandle:
         """The nodes of one workflow that store a result. Reads only."""
     def workflow_node_results_async(self, workflow_id: uuid.UUID) -> asyncio.Future[WorkflowNodeResultsRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
         """The awaitable form of the method above."""
-    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
+    def workflow_node_result(self, workflow_id: uuid.UUID, node_id: str) -> StoredNodeResultRecord | NodeResultNotStored | NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
         """The stored result of one node. Reads only."""
-    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
+    def workflow_node_result_async(self, workflow_id: uuid.UUID, node_id: str) -> asyncio.Future[StoredNodeResultRecord | NodeResultNotStored | NodeAbsent | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid]:
         """The awaitable form of the method above."""
     def workflow_nodes(self, workflow_id: uuid.UUID) -> WorkflowNodesRead | WorkflowAbsent | WorkflowHandleDatabaseOperationFailed | WorkflowHandleStoredDataInvalid:
         """The nodes of one workflow in index order. Reads only."""
@@ -725,8 +725,9 @@ class TaskAttemptRecord:
 
 @final
 class TaskInfoRecord:
-    """The metadata of one task, with the fields of TaskInfo. result_json is the
-    stored result envelope as JSON text; execution is None for a task read from history.
+    """The metadata of one task, with the fields of TaskInfo. result is the stored result:
+    TaskInfoResultNotRequested, TaskInfoResultNotStored, or TaskInfoResultStored with the envelope as
+    JSON text; execution is None for a task read from history.
     """
     @property
     def task_id(self) -> uuid.UUID: ...
@@ -767,11 +768,28 @@ class TaskInfoRecord:
     @property
     def failed_reason(self) -> str | None: ...
     @property
-    def result_json(self) -> str | None: ...
+    def result(self) -> TaskInfoResultNotRequested | TaskInfoResultNotStored | TaskInfoResultStored: ...
     @property
     def attempts(self) -> list[TaskAttemptRecord] | None: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'] | None: ...
+
+
+@final
+class TaskInfoResultNotRequested:
+    """The read did not ask for the result of the task."""
+
+
+@final
+class TaskInfoResultNotStored:
+    """The read asked for the result, and the task stored none."""
+
+
+@final
+class TaskInfoResultStored:
+    """The read asked for the result, and the task stored one: the envelope as JSON text, as stored."""
+    @property
+    def envelope_json(self) -> str: ...
 
 
 @final
@@ -1943,8 +1961,8 @@ class EventStreamEnded:
 
 @final
 class EventStreamRefused:
-    """No stream: the handler has no broker. The host writes frame, the degraded frame, and ends
-    the response.
+    """No stream: the handler has no broker, or it serves its bound of open streams. The host
+    writes frame, the degraded frame, and ends the response.
     """
     @property
     def message(self) -> str: ...
@@ -1987,7 +2005,8 @@ class MonitoringHandler:
         """
     def subscribe_events_async(self) -> asyncio.Future[EventStream | EventStreamRefused]:
         """Subscribe one event stream, after an allowed view. A broker without a listener, or a
-        stopped listener, gives a stream whose first frame is the degraded frame. Reads only.
+        stopped listener, gives a stream whose first frame is the degraded frame. A handler with
+        256 open streams gives EventStreamRefused. Reads only.
         """
     def close_events_async(self) -> asyncio.Future[None]:
         """End every event stream of the handler after the degraded frame. Runs to its end when the
@@ -2147,9 +2166,16 @@ class WorkflowNodeResultsRead:
 
 @final
 class NodeResultNotStored:
-    """No node of this id stores a result, or no workflow has the id; the read does not tell
-    the two apart.
-    """
+    """The node of this id exists and stores no result yet."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_id(self) -> str: ...
+
+
+@final
+class NodeAbsent:
+    """The workflow exists and has no node of this id."""
     @property
     def workflow_id(self) -> uuid.UUID: ...
     @property

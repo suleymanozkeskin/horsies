@@ -311,6 +311,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::success::BatchCommitUnknown>()?;
     module.add_class::<operations::success::WorkflowSuccessApplied>()?;
     module.add_class::<operations::task_info::TaskInfoRecord>()?;
+    module.add_class::<operations::task_info::TaskInfoResultNotRequested>()?;
+    module.add_class::<operations::task_info::TaskInfoResultNotStored>()?;
+    module.add_class::<operations::task_info::TaskInfoResultStored>()?;
     module.add_class::<operations::task_info::TaskAttemptRecord>()?;
     module.add_class::<operations::task_info::TaskInfoNotFound>()?;
     module.add_class::<operations::task_workflow_node::TaskWorkflowNodeLinked>()?;
@@ -366,6 +369,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_reads::StoredNodeResultRecord>()?;
     module.add_class::<operations::workflow_reads::WorkflowNodeResultsRead>()?;
     module.add_class::<operations::workflow_reads::NodeResultNotStored>()?;
+    module.add_class::<operations::workflow_reads::NodeAbsent>()?;
     module.add_class::<operations::workflow_reads::StoredNodeRecord>()?;
     module.add_class::<operations::workflow_reads::WorkflowNodesRead>()?;
     module.add_class::<operations::workflow_retention::WorkflowsDeleted>()?;

@@ -10,18 +10,16 @@
 //!   the send rules of each send (retention, payload bounds and the priority
 //!   of each queue), the producer manifest of its broker settings and of the
 //!   schema mode that the caller names (the resolution of the Rust client,
-//!   `config::producer_manifest`) and the coverage values of its retention
+//!   `horsies_core::manifest::producer_manifest`) and the coverage values of its retention
 //!   (`CoverageRequest::of_retention`).
 
 use horsies_core::core::config::SessionDatabase as CoreSessionDatabase;
 use horsies_core::manifest::{
-    DatabaseManifest, DatabaseUrl, ManifestVersion, PoolConnections, PoolSize as ManifestPoolSize,
-    ProducerManifest, ReservationWindowMicros, SchemaMode, SendManifest, SessionDatabase,
-    WholeSeconds,
+    core_scheme_url, producer_manifest, BrokerSettingRefused, SchemaMode,
 };
 use horsies_core::{
     AppConfig, AppConfigError, CoverageRequest, DeclaredErrorCodes, HorsiesErrorCode,
-    PostgresConfig, RetentionConfig,
+    RetentionConfig,
 };
 use napi_derive::napi;
 
@@ -29,17 +27,6 @@ use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::sends::refusals::{CoreRefusal, RefusalHelp};
 use crate::sends::send::{QueuePriorities, SendRules};
-
-/// The reservation window of a keyed send: 24 hours, in microseconds. The
-/// window of every app-built broker of the Python client
-/// (`IDEMPOTENCY_WINDOW_DEFAULT`) and of the Rust client.
-const DEFAULT_RESERVATION_WINDOW_MICROS: u64 = 24 * 60 * 60 * 1_000_000;
-
-/// The URL scheme that the core's connection layer reads.
-const CORE_URL_SCHEME: &str = "postgresql://";
-
-/// The short form of [`CORE_URL_SCHEME`] that the config also admits.
-const SHORT_URL_SCHEME: &str = "postgres://";
 
 /// What the core handle of a producer manifest does with the schema: the
 /// three members of the core's `SchemaMode`, with the manifest texts as the
@@ -206,7 +193,15 @@ impl CoverageCheck {
 /// Order of the refusals: the rules of `AppConfig::validate` in its order,
 /// then the manifest bounds of the broker settings, then the coverage
 /// bounds of the retention.
-fn app_config_check(config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
+fn app_config_check(mut config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
+    // The producer manifest writes `postgres://` as `postgresql://`, and the worker start validates the settings
+    // from the manifest. Both URLs are compared in that form, so the same refusals hold at create and at start.
+    config.database.database_url = core_scheme_url(&config.database.database_url);
+
+    if let CoreSessionDatabase::Separate { url } = &mut config.database.session_database {
+        *url = core_scheme_url(url);
+    }
+
     let errors = config.validate();
     let mut refusals: Vec<CoreRefusal> = errors.iter().map(CoreRefusal::of_config_error).collect();
     let manifest = producer_manifest(&config.database, schema);
@@ -234,7 +229,7 @@ fn app_config_check(config: AppConfig, schema: SchemaMode) -> AppConfigCheck {
             }
         }
         (_, manifest, coverage) => {
-            refusals.extend(manifest.err().into_iter().flatten());
+            refusals.extend(manifest.err().iter().flatten().filter_map(broker_refusal));
             refusals.extend(coverage.refusal());
             assert!(
                 !refusals.is_empty(),
@@ -269,93 +264,21 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
     }
 }
 
-/// The producer manifest of the broker settings `config` with the schema
-/// mode `schema`, or every refusal of a pool size outside 1 to 10,000 and of
-/// an overflow above 10,000, which the manifest bounds and
-/// `PostgresConfig::validate` does not. Each refusal has the code of a
-/// broker pool value (`HRS-213`), as Python's pool field checks. Pure.
-fn producer_manifest(
-    config: &PostgresConfig,
-    schema: SchemaMode,
-) -> Result<ProducerManifest, Vec<CoreRefusal>> {
-    Ok(ProducerManifest {
-        manifest_version: ManifestVersion::CURRENT,
-        database: database_manifest(config)?,
-        schema,
-        send: SendManifest {
-            retain_rerun_input_default: config.retain_rerun_input_default,
-            idempotency_reservation_window: ReservationWindowMicros::try_from(
-                DEFAULT_RESERVATION_WINDOW_MICROS,
-            )
-            .expect("24 hours is inside the reservation window bounds of 1 us to 30 days"),
-        },
-    })
-}
-
-/// The database section of the manifest, or the refusal of each pool
-/// setting outside its manifest bound, in field order. A TCP keepalive or
-/// user timeout value outside its bound gives no refusal here:
-/// `AppConfig::validate` refuses it (`CONFIG_INVALID_KEEPALIVE`) with the
-/// same check, so the refusal list holds it already. Pure.
-fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Vec<CoreRefusal>> {
-    let pool_size = ManifestPoolSize::try_from(config.pool_size)
-        .map_err(|cause| database_setting_refused("pool_size", &cause));
-    let max_overflow = PoolConnections::try_from(config.max_overflow)
-        .map_err(|cause| database_setting_refused("max_overflow", &cause));
-    let keepalives = config.tcp_keepalives.checked();
-    let user_timeout = config.tcp_user_timeout.checked();
-    match (pool_size, max_overflow, keepalives, user_timeout) {
-        (Ok(pool_size), Ok(max_overflow), Ok(tcp_keepalives), Ok(tcp_user_timeout)) => {
-            Ok(DatabaseManifest {
-                database_url: core_database_url(&config.database_url),
-                session_database: match &config.session_database {
-                    CoreSessionDatabase::SameAsDatabaseUrl => SessionDatabase::SameAsDatabaseUrl,
-                    CoreSessionDatabase::Separate { url } => SessionDatabase::Separate {
-                        url: core_database_url(url),
-                    },
-                },
-                pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
-                pool_pre_ping: config.pool_pre_ping,
-                pool_size,
-                max_overflow,
-                pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
-                pool_recycle: config.pool_recycle,
-                echo: config.echo,
-                tcp_keepalives,
-                tcp_user_timeout,
-            })
+/// The refusal of a pool setting outside a manifest bound (`HRS-213`), or
+/// nothing for a socket value: `AppConfig::validate` refuses it already.
+/// Pure.
+fn broker_refusal(refused: &BrokerSettingRefused) -> Option<CoreRefusal> {
+    match refused {
+        BrokerSettingRefused::PoolSize { .. } | BrokerSettingRefused::MaxOverflow { .. } => {
+            Some(CoreRefusal::coded(
+                refused.code(),
+                format!("invalid database config: {refused}"),
+                Vec::new(),
+                RefusalHelp::NoHelp,
+            ))
         }
-        (pool_size, max_overflow, _, _) => Err(pool_size
-            .err()
-            .into_iter()
-            .chain(max_overflow.err())
-            .collect()),
+        BrokerSettingRefused::Socket(_) => None,
     }
-}
-
-/// The refusal of a database pool setting outside a manifest bound
-/// (`HRS-213`). The cause names the bound, never the value. Pure.
-fn database_setting_refused(field: &str, cause: &str) -> CoreRefusal {
-    CoreRefusal::coded(
-        HorsiesErrorCode::ConfigInvalidDatabasePool,
-        format!("invalid database config: database.{field}: {cause}"),
-        Vec::new(),
-        RefusalHelp::NoHelp,
-    )
-}
-
-/// `url` with the scheme that the core reads: `postgres://` becomes
-/// `postgresql://`, the rest is kept (Python `core_database_url`).
-/// `PostgresConfig::validate` admits only these two schemes. Pure.
-fn core_database_url(url: &str) -> DatabaseUrl {
-    let text = match url.strip_prefix(SHORT_URL_SCHEME) {
-        Some(rest) => format!("{CORE_URL_SCHEME}{rest}"),
-        None => url.to_owned(),
-    };
-    // A `DatabaseUrl` is built only from its serde form, one JSON string, so
-    // that no code path holds an unchecked URL type. A string always reads.
-    serde_json::from_value(serde_json::Value::String(text))
-        .expect("a JSON string reads as a DatabaseUrl")
 }
 
 #[cfg(test)]
@@ -462,6 +385,47 @@ mod tests {
     }
 
     #[test]
+    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_refused_at_the_check() {
+        for (database, session) in [
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgres://127.0.0.1:6432/horsies",
+                "postgres://127.0.0.1:6432/horsies",
+            ),
+            (
+                "postgresql://127.0.0.1:6432/horsies",
+                "postgresql://127.0.0.1:6432/horsies",
+            ),
+        ] {
+            let text = format!(
+                r#"{{"database": {{"database_url": "{database}", "session_database": {{"kind": "SEPARATE", "url": "{session}"}}, "pgbouncer_transaction_mode": true}}}}"#
+            );
+            let refusals = refusals_of(check_of(&text));
+            assert_eq!(refusals.len(), 1, "{database} {session}: {refusals:?}");
+            assert!(
+                refusals[0]
+                    .message
+                    .contains("must not use the transaction-pool URL"),
+                "{:?}",
+                refusals[0]
+            );
+        }
+    }
+
+    #[test]
+    fn two_urls_of_different_hosts_are_accepted_in_transaction_mode() {
+        let text = r#"{"database": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database": {"kind": "SEPARATE", "url": "postgresql://127.0.0.1:5432/horsies"}, "pgbouncer_transaction_mode": true}}"#;
+        assert!(matches!(check_of(text), AppConfigCheck::Accepted { .. }));
+    }
+
+    #[test]
     fn a_payload_rule_is_refused_with_hrs_227() {
         let text = format!(r#"{{"database": {BROKER}, "payload": {{"warn_bytes": 0}}}}"#);
         let refusals = refusals_of(check_of(&text));
@@ -489,7 +453,29 @@ mod tests {
                 .unwrap_or_else(|| panic!("{field} is refused: {refusals:?}"));
             assert_eq!(pool.code, "HRS-213");
             assert_eq!(pool.help, RefusalHelp::NoHelp);
+            assert!(
+                pool.message.starts_with("invalid database config: "),
+                "{}",
+                pool.message
+            );
+            assert!(pool.message.contains(field), "{}", pool.message);
         }
+    }
+
+    /// `AppConfig::validate` refuses a socket value outside its bound; the
+    /// manifest refusal of the same value is dropped, so the caller gets one
+    /// refusal.
+    #[test]
+    fn a_socket_value_outside_its_bound_is_refused_once() {
+        let broker = r#"{"database_url": "postgresql://127.0.0.1/horsies", "tcp_keepalives": {"kind": "ON", "idle_seconds": 0, "interval_seconds": 10, "probes": 3}}"#;
+        let refusals = refusals_of(check_of(&config_text(broker)));
+        let socket: Vec<&CoreRefusal> = refusals
+            .iter()
+            .filter(|refusal| refusal.message.contains("tcp_keepalives.idle_seconds"))
+            .collect();
+        assert_eq!(socket.len(), 1, "{refusals:?}");
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(socket[0].code, "HRS-215");
     }
 
     #[test]

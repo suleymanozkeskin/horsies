@@ -8,7 +8,7 @@ tags: [monitoring, broker, api]
 
 `PostgresBroker` exposes async methods for querying task and worker health directly from the database. These are useful for building custom monitoring, alerting, or cleanup scripts.
 
-All broker methods return `DatabaseResult[T]` — either `Ok(value)` on success or `Err(DatabaseOperationError)` on failure. `DatabaseOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the core classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
+All broker methods return `DatabaseResult[T]` — either `Ok(value)` on success or `Err(DatabaseOperationError)` on failure. `DatabaseOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-databaseresult)). Every variant carries a `retryable` flag: `True` when the core classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
 from uuid import UUID
@@ -45,7 +45,7 @@ Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 se
 
 In a worker child, where task bodies run, it returns `Err(DatabaseWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
-**Returns:** `DatabaseResult[StoredResult | None]` — `Ok(None)` if no task row exists for that ID; `Err(DatabaseOperationError)` on infrastructure failure. The `StoredResult` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
+**Returns:** `DatabaseResult[StoredResult | None]` — `Ok(None)` if no task row exists for that ID; `Err(DatabaseOperationError)` on infrastructure failure. The `StoredResult` carries `task_id`, `task_name`, `status`, and `envelope` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
 Sync variant: `get_raw_result_record(task_id, wait_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(DatabaseAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
@@ -56,11 +56,11 @@ if is_ok(result):
     record = result.ok_value
     if record is None:
         print("Task does not exist")
-    elif record.raw_result is None:
+    elif record.envelope is None:
         print(f"status={record.status}, no result payload yet")
     else:
         print(f"status={record.status}, task_name={record.task_name}")
-        print(f"raw envelope: {record.raw_result}")
+        print(f"raw envelope: {record.envelope}")
 elif is_err(result):
     print(f"Broker error: {result.err_value.code} - {result.err_value.message}")
 ```
@@ -117,17 +117,25 @@ if is_ok(result):
         print(f"Task {task.task_id} ({task.task_name}) expired {task.expired_for} ago")
 ```
 
-### `get_task_info(task_id: UUID, include_result: bool = False, include_failed_reason: bool = False) -> DatabaseResult[TaskInfo | None]`
+### `get_task_info(task_id: UUID, include_result: bool = False, include_failed_reason: bool = False) -> DatabaseResult[TaskInfo[dict[str, Json]] | None]`
 
 Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not exist, `Err(DatabaseOperationError)` on infrastructure failure.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_id` | `UUID` | — | Task ID to query |
-| `include_result` | `bool` | `False` | Include the raw stored result envelope for terminal tasks |
+| `include_result` | `bool` | `False` | Ask for the stored result envelope of a terminal task. Without it, `TaskInfo.result` is `ResultSlotNotRequested()` |
 | `include_failed_reason` | `bool` | `False` | Include worker-level `failed_reason` |
 
-**Returns:** `DatabaseResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
+**Returns:** `DatabaseResult[TaskInfo[dict[str, Json]] | None]`. `TaskInfo.result` is one of three states:
+
+| `TaskInfo.result` | Meaning |
+|---|---|
+| `ResultSlotNotRequested()` | The read did not pass `include_result=True` |
+| `ResultSlotNotStored()` | The read passed `include_result=True`, and the task stored no result. A live task has none |
+| `ResultSlotStored(envelope)` | The read passed `include_result=True`, and the task stored a result. `envelope` is the stored envelope as a `dict` |
+
+Use `app.get_task_info_async(...)` when you want the local app to decode the envelope: `ResultSlotStored(outcome)` then holds a `TaskOutcome`. An ok value of a task that is not registered in this process stays plain JSON.
 Sync wrapper: `broker.get_task_info(...)`.
 
 ```python

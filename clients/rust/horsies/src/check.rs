@@ -30,12 +30,18 @@
 use std::collections::BTreeMap;
 
 use horsies_core::core::task::error::check_error_code_text;
+use horsies_core::handle::{CoreConnection, HandleClose};
 use horsies_core::{
-    check_worker_connections, ConnectivityRefusal, Execution, RegisteredTask, TaskOptions,
+    check_worker_connections, ClientFamily, ConnectivityRefusal, Execution, PoolProfile,
+    RegisteredTask, TaskOptions,
 };
 
+use crate::app::broker_refusal_errors;
 use crate::process_state::refuse_in_a_fork;
-use crate::{AppRole, Horsies, HorsiesError, HorsiesErrorCode, ValidationReport};
+use crate::{
+    AppConfig, AppRole, Horsies, HorsiesError, HorsiesErrorCode, SchemaMode, ValidationReport,
+};
+use horsies_core::manifest::producer_manifest;
 
 /// The check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,9 +126,11 @@ impl Horsies {
     }
 
     /// The static check, then the connectivity and the worker connections
-    /// (Python `check(live=True)`). Connects the app's handle and reads;
-    /// writes nothing but the LISTEN probe's one NOTIFY in PgBouncer
-    /// transaction mode. Installs no schema.
+    /// (Python `check(live=True)`). Connects a handle of its own with the
+    /// schema mode [`SchemaMode::ObserveOnly`], whatever the mode of the
+    /// app's handle, and closes it at the end; the app's handle does not
+    /// connect. Writes nothing but the LISTEN probe's one NOTIFY in
+    /// PgBouncer transaction mode. Installs no schema.
     ///
     /// Errors: [`ValidationReport`] with the refusals of the first phase that
     /// refused.
@@ -134,17 +142,10 @@ impl Horsies {
     pub async fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let passed = self.check()?;
         refuse_in_a_fork(format_args!("Horsies::check_live"));
-        let broker = match self.handle().broker().await {
-            Ok(broker) => broker,
-            Err(error) => return Err(connectivity_report(&error.to_string())),
-        };
-        if let Err(refused) = broker.check_connectivity().await {
-            return Err(refusal_report(&refused));
-        }
-        match check_worker_connections(self.config(), &broker).await {
-            errors if errors.is_empty() => Ok(passed),
-            errors => Err(ValidationReport::of(CHECK, errors)),
-        }
+        let handle = live_check_handle(self.config())?;
+        let outcome = run_live_phases(self.config(), &handle).await;
+        let _closed: HandleClose = handle.close().await;
+        outcome.map(|()| passed)
     }
 
     /// The static check with the phases of `scope`; a refusal names
@@ -173,6 +174,45 @@ impl Horsies {
             }),
             false => Err(ValidationReport::of(phase, schedule_errors)),
         }
+    }
+}
+
+/// The core handle of the live check: built from `config.database` with the
+/// schema mode `ObserveOnly` (no schema step, no write but the probe's
+/// NOTIFY), whatever the mode of the app. Nothing connects. Pure.
+///
+/// Errors: a [`ValidationReport`] of the phase `check` that holds the
+/// refused database setting; `config` passed validation when the app was
+/// built, so a refusal here is a setting that the manifest bounds refuse
+/// and the config validation does not.
+fn live_check_handle(config: &AppConfig) -> Result<CoreConnection, ValidationReport> {
+    let manifest = producer_manifest(&config.database, SchemaMode::ObserveOnly)
+        .map_err(|refusals| ValidationReport::of(CHECK, broker_refusal_errors(&refusals)))?;
+    Ok(CoreConnection::new(
+        manifest,
+        PoolProfile::Producer,
+        ClientFamily::Rust,
+    ))
+}
+
+/// The live phases on `handle`: the connectivity check, then the worker
+/// connections. Connects `handle` and reads; leaves it open.
+///
+/// Errors: the report of the first phase that refused.
+async fn run_live_phases(
+    config: &AppConfig,
+    handle: &CoreConnection,
+) -> Result<(), ValidationReport> {
+    let broker = match handle.broker().await {
+        Ok(broker) => broker,
+        Err(error) => return Err(connectivity_report(&error.to_string())),
+    };
+    if let Err(refused) = broker.check_connectivity().await {
+        return Err(refusal_report(&refused));
+    }
+    match check_worker_connections(config, &broker).await {
+        errors if errors.is_empty() => Ok(()),
+        errors => Err(ValidationReport::of(CHECK, errors)),
     }
 }
 
@@ -648,6 +688,16 @@ mod tests {
         assert_eq!(error.code, Some(HorsiesErrorCode::DatabaseInvalidUrl));
         assert!(error.notes[0].contains("transaction-pooled"));
         assert_eq!(error.notes[1], "the listener stopped during the probe");
+    }
+
+    #[test]
+    fn the_live_check_handle_is_observe_only_whatever_the_mode_of_the_app() {
+        let config = AppConfig::from_database_url("postgresql://localhost/horsies");
+        let app =
+            Horsies::with_schema_mode(config.clone(), SchemaMode::MigrateAndValidate).unwrap();
+        assert_eq!(app.handle().schema_mode(), SchemaMode::MigrateAndValidate);
+        let handle = live_check_handle(app.config()).unwrap();
+        assert_eq!(handle.schema_mode(), SchemaMode::ObserveOnly);
     }
 
     #[test]

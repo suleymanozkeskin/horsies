@@ -112,15 +112,50 @@ describe("the decode of an h.taskOutcome parameter", () => {
     assert.equal(decoded.ok ? undefined : decoded.error.path, "$.price.ok.total");
   });
 
-  test("a stored custom code that the contract does not list decodes as a custom code (#2557)", () => {
-    const stored = '{"error_code":"OTHER","message":null,"data":null,"exception":null}';
-    const text = writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`);
+  const failedWith = (code: string): ReturnType<typeof decodeParameters> => {
+    const stored = `{"error_code":"${code}","message":null,"data":null,"exception":null}`;
 
+    return decodeParameters(
+      parameters,
+      writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+      "worker",
+    );
+  };
+
+  test("a stored custom code that the contract declares decodes as a custom code", () => {
     const failed = {
       kind: "failed",
-      error: { kind: "custom", code: "OTHER", message: null, data: null, exception: null, subWorkflow: null },
+      error: { kind: "custom", code: "NO_PRICE", message: null, data: null, exception: null, subWorkflow: null },
     };
 
-    assert.deepEqual(decodeParameters(parameters, text, "worker"), { ok: true, value: { price: failed } });
+    assert.deepEqual(failedWith("NO_PRICE"), { ok: true, value: { price: failed } });
+  });
+
+  test("a stored built-in code decodes whatever the contract declares", () => {
+    const stored =
+      '{"error_code":{"__builtin_task_code__":"WORKER_CRASHED"},"message":null,"data":null,"exception":null}';
+
+    const builtIn = decodeParameters(
+      parameters,
+      writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+      "worker",
+    );
+
+    assert(builtIn.ok, "the built-in code decodes");
+  });
+
+  test("the decode leaves the check of a custom code to the core: a task with no errorCodes and a workflow contract decode any code", () => {
+    for (const upstream of [defineTask({ name: "free", input: {}, output: Total }), pricing]) {
+      const open = parametersWith(h.taskOutcome(upstream));
+      const stored = '{"error_code":"ANYTHING","message":null,"data":null,"exception":null}';
+
+      const decoded = decodeParameters(
+        open,
+        writtenJsonText(`{"price":{"__h_task_result__":true,"ok":null,"err":${stored}}}`),
+        "worker",
+      );
+
+      assert(decoded.ok, "any custom code decodes");
+    }
   });
 });

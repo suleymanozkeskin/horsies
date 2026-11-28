@@ -28,6 +28,7 @@ LIFE: Final[list[tuple[str, str]]] = [
     ('status', 'WorkflowStatusRead'),
     ('wait_no_time', 'WaitTimedOut'),
     ('node_result', 'NodeResultNotStored'),
+    ('node_result_no_such_node', 'NodeAbsent'),
     ('node_results', 'WorkflowNodeResultsRead'),
     ('nodes', 'WorkflowNodesRead'),
     ('pause', 'WorkflowPaused'),
@@ -44,7 +45,7 @@ LIFE: Final[list[tuple[str, str]]] = [
 ABSENT: Final[list[tuple[str, str]]] = [
     ('status', 'WorkflowAbsent'),
     ('wait', 'WorkflowAbsent'),
-    ('node_result', 'NodeResultNotStored'),
+    ('node_result', 'WorkflowAbsent'),
     ('node_results', 'WorkflowAbsent'),
     ('nodes', 'WorkflowAbsent'),
     ('pause', 'WorkflowAbsent'),

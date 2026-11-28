@@ -15,8 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
+use crate::core::history::identity::keys::IDEMPOTENCY_WINDOW_DEFAULT_MICROS;
 use crate::core::{mask_database_url, PostgresConfig};
 use crate::manifest_schema::{IntBound, ManifestValue, PythonValue};
+
+mod producer_builder;
+
+pub use producer_builder::{
+    core_database_url, core_scheme_url, producer_manifest, send_manifest,
+    session_database_manifest, BrokerSettingRefused,
+};
 
 /// The one manifest version this core reads.
 pub const PRODUCER_MANIFEST_VERSION: u32 = 1;
@@ -323,6 +331,20 @@ pub struct SendManifest {
 pub struct ReservationWindowMicros(u64);
 
 impl ReservationWindowMicros {
+    /// The reservation window of a keyed send when nothing sets one: 24
+    /// hours ([`IDEMPOTENCY_WINDOW_DEFAULT_MICROS`], the window of the
+    /// broker). Every producer manifest of an app holds it.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "the assertions below prove the value positive"
+    )]
+    pub const DEFAULT: Self = {
+        // The assertion keeps the cast exact and the value inside the bounds.
+        assert!(IDEMPOTENCY_WINDOW_DEFAULT_MICROS > 0);
+        assert!(IDEMPOTENCY_WINDOW_DEFAULT_MICROS as u64 <= MAX_RESERVATION_WINDOW_MICROS);
+        Self(IDEMPOTENCY_WINDOW_DEFAULT_MICROS as u64)
+    };
+
     pub const fn get(self) -> u64 {
         self.0
     }

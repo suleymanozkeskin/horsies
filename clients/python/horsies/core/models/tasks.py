@@ -34,6 +34,10 @@ if TYPE_CHECKING:
     from horsies.core.models.outcome import TaskOutcome
     from horsies.core.models.workflow import SubWorkflowSummary
 
+from horsies._catalog.task_bounds import (
+    MAX_TASK_TIMEOUT_MS as MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS as MIN_TASK_TIMEOUT_MS,
+)
 from horsies._catalog.task_codes import ContractCode as ContractCode
 from horsies._catalog.task_codes import OperationalCode as OperationalCode
 from horsies._catalog.task_codes import OutcomeCode as OutcomeCode
@@ -410,22 +414,45 @@ class TaskAttemptInfo:
     worker_process_name: str | None = None
 
 
-@dataclass
-class TaskInfo:
+@dataclass(frozen=True, slots=True)
+class ResultSlotNotRequested:
+    """The read did not ask for the result of the task."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResultSlotNotStored:
+    """The read asked for the result, and the task stored none.
+
+    A live task has none: the result of a finished task is in the history.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ResultSlotStored[R]:
+    """The read asked for the result, and the task stored one: `value`."""
+
+    value: R
+
+
+type ResultSlot[R] = ResultSlotNotRequested | ResultSlotNotStored | ResultSlotStored[R]
+"""The stored result of a task record, in one of three states."""
+
+
+@dataclass(frozen=True, slots=True)
+class TaskInfo[R]:
     """Metadata for a broker-backed task.
 
-    Strict-serde (design §6) splits the legacy single ``result`` field
-    into a three-field shape so callers can dispatch cleanly on whether
-    typed decode succeeded:
+    ``result`` is a ``ResultSlot[R]``:
 
-    - ``raw_result``: the JSON envelope as stored, always populated when
-      the task has a terminal payload. Available without any local task
-      registration — safe for cross-process monitoring / dashboards.
-    - ``decoded_result``: the typed ``TaskOutcome`` produced by
-      ``decode_task_result(raw_result, ok_type)``. Populated only when
-      the calling process has the task definition imported AND decode
-      succeeds.
-    - ``result_decoded``: ``True`` iff ``decoded_result`` was populated.
+    - ``ResultSlotNotRequested``: the read did not ask for the result.
+    - ``ResultSlotNotStored``: the read asked, and the task stored no result.
+    - ``ResultSlotStored(value)``: the read asked, and the task stored one.
+
+    ``R`` is the stored envelope (``dict[str, Json]``, the JSON as stored) for
+    the broker's read, and ``TaskOutcome[Any, TaskError]`` for the app's read
+    (``Horsies.get_task_info``), which decodes the envelope. The app decodes
+    an ok value with the task's ``ok_type`` when the task is registered in
+    the calling process, and as plain JSON when it is not.
 
     ``execution`` is the stored ``Execution`` of a live task. It is ``None``
     for a task read from the history archive, which does not keep the class.
@@ -451,10 +478,8 @@ class TaskInfo:
     worker_hostname: str | None
     worker_pid: int | None
     worker_process_name: str | None
+    result: ResultSlot[R]
     error_code: str | None = None
-    raw_result: 'dict[str, Any] | None' = None
-    decoded_result: 'TaskOutcome[Any, TaskError] | None' = None
-    result_decoded: bool = False
     failed_reason: str | None = None
     attempts: list[TaskAttemptInfo] | None = None
     execution: Execution | None = None
@@ -462,16 +487,6 @@ class TaskInfo:
 
 MAX_RETRY_ATTEMPTS: Final = 20
 """The largest `RetryPolicy.max_retries`."""
-
-MIN_TASK_TIMEOUT_MS: Final = 1000
-"""The smallest `TaskOptions.timeout_ms`."""
-
-MAX_TASK_TIMEOUT_MS: Final = 2**32 - 1
-"""The largest `TaskOptions.timeout_ms`, and the largest wait of a result get.
-
-About 49.7 days. It is the limit of the Rust port's `u32` field, so both
-libraries accept the same declarations.
-"""
 
 MIN_CANCEL_GRACE_MS: Final = 100
 """The smallest `cancel_grace_ms` of a `SHARED_ASYNC` or an `ISOLATED` task.

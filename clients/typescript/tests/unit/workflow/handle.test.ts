@@ -287,9 +287,49 @@ describe("WorkflowHandle.resultFor", () => {
     });
   });
 
-  test("no stored result: resultNotReady; a failed read: databaseError", async () => {
-    assert.deepEqual(await handle().handle.resultFor("count"), { ok: false, error: { kind: "resultNotReady", code: "RESULT_NOT_READY" } });
+  test("a node that exists and stores no result: resultNotReady", async () => {
+    assert.deepEqual(await handle({ nodeResult: { kind: "notStored" } }).handle.resultFor("count"), {
+      ok: false,
+      error: { kind: "resultNotReady", code: "RESULT_NOT_READY" },
+    });
+  });
 
+  test("a workflow with no node of the id: nodeNotFound", async () => {
+    assert.deepEqual(await handle({ nodeResult: { kind: "nodeAbsent" } }).handle.resultFor("count"), {
+      ok: false,
+      error: { kind: "nodeNotFound", code: "NODE_NOT_FOUND" },
+    });
+  });
+
+  test("an id that no workflow has: workflowNotFound", async () => {
+    assert.deepEqual(await handle({ nodeResult: { kind: "workflowAbsent" } }).handle.resultFor("count"), {
+      ok: false,
+      error: { kind: "workflowNotFound", code: "WORKFLOW_NOT_FOUND" },
+    });
+  });
+
+  test("a node id outside the build: nodeNotFound, with no read", async () => {
+    const { handle: wf, core } = handle();
+    // SAFETY: the typed handle takes the id of a node of its build; the test passes an id that no node has.
+    const missing = await (wf.resultFor as (nodeId: string) => Promise<unknown>)("missing");
+
+    assert.deepEqual(missing, { ok: false, error: { kind: "nodeNotFound", code: "NODE_NOT_FOUND" } });
+    assert.deepEqual(core.calls, []);
+  });
+
+  test("an err-only stored result reads as the stored error, whatever the node's output type", async () => {
+    const stored =
+      '{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},"data":null,"message":"boom"}}';
+    // `name` has a string output: its ok slot (null here) would not decode, so the read must not decode the ok slot.
+
+    const read = await handle({ nodeResult: { kind: "stored", result: { kind: "checked", text: stored } } }).handle.resultFor("name");
+
+    assert(read.ok && read.value.kind === "failed");
+    assert.equal(read.value.error.code, "TASK_EXCEPTION");
+    assert.equal(read.value.error.message, "boom");
+  });
+
+  test("a failed read: databaseError", async () => {
     const failed = await handle({ nodeResult: { kind: "failed", error: rawDbFailed() } }).handle.resultFor("count");
 
     assert(!failed.ok && failed.error.kind === "databaseError" && failed.error.code === "DATABASE_ERROR");

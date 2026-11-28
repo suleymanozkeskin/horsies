@@ -137,6 +137,7 @@ result = app.get_result(UUID(stored_task_id))
 | The `workflow_id` of `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and `resume_workflow_sync` | Give a `uuid.UUID` |
 | The `workflow_id` of the handle error classes | Still a `str`: the canonical text of the UUID (lower case, with hyphens). In 0.7 it was the text that the handle was made from |
 
+<!-- check: skip elided -- the 0.8.0 names; a later release renames them -->
 ```python
 from horsies import Err, Ok, WorkflowHandle
 

@@ -137,6 +137,8 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "the workflow has not ended; is a worker running?";
     case "workflowNotFound":
       return "no workflow has this id";
+    case "nodeNotFound":
+      return "the workflow has no node with this id";
     case "resultNotReady":
       return "the node stores no result yet";
     case "storedResultUnreadable":

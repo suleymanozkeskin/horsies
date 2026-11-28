@@ -56,7 +56,7 @@ def _ok_record(value: int) -> Ok[StoredResult]:
             task_id='task-1',
             task_name='t',
             status=TaskStatus.COMPLETED,
-            raw_result=envelope,
+            envelope=envelope,
         )
     )
 
@@ -139,7 +139,7 @@ class TestTerminalErrorsStillCached:
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.CANCELLED,
-                    raw_result=None,
+                    envelope=None,
                 )
             ),
         )

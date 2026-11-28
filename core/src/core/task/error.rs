@@ -116,6 +116,9 @@ pub enum RetrievalCode {
     WaitTimeout,
     TaskNotFound,
     WorkflowNotFound,
+    /// The workflow exists and has no node of the id that a node result read asked for. The same
+    /// id gives the same answer on every read: a caller that polls does not retry it.
+    NodeNotFound,
     ResultNotAvailable,
     ResultNotReady,
     /// A sync get was called on a thread that runs an event loop, so this call site cannot wait for
@@ -138,10 +141,11 @@ pub enum RetrievalCode {
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
+        Self::NodeNotFound,
         Self::ResultNotAvailable,
         Self::ResultNotReady,
         Self::AsyncContext,

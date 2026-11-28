@@ -91,9 +91,10 @@ export interface TaskDefinition<
   readonly output: O;
   /**
    * The codes that the task may return, as literals (no `as const` needed). Left out: any code that is not a built-in
-   * name. A list of the type `string[]` fails typecheck: its codes would not be known to the types.
+   * name. A list of the type `string[]` fails typecheck: its codes would not be known to the types. An empty list fails
+   * typecheck and `defineTask`'s checks: leave `errorCodes` out to declare no code.
    */
-  readonly errorCodes?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
+  readonly errorCodes?: string extends E ? readonly [WidenedCodes, ...WidenedCodes[]] : readonly [CustomCode<E>, ...CustomCode<E>[]];
   /** How a worker runs the task. Left out: `ISOLATED`, one task at a time in its own child process. */
   readonly execution?: X;
   readonly retryPolicy?: RetryPolicy<NoInfer<E>>;

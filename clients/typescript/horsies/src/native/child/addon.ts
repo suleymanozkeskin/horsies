@@ -111,6 +111,8 @@ export interface ChildTaskEntry {
   readonly name: string;
   readonly form: BodyForm;
   readonly context: TaskContextUse;
+  /** The `errorCodes` of the contract, in its order; empty for a contract with no `errorCodes`. */
+  readonly errorCodes: string[];
 }
 
 /** What the package gives the child host. */
