@@ -1668,6 +1668,25 @@ fn the_core_stopped_code_is_a_named_child_code() {
     );
 }
 
+/// The code of a child above its memory limit is a code of the protocol,
+/// apart from the codes of the worker process and from the other child codes.
+#[test]
+fn the_memory_limit_code_is_a_named_child_code() {
+    assert_eq!(super::MEMORY_LIMIT_EXIT_CODE, 81);
+    assert_eq!(
+        ChildExitCode::from_code(super::MEMORY_LIMIT_EXIT_CODE),
+        Some(ChildExitCode::MemoryLimit)
+    );
+    assert_eq!(
+        ChildExitCode::MemoryLimit.code(),
+        super::MEMORY_LIMIT_EXIT_CODE
+    );
+    assert_eq!(
+        crate::worker::executor::child_host::ChildHostExit::MemoryLimit.exit_code(),
+        super::MEMORY_LIMIT_EXIT_CODE
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The step parser and the read plan
 // ---------------------------------------------------------------------------

@@ -562,6 +562,9 @@ fn idle_leave(idle: IdleEnd, exited: bool, exit: ChildExit) -> ChildLeave {
         (IdleEnd::ChildEnded, EndWithoutTask::CoreStopped, _) => {
             ChildLeave::For(ReplaceReason::CoreStopped)
         }
+        (IdleEnd::ChildEnded, EndWithoutTask::MemoryLimit, _) => {
+            ChildLeave::For(ReplaceReason::MemoryLimit)
+        }
         (IdleEnd::ChildEnded, EndWithoutTask::Other, true) => {
             ChildLeave::For(ReplaceReason::ChildDied)
         }
@@ -576,7 +579,7 @@ fn idle_leave(idle: IdleEnd, exited: bool, exit: ChildExit) -> ChildLeave {
 fn log_end_without_task(pid: ProcessId, exit: ChildExit) {
     match EndWithoutTask::of(exit) {
         EndWithoutTask::CoreStopped => log_core_stopped_child(pid),
-        EndWithoutTask::Other => {}
+        EndWithoutTask::MemoryLimit | EndWithoutTask::Other => {}
     }
 }
 

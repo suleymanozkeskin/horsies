@@ -96,6 +96,10 @@ pub enum EndWithoutTask {
     /// stopped, and the child ended itself after it reported any start it
     /// refused. The slot logs it at error level and boots a new child.
     CoreStopped,
+    /// Exit code [`ChildExitCode::MemoryLimit`]: the child went above its
+    /// memory limit and ended itself. The slot replaces it as a memory
+    /// recycle.
+    MemoryLimit,
     /// Any other end. The slot replaces the child with no log of its own.
     Other,
 }
@@ -109,6 +113,7 @@ impl EndWithoutTask {
         };
         match reaped.meaning() {
             ExitMeaning::Protocol(ChildExitCode::CoreStopped) => Self::CoreStopped,
+            ExitMeaning::Protocol(ChildExitCode::MemoryLimit) => Self::MemoryLimit,
             ExitMeaning::Protocol(
                 ChildExitCode::ParentGone
                 | ChildExitCode::BadParentFrame

@@ -207,6 +207,9 @@ pub enum ChildHostExit {
     /// A run met the stopped host core ([`HostCoreWatch`]); its frame is
     /// written: exit 80.
     CoreStopped,
+    /// The resident memory of the child went above its `recycle_above`
+    /// limit: exit 81. The worker recycles the child.
+    MemoryLimit,
 }
 
 impl ChildHostExit {
@@ -221,6 +224,7 @@ impl ChildHostExit {
             Self::ProtocolMismatch => ChildExitCode::ProtocolMismatch.code(),
             Self::ChildHookFailed => ChildExitCode::ChildHookFailed.code(),
             Self::CoreStopped => ChildExitCode::CoreStopped.code(),
+            Self::MemoryLimit => ChildExitCode::MemoryLimit.code(),
         }
     }
 }
