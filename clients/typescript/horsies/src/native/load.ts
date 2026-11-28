@@ -5,26 +5,23 @@
 // - Only the main thread of a process loads the addon. In a `worker_threads` isolate, a load
 //   answers `outsideMainThread` and loads nothing.
 // - The package loads the addon from the platform package `@horsies/native-<platform>` of the host
-//   (`loadAddon`). No environment variable chooses the file. Tests and dev builds load a build of
+//   (`loadAddon`). No environment variable chooses the file. The checks before the open (main thread,
+//   platform, C library) are in this module. The open step comes from the import
+//   `#native/platform-open` of `package.json` `imports`: on Bun its `bun` condition
+//   (`platform-open/bun.ts`, a literal `require` per platform, which `bun build --compile` embeds);
+//   on every other runtime its `default` condition (`platform-open/node.ts`, a resolve and
+//   `process.dlopen`). Tests and dev builds load a build of
 //   `clients/typescript/bridge` through the dev-only entry `dev-addon.ts`, which is not in the
 //   published package.
 
 import { closeSync, openSync, readSync } from "node:fs";
-import { createRequire } from "node:module";
 import { isMainThread, threadId } from "node:worker_threads";
 
+import { openPlatformPackage } from "#native/platform-open";
+
+import { describeThrown, platformPackageName } from "./addon-file.ts";
+import type { AddonOpen, NativePlatform } from "./addon-file.ts";
 import { impossibleValueDefect } from "./call/impossible-value.ts";
-
-/** The name prefix of the platform packages. Equal to `napi.packageName` of `bridge/package.json`, plus `-`. */
-const PLATFORM_PACKAGE_PREFIX = "@horsies/native-";
-
-/** The platforms that have a platform package: the `npm.platform` values of `.github/release-platforms.json`. */
-export type NativePlatform =
-  | "darwin-arm64"
-  | "linux-arm64-gnu"
-  | "linux-arm64-musl"
-  | "linux-x64-gnu"
-  | "linux-x64-musl";
 
 /** The C library of a Linux process. `undetected`: the process report shows neither library. */
 export type LinuxLibc = "glibc" | "musl" | "undetected";
@@ -48,11 +45,6 @@ export type AddonSource =
   | { readonly kind: "platformPackage"; readonly packageName: string }
   | { readonly kind: "devBuild"; readonly path: string };
 
-/** The outcome of opening one addon file. */
-export type AddonOpen =
-  | { readonly kind: "opened"; readonly exports: object }
-  | { readonly kind: "openFailed"; readonly cause: string };
-
 /** The outcome of a load. */
 export type AddonLoad =
   | { readonly kind: "loaded"; readonly exports: object; readonly source: AddonSource }
@@ -68,7 +60,7 @@ let loadSlot: LoadSlot = { kind: "empty" };
 /**
  * Load the addon from the platform package of the host at the first load of the process; give the
  * kept outcome at every later call. Effects of the first load on the main thread: on Linux it reads
- * `/proc/self/maps`; it resolves and opens one addon file. It starts no core runtime: the addon
+ * `/proc/self/maps`; it opens the addon file of one platform package. It starts no core runtime: the addon
  * starts nothing at load.
  */
 export function loadAddon(): AddonLoad {
@@ -108,17 +100,12 @@ function loadFromPlatformPackage(): AddonLoad {
     case "supported": {
       const packageName = platformPackageName(lookup.platform);
 
-      return loadedFrom({ kind: "platformPackage", packageName }, openPlatformPackage(packageName));
+      return loadedFrom({ kind: "platformPackage", packageName }, openPlatformPackage(lookup.platform));
     }
 
     default:
       return unreachable(lookup);
   }
-}
-
-/** The name of the platform package of `platform`. Pure. */
-export function platformPackageName(platform: NativePlatform): string {
-  return `${PLATFORM_PACKAGE_PREFIX}${platform}`;
 }
 
 /** The load outcome of opening the file of `source`. Pure. */
@@ -258,43 +245,6 @@ export function linuxLibc(maps: ProcessMapsRead): LinuxLibc {
     default:
       return unreachable(maps);
   }
-}
-
-/**
- * Resolve the main file of the platform package `packageName` against this module's location, and
- * open it. A package that does not resolve, or a file that does not open, is `openFailed` with its
- * cause.
- */
-export function openPlatformPackage(packageName: string): AddonOpen {
-  let path: string;
-
-  try {
-    path = createRequire(import.meta.url).resolve(packageName);
-  } catch (cause) {
-    return { kind: "openFailed", cause: describeThrown(cause) };
-  }
-
-  return openAddonFile(path);
-}
-
-/**
- * Open the addon file `path` with `process.dlopen`. Effects: opens the shared object, which registers
- * the Node-API module in this environment. A failure is `openFailed` with its cause.
- */
-export function openAddonFile(path: string): AddonOpen {
-  const module: { exports: object } = { exports: {} };
-
-  try {
-    process.dlopen(module, path);
-  } catch (cause) {
-    return { kind: "openFailed", cause: describeThrown(cause) };
-  }
-
-  return { kind: "opened", exports: module.exports };
-}
-
-function describeThrown(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 /** Throw the defect of an impossible value. The loader has no addon to report it to, so it throws. */

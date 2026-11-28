@@ -2,7 +2,7 @@
 title: Installation
 summary: Install the horsies npm package on Node or Bun. The package manager selects one prebuilt native addon for the platform, so no Rust toolchain and no build step are necessary.
 related: [index, quick-start/getting-started, configuration/app-config]
-tags: [typescript, install, npm, bun, node, platforms, native addon, typescript version]
+tags: [typescript, install, npm, bun, node, platforms, native addon, typescript version, bun build --compile]
 ---
 
 # Installation
@@ -92,6 +92,23 @@ The package's type tests compile a project with these options and no `lib` setti
 ```
 
 Use a `module` or `moduleResolution` setting that reads the `exports` map: `nodenext`, `node16` or `bundler`.
+
+## A Single-File Program With `bun build --compile`
+
+`bun build --compile` puts the addon of the installed platform package into the compiled file. The compiled file runs on a host that has no `node_modules` folder.
+
+1. On a host of the target platform, install `horsies` with Bun.
+2. Compile the entry file of your program:
+
+   ```bash
+   bun build --compile ./src/main.ts --outfile my-app
+   ```
+
+3. Copy `my-app` to the target host and run it. The target host needs no Bun, no Node and no `node_modules`.
+
+Build on a host of the target platform. The compiled file holds only the platform package that is installed, and the package manager installs only the package of the build host. A compiled file that holds no platform package for its host fails at the first call that needs the core, with the `RuntimeStartFailed` message of [A Host With No Platform Package](#a-host-with-no-platform-package).
+
+On Bun, the package opens its platform package with a `require` of the package name, which the Bun bundler follows. On Node, the package finds the platform package at run time. Thus a Node single executable application, or a bundle of another bundler, does not hold the addon. For such a program, install the platform package in a `node_modules` folder that the program file can resolve.
 
 ## The Main Thread
 

@@ -8,7 +8,7 @@
 
 import { parseArgs } from "node:util";
 
-import type { NativePlatform } from "../../horsies/src/native/load.ts";
+import type { NativePlatform } from "../../horsies/src/native/addon-file.ts";
 import { manifestRefusedText, readHorsiesManifest } from "./manifest.ts";
 import { platformListRefusedText, platformPackageOf, readPlatformList } from "./platforms.ts";
 import type { NpmBuild, NpmInstall, ReleasePlatform, ReleaseState } from "./platforms.ts";

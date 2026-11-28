@@ -14,14 +14,8 @@ import {
   devLoadOf,
   loadDevAddon,
 } from "../../horsies/src/native/dev-addon.ts";
-import {
-  linuxLibc,
-  loadedFrom,
-  nativePlatform,
-  openAddonFile,
-  openPlatformPackage,
-  platformPackageName,
-} from "../../horsies/src/native/load.ts";
+import { openAddonFile, platformPackageName } from "../../horsies/src/native/addon-file.ts";
+import { linuxLibc, loadedFrom, nativePlatform } from "../../horsies/src/native/load.ts";
 import type { AddonLoad } from "../../horsies/src/native/load.ts";
 
 const GLIBC_MAPS = [
@@ -204,19 +198,12 @@ describe("loadedFrom", () => {
   });
 });
 
-describe("openAddonFile and openPlatformPackage", () => {
+describe("openAddonFile", () => {
   test("a file that does not exist fails with the cause", () => {
     const opened = openAddonFile(MISSING_BUILD_PATH);
 
     assert.equal(opened.kind, "openFailed");
     assert.match(opened.kind === "openFailed" ? opened.cause : "", /horsies-loader-check/u);
-  });
-
-  test("a platform package that is not installed fails with the cause", () => {
-    const opened = openPlatformPackage("@horsies/native-not-a-platform");
-
-    assert.equal(opened.kind, "openFailed");
-    assert.match(opened.kind === "openFailed" ? opened.cause : "", /@horsies\/native-not-a-platform/u);
   });
 });
 

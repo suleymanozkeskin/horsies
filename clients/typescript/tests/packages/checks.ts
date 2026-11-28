@@ -54,7 +54,7 @@ export function horsiesProblems(
   const manifest = unpackedManifest(packageDir);
 
   return [
-    ...horsiesFileProblems(tarball.files, exportTargets(manifest["exports"]), expected.skills),
+    ...horsiesFileProblems(tarball.files, [...exportTargets(manifest["exports"]), ...exportTargets(manifest["imports"])], expected.skills),
     ...binFileProblems(tarball.files, manifest["bin"]),
     ...horsiesManifestProblems(manifest, expected.version, expected.optionalDependencies),
     ...filesNamingDevVariable(packageDir, tarball.files).map((file) => `${file} names ${DEV_ADDON_PATH_VARIABLE}`),
