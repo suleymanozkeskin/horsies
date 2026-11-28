@@ -237,7 +237,7 @@ use crate::workflows::restock::Restock;
 #[task("replenish_catalog", queue = "analytics")]
 pub async fn replenish_catalog(rt: TaskRuntime) -> Result<String, TaskError<AcmeCode>> {
     let spec = Restock::build(rt.workflow_builder(Restock::name())).map_err(|refused| {
-        TaskError::custom(AcmeCode::StoreUnavailable, format!("restock spec refused: {refused}"))
+        TaskError::custom(AcmeCode::RestockRefused, format!("restock spec refused: {refused}"))
     })?;
     let handle = rt.start::<StockUpdate>(&spec).await.map_err(|error| {
         TaskError::custom(AcmeCode::StoreUnavailable, format!("restock not started: {error}"))

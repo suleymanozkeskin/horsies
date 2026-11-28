@@ -27,6 +27,9 @@ pub enum AcmeCode {
     DataCorruption,
     LoyaltyEngineBug,
     StoreUnavailable,
+    /// The builder of the `restock` workflow refused the spec, so no workflow
+    /// was started. The refusal text is the error message.
+    RestockRefused,
 }
 
 pub type OrderStatus = String;
