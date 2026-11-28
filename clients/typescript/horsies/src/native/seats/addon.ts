@@ -1,15 +1,14 @@
 // The functions of the `seats` area of the addon, their records, and the accessor.
 //
 // - `seatBounds` is pure: it starts no core. The main thread of a `SHARED_THREAD` child reads it; a seat isolate never
-//   loads the addon, so the main thread gives the relay bounds to each isolate in its seat marker.
+//   loads the addon, so the main thread gives the relay bounds to each isolate in its seat marker. The in-flight bound
+//   of the relay is the child's task-send pool, from its start facts.
 
 import { requireAddon } from "../call/addon.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 
 /** The bounds of the thread seats, from the core's constants. */
 export interface SeatBounds {
-  /** The most operations of one isolate that wait for I/O of the main thread at once. */
-  readonly opsInFlight: number;
   /** The most operations that wait in one isolate. */
   readonly opsWaiting: number;
   /** The longest boot of a new isolate, in milliseconds. */

@@ -14,6 +14,9 @@
 
 use std::sync::Arc;
 
+use std::num::NonZeroU64;
+
+use horsies_core::frame_protocol::MemoryLimit;
 use horsies_core::{
     ChildHookFailure, ChildStartFacts, ChildStartFuture, ChildStartHook, NamedChildStartHook,
 };
@@ -41,10 +44,42 @@ pub enum StartFactsRecord {
     Isolated,
     /// A shared async child with `seats` runs at once.
     SharedAsync { seats: u32 },
-    /// A shared thread child with `seats` runs at once.
-    SharedThread { seats: u32 },
+    /// A shared thread child with `seats` runs at once. Its task sends
+    /// share `task_send_pool` connections (1 to 1,000); `recycle_above` is
+    /// its resident-memory limit.
+    SharedThread {
+        seats: u32,
+        task_send_pool: u32,
+        recycle_above: MemoryLimitRecord,
+    },
     /// The handler child.
     Handler,
+}
+
+/// The resident-memory limit of a child (`recycle.above` of the profile).
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryLimitRecord {
+    /// No limit.
+    Off,
+    /// The limit is `mb` MiB, 1 to `u32::MAX`.
+    AtMb { mb: u32 },
+}
+
+impl MemoryLimitRecord {
+    /// The record of the core's limit. Pure.
+    fn of(limit: MemoryLimit) -> Self {
+        match limit {
+            MemoryLimit::Off => Self::Off,
+            MemoryLimit::AtMb(mb) => Self::AtMb {
+                mb: limit_megabytes(mb),
+            },
+        }
+    }
 }
 
 impl StartFactsRecord {
@@ -55,8 +90,14 @@ impl StartFactsRecord {
             ChildStartFacts::SharedAsync { seats } => Self::SharedAsync {
                 seats: seat_count(seats.get()),
             },
-            ChildStartFacts::SharedThread { seats } => Self::SharedThread {
+            ChildStartFacts::SharedThread {
+                seats,
+                task_send_pool,
+                recycle_above,
+            } => Self::SharedThread {
                 seats: seat_count(seats.get()),
+                task_send_pool: pool_connections(task_send_pool.get()),
+                recycle_above: MemoryLimitRecord::of(recycle_above),
             },
             ChildStartFacts::Handler => Self::Handler,
         }
@@ -66,6 +107,20 @@ impl StartFactsRecord {
 /// A seat count of the core: 1 to 1,000, so it fits a `u32`.
 fn seat_count(seats: u64) -> u32 {
     u32::try_from(seats).unwrap_or_else(|_| panic!("a seat count is 1 to 1,000, not {seats}"))
+}
+
+/// A task-send pool of the core: 1 to 1,000 connections, so it fits a
+/// `u32`.
+fn pool_connections(connections: u64) -> u32 {
+    u32::try_from(connections)
+        .unwrap_or_else(|_| panic!("a task-send pool is 1 to 1,000 connections, not {connections}"))
+}
+
+/// A memory limit of the core's start facts: the init frame decoder takes
+/// 1 to `u32::MAX` MiB, so it fits a `u32`.
+fn limit_megabytes(mb: NonZeroU64) -> u32 {
+    u32::try_from(mb.get())
+        .unwrap_or_else(|_| panic!("a memory limit is 1 to u32::MAX MiB, not {mb}"))
 }
 
 /// One call of the hook dispatcher: the index of the hook in the plan, and
@@ -156,6 +211,8 @@ fn hook_failure(failure: CallbackFailure) -> ChildHookFailure {
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::frame_protocol::{AsyncSeats, TaskSendPool, ThreadSeats};
+
     use super::*;
 
     #[test]
@@ -226,6 +283,63 @@ mod tests {
         assert_eq!(
             StartFactsRecord::of(ChildStartFacts::Handler),
             StartFactsRecord::Handler
+        );
+        assert_eq!(
+            StartFactsRecord::of(ChildStartFacts::SharedAsync {
+                seats: AsyncSeats::new(50).expect("50 async seats"),
+            }),
+            StartFactsRecord::SharedAsync { seats: 50 }
+        );
+    }
+
+    fn shared_thread_facts(recycle_above: MemoryLimit) -> ChildStartFacts {
+        ChildStartFacts::SharedThread {
+            seats: ThreadSeats::new(4).expect("4 thread seats"),
+            task_send_pool: TaskSendPool::new(3).expect("3 is a task-send pool"),
+            recycle_above,
+        }
+    }
+
+    #[test]
+    fn a_shared_thread_record_has_the_seats_and_the_task_send_pool() {
+        let StartFactsRecord::SharedThread {
+            seats,
+            task_send_pool,
+            ..
+        } = StartFactsRecord::of(shared_thread_facts(MemoryLimit::Off))
+        else {
+            panic!("a shared thread child has the shared thread record");
+        };
+        assert_eq!((seats, task_send_pool), (4, 3));
+    }
+
+    #[test]
+    fn no_memory_limit_is_its_own_variant() {
+        assert_eq!(
+            StartFactsRecord::of(shared_thread_facts(MemoryLimit::Off)),
+            StartFactsRecord::SharedThread {
+                seats: 4,
+                task_send_pool: 3,
+                recycle_above: MemoryLimitRecord::Off,
+            }
+        );
+    }
+
+    #[test]
+    fn a_memory_limit_keeps_its_megabytes() {
+        let limit = NonZeroU64::new(1536).expect("1536 is above 0");
+        assert_eq!(
+            StartFactsRecord::of(shared_thread_facts(MemoryLimit::AtMb(limit))),
+            StartFactsRecord::SharedThread {
+                seats: 4,
+                task_send_pool: 3,
+                recycle_above: MemoryLimitRecord::AtMb { mb: 1536 },
+            }
+        );
+        let largest = NonZeroU64::new(u64::from(u32::MAX)).expect("u32::MAX is above 0");
+        assert_eq!(
+            MemoryLimitRecord::of(MemoryLimit::AtMb(largest)),
+            MemoryLimitRecord::AtMb { mb: u32::MAX }
         );
     }
 }

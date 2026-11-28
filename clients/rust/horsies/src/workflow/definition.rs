@@ -43,10 +43,10 @@ use crate::HorsiesError;
 /// let checkout = app.register_workflow_definition::<Checkout>()?;
 /// ```
 pub trait WorkflowDefinition: 'static {
-    /// The type of the workflow's result: the output node's type, or for a
-    /// workflow with no output node `OutputlessResults` (the outcome of each
-    /// node) or `NoWorkflowOutput` (the value of its sub-workflow node, and
-    /// of a handle that reads no node outcomes).
+    /// The type of the workflow's result: the output node's type, or
+    /// `NoWorkflowOutput` for a workflow with no output node. The node of a
+    /// sub-workflow and the handle of a start read the same type. The values
+    /// of the nodes come from `results()`, `nodes()` and `result_for()`.
     type Output: 'static;
 
     /// The parameters of `build_with`; `()` for a definition without parameters.
@@ -163,7 +163,7 @@ mod tests {
     use super::*;
     use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
     use crate::workflow::spec::{SpecOutput, SpecSuccessPolicy, SuccessCase};
-    use crate::workflow::OutputlessResults;
+    use crate::workflow::NoWorkflowOutput;
     use crate::HorsiesErrorCode;
 
     fn charge_node() -> crate::TaskNode<f64, ChargeInput> {
@@ -227,7 +227,7 @@ mod tests {
     struct NoDefine;
 
     impl WorkflowDefinition for NoDefine {
-        type Output = OutputlessResults;
+        type Output = NoWorkflowOutput;
         type Parameters = ();
 
         fn name() -> &'static str {

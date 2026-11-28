@@ -466,6 +466,84 @@ fn the_init_frame_of_a_python_child() {
     );
 }
 
+fn shared_thread_init(recycle_above: MemoryLimit) -> ParentFrame {
+    ParentFrame::Init(InitFrame {
+        program: ChildProgram::Rust,
+        log_level: ChildLogLevel::Info,
+        database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
+        process_name: "horsies-child".to_owned(),
+        child_kind: ChildKind::SharedThread(SharedThreadChild {
+            seats: ThreadSeats::new(4).unwrap(),
+            pool: pool(),
+            task_send_pool: TaskSendPool::new(3).unwrap(),
+            recycle_above,
+        }),
+    })
+}
+
+/// The init frame of a shared thread child, with `recycle_above` as the
+/// JSON text of its limit (and none when `None`).
+fn shared_thread_init_bytes(recycle_above: Option<&str>) -> Vec<u8> {
+    let limit = recycle_above
+        .map(|text| format!(r#","recycle_above":{text}"#))
+        .unwrap_or_default();
+    framed(
+        &format!(
+            concat!(
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"rust"}},"log_level":"info","#,
+                r#""database_url":"postgresql://u@h/db","#,
+                r#""connection":{{"tcp_keepalives":{{"kind":"on","idle_seconds":30,"#,
+                r#""interval_seconds":10,"probes":3}},"tcp_user_timeout":{{"kind":"after","#,
+                r#""milliseconds":30000}},"server_sessions":{{"kind":"kept"}}}},"#,
+                r#""process_name":"horsies-child","child_kind":{{"kind":"shared_thread","#,
+                r#""seats":4,"pool":{{"min_size":0,"max_size":1,"check":true}},"#,
+                r#""task_send_pool":3{limit}}}}}"#,
+            ),
+            limit = limit,
+        ),
+        b"",
+    )
+}
+
+#[test]
+fn the_init_frame_of_a_shared_thread_child_carries_its_memory_limit() {
+    assert_parent_bytes(
+        &shared_thread_init(MemoryLimit::AtMb(NonZeroU64::new(1536).unwrap())),
+        &shared_thread_init_bytes(Some(r#"{"kind":"at_mb","mb":1536}"#)),
+    );
+}
+
+#[test]
+fn the_init_frame_of_a_shared_thread_child_without_a_limit_says_off() {
+    assert_parent_bytes(
+        &shared_thread_init(MemoryLimit::Off),
+        &shared_thread_init_bytes(Some(r#"{"kind":"off"}"#)),
+    );
+}
+
+#[test]
+fn a_shared_thread_init_frame_without_its_memory_limit_is_refused() {
+    assert_eq!(
+        malformed_parent(&shared_thread_init_bytes(None)),
+        MalformedFrame::MissingField {
+            field: "child_kind.recycle_above".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn a_shared_thread_init_frame_with_a_zero_memory_limit_is_refused() {
+    assert_eq!(
+        malformed_parent(&shared_thread_init_bytes(Some(
+            r#"{"kind":"at_mb","mb":0}"#
+        ))),
+        MalformedFrame::OutOfBounds {
+            field: "child_kind.recycle_above.mb".to_owned(),
+        },
+    );
+}
+
 /// Keepalives off, the system's TCP user timeout and PgBouncer transaction
 /// mode, with the session URL of the parent's config.
 fn transaction_mode_connection() -> ChildConnection {
@@ -1587,6 +1665,25 @@ fn the_core_stopped_code_is_a_named_child_code() {
     assert_eq!(
         ChildExitCode::CoreStopped.code(),
         super::CORE_STOPPED_EXIT_CODE
+    );
+}
+
+/// The code of a child above its memory limit is a code of the protocol,
+/// apart from the codes of the worker process and from the other child codes.
+#[test]
+fn the_memory_limit_code_is_a_named_child_code() {
+    assert_eq!(super::MEMORY_LIMIT_EXIT_CODE, 81);
+    assert_eq!(
+        ChildExitCode::from_code(super::MEMORY_LIMIT_EXIT_CODE),
+        Some(ChildExitCode::MemoryLimit)
+    );
+    assert_eq!(
+        ChildExitCode::MemoryLimit.code(),
+        super::MEMORY_LIMIT_EXIT_CODE
+    );
+    assert_eq!(
+        crate::worker::executor::child_host::ChildHostExit::MemoryLimit.exit_code(),
+        super::MEMORY_LIMIT_EXIT_CODE
     );
 }
 

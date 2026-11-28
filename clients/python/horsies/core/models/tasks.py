@@ -175,7 +175,7 @@ class TaskError(BaseModel, Generic[C]):
     own fields and no others.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     exception: BaseException | ExceptionRecord | None = None
     # The type checker sees the code type of the error. At run time the

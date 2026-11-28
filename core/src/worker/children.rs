@@ -340,6 +340,7 @@ fn shared_thread_kind(profile: &WorkerProfile) -> Option<ChildKind> {
             TaskSendPool::new,
             "shared thread task_send_pool",
         ),
+        recycle_above: memory_limit(children.recycle.above),
     }))
 }
 

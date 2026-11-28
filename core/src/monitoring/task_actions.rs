@@ -59,7 +59,8 @@ pub enum TaskActionError {
     /// No task has this id. Nothing changed.
     ///
     /// Neither the live table nor history holds the task (retention can
-    /// remove it).
+    /// remove it). Not retryable: the same call returns this error until a
+    /// task with this id exists. A repeat does not create it.
     #[error("{message}")]
     #[error_class(class = "TaskActionNotFound", code = "TaskNotFound", never_retryable)]
     NotFound {
@@ -163,8 +164,9 @@ pub enum TaskActionError {
     /// Stored task data does not parse. Nothing changed: the cancel refused the task.
     ///
     /// ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
-    /// example a history status that is not a task status. A repeat gives the
-    /// same result until the stored row changes.
+    /// example a history status that is not a task status. Not retryable: the
+    /// same call returns this error until the stored row is repaired. A repeat
+    /// does not repair it.
     #[error("{message}")]
     #[error_class(
         class = "TaskActionStoredDataInvalid",

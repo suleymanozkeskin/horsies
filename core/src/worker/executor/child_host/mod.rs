@@ -28,6 +28,12 @@
 //! host runs each body inside the `tracing` span that it opens for the run
 //! ([`BodyScope`]).
 //!
+//! A host program with a core of its own next to the child host gives the
+//! read of that core's state ([`HostCoreWatch::Host`]): a run that meets the
+//! stopped host core before its start write or before its finalizing
+//! marker ends the child with exit code 80 after its frame
+//! ([`ChildHostExit::CoreStopped`]).
+//!
 //! The same binary serves the handler child of a worker: an init frame of
 //! the `handler` kind boots a child that runs the app's event handlers
 //! ([`EventHandlerSet`]) and no task. Each handler runs on a thread of its
@@ -44,6 +50,7 @@ mod handle_setup;
 mod handler_host;
 mod handlers;
 mod host;
+mod host_core;
 mod link;
 mod panic;
 mod producer;
@@ -71,7 +78,7 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
+pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans};
 pub use ended_spans::{
     EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
@@ -86,6 +93,9 @@ pub use handlers::{
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
     ChildStartFacts, ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
+};
+pub use host_core::{
+    HostCoreRead, HostCoreState, HostCoreStop, HostCoreWatch, CORE_STOPPED_FLUSH_BOUND,
 };
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};

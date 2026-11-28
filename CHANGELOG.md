@@ -22,12 +22,39 @@ and there is no migration contract between pre-1.0 versions.
   `TestRunFacts` and `TestRunCancel`. This is the Rust form of Python's
   `TaskRuntime.for_test`.
 - **`check` bounds the builds of the sub-workflow nesting walk.** The walk of
-  one root workflow builds at most `MAX_CHECK_SUBWORKFLOW_BUILDS` (1,000)
+  one root workflow builds at most `MAX_CHECK_SUBWORKFLOW_BUILDS` (320,000, `MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`)
   child workflows; the builds grow as the children per build to the power of
   the depth (32), so the walk had no bound. At the bound the walk stops and
   `check` reports the new code `HRS-039` (`WORKFLOW_CHECK_BUILD_LIMIT`,
   Rust `WorkflowCheckBuildLimit`) once for that root. The core defines the
   bound; Python reads it from the generated `_catalog.workflow_bounds`.
+  The sub-workflow depth limit `MAX_SUBWORKFLOW_DEPTH` (32) is now one core
+  constant too: the Rust client reads it from `horsies_core`, and Python from
+  the same generated module.
+- **A shared thread child ends itself above its memory limit: exit code 81.**
+  `ChildExitCode::MemoryLimit` (81, `MEMORY_LIMIT_EXIT_CODE`) is the code of a
+  shared thread child whose resident memory went above `recycle_above` while
+  it ran; `ChildHostExit::MemoryLimit` exits with it. The worker reads the end
+  as a memory recycle (`ReplaceReason::MemoryLimit`), not as a crash of the
+  child. A run that the child held is lost with it and follows the retry
+  policy of its task.
+- **Core child host: more start facts of a shared thread child, and the run
+  in `BodySpans::close` (Rust core types).**
+  `ChildStartFacts::SharedThread` holds `task_send_pool` (the connections that
+  the task sends of the child share) and `recycle_above` (`MemoryLimit`:
+  `AtMb(limit)` or `Off` for no limit) beside `seats`. The init frame of a
+  shared thread child carries the limit in the new field `recycle_above`
+  (`{"kind":"off"}` or `{"kind":"at_mb","mb":N}`, `N` from 1); the decoder
+  refuses a shared thread init frame without it (`MissingField`).
+  `BodySpans::close` takes the run that it closes as its first argument
+  (`BodyRunKey { task_id, attempt }`, new). A client whose `open` returns
+  `tracing::Span::none()` can name the run that ended.
+- **`StoredTime` stores a time of day in Python's text (Rust).**
+  `horsies::StoredTime` wraps a chrono `NaiveTime`. It writes `09:10:12` for a
+  whole second, `09:10:12.500000` for a fraction (6 digits) and 9 digits for a
+  part below the microsecond. chrono's own serde form writes a whole
+  millisecond with 3 digits (`09:10:12.500`). The read takes any count of
+  fraction digits. A plain `NaiveTime` keeps chrono's text.
 - **`TaskRuntime` gives the attempt facts of the run.** `task_id` is the
   same on every attempt of a task. `attempt` is the attempt number: 1 is the
   first run, 2 the first retry. `max_retries` is the retry budget of the task
@@ -62,6 +89,20 @@ and there is no migration contract between pre-1.0 versions.
   Python `WorkflowContextMissingId` carries that `code`. The core's
   `WorkflowContext::result_for`, `summary_for` and `output_for` give
   `NODE_NOT_IN_CONTEXT` for an id that is not in the context.
+- **Child host: the stop of a host core ends the child.** `ChildApp` has
+  the new field `host_core: HostCoreWatch`: `NoHostCore` (a Rust binary), or
+  `Host` with a read that gives `HostCoreState::Running` or
+  `Stopped(HostCoreStop { subject, cause })`. A task child reads it before
+  each start write and before each finalizing marker. A stopped host core
+  refuses the start (`OWNERSHIP_UNCONFIRMED`, no attempt charged), or keeps
+  the result of the body and writes no marker; the frame says
+  `child: ends_itself`, and the child exits with the new
+  `ChildHostExit::CoreStopped` (code 80). A shared child ends after the first
+  such frame. A TypeScript task child gives the state of its bridge core: a
+  panic in a core background task of the child stops its core and no longer
+  aborts the child, which ends with code 80 at the next start, after a body
+  that returned, or at a core call that the stopped core refuses during a
+  body.
 - **Core: one builder of the producer manifest and one reservation window constant.**
   `horsies_core::manifest` gives `producer_manifest(&PostgresConfig, SchemaMode)`,
   `send_manifest`, `session_database_manifest`, `core_database_url`,
@@ -176,6 +217,69 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Rust): `TaskSendError` holds a typed exception cause.**
+  `TaskSendError::ValidationFailed.cause` is a `BrokerRefusalCause` (it was a
+  `FailureCause`): `Check` is Python's `NoCause()`, `ValueRule(text)` is the
+  `ValueError` of a rule, `JsonUnreadable(text)` is the `SerializationError` of
+  a text that does not read as JSON. `TaskSendError::EnqueueFailed.cause` is an
+  `EnqueueFailureCause` (new): `Error { text, retryable, failure }` is the
+  core's class of the failed enqueue, `Check` is a conflict whose row was gone
+  before the compare (Python's `NoCause()`). Both types are exported from
+  `horsies_core` and `horsies`. `TaskSendError::failure_cause()` still gives a
+  `FailureCause`. The slot values of every `TaskSendError` class come from
+  `#[derive(ErrorClassValues)]`; `send_failure_exception` and
+  `SendFailureException` are removed. A caller that built a send error with a
+  `FailureCause` passes the matching cause type; a caller that read `cause`
+  matches on it.
+- **Breaking (Rust core): the field of the send-time refusal
+  `DeclaredOptionRefusal::RetryCodeNotDeclared` is `retry_code`.** It was
+  `code`. The rerun refusal `RerunError::RetryCodeNotDeclared` already names
+  the same concept `retry_code`. The message of the refusal does not change.
+- **The error catalog states the retry rule of each class in its text, and
+  `TaskSendAsyncContext` has `retryable`.** `retryable` means that the same
+  call, repeated with no other change, can succeed. `WorkflowHandleNotFound` and
+  `TaskActionNotFound` (a row that does not exist),
+  `WorkflowHandleStoredDataInvalid`, `TaskActionStoredDataInvalid` and
+  `MonitoringQueryHistoryContractViolation` (stored data that an operator must
+  repair) and `WorkflowHandleResumeRecoveryFailed` (a repeated `resume`
+  returns `Ok(False)`) need a change outside the call, so they stay
+  `retryable = False`: no flag value of these six classes changes, and the
+  text of each now says "Not retryable" and names the change. The generated
+  Python class `TaskSendAsyncContext` has `retryable: ClassVar[bool] = False`,
+  as `WorkflowHandleAsyncContext`, `WorkflowStartAsyncContext` and
+  `DatabaseAsyncContext` have; `TaskSendError::retryable()` already gave
+  `false` for it.
+- **Breaking (Python, Rust): a workflow with no output node declares
+  `NoWorkflowOutput`, and `get()` of its handle gives `NoWorkflowOutput`.**
+  Python declares `WorkflowDefinition[NoWorkflowOutput]` and Rust declares
+  `type Output = NoWorkflowOutput`; the sub-workflow node of the definition
+  reads the same value. `get()` gives `Succeeded(NoWorkflowOutput)` or the
+  stored error. The terminal-node map is removed: Rust `OutputlessResults` and
+  Python `WorkflowTerminalResults`. The value of each node comes from
+  `results()`, `nodes()` and `result_for()`; a SKIPPED node has no stored
+  result, so `results()` leaves it out and `nodes()` shows its status.
+  `app.workflow(..., output=None)` returns `WorkflowSpec[NoWorkflowOutput]`.
+  Python refuses `WorkflowDefinition[Any]` and a subclass with no generic
+  parameter when the definition has no `config.output` (HRS-025); Rust
+  refuses any `Output` other than `NoWorkflowOutput` for a definition with
+  no output node (HRS-025). The core stores the same result as before.
+- **A send refuses a `timeout_ms` that no worker accepts.** A present
+  `timeout_ms` that is not an int, is below 1000 ms or is above 4294967295 ms
+  is refused at the send with `VALIDATION_FAILED` before any statement, and
+  nothing is written. The text is the text of the worker's dispatch read:
+  `task_options refused for <task>: stored timeout_ms is a str, not an int`,
+  `... is below 1000 ms`, or `... is above the limit of 4294967295 ms (about
+  49.7 days)`. A run no longer fails with `WORKER_SERIALIZATION_ERROR` for
+  such a value. `null` and an absent `timeout_ms` are not refused here. A
+  schedule keeps its outcome.
+- **A workflow start refuses a shared-class task node with no `timeout_ms`.**
+  A `SHARED_ASYNC` or `SHARED_THREAD` task node whose merged task options have
+  no `timeout_ms` (absent or `null`) is refused at the start with the start's
+  validation error, which names the node (`workflow node <index> (<task>)
+  refused: task_options refused: timeout_ms is absent for execution
+  <class>; a shared class requires timeout_ms`). Nothing is written. An
+  `ISOLATED` node needs no timeout. The Python task decorator and the Rust
+  task macro refuse the same declaration at registration.
 - **Breaking: the task record has one `result` field with three states.**
   `TaskInfo.result` is a `ResultSlot` in Python and Rust. Python
   `TaskInfo.raw_result`, `TaskInfo.decoded_result` and

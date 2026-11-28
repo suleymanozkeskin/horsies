@@ -282,15 +282,19 @@ export async function refreshed(): Promise<void> {
   const result = await started.value.get({ waitMs: 60_000 });
 
   if (result.ok && result.value.kind === "succeeded") {
-    for (const [nodeId, outcome] of result.value.value.byNodeId) {
-      console.log(nodeId, outcome.kind);
+    const nodes = await started.value.results();
+
+    if (nodes.ok) {
+      for (const [nodeId, node] of nodes.value) {
+        console.log(nodeId, node.kind);
+      }
     }
   }
 }
 ```
 
-- `get` of a COMPLETED workflow gives `WorkflowTerminalResults`: `{ kind: "terminalResults", byNodeId }`, the outcome of each terminal node by node id. Each value is a `JsonValue` and each custom code is open.
-- A node entry that does not read is a failed outcome with `RESULT_DESERIALIZATION_ERROR` and the node id in `data.node_id`. The other entries stay readable.
+- `get` of a COMPLETED workflow gives `NoWorkflowOutput` (`{ kind: "noWorkflowOutput" }`) as the success value, or the stored error as a failed outcome. The values of the nodes come from `results()`, `nodes()` and `resultFor`.
+- A node result that does not read is `{ kind: "unreadable", cause }` in `results()`. The other entries stay readable.
 - A sub-workflow node of such a child, `resultFor` of that node and an `h.taskOutcome(workflow)` parameter give `NoWorkflowOutput`.
 
 ## List the Workflows
@@ -467,7 +471,7 @@ export async function startWithRetry(): Promise<void> {
 
 - `waitMs` is a whole number of milliseconds from 0 to 4,294,967,295. Left out, the wait has no bound. Another value is `invalidInput`, before any statement.
 - reads the result with the workflow's declared `outputType` and open custom codes (`string`), because a workflow holds the codes of many tasks;
-- for a workflow with no `outputType`, gives `WorkflowTerminalResults` on success (see [A Workflow With No Output](#a-workflow-with-no-output));
+- for a workflow with no `outputType`, gives `NoWorkflowOutput` on success (see [A Workflow With No Output](#a-workflow-with-no-output));
 - returns `failed` with the stored error of a FAILED, CANCELLED or EXPIRED workflow, or with the library code of its status (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `WORKFLOW_EXPIRED`) when it stored none;
 - returns `failed` with `WORKFLOW_PAUSED` for a PAUSED workflow, which a resume can continue;
 - in a process that runs task bodies, is `waitInsideTask` before any statement.

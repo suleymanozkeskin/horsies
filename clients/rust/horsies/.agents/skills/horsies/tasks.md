@@ -72,6 +72,9 @@ Python stores keyword arguments.
   `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text
   (`2026-08-12T09:10:12.500000Z`). A plain chrono value keeps chrono's serde
   text (`…12.500Z`). Both clients read either text to the same value.
+- A time of day of type `horsies::StoredTime` (wraps a chrono `NaiveTime`) is
+  stored in Python's text (`09:10:12.500000`). A plain `NaiveTime` keeps
+  chrono's serde text (`09:10:12.500`).
 
 ## The Generated Module
 
@@ -92,7 +95,7 @@ app. Two apps in one process share no registration.
 
 - `send` and `with_options(..).send` through an app that does not register
   the task return `TaskSendError::ValidationFailed` with the cause
-  `PreconditionFailed`. The message names the task. Nothing is written.
+  `BrokerRefusalCause::Check`. The message names the task. Nothing is written.
 - `builder.task(node)` on a builder of an app that does not register the
   task returns a `HorsiesError` with `HRS-302`
   (`HorsiesErrorCode::WorkflowUnregisteredTask`). The node is not added.
@@ -506,8 +509,13 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Refused |
 
-- `ValidationFailed` with the cause `PreconditionFailed` is also the answer
-  of a generated send through an app that does not register the task.
+- `ValidationFailed` with the cause `BrokerRefusalCause::Check` is also the
+  answer of a generated send through an app that does not register the task.
+  The `cause` of `ValidationFailed` is a `BrokerRefusalCause`: `Check` (no
+  exception), `ValueRule(text)` or `JsonUnreadable(text)`. The `cause` of
+  `EnqueueFailed` is an `EnqueueFailureCause`: `Error { text, retryable,
+  failure }` or `Check`. `error.failure_cause()` gives the `FailureCause` of
+  either.
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the
   classification of the cause.
 - `cause` (`failure_cause()` on every variant): what the send met, a
@@ -840,7 +848,7 @@ use horsies::{
     // Task definition
     blocking_task, task, CustomErrorCode, TaskError, TaskErrorCode, TaskRuntime,
     RunCancelState, CancelCause, FencingToken, FencingTokenRefused,
-    StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
+    StoredDateTime, StoredTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Built-in codes
     BuiltInTaskCode, OperationalCode, ContractCode, RetrievalCode, OutcomeCode,

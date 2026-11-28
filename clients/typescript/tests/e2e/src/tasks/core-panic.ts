@@ -3,16 +3,17 @@
 // test export of the dev addon (`forwarder-panic.ts`). Each is `ISOLATED`, so its body runs on the main thread of its
 // child, where the addon is loaded.
 //
-// A task child runs under the panic rule `ABORT_PROCESS`: at the panic the child writes the abort line and aborts, so
-// no code of the child runs after it. (A Python child runs under `STOP_CORE`: its core stops, and the child ends
-// itself at its next core call with exit code 80.)
+// A task child runs under the task child rule once its child host read its core, as a Python child runs under
+// `STOP_CORE`: at the panic the core of the child stops, and the child ends itself with exit code 80 at its next task
+// start (no attempt is charged), after a body that returned (its result is kept), or at a core call that the stopped
+// core refuses.
 //
 // - `e2e_core_panic_after_return`: a timer of the child arms the panic `PANIC_DELAY_MS` after the body returned, while
 //   the child holds no task.
 // - `e2e_core_panic_in_body`: on its first run the panic comes while the body waits; a body that reaches its end
 //   appends its process id to `<token>-returned`. Each run appends its process id to `<token>-runs`.
-// - `e2e_core_panic_then_send`: on its first run the panic comes while the body waits before a send. Later runs
-//   return their process id.
+// - `e2e_core_panic_then_send`: on its first run the panic comes while the body waits before a send; the send is a
+//   refused core call. Later runs return their process id.
 
 import { defineTask, h, type Horsies } from "#horsies";
 import type { Result } from "../../../../horsies/src/wire/result.ts";
@@ -27,7 +28,7 @@ export const PANIC_TEXT = "planned panic in the log forwarder of an e2e task";
 /** How long after the return of `e2e_core_panic_after_return` the panic comes: after the end of its run (Python `STOP_DELAY_S`). */
 export const PANIC_DELAY_MS = 2_000;
 
-/** How long a body waits after the panic of its own run: far past the abort, which comes at once (Python `STOP_WAIT_S`). */
+/** How long a body waits after the panic of its own run: far past the stop of the core, which comes at once (Python `STOP_WAIT_S`). */
 const AFTER_PANIC_WAIT_MS = 10_000;
 
 const PANIC_CODES = ["PROBE_FAILED", "MARKER_FAILED", "SEND_FAILED"] as const;

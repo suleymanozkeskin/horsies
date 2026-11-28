@@ -6,6 +6,7 @@ import type { ChildHostPlan } from "../../../horsies/src/native/child/addon.ts";
 import { loopTurned, serveChild } from "../../../horsies/src/native/child/child.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { manifestJson } from "./manifest.ts";
+import { coreCall, panicForwarder, readCore, startTaskChild, untilCoreStopped } from "./task-child-rule.ts";
 
 // The addon of these cases is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -51,6 +52,26 @@ function block(milliseconds: number): void {
   }
 }
 
+/**
+ * A background panic after the first read of the core by the child host: the core stops, and the next core call
+ * ends the child with 80 and its stderr line.
+ */
+async function panicAfterRead(): Promise<string> {
+  startTaskChild();
+
+  const first = readCore();
+
+  if (first !== "running") {
+    return `the first read gave ${first}`;
+  }
+
+  panicForwarder();
+
+  const read = await untilCoreStopped();
+
+  return read === "stopped" ? coreCall() : "the core did not stop";
+}
+
 async function runCase(name: string | undefined): Promise<string> {
   switch (name) {
     case "socket-not-open":
@@ -86,6 +107,9 @@ async function runCase(name: string | undefined): Promise<string> {
       } catch (cause) {
         return cause instanceof ClientDefect ? "ClientDefect" : String(cause);
       }
+
+    case "task-child-panic-after-read":
+      return panicAfterRead();
 
     case undefined:
     default:

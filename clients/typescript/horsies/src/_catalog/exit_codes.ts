@@ -20,4 +20,6 @@ export const LIVENESS_LOCK_LOST_EXIT_CODE = 79;
 
 export const CORE_STOPPED_EXIT_CODE = 80;
 
+export const MEMORY_LIMIT_EXIT_CODE = 81;
+
 export const CHILD_HOOK_FAILED_EXIT_CODE = 173;

@@ -102,7 +102,7 @@ impl WorkflowDefinition for Checkout {
 
 | Item | Rule |
 |---|---|
-| `type Output` | The type of the workflow's result: the output node's type, or for a workflow with no output node `OutputlessResults` (the outcome of each node) or `NoWorkflowOutput` (the value of its sub-workflow node, and of a handle that reads no node outcomes) |
+| `type Output` | The type of the workflow's result: the output node's type, or `NoWorkflowOutput` for a workflow with no output node: the value of its sub-workflow node and of `get()` of its handle. The values of the nodes come from `results()`, `nodes()` and `result_for()` |
 | `type Parameters` | The parameters of `build_with` (`Serialize + DeserializeOwned`); `()` for a definition without parameters |
 | `fn name()` | The workflow name, unique in the app |
 | `fn definition_key()` | The stable identity, unique in the app. A start and the engine find the workflow by it |
@@ -219,7 +219,7 @@ worker writes the context into that parameter.
 <!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{
-    HorsiesError, OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowDefinition,
+    HorsiesError, NoWorkflowOutput, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowDefinition,
     WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
@@ -232,7 +232,7 @@ struct RegionParams {
 struct RegionReport;
 
 impl WorkflowDefinition for RegionReport {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = RegionParams;
 
     fn name() -> &'static str {
@@ -258,7 +258,7 @@ impl WorkflowDefinition for RegionReport {
 struct AllRegions;
 
 impl WorkflowDefinition for AllRegions {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -301,7 +301,7 @@ impl WorkflowDefinition for AllRegions {
 - The depth limit of nested children is 32. `check()` reports a nesting
   that reaches it for certain (`HRS-036`) or repeats a definition with the
   same parameters at once (`HRS-037`). The walk of one root builds at most
-  1,000 children (`MAX_CHECK_SUBWORKFLOW_BUILDS`); at the bound it stops
+  320,000 children (`MAX_CHECK_SUBWORKFLOW_BUILDS`); at the bound it stops
   and reports `HRS-039`.
 - A failed child gives its node a `TaskError` whose `sub_workflow()` is the
   `SubWorkflowFailure`.
@@ -436,14 +436,13 @@ with the error's id.
   holds the codes of many tasks. A FAILED, CANCELLED or EXPIRED workflow
   is `Failed` with its stored error, or the code of its status. A PAUSED
   workflow is `Failed` with `WORKFLOW_PAUSED`; a resume can continue it.
-- A workflow with no output node is read as `OutputlessResults`: `get(id)`,
-  `iter()`, `len()`, `is_empty()`, each outcome as
-  `TaskOutcome<JsonText, CustomCode>`: the value as its stored text, read with
-  `decode::<T>()`.
+- A workflow with no output node declares `type Output = NoWorkflowOutput`.
+  `get` gives `Succeeded(NoWorkflowOutput)` or the stored error; the node
+  outcomes are not in it. `results()`, `nodes()` and `result_for()` give the
+  value of each node.
 - A sub-workflow node of a child with no output node reads as the value
   `NoWorkflowOutput` (the stored `Ok(null)`); another stored value does not
-  read. A handle typed `NoWorkflowOutput` reads a workflow with no output node
-  as `Succeeded(NoWorkflowOutput)` or its stored error.
+  read.
 - `NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
@@ -565,7 +564,7 @@ For a template, pass the builder to `build_with`:
 | `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
 | `HRS-034` | A priority outside 1 to 100 |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or repeats at once |
-| `HRS-039` | The nesting walk of one root reached its bound of 1,000 child builds |
+| `HRS-039` | The nesting walk of one root reached its bound of 320,000 child builds |
 | `HRS-302` | `builder.task(node)`: the builder's app does not register the task, or registers it with another input or output type. The node is not added |
 
 ## Common Pitfalls
@@ -598,7 +597,7 @@ is `HRS-013`.
 use horsies::{
     // Definitions and specs
     WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpec, WorkflowSpecBuilder, OnError,
-    SuccessPolicy, SuccessCase, OutputlessResults,
+    SuccessPolicy, SuccessCase, NoWorkflowOutput,
     // Nodes
     TaskNode, SubWorkflowNode, SubWorkflowParameters, NodeRef, TypedNodeRef, NodeKey,
     InputField, JoinType, WorkflowInput,

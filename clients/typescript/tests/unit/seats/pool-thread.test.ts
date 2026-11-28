@@ -13,7 +13,7 @@ import { seatResourceLimits, workerIsolates } from "../../../horsies/src/seats/n
 import type { SeatOutcome } from "../../../horsies/src/seats/protocol.ts";
 import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { TASK_ID } from "../app/support.ts";
-import { TEST_SEAT_BOUNDS } from "./support.ts";
+import { TEST_SEAT_BOUNDS, testPoolSize, UNREAD_MEMORY } from "./support.ts";
 
 /** `test` on Node; a skipped case on Bun, whose worker threads end at a throw that a listener of the thread handles. */
 const nodeOnly = "bun" in process.versions ? test.skip : test;
@@ -63,8 +63,9 @@ describe("the seat pool with worker threads", () => {
   let pool: SeatPool;
 
   before(async () => {
-    const started = startSeatPool(2, {
+    const started = startSeatPool(testPoolSize(2), {
       start: workerIsolates(ENTRY, seatResourceLimits(getHeapStatistics().heap_size_limit)),
+      memory: UNREAD_MEMORY,
       bounds: () => TEST_SEAT_BOUNDS,
       clock: () => performance.now(),
       now: () => Temporal.Now.instant(),

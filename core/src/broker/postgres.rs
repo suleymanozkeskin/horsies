@@ -806,7 +806,7 @@ impl<'a> CheckedSend<'a> {
     /// future of a send that starts now; an input that the rules of a user
     /// value refuse (`check_sent_input`); options that do not read by the
     /// strict rule, that hold an integer outside `i64::MIN` to `u64::MAX`,
-    /// or whose retry limit does not fit; a `sent_at` with no
+    /// or whose retry limit or `timeout_ms` does not fit (`enqueue_timeout`); a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
     /// class, the command fingerprint and the scope of the idempotency key;
@@ -859,6 +859,7 @@ impl<'a> CheckedSend<'a> {
         let options = parse_optional_object(task_options)
             .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
+        enqueue_timeout(task_name, task_options)?;
         let sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retention_class_key = retention.class_key();
         let facts = prepare_enqueue_facts(
@@ -3124,7 +3125,7 @@ fn decode_pong(
     })
 }
 
-use crate::worker::retry::stored_max_retries;
+use crate::worker::retry::{check_stored_timeout, stored_max_retries, timeout_refusal_message};
 
 /// The `max_retries` that enqueue stores, by Python's rule
 /// (`clients/python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
@@ -3141,6 +3142,25 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
         BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
             SendPart::TaskOptions,
             format!("task_options refused for {task_name}: {refusal}"),
+        ))
+    })
+}
+
+/// The `timeout_ms` of the options of a new send, judged with the rule of
+/// the dispatch ([`check_stored_timeout`]): a value that is not an int or
+/// not from `MIN_TASK_TIMEOUT_MS` to `MAX_TASK_TIMEOUT_MS` is
+/// `EnqueueContract` (`VALIDATION_FAILED`) with the dispatch's text, so no
+/// worker fails the run with `WORKER_SERIALIZATION_ERROR`. Absent and `null`
+/// pass (`check_new_send_timeout` judges a shared class). A schedule
+/// (`SendCommand::prepare`) does not apply it. Pure.
+fn enqueue_timeout(task_name: &str, task_options: Option<&str>) -> Result<(), BrokerError> {
+    check_stored_timeout(task_options).map_err(|refusal| {
+        BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
+            SendPart::TaskOptions,
+            format!(
+                "task_options refused for {task_name}: {}",
+                timeout_refusal_message(refusal)
+            ),
         ))
     })
 }
@@ -5261,6 +5281,102 @@ mod enqueue_task_options_tests {
                 ),
                 "{options}"
             );
+        }
+    }
+
+    use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
+
+    fn check_with_options(options: &str) -> Result<(), BrokerError> {
+        CheckedSend::check(
+            "t",
+            "{}",
+            "default",
+            50,
+            None,
+            None,
+            None,
+            Some(options),
+            Some(Uuid::from_u128(1)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_| ())
+    }
+
+    fn refusal_text(result: Result<(), BrokerError>) -> String {
+        match result {
+            Err(BrokerError::EnqueueContract(refusal)) => refusal.message,
+            other => panic!("expected the task options refusal, got {other:?}"),
+        }
+    }
+
+    /// A `timeout_ms` that is not an int is refused with the dispatch's text.
+    #[test]
+    fn a_send_refuses_a_timeout_that_is_not_an_int() {
+        for (options, found) in [
+            (r#"{"timeout_ms": "30s"}"#, "str"),
+            (r#"{"timeout_ms": 1500.5}"#, "float"),
+            (r#"{"timeout_ms": true}"#, "bool"),
+            (r#"{"timeout_ms": [1000]}"#, "list"),
+            (r#"{"timeout_ms": {"a": 1}}"#, "dict"),
+        ] {
+            let text = refusal_text(check_with_options(options));
+            assert!(
+                text.contains(&format!("stored timeout_ms is a {found}, not an int")),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// An int below the minimum is refused, whatever the class.
+    #[test]
+    fn a_send_refuses_a_timeout_below_the_minimum() {
+        for options in [
+            r#"{"timeout_ms": 999}"#,
+            r#"{"timeout_ms": -1}"#,
+            r#"{"execution": "ISOLATED", "timeout_ms": 5}"#,
+        ] {
+            let text = refusal_text(check_with_options(options));
+            assert!(
+                text.contains(&format!(
+                    "stored timeout_ms is below {MIN_TASK_TIMEOUT_MS} ms"
+                )),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// An int above the maximum is refused, a value above `u64::MAX`
+    /// included.
+    #[test]
+    fn a_send_refuses_a_timeout_above_the_maximum() {
+        let above = MAX_TASK_TIMEOUT_MS + 1;
+        for options in [
+            format!(r#"{{"timeout_ms": {above}}}"#),
+            r#"{"timeout_ms": 18446744073709551615}"#.to_owned(),
+        ] {
+            let text = refusal_text(check_with_options(&options));
+            assert!(
+                text.contains(&format!(
+                    "stored timeout_ms is above the limit of {MAX_TASK_TIMEOUT_MS} ms"
+                )),
+                "{options}: {text}"
+            );
+        }
+    }
+
+    /// The minimum, the maximum, an absent value and `null` are accepted.
+    #[test]
+    fn a_send_accepts_the_bounds_and_no_timeout() {
+        for options in [
+            format!(r#"{{"timeout_ms": {MIN_TASK_TIMEOUT_MS}}}"#),
+            format!(r#"{{"timeout_ms": {MAX_TASK_TIMEOUT_MS}}}"#),
+            r#"{"timeout_ms": null}"#.to_owned(),
+            "{}".to_owned(),
+        ] {
+            check_with_options(&options).unwrap_or_else(|error| panic!("{options}: {error:?}"));
         }
     }
 

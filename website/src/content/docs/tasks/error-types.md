@@ -251,7 +251,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
 | `TaskSendSuppressed` | `SEND_SUPPRESSED` | `message` |
-| `TaskSendAsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` |
+| `TaskSendAsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message`; `retryable` is `False` |
 | `TaskSendValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` |
 | `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` |
 | `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
@@ -263,7 +263,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the resend methods send again |
-| `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `False`, because a repeat of the same send does not complete it |
+| `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict` and `TaskSendAsyncContext`: a class variable that is always `False`, because a repeat of the same send does not complete it (a sync resend on the same thread returns the same error; `resend_async` completes it) |
 | `cause` | `BaseException \| NoCause` | The exception of the cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |

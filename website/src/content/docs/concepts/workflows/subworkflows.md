@@ -640,16 +640,16 @@ Outputless child workflows are orchestration-only when used through
 as `WorkflowDefinition[NoWorkflowOutput]`; the parent node receives
 `Succeeded(NoWorkflowOutput())`, a `TaskOutcome[NoWorkflowOutput, TaskError]`,
 when the child completes. `NoWorkflowOutput` is not `None`: a child whose output
-node returns `None` gives `Succeeded(None)`. The terminal-results map
-returned by a top-level outputless `app.workflow(...).get()` is not exposed as
-a nested subworkflow output.
+node returns `None` gives `Succeeded(None)`. A top-level outputless
+`app.workflow(...).get()` gives the same `Succeeded(NoWorkflowOutput())`; read
+the values of its nodes with `results()`, `nodes()` or `result_for()`.
 
 ### 6.6 Limits
 
 - A child workflow has at most depth 32. A top-level workflow has depth 0, and a child workflow has the depth of its parent plus 1.
   - A `SubWorkflowNode` whose child would have depth 33 does not start its child. The node goes `FAILED` with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and the `on_error` policy of its workflow applies.
   - `horsies check` reports `HRS-036` for such a nesting only when no `SubWorkflowNode` on its path has `waits_for`. The engine then starts the whole chain when the top-level workflow starts, so the failure is certain. A node with `waits_for` starts after results that check does not know, so check does not report a nesting through it. The engine applies the limit at run time.
-- `horsies check` builds each child workflow of the nesting of a workflow, at most 1,000 builds for one root workflow. At the bound the walk stops and `check` reports `HRS-039`; the rest of that nesting is not checked.
+- `horsies check` builds each child workflow of the nesting of a workflow, at most 320,000 builds for one root workflow (`MAX_WORKFLOW_NODES` times `MAX_SUBWORKFLOW_DEPTH`). At the bound the walk stops and `check` reports `HRS-039`; the rest of that nesting is not checked.
 - A `WorkflowSpec` holds at most 10,000 nodes. A spec with more nodes raises `HRS-038` when it is built. In `build_with()`, that raise fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. To run more nodes, split them into `SubWorkflowNode`s: each child workflow has its own limit.
 - A definition that includes itself with the same kwargs builds the same spec at each level, because `build_with()` builds from its arguments only. When no `SubWorkflowNode` from one level to the next has `waits_for`, the nesting never ends once it starts, and `horsies check` reports `HRS-037`. Change the kwargs at each level, and end the nesting with a condition on them. When a node between the levels has `waits_for`, check does not report the nesting, and the engine applies the depth limit at run time.
 

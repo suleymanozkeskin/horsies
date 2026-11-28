@@ -161,6 +161,7 @@ pub(super) fn shared_thread_init(seats: u64) -> InitFrame {
         seats: ThreadSeats::new(seats).unwrap(),
         pool: child_pool(),
         task_send_pool: TaskSendPool::new(1).unwrap(),
+        recycle_above: MemoryLimit::Off,
     }))
 }
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::workflow::node::tests::{add, task_node, test_builder};
 use crate::workflow::{
-    OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowSpecBuilder,
+    NoWorkflowOutput, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 
 /// The typed functions of an app with no task: the definitions here add
@@ -86,7 +86,7 @@ where
 struct Countdown;
 
 impl WorkflowDefinition for Countdown {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -113,7 +113,7 @@ impl WorkflowDefinition for Countdown {
 struct Countup;
 
 impl WorkflowDefinition for Countup {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -138,7 +138,7 @@ impl WorkflowDefinition for Countup {
 struct Mirror;
 
 impl WorkflowDefinition for Mirror {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -161,7 +161,7 @@ impl WorkflowDefinition for Mirror {
 struct Waiting;
 
 impl WorkflowDefinition for Waiting {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -187,7 +187,7 @@ impl WorkflowDefinition for Waiting {
 struct Fanout;
 
 impl WorkflowDefinition for Fanout {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {
@@ -219,7 +219,7 @@ impl<D> WorkflowDefinition for Root<D>
 where
     D: WorkflowDefinition<Parameters = Level>,
 {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -240,7 +240,7 @@ where
 struct Plain;
 
 impl WorkflowDefinition for Plain {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -442,7 +442,7 @@ fn a_member_that_no_params_field_takes_fails_the_node() {
 struct NoParams;
 
 impl WorkflowDefinition for NoParams {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -661,6 +661,9 @@ fn a_nesting_past_the_depth_limit_at_once_is_reported() {
     );
 }
 
+/// A walk bound that the fan-out of `Fanout` reaches at once.
+const SMALL_BUILD_BOUND: usize = 5;
+
 #[test]
 fn a_walk_past_the_bound_of_builds_stops_with_one_finding() {
     let registry = registry();
@@ -671,15 +674,23 @@ fn a_walk_past_the_bound_of_builds_stops_with_one_finding() {
         .register(Definition::without_params::<Root<Fanout>>(&tasks()).unwrap())
         .unwrap();
     assert_eq!(
-        codes(&registry.check_findings()),
+        codes(&registry.check_findings_within(SMALL_BUILD_BOUND)),
         vec![Some(HorsiesErrorCode::WorkflowCheckBuildLimit)]
     );
 }
 
 #[test]
+fn the_check_bound_is_the_nodes_of_a_spec_times_the_depth_limit() {
+    assert_eq!(
+        MAX_CHECK_SUBWORKFLOW_BUILDS,
+        horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH as usize
+    );
+}
+
+#[test]
 fn the_budget_grants_the_bound_then_refuses_once_then_again() {
-    let mut budget = ChildBuildBudget::new();
-    for _ in 0..MAX_CHECK_SUBWORKFLOW_BUILDS {
+    let mut budget = ChildBuildBudget::new(SMALL_BUILD_BOUND);
+    for _ in 0..SMALL_BUILD_BOUND {
         assert!(matches!(budget.take("node"), BuildDecision::Granted));
     }
     match budget.take("node") {
@@ -779,7 +790,7 @@ fn the_decision_stops_at_the_depth_limit() {
         params_text: "{}".to_owned(),
         start,
     };
-    let path: Vec<NestingStep> = (0..MAX_SUBWORKFLOW_DEPTH)
+    let path: Vec<NestingStep> = (0..MAX_SUBWORKFLOW_DEPTH as usize)
         .map(|level| step(&format!("level{level}"), ChildStart::AfterDependencies))
         .collect();
     assert!(matches!(
@@ -796,7 +807,7 @@ fn the_decision_stops_at_the_depth_limit() {
 struct Panicking;
 
 impl WorkflowDefinition for Panicking {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = Level;
 
     fn name() -> &'static str {

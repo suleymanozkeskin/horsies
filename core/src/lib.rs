@@ -51,10 +51,10 @@ pub use crate::core::{
     BackoffStrategy, BuiltInTaskCode, CancelGraceOutOfRange, ContractCode, CronEnumTerm,
     CronNumericTerm, CronOrdinal, CronSchedule, CustomCode, CustomCodeRefused, CustomQueueConfig,
     CustomQueueConfigError, DailySchedule, DaySelector, DeclaredCodeRefusal, DeclaredCodesRefused,
-    DeclaredErrorCode, DeclaredErrorCodes, EnqueueRetention, ErrorCodeLabel, Execution,
-    ExecutionClass, HandleOperation, HandleResult, HorsiesErrorCategory, HorsiesErrorCode,
-    HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, OnError,
-    OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
+    DeclaredErrorCode, DeclaredErrorCodes, EnqueueFailureCause, EnqueueRetention, ErrorCodeLabel,
+    Execution, ExecutionClass, HandleOperation, HandleResult, HorsiesErrorCategory,
+    HorsiesErrorCode, HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey,
+    OnError, OperationalCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
     PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
     ResilienceConfigError, ResultSlot, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
     RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
@@ -164,15 +164,16 @@ pub use crate::worker::executor::child_host::{
     child_command, child_handle_setup, child_mode, child_producer, current_run, process_role,
     run_cancel_signal, run_cancel_state, run_child_host, run_fencing_token, run_task_attempt,
     spawn_in_run, thread_role, wait_inside_task_message, with_test_blocking_run_scope,
-    with_test_run_scope, BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans, CancelCause,
-    ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure, ChildHostExit,
-    ChildLogSetup, ChildMode, ChildProducer, ChildStartFacts, ChildStartFuture, ChildStartHook,
-    EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, EventHandlerRefused,
-    EventHandlerSet, EventLoopWatch, HandlerChildApp, HandlerChildHasNoHandle, HandlerError,
-    HostLoop, HostStopState, HostWork, HostWorkRefused, NamedChildStartHook, ProcessRole,
-    RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
-    RunSpawnRefused, TestRunCancel, TestRunFacts, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT,
-    CHILD_START_HOOK_BOUND, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND,
+    with_test_run_scope, BodyCarrier, BodyOutcome, BodyRun, BodyRunKey, BodyScope, BodySpans,
+    CancelCause, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure,
+    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFacts, ChildStartFuture,
+    ChildStartHook, EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow,
+    EventHandlerRefused, EventHandlerSet, EventLoopWatch, HandlerChildApp, HandlerChildHasNoHandle,
+    HandlerError, HostCoreRead, HostCoreState, HostCoreStop, HostCoreWatch, HostLoop,
+    HostStopState, HostWork, HostWorkRefused, NamedChildStartHook, ProcessRole, RunCancelSignal,
+    RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused, RunSpawnRefused, TestRunCancel,
+    TestRunFacts, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
+    CORE_STOPPED_FLUSH_BOUND, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND,
     HANDLER_QUEUE_EVENTS, HANDLER_STATISTICS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK,
     NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,
 };
@@ -303,7 +304,7 @@ pub use crate::workflow_engine::args_merge::ChildBuildInput;
 pub use crate::workflow_engine::start::ChildSpecError;
 // The bound of the builds in the nesting walk of a client's `check`; Python gets it
 // from the generated `_catalog`.
-pub use crate::workflow_engine::start::MAX_CHECK_SUBWORKFLOW_BUILDS;
+pub use crate::workflow_engine::start::{MAX_CHECK_SUBWORKFLOW_BUILDS, MAX_SUBWORKFLOW_DEPTH};
 pub use crate::workflow_engine::start_statement::{
     build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
     params_refused_error, subworkflow_load_failed_error, NodeInput, RefusedMember,

@@ -38,6 +38,7 @@ async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
 - The parameters form the input, stored as Python stores keyword arguments: a generated `Input` struct with one field per parameter, keyed by the parameter's name, a single parameter of any type included. `validate_order` stores `{"order": {"order_id": "...", "total_cents": ...}}`; `fn double(x: i64)` stores `{"x": 2}`. No parameter, or one parameter written `()`, is the input `()`: a send and a workflow node store `{}`, as Python stores no keyword arguments.
 - A parameter whose value is stored needs a name: `_` is a compile error for it.
 - A date-time of type `horsies::StoredDateTime<T>` (`T` is a chrono `DateTime<Tz>` or `NaiveDateTime`) is stored in Python's text: `2026-08-12T09:10:12.500000Z`. chrono's own serde form writes a whole millisecond with 3 digits (`…12.500Z`). Both clients read either text to the same value; use `StoredDateTime` in a parameter, the output type or a field of either when the stored bytes must equal Python's.
+- A time of day of type `horsies::StoredTime` (it wraps a chrono `NaiveTime`) is stored in Python's text by the same rule: `09:10:12` for a whole second, `09:10:12.500000` for a fraction. chrono's own serde form writes a whole millisecond with 3 digits (`09:10:12.500`). Both clients read either text to the same value.
 - A first parameter of type `horsies::TaskRuntime` is not input: the body gets the runtime of the app. See [Task Runtime](#task-runtime).
 - A task with no codes of its own uses `TaskError<std::convert::Infallible>`. `TaskError` without its code type is a compile error.
 
@@ -118,7 +119,7 @@ The attribute generates a module with the name of the function. The module holds
 | `validate_order::function(&runtime)` | The `TaskFunction` from a `TaskRuntime`; `Err(TaskFunctionNotFound)` when the app did not register the task with these types |
 | `validate_order::fields::order()` | The field token of the parameter `order` (`InputField<validate_order::Input, Order>`), for a workflow node's `set` and `arg_from` |
 
-A send through an app that does not register the task returns `TaskSendError::ValidationFailed` with the cause `PreconditionFailed`. The message names the task. Nothing is written. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
+A send through an app that does not register the task returns `TaskSendError::ValidationFailed` with the cause `BrokerRefusalCause::Check`. The message names the task. Nothing is written. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
 
 ## Task Runtime
 

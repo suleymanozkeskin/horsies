@@ -143,6 +143,7 @@ fn init_frame(kind: SharedChildKindOfTest) -> InitFrame {
             seats: ThreadSeats::new(2).unwrap(),
             pool: child_pool(),
             task_send_pool: TaskSendPool::new(1).unwrap(),
+            recycle_above: MemoryLimit::Off,
         }),
     };
     InitFrame {

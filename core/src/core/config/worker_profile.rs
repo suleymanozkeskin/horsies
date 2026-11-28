@@ -2661,7 +2661,7 @@ mod tests {
             ("c", isolated_input(MAX_ISOLATED_CHILDREN + 1)),
         ]);
         let refusals = checked_worker_profiles(&refused).expect_err("two values are outside");
-        let paths: Vec<&str> = refusals.iter().map(ProfileValueRefused::path).collect();
+        let paths: Vec<String> = refusals.iter().map(ProfileValueRefused::path).collect();
         assert_eq!(
             paths,
             [

@@ -16,13 +16,16 @@ use super::body_scope::BodyScope;
 use super::event_loop::{EventLoopWatch, HostLoopWatched};
 use super::handler_host::boot_and_serve_handlers;
 use super::handlers::HandlerChildApp;
+use super::host_core::HostCoreWatch;
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
 use super::panic::{install_panic_hook, CatchPanic};
 use super::producer::{publish_child_producer, task_send_manifest, task_send_pool_of};
 use super::role::mark_process_runs_task_bodies;
 use super::rss::read_rss;
 use super::run::HostContext;
-use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
+use super::seats::{
+    serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, TaskServeEnd,
+};
 use crate::broker::client_family::ClientFamily;
 use crate::broker::PostgresBroker;
 use crate::core::config::{PostgresConfig, SessionDatabase};
@@ -37,9 +40,9 @@ use crate::process_runtime::{
 use crate::worker::executor::protocol::{
     decode_parent_frame, AsyncSeats, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
     ChildExitCode, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, FrameReader,
-    InitFrame, IsolatedChild, ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame,
+    InitFrame, IsolatedChild, MemoryLimit, ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame,
     ReportedBootCause, ServerSessions, SharedAsyncChild, SharedThreadChild, ShortageErrno,
-    ThreadSeats,
+    TaskSendPool, ThreadSeats,
 };
 use crate::worker::executor::supervisor::{ChildCommand, MailboxBound};
 
@@ -97,6 +100,10 @@ pub struct ChildApp {
     /// end of the parent and at a bad parent frame. A Rust binary gives
     /// [`ProcessExit::Standard`].
     pub exit: ProcessExit,
+    /// The host core whose stop ends a task child: none, or the host's read
+    /// of its core ([`HostCoreWatch`]). A Rust binary gives
+    /// [`HostCoreWatch::NoHostCore`]. A handler child does not read it.
+    pub host_core: HostCoreWatch,
 }
 
 /// What a child does with the log level of its init frame (the worker's
@@ -149,15 +156,23 @@ pub struct NamedChildStartHook {
 /// The kind of the child that a start hook runs in, read from its init
 /// frame before the first hook: a host that starts its own seats in a hook
 /// (for example one isolate per seat of a shared thread child) reads the
-/// seat count here.
+/// seat count here, and for a shared thread child the task-send pool and the
+/// resident-memory limit of the child too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildStartFacts {
     /// An isolated child: one run at a time.
     Isolated,
     /// A shared async child with `seats` runs at once.
     SharedAsync { seats: AsyncSeats },
-    /// A shared thread child with `seats` runs at once.
-    SharedThread { seats: ThreadSeats },
+    /// A shared thread child with `seats` runs at once. `task_send_pool` is
+    /// the number of connections that its task sends share. `recycle_above`
+    /// is the resident-memory limit of the child (`recycle.above` of the
+    /// profile): [`MemoryLimit::Off`] is no limit.
+    SharedThread {
+        seats: ThreadSeats,
+        task_send_pool: TaskSendPool,
+        recycle_above: MemoryLimit,
+    },
     /// The handler child: it runs the app's event handlers and no task.
     Handler,
 }
@@ -168,7 +183,11 @@ fn task_start_facts(kind: TaskChild) -> ChildStartFacts {
     match kind {
         TaskChild::Isolated(_) => ChildStartFacts::Isolated,
         TaskChild::SharedAsync(child) => ChildStartFacts::SharedAsync { seats: child.seats },
-        TaskChild::SharedThread(child) => ChildStartFacts::SharedThread { seats: child.seats },
+        TaskChild::SharedThread(child) => ChildStartFacts::SharedThread {
+            seats: child.seats,
+            task_send_pool: child.task_send_pool,
+            recycle_above: child.recycle_above,
+        },
     }
 }
 
@@ -185,6 +204,12 @@ pub enum ChildHostExit {
     ProtocolMismatch,
     /// The start hook failed, panicked or ran past its bound: exit 173.
     ChildHookFailed,
+    /// A run met the stopped host core ([`HostCoreWatch`]); its frame is
+    /// written: exit 80.
+    CoreStopped,
+    /// The resident memory of the child went above its `recycle_above`
+    /// limit: exit 81. The worker recycles the child.
+    MemoryLimit,
 }
 
 impl ChildHostExit {
@@ -198,6 +223,8 @@ impl ChildHostExit {
             Self::BootFailed => ChildExitCode::BootFailed.code(),
             Self::ProtocolMismatch => ChildExitCode::ProtocolMismatch.code(),
             Self::ChildHookFailed => ChildExitCode::ChildHookFailed.code(),
+            Self::CoreStopped => ChildExitCode::CoreStopped.code(),
+            Self::MemoryLimit => ChildExitCode::MemoryLimit.code(),
         }
     }
 }
@@ -819,9 +846,10 @@ fn boot_and_serve_tasks(
     // The process runtime is never shut down: the binary exits with the
     // code, so work that still runs (a stuck body) does not hold the exit.
     match end {
-        ServeEnd::Stopped => ChildHostExit::Stopped,
-        ServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
-        ServeEnd::ParentGone => ChildHostExit::ParentGone,
+        TaskServeEnd::Stopped => ChildHostExit::Stopped,
+        TaskServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
+        TaskServeEnd::ParentGone => ChildHostExit::ParentGone,
+        TaskServeEnd::CoreStopped => ChildHostExit::CoreStopped,
     }
 }
 
@@ -1123,11 +1151,16 @@ mod tests {
             task_send_pool,
         });
         let four = ThreadSeats::new(4).expect("4 thread seats");
-        let shared_thread = TaskChild::SharedThread(SharedThreadChild {
-            seats: four,
-            pool: child_pool(3, true),
-            task_send_pool,
-        });
+        let shared_thread_send_pool = TaskSendPool::new(3).expect("3 is a task-send pool");
+        let limit_mb = std::num::NonZeroU64::new(1536).expect("1536 is above 0");
+        let shared_thread = |recycle_above: MemoryLimit| {
+            TaskChild::SharedThread(SharedThreadChild {
+                seats: four,
+                pool: child_pool(3, true),
+                task_send_pool: shared_thread_send_pool,
+                recycle_above,
+            })
+        };
         assert_eq!(task_start_facts(isolated), ChildStartFacts::Isolated);
         assert_eq!(
             task_start_facts(shared_async),
@@ -1135,10 +1168,23 @@ mod tests {
         );
         assert_eq!(fifty.get(), 50);
         assert_eq!(
-            task_start_facts(shared_thread),
-            ChildStartFacts::SharedThread { seats: four }
+            task_start_facts(shared_thread(MemoryLimit::AtMb(limit_mb))),
+            ChildStartFacts::SharedThread {
+                seats: four,
+                task_send_pool: shared_thread_send_pool,
+                recycle_above: MemoryLimit::AtMb(limit_mb),
+            }
+        );
+        assert_eq!(
+            task_start_facts(shared_thread(MemoryLimit::Off)),
+            ChildStartFacts::SharedThread {
+                seats: four,
+                task_send_pool: shared_thread_send_pool,
+                recycle_above: MemoryLimit::Off,
+            }
         );
         assert_eq!(four.get(), 4);
+        assert_eq!(shared_thread_send_pool.get(), 3);
     }
 
     /// Each start hook gets the facts that the child passes: every hook of
@@ -1151,7 +1197,11 @@ mod tests {
         for facts in [
             ChildStartFacts::Isolated,
             ChildStartFacts::SharedAsync { seats: fifty },
-            ChildStartFacts::SharedThread { seats: four },
+            ChildStartFacts::SharedThread {
+                seats: four,
+                task_send_pool: TaskSendPool::new(2).expect("2 is a task-send pool"),
+                recycle_above: MemoryLimit::Off,
+            },
         ] {
             let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
             let recording = |name: &'static str| {
@@ -1238,6 +1288,7 @@ mod tests {
             seats: ThreadSeats::new(4).expect("4 thread seats"),
             pool: child_pool(3, true),
             task_send_pool,
+            recycle_above: MemoryLimit::Off,
         });
         let host = Arc::new(super::super::HostLoop::new());
         let with_host = EventLoopWatch::Host(Arc::clone(&host));

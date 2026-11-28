@@ -108,22 +108,24 @@ class ChildBuildBudget:
     """The builds of child specs in the walk of one root spec.
 
     One budget belongs to one root spec. ``take`` is called before each build.
+    ``bound`` is the most builds; the check gives ``MAX_CHECK_SUBWORKFLOW_BUILDS``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bound: int = MAX_CHECK_SUBWORKFLOW_BUILDS) -> None:
+        self._bound = bound
         self._builds = 0
         self._reported = False
 
     def take(self, node_name: str) -> BuildDecision:
         """Count one build of the child of ``node_name`` and say whether it may
         go on. Changes only the counts of this budget."""
-        if self._builds < MAX_CHECK_SUBWORKFLOW_BUILDS:
+        if self._builds < self._bound:
             self._builds += 1
             return BuildGranted()
         if self._reported:
             return BuildRefusedAgain()
         self._reported = True
-        return BuildRefusedFirst(_build_limit_finding(node_name))
+        return BuildRefusedFirst(_build_limit_finding(node_name, self._bound))
 
 
 def child_start(node: SubWorkflowNode[Any]) -> ChildStart:
@@ -216,13 +218,13 @@ def _depth_limit_finding(node_name: str, child_depth: int) -> WorkflowValidation
     )
 
 
-def _build_limit_finding(node_name: str) -> WorkflowValidationError:
+def _build_limit_finding(node_name: str, bound: int) -> WorkflowValidationError:
     return WorkflowValidationError(
         message='the subworkflow nesting walk reached its bound of builds',
         code=HorsiesErrorCode.WORKFLOW_CHECK_BUILD_LIMIT,
         notes=[
             f"node '{node_name}': the walk of this workflow built "
-            f'{MAX_CHECK_SUBWORKFLOW_BUILDS} child workflows and stopped; '
+            f'{bound} child workflows and stopped; '
             'the rest of its nesting is not checked',
         ],
         help_text='nest fewer child workflows in this workflow',

@@ -24,15 +24,13 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
-use horsies_core::core::task::send_types::{
-    send_error_from_enqueue, send_failure_exception, SendFailureException,
-};
+use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    BrokerError, CheckedSend, CustomQueueConfig, EnqueueRetention, FailureCause, PayloadPolicy,
-    QueueMode, RetentionConfig, RetentionDays, SendKind as CoreSendKind, TaskOptions,
-    TaskSendError, TaskSendPayload,
+    BrokerError, BrokerRefusalCause, CheckedSend, CustomQueueConfig, EnqueueRetention,
+    PayloadPolicy, QueueMode, RetentionConfig, RetentionDays, SendKind as CoreSendKind,
+    TaskOptions, TaskSendError, TaskSendPayload,
 };
 use napi::bindgen_prelude::{BigInt, Object};
 use napi::Env;
@@ -438,7 +436,7 @@ fn byte_count(subject: &str, value: f64) -> Result<usize, BoundaryRefusal> {
 fn validation_failed(task_name: &str, message: &str) -> TaskSendError {
     TaskSendError::ValidationFailed {
         message: format!("{message} (task {task_name})"),
-        cause: FailureCause::PreconditionFailed,
+        cause: BrokerRefusalCause::Check,
     }
 }
 
@@ -665,19 +663,11 @@ fn enqueue_failed(command: &EnqueueCommand, error: &BrokerError) -> EnqueueOutco
 }
 
 /// The raw record of the send error of a failed enqueue of `command`: the
-/// class by the core's one rule (`send_error_from_enqueue`), and in the
-/// `cause` slot the exception that Python stores for `error`
-/// (`send_failure_exception`). The send error holds no rule text, no
-/// reader text and no data check, so its own slot is not exact for each
-/// error. Pure.
+/// class and the typed cause by the core's one rule
+/// (`send_error_from_enqueue`). Pure.
 fn enqueue_failure_record(command: &EnqueueCommand, error: &BrokerError) -> RawCatalogError {
     let send_error = send_error_from_enqueue(command.task_id, command.payload.clone(), error);
-    match send_failure_exception(error) {
-        SendFailureException::Slot(exception) => {
-            RawCatalogError::of_with_exception(ENQUEUE_SUBJECT, &send_error, &exception)
-        }
-        SendFailureException::NoSlot => RawCatalogError::of(ENQUEUE_SUBJECT, &send_error),
-    }
+    RawCatalogError::of(ENQUEUE_SUBJECT, &send_error)
 }
 
 /// The core's checks of the send of `command` that need no connection, with
@@ -1181,6 +1171,26 @@ mod tests {
                 }
             )
         );
+    }
+
+    /// Python: `NoCause()`; a check of the bridge refused the send before
+    /// any write.
+    #[test]
+    fn a_refusal_of_a_check_is_validation_failed_with_no_cause() {
+        let raw = RawCatalogError::of(
+            PREPARE_SUBJECT,
+            &validation_failed("report", "the retention period is refused"),
+        );
+        assert_eq!(raw.class, "TaskSendValidationFailed");
+        let cause = raw
+            .slots
+            .iter()
+            .find_map(|slot| match &slot.value {
+                RawSlotValue::Exception { exception } => Some(exception.clone()),
+                _ => None,
+            })
+            .expect("the class has an exception slot");
+        assert_eq!(cause, ExceptionRecord::NoCause);
     }
 
     /// Python: the JSON reader's `SerializationError` with its text.

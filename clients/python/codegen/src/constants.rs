@@ -9,8 +9,8 @@
 use horsies_core::core::config::broker::{BROKER_MAX_OVERFLOW_DEFAULT, BROKER_POOL_SIZE_DEFAULT};
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
-    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
-    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
+    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MEMORY_LIMIT_EXIT_CODE,
+    PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use horsies_core::monitoring::{
@@ -21,7 +21,8 @@ use horsies_core::{
     CANCELLED_WRITE_END, DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_QUEUE_NAME, DEFAULT_QUEUE_PRIORITY,
     DEFAULT_SCHEDULE_CHECK_INTERVAL_SECONDS, DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_TIMEZONE,
     IDEMPOTENCY_KEY_MAX_BYTES, LIVENESS_LOCK_LOST_EXIT_CODE, MAX_CHECK_SUBWORKFLOW_BUILDS,
-    MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS, RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
+    MAX_SUBWORKFLOW_DEPTH, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS,
+    RUNNER_HEARTBEAT_LOST_EXIT_CODE, TASK_LIST_BOUND,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -157,7 +158,7 @@ pub const BROKER_POOL_DEFAULTS: ConstantModule = ConstantModule {
     constants: &BROKER_POOL_DEFAULT_CONSTANTS,
 };
 
-const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
+const EXIT_CODE_CONSTANTS: [CoreConstant; 12] = [
     CoreConstant {
         name: "PARENT_GONE_EXIT_CODE",
         doc: "A child: the parent is gone (the socket reached EOF, or the parent-death\n\
@@ -213,6 +214,12 @@ const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
         doc: "A child: its core stopped, or the process was forked after its core\n\
               started; the child ended itself.",
         value: CoreValue::Integer(CORE_STOPPED_EXIT_CODE as i64),
+    },
+    CoreConstant {
+        name: "MEMORY_LIMIT_EXIT_CODE",
+        doc: "A shared-thread child: its resident memory reached recycle_above during\n\
+              a run; the child ended itself and the worker replaces it.",
+        value: CoreValue::Integer(MEMORY_LIMIT_EXIT_CODE as i64),
     },
     CoreConstant {
         name: "CHILD_HOOK_FAILED_EXIT_CODE",
@@ -331,18 +338,29 @@ pub const SCHEDULE_DEFAULTS: ConstantModule = ConstantModule {
     constants: &SCHEDULE_DEFAULT_CONSTANTS,
 };
 
-const WORKFLOW_BOUND_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
-    name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
-    doc: "The most builds of child workflows in the nesting walk of `check` for one\n\
-          root workflow. At the bound the walk stops and `check` reports `HRS-039`.",
-    value: CoreValue::Integer(MAX_CHECK_SUBWORKFLOW_BUILDS as i64),
-}];
+const WORKFLOW_BOUND_CONSTANTS: [CoreConstant; 2] = [
+    CoreConstant {
+        name: "MAX_SUBWORKFLOW_DEPTH",
+        doc: "The greatest depth of a child workflow.\n\
+              \n\
+              A top-level workflow has depth 0. A child workflow has the depth of its\n\
+              parent plus 1.",
+        value: CoreValue::Integer(MAX_SUBWORKFLOW_DEPTH as i64),
+    },
+    CoreConstant {
+        name: "MAX_CHECK_SUBWORKFLOW_BUILDS",
+        doc: "The most builds of child workflows in the nesting walk of `check` for one\n\
+              root workflow: the most nodes of a spec times `MAX_SUBWORKFLOW_DEPTH`. At\n\
+              the bound the walk stops and `check` reports `HRS-039`.",
+        value: CoreValue::Integer(MAX_CHECK_SUBWORKFLOW_BUILDS as i64),
+    },
+];
 
-/// The bound of the nesting walk of `check`.
+/// The depth limit of sub-workflows and the bound of the nesting walk of `check`.
 pub const WORKFLOW_BOUNDS: ConstantModule = ConstantModule {
     file: "workflow_bounds.py",
-    doc: "The bound of the nesting walk of `check` in horsies-core, generated from its\n\
-          Rust constant.",
+    doc: "The sub-workflow depth limit and the bound of the nesting walk of `check` in\n\
+          horsies-core, generated from its Rust constants.",
     constants: &WORKFLOW_BOUND_CONSTANTS,
 };
 
@@ -474,6 +492,7 @@ mod tests {
             ("PROTOCOL_MISMATCH_EXIT_CODE", PROTOCOL_MISMATCH_EXIT_CODE),
             ("LIVENESS_LOCK_LOST_EXIT_CODE", LIVENESS_LOCK_LOST_EXIT_CODE),
             ("CORE_STOPPED_EXIT_CODE", CORE_STOPPED_EXIT_CODE),
+            ("MEMORY_LIMIT_EXIT_CODE", MEMORY_LIMIT_EXIT_CODE),
             ("CHILD_HOOK_FAILED_EXIT_CODE", CHILD_HOOK_FAILED_EXIT_CODE),
         ] {
             assert!(
@@ -551,12 +570,16 @@ mod tests {
     }
 
     #[test]
-    fn the_workflow_bounds_hold_the_core_check_build_bound() {
+    fn the_workflow_bounds_hold_the_core_depth_limit_and_check_build_bound() {
         let rendered = render_constant_module(&WORKFLOW_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nMAX_SUBWORKFLOW_DEPTH: Final = {MAX_SUBWORKFLOW_DEPTH}\n"
+        )));
         assert!(rendered.contains(&format!(
             "\nMAX_CHECK_SUBWORKFLOW_BUILDS: Final = {MAX_CHECK_SUBWORKFLOW_BUILDS}\n"
         )));
-        assert_eq!(MAX_CHECK_SUBWORKFLOW_BUILDS, 1_000);
+        assert_eq!(MAX_SUBWORKFLOW_DEPTH, 32);
+        assert_eq!(MAX_CHECK_SUBWORKFLOW_BUILDS, 320_000);
     }
 
     #[test]

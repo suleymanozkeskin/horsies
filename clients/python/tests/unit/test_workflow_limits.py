@@ -15,6 +15,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.workflow import (
+    NoWorkflowOutput,
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
@@ -85,7 +86,7 @@ class TestNestingFindingsInCheck:
     def test_a_nesting_past_the_depth_limit_is_reported_once(self) -> None:
         app = _app()
 
-        class Deeper(WorkflowDefinition[Any]):
+        class Deeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'deeper'
             definition_key = 'tests.limits.deeper.v1'
 
@@ -118,7 +119,7 @@ class TestNestingFindingsInCheck:
     ) -> None:
         app = _app()
 
-        class Same(WorkflowDefinition[Any]):
+        class Same(WorkflowDefinition[NoWorkflowOutput]):
             name = 'same'
             definition_key = 'tests.limits.same.v1'
 
@@ -147,7 +148,7 @@ class TestNestingFindingsInCheck:
     def test_a_nesting_that_ends_before_the_limit_passes(self) -> None:
         app = _app()
 
-        class Ends(WorkflowDefinition[Any]):
+        class Ends(WorkflowDefinition[NoWorkflowOutput]):
             name = 'ends'
             definition_key = 'tests.limits.ends.v1'
 
@@ -157,7 +158,7 @@ class TestNestingFindingsInCheck:
             ) -> WorkflowSpec[Any]:
                 if level >= LEVEL_WHERE_THE_NESTING_ENDS:
                     leaf = TaskNode(function=_task_fn(), node_id='leaf')
-                    return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
+                    return WorkflowSpec(name=cls.name, nodes=[leaf])
                 child = SubWorkflowNode(workflow_definition=Ends, kwargs={'level': level + 1})
                 return WorkflowSpec(name=cls.name, nodes=[child])
 
@@ -179,7 +180,7 @@ class TestNestingBehindADependency:
     def test_a_self_nesting_behind_a_dependency_passes(self) -> None:
         app = _app()
 
-        class Gated(WorkflowDefinition[Any]):
+        class Gated(WorkflowDefinition[NoWorkflowOutput]):
             name = 'gated'
             definition_key = 'tests.limits.gated.v1'
 
@@ -207,7 +208,7 @@ class TestNestingBehindADependency:
     def test_a_nesting_past_the_limit_behind_dependencies_passes(self) -> None:
         app = _app()
 
-        class GatedDeeper(WorkflowDefinition[Any]):
+        class GatedDeeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'gated_deeper'
             definition_key = 'tests.limits.gated_deeper.v1'
 
@@ -238,7 +239,7 @@ class TestNestingBehindADependency:
         """Once the definition starts, nothing between its two occurrences waits."""
         app = _app()
 
-        class Same(WorkflowDefinition[Any]):
+        class Same(WorkflowDefinition[NoWorkflowOutput]):
             name = 'same_after_gate'
             definition_key = 'tests.limits.same_after_gate.v1'
 
@@ -272,7 +273,7 @@ class TestNestingBehindADependency:
         """The depth that the chain reaches depends on the result of the gate."""
         app = _app()
 
-        class Deeper(WorkflowDefinition[Any]):
+        class Deeper(WorkflowDefinition[NoWorkflowOutput]):
             name = 'deeper_after_gate'
             definition_key = 'tests.limits.deeper_after_gate.v1'
 
@@ -344,19 +345,25 @@ class TestNestingDecisionAtTheLimit:
         assert decision.finding.code == HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT
 
 
+_SMALL_BUILD_BOUND = 5
+
+
 class TestChildBuildBudget:
-    """The walk of one root spec builds at most MAX_CHECK_SUBWORKFLOW_BUILDS children."""
+    """The walk of one root spec builds at most its bound of children."""
+
+    def test_the_check_bound_is_the_nodes_of_a_spec_times_the_depth_limit(self) -> None:
+        assert MAX_CHECK_SUBWORKFLOW_BUILDS == MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH
 
     def test_the_builds_up_to_the_bound_are_granted(self) -> None:
-        budget = ChildBuildBudget()
+        budget = ChildBuildBudget(_SMALL_BUILD_BOUND)
 
-        decisions = [budget.take('node') for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS)]
+        decisions = [budget.take('node') for _ in range(_SMALL_BUILD_BOUND)]
 
         assert all(isinstance(decision, BuildGranted) for decision in decisions)
 
     def test_the_first_build_past_the_bound_gives_the_finding(self) -> None:
-        budget = ChildBuildBudget()
-        for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS):
+        budget = ChildBuildBudget(_SMALL_BUILD_BOUND)
+        for _ in range(_SMALL_BUILD_BOUND):
             budget.take('node')
 
         decision = budget.take('node')
@@ -365,8 +372,8 @@ class TestChildBuildBudget:
         assert decision.finding.code == HorsiesErrorCode.WORKFLOW_CHECK_BUILD_LIMIT
 
     def test_a_later_build_past_the_bound_gives_no_second_finding(self) -> None:
-        budget = ChildBuildBudget()
-        for _ in range(MAX_CHECK_SUBWORKFLOW_BUILDS + 1):
+        budget = ChildBuildBudget(_SMALL_BUILD_BOUND)
+        for _ in range(_SMALL_BUILD_BOUND + 1):
             budget.take('node')
 
         assert isinstance(budget.take('node'), BuildRefusedAgain)

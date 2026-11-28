@@ -8,8 +8,10 @@
 //   `--max-old-space-size` on the worker command sets for every child, or V8's own default. An isolate whose
 //   JavaScript heap reaches it ends alone with `ERR_WORKER_OUT_OF_MEMORY`, and the child lives. The cap holds for the
 //   JavaScript heap only: `ArrayBuffer` and `Buffer` memory is outside it, so a body that keeps buffers grows the whole
-//   child (Node has no cap of that memory per isolate). The start facts of a child give no memory value of the worker
-//   profile.
+//   child (Node has no cap of that memory per isolate). This is the rule for the cap of a seat isolate: the worker
+//   profile has no member for it. The bound of the whole child is `recycle.above` of the profile, as for the other
+//   execution classes: the worker replaces the child after a task once its resident memory reaches it, and while the
+//   child holds runs its main thread ends it with exit code 81 at that bound (`memory-watch.ts`).
 // - Each isolate has an `error` listener: an isolate that ends with an error must not throw on this thread. A message
 //   of an isolate that does not deserialize goes to the pool as a defect. A `Worker` that the runtime does not start
 //   (for example at a thread limit of the OS) is an isolate that did not start, not a throw.
@@ -18,6 +20,7 @@
 import { getHeapStatistics } from "node:v8";
 import { type ResourceLimits, Worker } from "node:worker_threads";
 
+import { endAtMemoryLimit } from "../native/child/child.ts";
 import { seatBounds } from "../native/seats/seats.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import type { IsolateStart, SeatHost, StartIsolate } from "./pool.ts";
@@ -69,11 +72,15 @@ export function workerIsolates(entry: string, limits: ResourceLimits): StartIsol
   };
 }
 
-/** The seat host of this process: its isolates, the seat bounds of the core, its clocks and its timers. */
+/**
+ * The seat host of this process: its isolates, its resident memory (`process.memoryUsage.rss()`) and its end at the
+ * memory bound, the seat bounds of the core, its clocks and its timers.
+ */
 export function processSeatHost(): SeatHost {
   const entry = process.argv[1];
 
   return {
+    memory: { residentBytes: () => process.memoryUsage.rss(), endAtLimit: endAtMemoryLimit },
     start: (marker, events) =>
       entry === undefined
         ? { kind: "notStarted", cause: "the child runs no entry script" }

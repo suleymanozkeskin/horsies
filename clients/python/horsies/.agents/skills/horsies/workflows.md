@@ -19,11 +19,11 @@ spec = app.workflow(
     success_policy: SuccessPolicy | None = None,
     *,
     definition_key: str | None = None,  # required; None raises HRS-016
-) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]
+) -> WorkflowSpec[OutT] | WorkflowSpec[NoWorkflowOutput]
 ```
 
 - When `output` is provided: returns `WorkflowSpec[OutT]` typed to that node's ok-type.
-- When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]`. `WorkflowTerminalResults` is `dict[str, TaskOutcome[Any, TaskError] | None]`, keyed by `node_id`. On success `handle.get()` returns `Ok(Succeeded(terminal_results))`.
+- When `output=None`: returns `WorkflowSpec[NoWorkflowOutput]`. On success `handle.get()` returns `Ok(Succeeded(NoWorkflowOutput()))`. The value of each node comes from `handle.results()`, `handle.nodes()` or `handle.result_for(node)`.
 - Resolves queue/priority for each `TaskNode` using app config. A queue that is not in app config raises HRS-103 (`CUSTOM` mode) or HRS-200 (`DEFAULT` mode).
 - Attaches broker and `resend_on_transient_error` from app config automatically.
 - `definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime lookup.
@@ -55,7 +55,7 @@ spec = ETLPipeline.build(app)
 - `definition_key` is required — a stable string key for persistence and runtime lookup. Auto-registered by the metaclass at import time.
 - `config` is a frozen `WorkflowDefinitionConfig(output=None, on_error=OnError.FAIL, success_policy=None)`. The class body can name its own nodes in it. A subclass without its own `config` uses the parent's `config`.
 - A `Meta` attribute (any object, also from a base class) or a `config` that is not a `WorkflowDefinitionConfig` raises HRS-033 when the class is created, before `build()`.
-- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `config.output`, `T` must be `NoWorkflowOutput` (`WorkflowDefinition[NoWorkflowOutput]`) or `Any`; `None` or another concrete `T` without `config.output` raises HRS-025.
+- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `config.output`, `T` must be `NoWorkflowOutput` (`WorkflowDefinition[NoWorkflowOutput]`). `None`, `Any`, another concrete `T`, or no generic parameter without `config.output` raises HRS-025.
 - Nodes are collected in definition order by the metaclass.
 - Spec and all nodes are **frozen** (immutable) after construction.
 
@@ -211,7 +211,7 @@ Differences from `TaskNode`:
 - `kwargs` forwarded to `workflow_definition.build_with(app, **kwargs)` at execution time.
 - `args_from` injects the upstream `TaskOutcome` into `build_with()`.
 - The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowFailure`.
-- Outputless child (`WorkflowDefinition[NoWorkflowOutput]`, no `config.output`): the parent node completes with `Succeeded(NoWorkflowOutput())`. `NoWorkflowOutput` is not `None`: a child whose output node returns `None` gives `Succeeded(None)`. A task parameter that receives the node is `TaskOutcome[NoWorkflowOutput, TaskError]`. The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- Outputless child (`WorkflowDefinition[NoWorkflowOutput]`, no `config.output`): the parent node completes with `Succeeded(NoWorkflowOutput())`. `NoWorkflowOutput` is not `None`: a child whose output node returns `None` gives `Succeeded(None)`. A task parameter that receives the node is `TaskOutcome[NoWorkflowOutput, TaskError]`. A top-level `handle.get()` of an outputless workflow gives the same `Succeeded(NoWorkflowOutput())`.
 - A raise in the child start stops in the reaper's recovery, and the recovery limit bounds it (see Failure Semantics).
 - An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
 - The child start encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them (a value that does not fit is `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, and the node fails with `WORKFLOW_ENQUEUE_FAILED`), so a refusal at the child start is a defect: it raises `SerializationError` and the transaction rolls back.
@@ -396,7 +396,7 @@ appearing during a pause are expected, not a fault.
 ### `get()` semantics
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
-- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(terminal_results))`, a `{node_id: TaskOutcome | None, ...}` map; the entry of a `SKIPPED` terminal node is `Failed(TaskError(code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ReadResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
+- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(NoWorkflowOutput()))`; `results()`, `nodes()` and `result_for(node)` give the node values. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ReadResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
 - `FAILED` / `CANCELLED` → returns `Ok(Failed(task_error))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when the error is NULL (no error is stored). An empty stored error → `Err(ReadResultDeserializationError(...))`.
 - `EXPIRED` → returns `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_EXPIRED`. The error `data` holds the policy name and the age.
 - A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `Err(ReadResultDeserializationError(...))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
@@ -706,7 +706,7 @@ node_b = TaskNode(function=process, waits_for=[node_a], args_from={"data": node_
 | HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | Same key in kwargs and args_from |
 | HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
 | HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible `TaskOutcome` type |
-| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or concrete `WorkflowDefinition[T]` has no `config.output` |
+| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or `WorkflowDefinition[T]` has no `config.output` and `T` is not `NoWorkflowOutput` (`Any` and no generic included) |
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
@@ -720,7 +720,7 @@ node_b = TaskNode(function=process, waits_for=[node_a], args_from={"data": node_
 | HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting with no `waits_for` on its path would start a child workflow deeper than 32 |
 | HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs and with no `waits_for` between, so its nesting never ends |
 | HRS-038 | `WORKFLOW_TOO_MANY_NODES` | A `WorkflowSpec` has more than 10,000 nodes (raised when the spec is built) |
-| HRS-039 | `WORKFLOW_CHECK_BUILD_LIMIT` | `horsies check`: the nesting walk of one root workflow built 1,000 child workflows (`MAX_CHECK_SUBWORKFLOW_BUILDS`) and stopped |
+| HRS-039 | `WORKFLOW_CHECK_BUILD_LIMIT` | `horsies check`: the nesting walk of one root workflow built 320,000 child workflows (`MAX_CHECK_SUBWORKFLOW_BUILDS`, 10,000 nodes times a depth of 32) and stopped |
 
 ## Known Constraints
 

@@ -1,7 +1,8 @@
 // The relay of a seat isolate: each core operation of the isolate's app (a send, a task read, a facade call) becomes
 // one `op` message to the main thread of its child, and the `opReply` of that message its answer. The isolate never
-// loads the addon. The bounds come from the core's constants, which the main thread gives in the seat marker
-// (`RelayBounds`); they hold per isolate, across its runs.
+// loads the addon. The main thread gives the bounds in the seat marker (`RelayBounds`): the in-flight bound is the
+// task-send pool of the child (its start facts), and the waiting bound is the core's constant. They hold per isolate,
+// across its runs.
 //
 // - An operation that waits for I/O of the main thread (an enqueue, a task read, a workflow call, a facade call): at
 //   most `opsInFlight` of them wait for the main thread at once. Later ones wait in the isolate, in order, at most

@@ -134,7 +134,13 @@ export const PROFILES = [
 export type Profile = (typeof PROFILES)[number];
 
 /** The profiles of the `thread_profiles` instance only: they start `SHARED_THREAD` children. */
-export const THREAD_PROFILES = ["thread-only-1x4", "split-isolated-1-thread-1x4"] as const;
+export const THREAD_PROFILES = ["thread-only-1x4", "split-isolated-1-thread-1x4", "thread-memory-bound-1x1"] as const;
+
+/**
+ * The resident-memory bound of the thread child of `thread-memory-bound-1x1`, in MiB: above the memory of a thread child
+ * with one seat that runs no task, and below what `e2e_thread_holds_memory` keeps (`HELD_MEMORY_MB`).
+ */
+export const THREAD_MEMORY_BOUND_MB = 320;
 
 /** A profile with `SHARED_THREAD` children. */
 export type ThreadProfile = (typeof THREAD_PROFILES)[number];
@@ -155,6 +161,7 @@ export function readyClass(profile: Profile | ThreadProfile): ReadyClass {
     case "shared-only-1x4":
       return "SHARED_ASYNC";
     case "thread-only-1x4":
+    case "thread-memory-bound-1x1":
       return "SHARED_THREAD";
     case "isolated-1":
     case "isolated-2":
@@ -330,5 +337,15 @@ function threadProfile(profile: ThreadProfile): WorkerProfileInput {
       return { ...drain, sharedThread };
     case "split-isolated-1-thread-1x4":
       return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, sharedThread };
+    case "thread-memory-bound-1x1":
+      return {
+        ...drain,
+        sharedThread: {
+          kind: "sharedThreadChildren",
+          count: 1,
+          seats: 1,
+          recycle: { above: { kind: "memoryLimit", mb: THREAD_MEMORY_BOUND_MB } },
+        },
+      };
   }
 }

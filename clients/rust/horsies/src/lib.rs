@@ -150,7 +150,7 @@ pub mod __private {
     /// The typed function of the task `task_name` on `app`, for the
     /// generated `name::send` and `name::with_options(..).send`.
     ///
-    /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed` when
+    /// Errors: `VALIDATION_FAILED` with the cause `Check` when
     /// `app` holds no task of this name with these types; nothing is
     /// written. The message is the text of the [`crate::TaskFunctionNotFound`]
     /// cause.
@@ -167,7 +167,7 @@ pub mod __private {
             .get::<A, T, E>(task_name)
             .map_err(|not_found| crate::TaskSendError::ValidationFailed {
                 message: not_found.to_string(),
-                cause: horsies_core::FailureCause::PreconditionFailed,
+                cause: horsies_core::BrokerRefusalCause::Check,
             })
     }
 

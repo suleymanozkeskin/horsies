@@ -75,6 +75,19 @@ export const importFeed = defineTask({
 | `SHARED_ASYNC` | async only (typecheck) | Many runs on the one event loop of a shared async child. `timeoutMs` is required |
 | `SHARED_THREAD` | sync or async | Many runs in the seat isolates of a shared thread child. The runtime is `ThreadTaskRuntime` (no `spawn`). `timeoutMs` is required; `cancelGraceMs` is not taken |
 
+- The JavaScript heap of each seat of a `SHARED_THREAD` child has the heap
+  limit of the child's main thread (`--max-old-space-size` on the worker
+  command, or the default of V8). The profile has no member for it.
+  `ArrayBuffer` and `Buffer` memory is outside that limit;
+  `recycle.above` of the profile bounds the whole child. At most
+  `taskSendPool` calls of one seat wait for the database at once.
+- While a `SHARED_THREAD` child holds runs, it reads its resident memory
+  every 100 ms. At or above `recycle.above`, it logs the bound and the
+  measured value and ends with exit code 81; the worker replaces it. A
+  run that the child held ends `WORKER_CRASHED` and retries only as the
+  retry policy of its task says (put `WORKER_CRASHED` in `retryFor`).
+  With no `recycle.above`, the child does not read its memory.
+
 - A shared async run stops at its deadline only where its code passes
   `runtime.signal` (or reads `runtime.cancelState()`). A promise cannot be
   stopped from outside. Put a body whose libraries take no `AbortSignal` in

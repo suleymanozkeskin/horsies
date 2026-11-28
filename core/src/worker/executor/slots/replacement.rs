@@ -34,10 +34,12 @@ pub enum ChildLeave {
 
 /// The replace reason of a child lost by `lost`: its loss cause, and
 /// [`ReplaceReason::CoreStopped`] for a child that died with the
-/// core-stopped exit code. Pure.
+/// core-stopped exit code, and [`ReplaceReason::MemoryLimit`] for one that
+/// died with the memory-limit exit code. Pure.
 pub(super) fn reason_of_loss(lost: &ChildLost) -> ReplaceReason {
     match (lost.cause, EndWithoutTask::of(lost.exit)) {
         (LossCause::ChildDied, EndWithoutTask::CoreStopped) => ReplaceReason::CoreStopped,
+        (LossCause::ChildDied, EndWithoutTask::MemoryLimit) => ReplaceReason::MemoryLimit,
         (LossCause::ChildDied, EndWithoutTask::Other) => ReplaceReason::ChildDied,
         (LossCause::ChannelLost, _) => ReplaceReason::ChannelLost,
         (LossCause::ProtocolViolation, _) => ReplaceReason::ProtocolViolation,
@@ -71,7 +73,9 @@ pub(super) fn tell_replaced(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::executor::protocol::{ReceivedProtocol, CORE_STOPPED_EXIT_CODE};
+    use crate::worker::executor::protocol::{
+        ReceivedProtocol, CORE_STOPPED_EXIT_CODE, MEMORY_LIMIT_EXIT_CODE,
+    };
     use crate::worker::executor::supervisor::{ChildExit, PartialFrame, ReapedExit};
 
     fn lost(cause: LossCause, exit: ChildExit) -> ChildLost {
@@ -129,6 +133,14 @@ mod tests {
         let died = lost(LossCause::ChildDied, exited_with(CORE_STOPPED_EXIT_CODE));
 
         assert_eq!(reason_of_loss(&died), ReplaceReason::CoreStopped);
+    }
+
+    #[test]
+    fn a_child_that_died_with_the_memory_limit_code_is_a_memory_recycle() {
+        let died = lost(LossCause::ChildDied, exited_with(MEMORY_LIMIT_EXIT_CODE));
+
+        assert_eq!(reason_of_loss(&died), ReplaceReason::MemoryLimit);
+        assert_eq!(EndWithoutTask::of(died.exit), EndWithoutTask::MemoryLimit);
     }
 
     #[test]

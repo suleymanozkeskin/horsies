@@ -26,6 +26,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
     WorkflowContext,
+    NoWorkflowOutput,
     WorkflowDefinition,
     WorkflowValidationError,
     SuccessPolicy,
@@ -468,7 +469,7 @@ class TestCopyOnBuild:
     def test_class_level_nodes_not_enriched_by_build(self) -> None:
         """Queue/priority enrichment in app.workflow() must not reach class-level nodes."""
 
-        class MyWorkflow(WorkflowDefinition[Any]):
+        class MyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'copy_on_build_test'
             definition_key = 'tests.unit.copy_on_build.v1'
             fetch = TaskNode(function=fn_a)
@@ -492,7 +493,7 @@ class TestCopyOnBuild:
     def test_build_twice_produces_independent_specs(self) -> None:
         """Two build() calls must not share node identity."""
 
-        class MyWorkflow(WorkflowDefinition[Any]):
+        class MyWorkflow(WorkflowDefinition[NoWorkflowOutput]):
             name = 'double_build_test'
             definition_key = 'tests.unit.double_build.v1'
             step = TaskNode(function=fn_a)

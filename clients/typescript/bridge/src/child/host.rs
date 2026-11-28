@@ -18,7 +18,10 @@
 //!   handler child of the handler slot; the loop of the JavaScript main
 //!   thread (`EventLoopWatch::Host`); the immediate exit with the output
 //!   drain only, so a child at the end of its parent keeps the 1 s exit rule
-//!   (the core's other exits wait for no host drain either).
+//!   (the core's other exits wait for no host drain either); the host core
+//!   of the process core's stop state (`task_child_core_state`): a task
+//!   child whose core stopped ends with exit code 80 (`CORE_STOPPED`), and
+//!   the first read enters the task child rule of the panic rule.
 //! - Nothing starts before the call: the pure functions of the bridge never
 //!   shape the process runtime, so the child host shapes it for its kind.
 //! - One serve per process: a second one is `CLIENT_DEFECT`.
@@ -32,7 +35,7 @@ use horsies_core::core::TaskRegistry;
 use horsies_core::manifest::parse_producer_manifest;
 use horsies_core::{
     child_mode, run_child_host, ChildApp, ChildArgs, ChildHostExit, ChildMode, ClientFamily,
-    EventLoopWatch, HostLoop,
+    EventLoopWatch, HostCoreWatch, HostLoop,
 };
 use napi::bindgen_prelude::{BigInt, FnArgs, Function, Object};
 use napi::{Env, JsDeferred};
@@ -41,13 +44,16 @@ use napi_derive::napi;
 use crate::call::guard::sync_call;
 use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody};
+use crate::child::body::{
+    ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody, RunPosts,
+};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
 use crate::child::exit::{child_process_exit, hold_socket, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
 use crate::child::loop_watch::make_host_loop;
 use crate::child::start_hooks::{start_hooks, HookDispatcher, StartHookCall};
 use crate::logging::bridge::child_log_setup;
+use crate::process_core::runtime::task_child_core_state;
 
 /// The program name in front of the arguments that the core reads: a
 /// Node-API library has no argument list of its own.
@@ -145,6 +151,11 @@ pub enum ChildExitName {
     BootFailed,
     ProtocolMismatch,
     ChildHookFailed,
+    /// A run met the stopped core of the process: exit 80.
+    CoreStopped,
+    /// The resident memory of a `SHARED_THREAD` child reached its bound
+    /// while it held runs: exit 81.
+    MemoryLimit,
 }
 
 impl ChildExitName {
@@ -158,6 +169,8 @@ impl ChildExitName {
             ChildHostExit::BootFailed => Self::BootFailed,
             ChildHostExit::ProtocolMismatch => Self::ProtocolMismatch,
             ChildHostExit::ChildHookFailed => Self::ChildHookFailed,
+            ChildHostExit::CoreStopped => Self::CoreStopped,
+            ChildHostExit::MemoryLimit => Self::MemoryLimit,
         }
     }
 }
@@ -348,10 +361,8 @@ fn served_app(
                 cause: refused.cause,
             }
         })?;
-    let bodies = Arc::new(ChildBodies {
-        poster,
-        facts: BodyFacts::of(plan.body_facts),
-    });
+    let facts = BodyFacts::of(plan.body_facts, Arc::clone(&poster) as Arc<dyn RunPosts>);
+    let bodies = Arc::new(ChildBodies { poster, facts });
     let host_loop =
         make_host_loop().map_err(|_made| client_defect("a process serves as a child once"))?;
     let app = ChildApp {
@@ -365,6 +376,7 @@ fn served_app(
         handler_child: take_handler_child(),
         event_loop: host_loop_watch(host_loop),
         exit: child_process_exit(),
+        host_core: HostCoreWatch::Host(Arc::new(task_child_core_state)),
     };
     Ok(ServedApp {
         app,
@@ -560,5 +572,19 @@ mod tests {
             ChildExitName::ChildHookFailed
         );
         assert_eq!(serve_end(ChildHostExit::ChildHookFailed).code, 173);
+        assert_eq!(
+            serve_end(ChildHostExit::CoreStopped),
+            ChildServeEnd {
+                code: 80,
+                exit: ChildExitName::CoreStopped,
+            }
+        );
+        assert_eq!(
+            serve_end(ChildHostExit::MemoryLimit),
+            ChildServeEnd {
+                code: 81,
+                exit: ChildExitName::MemoryLimit,
+            }
+        );
     }
 }

@@ -264,7 +264,8 @@ fn every_bounded_value_passes_its_ends_and_is_refused_outside_with_its_path() {
             assert_eq!(
                 profile_of(refused).checked("p"),
                 Err(vec![ProfileValueRefused::OutOfBounds {
-                    path: format!("worker_profiles['p'].{field}"),
+                    profile: "p".to_owned(),
+                    field: field.to_owned(),
                     refused: OutOfBounds {
                         value: refused,
                         min,
@@ -291,11 +292,10 @@ fn a_drain_timeout_passes_above_zero_up_to_a_day_and_is_refused_outside() {
             .expect("inside the bounds");
         assert_eq!(checked.drain_timeout.get(), accepted);
     }
-    let path = "worker_profiles['p'].drain_timeout".to_owned();
     assert_eq!(
         with_timeout(Duration::ZERO).checked("p"),
         Err(vec![ProfileValueRefused::DrainTimeout {
-            path: path.clone(),
+            profile: "p".to_owned(),
             refused: DrainTimeoutRefused::Zero,
         }]),
     );
@@ -303,7 +303,7 @@ fn a_drain_timeout_passes_above_zero_up_to_a_day_and_is_refused_outside() {
     assert_eq!(
         with_timeout(above).checked("p"),
         Err(vec![ProfileValueRefused::DrainTimeout {
-            path,
+            profile: "p".to_owned(),
             refused: DrainTimeoutRefused::AboveMaximum(above),
         }]),
     );
@@ -324,7 +324,7 @@ fn every_refused_value_of_a_profile_is_reported_at_once() {
         .checked("batch")
         .expect_err("three values are outside");
 
-    let paths: Vec<&str> = refusals.iter().map(ProfileValueRefused::path).collect();
+    let paths: Vec<String> = refusals.iter().map(ProfileValueRefused::path).collect();
     assert_eq!(
         paths,
         [
@@ -505,7 +505,8 @@ fn the_json_form_is_the_form_of_the_checked_profile() {
 #[test]
 fn a_refusal_is_a_profile_refusal_with_its_bound() {
     let out_of_bounds = ProfileValueRefused::OutOfBounds {
-        path: "worker_profiles['p'].isolated.count".to_owned(),
+        profile: "p".to_owned(),
+        field: "isolated.count".to_owned(),
         refused: OutOfBounds {
             value: 0,
             min: 1,
@@ -526,9 +527,8 @@ fn a_refusal_is_a_profile_refusal_with_its_bound() {
         Some("set a value from 1 to 1024")
     );
 
-    let path = "worker_profiles['p'].drain_timeout".to_owned();
     let zero = ProfileValueRefused::DrainTimeout {
-        path: path.clone(),
+        profile: "p".to_owned(),
         refused: DrainTimeoutRefused::Zero,
     }
     .to_horsies_error();
@@ -546,7 +546,7 @@ fn a_refusal_is_a_profile_refusal_with_its_bound() {
         Some("set a drain timeout above 0 and at most 86400s")
     );
     let above = ProfileValueRefused::DrainTimeout {
-        path,
+        profile: "p".to_owned(),
         refused: DrainTimeoutRefused::AboveMaximum(Duration::from_secs(86_401)),
     }
     .to_horsies_error();

@@ -54,9 +54,11 @@ class AllowAll:
     """
 
     async def can_view(self, request: Request) -> bool:
+        """Allow every request to read."""
         return True
 
     async def can_act(self, request: Request) -> bool:
+        """Allow every request to act."""
         return True
 
 
@@ -64,9 +66,11 @@ class ViewOnly:
     """Authorize reads and refuse every action."""
 
     async def can_view(self, request: Request) -> bool:
+        """Allow every request to read."""
         return True
 
     async def can_act(self, request: Request) -> bool:
+        """Refuse every action."""
         return False
 
 
@@ -91,12 +95,14 @@ class TrustedHeader:
         self.actions = actions
 
     async def can_view(self, request: Request) -> bool:
+        """Allow a request whose identity header has only non-blank members."""
         values = request.headers.getlist(self.header_name)
         return bool(values) and all(
             member.strip() for value in values for member in value.split(',')
         )
 
     async def can_act(self, request: Request) -> bool:
+        """Allow an action when actions are enabled and the request may view."""
         match self.actions:
             case Actions.ENABLED:
                 return await self.can_view(request)

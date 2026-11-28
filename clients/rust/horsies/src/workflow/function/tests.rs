@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::workflow::node::tests::{add, task_node, test_builder};
-use crate::workflow::{OutputlessResults, WorkflowDefinitionConfig, WorkflowSpecBuilder};
+use crate::workflow::{NoWorkflowOutput, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 use crate::AppConfig;
 use horsies_core::WorkflowStartErrorCode;
 
@@ -132,7 +132,7 @@ impl WorkflowDefinition for DailyTwin {
 struct ParentOfUnregistered;
 
 impl WorkflowDefinition for ParentOfUnregistered {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -153,7 +153,7 @@ impl WorkflowDefinition for ParentOfUnregistered {
 struct Unregistered;
 
 impl WorkflowDefinition for Unregistered {
-    type Output = OutputlessResults;
+    type Output = NoWorkflowOutput;
     type Parameters = ();
 
     fn name() -> &'static str {
@@ -283,7 +283,7 @@ async fn a_spec_with_an_unregistered_child_is_refused_before_any_io() {
     builder.definition_key("tests.function.parent.v1");
     builder.sub_workflow(Daily::node(SubWorkflowParameters::NotGiven).unwrap());
     let spec = builder.build().unwrap();
-    let refused = app.start::<OutputlessResults>(&spec).await.unwrap_err();
+    let refused = app.start::<NoWorkflowOutput>(&spec).await.unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
 }
 

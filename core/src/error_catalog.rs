@@ -2229,4 +2229,134 @@ mod tests {
             }
         );
     }
+
+    /// One value of the send classes that have a fixed `retryable`.
+    fn fixed_send_errors() -> Vec<TaskSendError> {
+        let payload = || {
+            Box::new(TaskSendPayload {
+                task_name: "report".to_owned(),
+                queue_name: "default".to_owned(),
+                priority: 50,
+                input_json: "{}".to_owned(),
+                sent_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                good_until: None,
+                enqueue_delay_seconds: None,
+                task_options: None,
+                idempotency_key: None,
+                retention: crate::core::config::EnqueueRetention::Default,
+            })
+        };
+        vec![
+            TaskSendError::AsyncContext {
+                task_id: TASK,
+                payload: payload(),
+                message: "blocking send on a runtime thread".to_owned(),
+            },
+            TaskSendError::IdempotencyKeyConflict {
+                task_id: TASK,
+                payload: payload(),
+                message: "the key is held".to_owned(),
+                owner_task_id: TASK,
+            },
+        ]
+    }
+
+    /// One value of each workflow start class.
+    fn every_start_error() -> Vec<WorkflowStartError> {
+        let name = || "report".to_owned();
+        vec![
+            WorkflowStartError::ValidationFailed {
+                message: "refused".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+                cause: StartRefusalCause::Check,
+            },
+            WorkflowStartError::id_conflict("report", WORKFLOW, "other".to_owned()),
+            WorkflowStartError::CommandConflict {
+                message: "another command".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+            },
+            WorkflowStartError::EnqueueFailed {
+                message: "failed".to_owned(),
+                retryable: true,
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+                cause: Box::new(WorkflowError::Broker(refused())),
+            },
+            WorkflowStartError::AsyncContext {
+                message: "sync call inside a loop".to_owned(),
+                workflow_name: name(),
+                workflow_id: WORKFLOW,
+            },
+        ]
+    }
+
+    /// The `retryable` of each class that fixes it is the value of the retry
+    /// function of the enum that raises the class, and every class that fixes
+    /// it is checked. A class whose text says a repeat can succeed has
+    /// `retryable = True`; a class whose success needs a change outside the
+    /// call (a row that appears, data that an operator repairs) has `False`.
+    #[test]
+    fn the_fixed_retryable_of_each_class_is_the_retry_function_of_its_values() {
+        let mut by_class: Vec<(&'static str, bool)> = Vec::new();
+        by_class.extend(
+            every_broker_error()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+        by_class.extend(
+            every_handle_error()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+        by_class.extend(
+            every_monitoring_query_error()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+        by_class.extend(
+            every_task_action_error()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+        by_class.extend(
+            fixed_send_errors()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+        by_class.extend(
+            every_start_error()
+                .iter()
+                .map(|error| (error.python_class(), error.retryable())),
+        );
+
+        let mut checked = 0_usize;
+        for catalog in ERROR_CATALOGS {
+            for class in catalog.classes {
+                let fixed = class.slots.iter().find_map(|slot| match slot {
+                    ErrorSlot::NeverRetryable => Some(false),
+                    ErrorSlot::AlwaysRetryable => Some(true),
+                    ErrorSlot::CodeMember { .. }
+                    | ErrorSlot::CodeSubset { .. }
+                    | ErrorSlot::Field { .. }
+                    | ErrorSlot::Exception { .. } => None,
+                });
+                let Some(flag) = fixed else { continue };
+                let values: Vec<bool> = by_class
+                    .iter()
+                    .filter(|(name, _)| *name == class.python_class)
+                    .map(|(_, retryable)| *retryable)
+                    .collect();
+                assert!(!values.is_empty(), "no value of {}", class.python_class);
+                assert!(
+                    values.iter().all(|retryable| *retryable == flag),
+                    "{}: the flag is {flag}, the retry function gives {values:?}",
+                    class.python_class
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 23);
+    }
 }

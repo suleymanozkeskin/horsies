@@ -113,6 +113,7 @@ fn each_kind_gets_the_resolved_pool_of_its_setting() {
                 false
             ),
             task_send_pool: task_send(u64::from(DEFAULT_TASK_SEND_POOL_CONNECTIONS)),
+            recycle_above: MemoryLimit::Off,
         })
     );
 }
@@ -152,6 +153,7 @@ fn every_child_of_a_kind_gets_the_same_pool() {
             seats: ThreadSeats::new(4).expect("4 seats"),
             pool: pool(0, 7, false),
             task_send_pool: task_send(u64::from(DEFAULT_TASK_SEND_POOL_CONNECTIONS)),
+            recycle_above: MemoryLimit::Off,
         })
     );
     assert_eq!(
@@ -411,4 +413,33 @@ fn no_preload_runs_for_a_profile_without_one_or_a_child_program_without_one() {
         "preload": "library",
     }));
     assert!(preload_plan(&library, &launch()).is_none());
+}
+
+/// The init frame of a shared thread child carries the `recycle.above` of
+/// its profile, as the limit that the parent recycles at.
+#[test]
+fn the_shared_thread_init_frame_carries_the_memory_limit_of_the_profile() {
+    let limited = profile(serde_json::json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4,
+                          "recycle": {"above": {"kind": "memory_limit", "mb": 700}}}
+    }));
+    let unlimited = profile(serde_json::json!({
+        "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4,
+                          "recycle": {"above": {"kind": "no_memory_limit"}}}
+    }));
+    let recycle_above_of =
+        |profile: &WorkerProfile| match shared_thread_pool_config(profile, &launch(), &facts(8))
+            .expect("shared thread children")
+            .init
+            .child_kind
+        {
+            ChildKind::SharedThread(child) => child.recycle_above,
+            other => panic!("a shared thread pool builds a shared thread kind: {other:?}"),
+        };
+
+    assert_eq!(
+        recycle_above_of(&limited),
+        MemoryLimit::AtMb(NonZeroU64::new(700).expect("700"))
+    );
+    assert_eq!(recycle_above_of(&unlimited), MemoryLimit::Off);
 }

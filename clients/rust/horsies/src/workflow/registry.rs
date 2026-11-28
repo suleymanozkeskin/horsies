@@ -28,7 +28,7 @@ use horsies_core::{
     build_failed_error, merged_child_input, node_failure_result, params_decode_failed_error,
     params_refused_error, subworkflow_load_failed_error, ChildSpecError, ChildSpecFuture,
     ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ClientChildSpec, ClientSpec,
-    NodeInput, RefusedMember, TaskError, MAX_CHECK_SUBWORKFLOW_BUILDS,
+    NodeInput, RefusedMember, TaskError, MAX_CHECK_SUBWORKFLOW_BUILDS, MAX_SUBWORKFLOW_DEPTH,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -45,10 +45,6 @@ use crate::{AppConfig, HorsiesError, HorsiesErrorCode, ValidationReport};
 /// The hook that builds a child from params, as the error texts of a child
 /// start name it: the definition's `build_with`.
 const BUILD_WITH: &str = "build_with";
-
-/// The deepest child workflow (Python `MAX_SUBWORKFLOW_DEPTH`); the core
-/// fails a node whose child would be deeper.
-const MAX_SUBWORKFLOW_DEPTH: usize = 32;
 
 /// The params text of a sub-workflow node that gives no params.
 const NO_PARAMS_TEXT: &str = "{}";
@@ -294,6 +290,13 @@ impl WorkflowRegistry {
     /// of a check case without a definition key is reported (`HRS-016`) and
     /// not checked further.
     pub(crate) fn check_findings(&self) -> Vec<HorsiesError> {
+        self.check_findings_within(MAX_CHECK_SUBWORKFLOW_BUILDS)
+    }
+
+    /// [`Self::check_findings`] with a walk of at most `build_bound` child
+    /// builds for each root. `check_findings` gives
+    /// [`MAX_CHECK_SUBWORKFLOW_BUILDS`].
+    fn check_findings_within(&self, build_bound: usize) -> Vec<HorsiesError> {
         let registered = self.read();
         let mut findings = Vec::new();
         let roots = registered
@@ -308,7 +311,7 @@ impl WorkflowRegistry {
             match std::panic::catch_unwind(AssertUnwindSafe(|| (case.build)())) {
                 Ok(Ok(spec)) => match keyless_spec(&spec) {
                     Some(refused) => findings.push(refused),
-                    None => self.check_root(&registered, &spec, &mut findings),
+                    None => self.check_root(&registered, &spec, build_bound, &mut findings),
                 },
                 Ok(Err(refused)) => findings.push(
                     HorsiesError::new(format!(
@@ -330,7 +333,7 @@ impl WorkflowRegistry {
             }
         }
         for spec in &roots {
-            self.check_root(&registered, spec, &mut findings);
+            self.check_root(&registered, spec, build_bound, &mut findings);
         }
         findings
     }
@@ -339,6 +342,7 @@ impl WorkflowRegistry {
         &self,
         registered: &Registered,
         spec: &WorkflowSpec,
+        build_bound: usize,
         findings: &mut Vec<HorsiesError>,
     ) {
         findings.extend(self.spec_findings(registered, spec));
@@ -349,7 +353,7 @@ impl WorkflowRegistry {
             registered,
             spec,
             &[],
-            &mut ChildBuildBudget::new(),
+            &mut ChildBuildBudget::new(build_bound),
             findings,
         );
     }
@@ -898,7 +902,7 @@ fn decide_nesting(path: &[NestingStep], node_id: &str, step: NestingStep) -> Nes
             false => NestingDecision::StopWithoutFinding,
         };
     }
-    if path.len() >= MAX_SUBWORKFLOW_DEPTH {
+    if path.len() >= MAX_SUBWORKFLOW_DEPTH as usize {
         return match starts_for_certain(&walked) {
             true => NestingDecision::StopWithFinding(
                 HorsiesError::new("subworkflow nesting passes the depth limit")
@@ -931,16 +935,19 @@ enum BuildDecision {
 }
 
 /// The builds of child specs in the nesting walk of one root spec, at most
-/// [`MAX_CHECK_SUBWORKFLOW_BUILDS`] (Python `ChildBuildBudget`).
+/// `bound` (Python `ChildBuildBudget`). The check gives
+/// [`MAX_CHECK_SUBWORKFLOW_BUILDS`].
 #[derive(Debug)]
 struct ChildBuildBudget {
+    bound: usize,
     builds: usize,
     reported: bool,
 }
 
 impl ChildBuildBudget {
-    fn new() -> Self {
+    fn new(bound: usize) -> Self {
         Self {
+            bound,
             builds: 0,
             reported: false,
         }
@@ -949,7 +956,7 @@ impl ChildBuildBudget {
     /// Count one build of the child of node `node_id` and say whether it
     /// may go on. Changes only the counts of this budget.
     fn take(&mut self, node_id: &str) -> BuildDecision {
-        match (self.builds < MAX_CHECK_SUBWORKFLOW_BUILDS, self.reported) {
+        match (self.builds < self.bound, self.reported) {
             (true, _) => {
                 self.builds += 1;
                 BuildDecision::Granted
@@ -962,8 +969,9 @@ impl ChildBuildBudget {
                         .with_code(HorsiesErrorCode::WorkflowCheckBuildLimit)
                         .with_note(format!(
                             "node '{node_id}': the walk of this workflow built \
-                             {MAX_CHECK_SUBWORKFLOW_BUILDS} child workflows and stopped; the \
-                             rest of its nesting is not checked"
+                             {} child workflows and stopped; the \
+                             rest of its nesting is not checked",
+                            self.bound
                         ))
                         .with_help("nest fewer child workflows in this workflow"),
                 )

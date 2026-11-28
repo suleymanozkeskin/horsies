@@ -5,8 +5,7 @@
 //! case, so `check()` builds it. The other nine build one fixed spec each.
 
 use horsies::{
-    Horsies, HorsiesError, OutputlessResults, WorkflowDefinition, WorkflowFunction,
-    WorkflowTemplate,
+    Horsies, HorsiesError, NoWorkflowOutput, WorkflowDefinition, WorkflowFunction, WorkflowTemplate,
 };
 
 use crate::domain::{
@@ -49,7 +48,7 @@ pub struct RegisteredWorkflows {
     pub order_fulfillment: WorkflowTemplate<Order, PaymentCapture>,
     pub shipping: WorkflowTemplate<shipping::ShippingParams, TrackingSeed>,
     pub returns_review: WorkflowTemplate<returns_review::ReturnsParams, RestockDecision>,
-    pub catalog_import: WorkflowFunction<OutputlessResults>,
+    pub catalog_import: WorkflowFunction<NoWorkflowOutput>,
     pub customer_winback: WorkflowFunction<MarketingBlast>,
     pub daily_report: WorkflowFunction<AbandonedCartSweep>,
     pub flash_sale: WorkflowFunction<CacheWarm>,

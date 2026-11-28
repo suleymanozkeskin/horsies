@@ -1,8 +1,8 @@
 //! Task definition: the `#[horsies::task]` and `#[horsies::blocking_task]`
 //! attributes, the typed signature contract, `TaskError<E>` with the user's
 //! error code enum, the body adapters that the core's child host calls,
-//! `TaskRuntime`, and `StoredDateTime` for a date-time in Python's stored
-//! text.
+//! `TaskRuntime`, and `StoredDateTime` and `StoredTime` for a date-time and
+//! a time of day in Python's stored text.
 
 pub(crate) mod body;
 mod custom_code;
@@ -14,7 +14,7 @@ mod stored_datetime;
 pub use custom_code::CustomErrorCode;
 pub use error::{TaskError, TaskErrorCode, UnknownCustomCode};
 pub use runtime::{TaskRuntime, TestRun};
-pub use stored_datetime::StoredDateTime;
+pub use stored_datetime::{StoredDateTime, StoredTime};
 
 pub(crate) use custom_code::{is_free_custom_code, is_retry_code, stored_retry_code};
 

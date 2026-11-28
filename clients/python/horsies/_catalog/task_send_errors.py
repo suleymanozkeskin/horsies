@@ -75,6 +75,7 @@ class TaskSendAsyncContext:
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ASYNC_CONTEXT
+    retryable: ClassVar[bool] = False
     task_id: uuid.UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)

@@ -116,7 +116,7 @@ export const CORE_ONLY_FILES: readonly string[] = ["task_options.json", "trace_c
 /**
  * The keys that a row may hold, and the keys of each member that holds an object or a list of objects. A member that
  * holds a value notation, or facts that these tests do not read (`inputs` of the error data writers), is not listed
- * in `members`. The marks of the Rust client (`rust_cannot_express`, `rust_drift`) are keys that these tests skip.
+ * in `members`. The mark of the Rust client (`rust_cannot_express`) is a key that these tests skip.
  */
 type RowKeys = {
   readonly keys: readonly string[];
@@ -146,8 +146,8 @@ const FILE_LAYOUTS: Readonly<Record<VectorFileName, FileLayout>> = {
     form: "task input",
     sections: {
       vectors: rowKeys(
-        ["name", "parameters", "text", "rust_cannot_express", "rust_drift", "typescript_cannot_express", "typescript_drift"],
-        { parameters: PARAMETER, rust_drift: DRIFT, typescript_drift: DRIFT },
+        ["name", "parameters", "text", "rust_cannot_express", "typescript_cannot_express", "typescript_drift"],
+        { parameters: PARAMETER, typescript_drift: DRIFT },
       ),
       refused_values: rowKeys(["name", "parameters"], { parameters: PARAMETER }),
       refused_texts: rowKeys(["name", "text", "core_refusal", "refusal_text"]),
@@ -158,8 +158,8 @@ const FILE_LAYOUTS: Readonly<Record<VectorFileName, FileLayout>> = {
     form: "result envelope",
     sections: {
       vectors: rowKeys(
-        ["name", "ok", "err", "text", "stored_data", "rust_cannot_express", "rust_drift", "typescript_cannot_express"],
-        { ok: rowKeys(["type", "value"]), err: ERROR, rust_drift: DRIFT },
+        ["name", "ok", "err", "text", "stored_data", "rust_cannot_express", "typescript_cannot_express"],
+        { ok: rowKeys(["type", "value"]), err: ERROR },
       ),
       refused_texts: rowKeys(["name", "text", "refusal"]),
     },

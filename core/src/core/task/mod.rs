@@ -26,4 +26,6 @@ pub use options::{
 };
 pub use result::TaskResult;
 pub use seat_relay::SeatRelayCode;
-pub use send_types::{TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult};
+pub use send_types::{
+    EnqueueFailureCause, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
+};

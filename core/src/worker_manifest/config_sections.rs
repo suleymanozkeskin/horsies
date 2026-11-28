@@ -74,6 +74,14 @@ pub enum ConfigField {
     Retention(RetentionField),
     Resilience(ResilienceField),
     Payload(PayloadField),
+    /// A value of the worker profile `name`. `field` is the path of the
+    /// value inside the profile, with `.` between the members
+    /// (`isolated.count`, `claim.per_queue_per_pass.tasks`,
+    /// `drain_timeout`).
+    WorkerProfile {
+        name: String,
+        field: String,
+    },
 }
 
 /// A field of one custom queue (`CustomQueueConfig`).
@@ -174,6 +182,14 @@ impl ConfigField {
                 FieldSegment::Member("payload"),
                 FieldSegment::Member(field.config_name()),
             ],
+            Self::WorkerProfile { name, field } => {
+                let mut path = vec![
+                    FieldSegment::Member("worker_profiles"),
+                    FieldSegment::Key(name.as_str()),
+                ];
+                path.extend(field.split('.').map(FieldSegment::Key));
+                path
+            }
         }
     }
 }
@@ -259,7 +275,8 @@ impl PayloadField {
 /// - Every profile of the config goes in, in its checked form
 ///   ([`checked_worker_profiles`]), whose bounds are the bounds of the
 ///   manifest fields: the worker checks the profile set and picks the
-///   profile that the start asks for.
+///   profile that the start asks for. A profile value outside its bound
+///   is refused with [`ConfigField::WorkerProfile`].
 /// - For the other sections, the builder does not depend on
 ///   `AppConfig::validate`: it checks each manifest bound itself.
 ///
@@ -267,23 +284,17 @@ impl PayloadField {
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
 /// `claim_lease_ms`, `max_claim_renew_age_ms`, `cluster_wide_cap`, each
 /// custom queue in config order), then the recovery, retention (each mapped
-/// queue in name order), resilience and payload sections.
-///
-/// # Panics
-///
-/// When a profile has a value outside its bound. `AppConfig::validate`
-/// refuses each such value with its path, and a client builds the sections
-/// only of a config that validation accepted (the Rust `Horsies::new`, the
-/// TypeScript `Horsies.create`), so a value outside its bound here is a
-/// defect of the client.
+/// queue in name order), resilience and payload sections, then the
+/// profiles (in name order, then in field order).
 pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBoundRefused> {
     let claim = claim_manifest(config)?;
     let recovery = recovery_manifest(&config.recovery)?;
     let retention = retention_manifest(&config.retention)?;
     let resilience = resilience_manifest(&config.resilience)?;
     let payload = payload_manifest(&config.payload)?;
+    let profiles = checked_profiles(&config.worker_profiles)?;
     Ok(ConfigSections {
-        profiles: checked_profiles(&config.worker_profiles)
+        profiles: profiles
             .iter()
             .map(|(name, profile)| (name.clone(), profile_manifest(profile)))
             .collect(),
@@ -297,22 +308,39 @@ pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBou
 
 /// Every profile of the config in its checked form, by name. Pure.
 ///
-/// Panics when a profile has a value outside its bound, with the path and
-/// the bound of each such value: a defect of the client
-/// ([`config_sections`]).
+/// Errors: [`ManifestBoundRefused`] for the first profile value outside its
+/// bound, with the bound of the value.
 fn checked_profiles(
     profiles: &BTreeMap<String, input::WorkerProfile>,
-) -> BTreeMap<String, WorkerProfile> {
-    match checked_worker_profiles(profiles) {
-        Ok(checked) => checked,
-        Err(refusals) => panic!(
-            "the worker manifest is built from a config that AppConfig::validate refuses, a \
-             defect of the client: {}",
-            refusals
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; "),
+) -> Result<BTreeMap<String, WorkerProfile>, ManifestBoundRefused> {
+    checked_worker_profiles(profiles).map_err(|refusals| match refusals.first() {
+        Some(first) => profile_refusal(first),
+        None => unreachable!("a refused profile set has a refusal"),
+    })
+}
+
+/// The manifest refusal of one profile value outside its bound. Pure.
+fn profile_refusal(refusal: &input::ProfileValueRefused) -> ManifestBoundRefused {
+    match refusal {
+        input::ProfileValueRefused::OutOfBounds {
+            profile,
+            field,
+            refused: bound,
+        } => refused(
+            ConfigField::WorkerProfile {
+                name: profile.clone(),
+                field: field.clone(),
+            },
+            u64::from(bound.min),
+            u64::from(bound.max),
+        ),
+        input::ProfileValueRefused::DrainTimeout { profile, .. } => refused(
+            ConfigField::WorkerProfile {
+                name: profile.clone(),
+                field: input::DRAIN_TIMEOUT_FIELD.to_owned(),
+            },
+            wire::MIN_DRAIN_TIMEOUT_MS,
+            wire::MAX_DRAIN_TIMEOUT_MS,
         ),
     }
 }

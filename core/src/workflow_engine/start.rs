@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
+use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::core::{
     AnyNode, HorsiesError, HorsiesErrorCategory, OperationalCode, TaskError, WorkflowSpec,
 };
@@ -53,14 +54,16 @@ pub(crate) fn node_task_facts(
 // ---------------------------------------------------------------------------
 
 /// The greatest depth of a child workflow. A top-level workflow has depth 0; a child has the depth of its
-/// parent plus 1. Python: `MAX_SUBWORKFLOW_DEPTH` (`core/models/workflow/limits.py`); the baseline CHECK
-/// `horsies_workflows_depth_range` holds the same bound.
-pub(crate) const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
+/// parent plus 1. The baseline CHECK `horsies_workflows_depth_range` holds the same bound. Every client reads
+/// this one value (Python through the generated `_catalog.workflow_bounds`).
+pub const MAX_SUBWORKFLOW_DEPTH: i32 = 32;
 
 /// The most builds of child workflows in the nesting walk of `check` for one root workflow. The walk builds each
 /// child of each build down to [`MAX_SUBWORKFLOW_DEPTH`], so the builds grow as the children per build to the
-/// power of the depth; at the bound the walk stops and `check` reports `HRS-039`. Every client uses this one value.
-pub const MAX_CHECK_SUBWORKFLOW_BUILDS: usize = 1_000;
+/// power of the depth. The bound is derived from two core bounds: [`MAX_WORKFLOW_NODES`] (the most nodes of one
+/// spec, so the most children of one build) times [`MAX_SUBWORKFLOW_DEPTH`] (the levels of the walk). At the bound
+/// the walk stops and `check` reports `HRS-039`. Every client uses this one value.
+pub const MAX_CHECK_SUBWORKFLOW_BUILDS: usize = MAX_WORKFLOW_NODES * MAX_SUBWORKFLOW_DEPTH as usize;
 
 /// The depth of a new child of the workflow `parent_workflow_id` (named `parent_workflow_name`) at
 /// `parent_depth`.
@@ -386,11 +389,48 @@ mod tests {
         assert_eq!(without.facts.execution, Execution::Isolated);
         let thread = node_task_facts(
             &node,
-            Some(r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null}"#),
+            Some(r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null, "timeout_ms": 5000}"#),
             None,
         )
         .expect("a node of the thread class reads");
         assert_eq!(thread.facts.execution, Execution::SharedThread);
+    }
+
+    /// A shared-class task node with no `timeout_ms` (absent or `null`) is refused at the start with the
+    /// validation error that names the node; an `ISOLATED` node with none is accepted.
+    #[test]
+    fn a_shared_class_task_node_without_a_timeout_is_refused() {
+        let mut node = node_with(false, Some(10));
+        node.task_name = "shared_node".to_owned();
+        for options in [
+            r#"{"execution": "SHARED_ASYNC", "cancel_grace_ms": 1000}"#,
+            r#"{"execution": "SHARED_ASYNC", "cancel_grace_ms": 1000, "timeout_ms": null}"#,
+            r#"{"execution": "SHARED_THREAD", "cancel_grace_ms": null}"#,
+            r#"{"execution": "SHARED_THREAD", "timeout_ms": null}"#,
+        ] {
+            match node_task_facts(&node, Some(options), None) {
+                Ok(_) => panic!("{options}: the node must be refused"),
+                Err(WorkflowError::Validation(message)) => {
+                    assert!(
+                        message.contains("workflow node 0 (shared_node) refused"),
+                        "{options}: {message}"
+                    );
+                    assert!(
+                        message.contains("timeout_ms is absent for execution"),
+                        "{options}: {message}"
+                    );
+                }
+                Err(other) => panic!("{options}: expected a validation refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_isolated_task_node_without_a_timeout_is_accepted() {
+        let node = node_with(false, Some(10));
+        let isolated = node_task_facts(&node, Some(r#"{"execution": "ISOLATED"}"#), None)
+            .expect("an isolated node needs no timeout");
+        assert_eq!(isolated.facts.execution, Execution::Isolated);
     }
 
     /// Task options that are not JSON (an empty text is not "no options") and an execution class that is

@@ -62,14 +62,16 @@ use tokio::sync::oneshot;
 use crate::call::guard::sync_call;
 use crate::call::node_api::{call_status, CallStatus};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::child::body_facts::{BodyFacts, BodyFactsRecord};
+use crate::child::body_facts::{BodyEndRecord, BodyFacts, BodyFactsRecord};
 use crate::sends::task_error::TaskErrorRecord;
 use crate::values::boundary::{bigint_of_u64, u64_of_bigint};
 
 /// Posts of one seat that can wait for the JavaScript thread at once: the
-/// `runBody` and the `cancelRun` of its run, and the `cancelRun` of the run
-/// before it, when that run settled before JavaScript read its cancel.
-const RUN_POSTS_PER_SEAT: usize = 3;
+/// `runBody` and the `cancelRun` of its run, and the `cancelRun` and the
+/// `bodyEnded` of the run before it, when that run settled before
+/// JavaScript read them. The `bodyEnded` of a run comes after its settle
+/// call, so JavaScript read the `runBody` of that run before it.
+const RUN_POSTS_PER_SEAT: usize = 4;
 
 /// The queue bound of the run posts: every post of a shared async child
 /// with the most seats.
@@ -179,6 +181,14 @@ pub enum ChildPost {
         work_key: BigInt,
         cause: WorkStopCauseName,
     },
+    /// The core ended the body of the run of task `task_id`, attempt
+    /// `attempt` (from 1), as `end`. Only a child that records its body
+    /// facts gets it, once for each body that the core opened.
+    BodyEnded {
+        task_id: String,
+        attempt: u32,
+        end: BodyEndRecord,
+    },
 }
 
 /// The threadsafe function of the posts: weak, never throws into Node-API,
@@ -259,6 +269,22 @@ impl ChildPoster {
             self.work_stops
                 .call(post, ThreadsafeFunctionCallMode::NonBlocking),
         )
+    }
+}
+
+/// Where the posts of runs go: the JavaScript main thread of the child, or
+/// the recorder of a test.
+pub trait RunPosts: Send + Sync {
+    /// Post `post` of a run. Any thread.
+    ///
+    /// Failure exits: [`PostRefused`], when the post did not reach the
+    /// queue; nothing was posted.
+    fn post_run(&self, post: ChildPost) -> Result<(), PostRefused>;
+}
+
+impl RunPosts for ChildPoster {
+    fn post_run(&self, post: ChildPost) -> Result<(), PostRefused> {
+        ChildPoster::post_run(self, post)
     }
 }
 
@@ -1097,8 +1123,8 @@ mod tests {
     }
 
     #[test]
-    fn the_run_post_bound_holds_three_posts_per_seat_of_the_largest_child() {
-        assert_eq!(RUN_POST_QUEUE_BOUND, 3_000);
+    fn the_run_post_bound_holds_four_posts_per_seat_of_the_largest_child() {
+        assert_eq!(RUN_POST_QUEUE_BOUND, 4_000);
         assert_eq!(WORK_STOP_QUEUE_BOUND, 10_000);
     }
 }

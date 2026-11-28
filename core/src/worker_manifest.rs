@@ -57,6 +57,9 @@ use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHA
 /// The one worker manifest version this core reads.
 pub const WORKER_MANIFEST_VERSION: u32 = 1;
 
+/// The shortest drain timeout of the manifest, in milliseconds.
+pub const MIN_DRAIN_TIMEOUT_MS: u64 = 1;
+
 /// The longest drain timeout, in milliseconds: [`MAX_DRAIN_TIMEOUT`].
 pub const MAX_DRAIN_TIMEOUT_MS: u64 = MAX_DRAIN_TIMEOUT.as_millis() as u64;
 
@@ -206,7 +209,7 @@ impl ManifestValue for WorkerManifestVersion {
 }
 
 /// How long a stopping worker waits for running tasks, in milliseconds:
-/// 1 to [`MAX_DRAIN_TIMEOUT_MS`] (Python `WorkerProfile.drain_timeout`,
+/// [`MIN_DRAIN_TIMEOUT_MS`] to [`MAX_DRAIN_TIMEOUT_MS`] (Python `WorkerProfile.drain_timeout`,
 /// above 0 and at most 24 hours).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
@@ -234,9 +237,10 @@ impl TryFrom<u64> for DrainTimeoutMs {
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            1..=MAX_DRAIN_TIMEOUT_MS => Ok(Self(value)),
+            MIN_DRAIN_TIMEOUT_MS..=MAX_DRAIN_TIMEOUT_MS => Ok(Self(value)),
             _ => Err(format!(
-                "a drain timeout must be from 1 to {MAX_DRAIN_TIMEOUT_MS} milliseconds"
+                "a drain timeout must be from {MIN_DRAIN_TIMEOUT_MS} to {MAX_DRAIN_TIMEOUT_MS} \
+milliseconds"
             )),
         }
     }
@@ -251,7 +255,7 @@ impl From<DrainTimeoutMs> for u64 {
 impl ManifestValue for DrainTimeoutMs {
     const PYTHON: PythonValue = PythonValue::Int(IntBound {
         name: "DRAIN_TIMEOUT_MS",
-        min: 1,
+        min: MIN_DRAIN_TIMEOUT_MS,
         max: MAX_DRAIN_TIMEOUT_MS,
     });
 }

@@ -30,7 +30,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use horsies_core::frame_protocol::ChildLogLevel;
 use horsies_core::ChildLogSetup;
 
-use super::format::{current_format, spill_text};
+use super::format::{current_format, record_line, spill_text};
 use super::forwarder;
 use super::levels::{LogThreshold, RecordLevel, WhenFull, LEVELS};
 use super::names::LoggerName;
@@ -200,6 +200,15 @@ pub enum DrainOutcome {
     BoundReached { left: u64 },
 }
 
+/// Where a push sends its record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushRoute {
+    /// Into the channel, for the forwarder.
+    Channel,
+    /// To stderr: the forwarder ended.
+    Stderr,
+}
+
 /// The sending side of the channel and its counters.
 pub struct LogSink {
     sender: SyncSender<CoreLogRecord>,
@@ -212,6 +221,10 @@ pub struct LogSink {
     in_channel: AtomicU64,
     /// The forwarder thread runs its service loop.
     forwarder_running: AtomicBool,
+    /// The forwarder ran and left its service loop (a panic in it): no
+    /// thread takes records from the channel any more, so every later push
+    /// writes its record to stderr. It never turns back.
+    forwarder_ended: AtomicBool,
     /// The forwarder writes every later record to stderr, not to the
     /// JavaScript sink: the environment ends, or the process aborts from the
     /// JavaScript thread. It never turns back.
@@ -230,14 +243,35 @@ impl LogSink {
             abandoned: AtomicU64::new(0),
             in_channel: AtomicU64::new(0),
             forwarder_running: AtomicBool::new(false),
+            forwarder_ended: AtomicBool::new(false),
             stderr_only: AtomicBool::new(false),
         };
         (sink, receiver)
     }
 
     /// Push one record. Never waits for the JavaScript thread; a WARNING or
-    /// ERROR record in a full channel waits up to [`HIGH_RECORD_WAIT`].
+    /// ERROR record in a full channel waits up to [`HIGH_RECORD_WAIT`]. After
+    /// the forwarder ended, the record goes to stderr at once, in the format
+    /// of the process.
     pub fn push(&self, record: CoreLogRecord) {
+        match self.push_route() {
+            PushRoute::Channel => self.push_to_channel(record),
+            PushRoute::Stderr => {
+                let _write_failure_ignored =
+                    writeln!(std::io::stderr(), "{}", record_line(&record));
+            }
+        }
+    }
+
+    /// Where a push sends its record now.
+    fn push_route(&self) -> PushRoute {
+        match self.forwarder_ended.load(Ordering::SeqCst) {
+            false => PushRoute::Channel,
+            true => PushRoute::Stderr,
+        }
+    }
+
+    fn push_to_channel(&self, record: CoreLogRecord) {
         match self.try_enqueue(record) {
             Ok(()) => {}
             Err(refused) => match *refused {
@@ -294,9 +328,12 @@ impl LogSink {
         self.forwarder_running.store(true, Ordering::SeqCst);
     }
 
-    /// The forwarder thread left its service loop, or never started.
+    /// The forwarder thread left its service loop, or never started. A
+    /// forwarder that was running has ended: later pushes go to stderr.
     pub fn mark_forwarder_stopped(&self) {
-        self.forwarder_running.store(false, Ordering::SeqCst);
+        if self.forwarder_running.swap(false, Ordering::SeqCst) {
+            self.forwarder_ended.store(true, Ordering::SeqCst);
+        }
     }
 
     /// From now on the forwarder writes every record to stderr.
@@ -501,6 +538,33 @@ mod tests {
 
     fn record(level: RecordLevel) -> CoreLogRecord {
         CoreLogRecord::bridge(level, "message".to_owned())
+    }
+
+    #[test]
+    fn a_push_after_the_forwarder_ended_goes_to_stderr_and_not_to_the_channel() {
+        let (sink, receiver) = LogSink::new(4);
+        sink.push(record(RecordLevel::Error));
+        assert_eq!(sink.push_route(), PushRoute::Channel, "before the start");
+        sink.mark_forwarder_running();
+        assert_eq!(sink.push_route(), PushRoute::Channel, "while it runs");
+        sink.mark_forwarder_stopped();
+        assert_eq!(sink.push_route(), PushRoute::Stderr, "after it ended");
+        sink.push(record(RecordLevel::Error));
+        assert_eq!(sink.in_channel.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            receiver.try_iter().count(),
+            1,
+            "only the push before the end"
+        );
+    }
+
+    #[test]
+    fn a_forwarder_that_never_ran_keeps_the_pushes_in_the_channel() {
+        let (sink, receiver) = LogSink::new(4);
+        sink.mark_forwarder_stopped();
+        sink.push(record(RecordLevel::Error));
+        assert_eq!(sink.push_route(), PushRoute::Channel);
+        assert_eq!(receiver.try_iter().count(), 1);
     }
 
     #[test]

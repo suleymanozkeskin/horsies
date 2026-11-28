@@ -30,6 +30,12 @@ pub const PROTOCOL_MISMATCH_EXIT_CODE: i32 = 78;
 /// last log line names the cause. A child that ends with this code while it
 /// holds no task is replaced.
 pub const CORE_STOPPED_EXIT_CODE: i32 = 80;
+/// The resident memory of a shared thread child went above its
+/// `recycle_above` limit while it ran. The child ends itself. The worker
+/// reads the end as a memory recycle ([`ReplaceReason::MemoryLimit`](crate::events::ReplaceReason)),
+/// not as a crash of the child. A run that the child held is lost with it:
+/// it takes the path of a lost child, as the retry policy of its task says.
+pub const MEMORY_LIMIT_EXIT_CODE: i32 = 81;
 /// A start hook of the child failed or hung.
 pub const CHILD_HOOK_FAILED_EXIT_CODE: i32 = 173;
 
@@ -44,12 +50,13 @@ pub enum ChildExitCode {
     ReparentFailed,
     ProtocolMismatch,
     CoreStopped,
+    MemoryLimit,
     ChildHookFailed,
 }
 
 impl ChildExitCode {
     /// Every code of the protocol, for checks over the whole set.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ParentGone,
         Self::BadParentFrame,
         Self::BadArguments,
@@ -58,6 +65,7 @@ impl ChildExitCode {
         Self::ReparentFailed,
         Self::ProtocolMismatch,
         Self::CoreStopped,
+        Self::MemoryLimit,
         Self::ChildHookFailed,
     ];
 
@@ -71,6 +79,7 @@ impl ChildExitCode {
             Self::ReparentFailed => REPARENT_FAILED_EXIT_CODE,
             Self::ProtocolMismatch => PROTOCOL_MISMATCH_EXIT_CODE,
             Self::CoreStopped => CORE_STOPPED_EXIT_CODE,
+            Self::MemoryLimit => MEMORY_LIMIT_EXIT_CODE,
             Self::ChildHookFailed => CHILD_HOOK_FAILED_EXIT_CODE,
         }
     }

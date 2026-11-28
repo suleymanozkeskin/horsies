@@ -14,9 +14,7 @@
 //! `{"__h_task_result__": true, "ok": <value>, "err": null}` or
 //! `{"__h_task_result__": true, "ok": null, "err": {...}}`.
 
-use std::collections::BTreeMap;
-
-use horsies_core::{CustomCode, JsonText, OutcomeCode, TaskResult};
+use horsies_core::{OutcomeCode, TaskResult};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -71,61 +69,11 @@ where
 /// value, so a reader never takes `null` for a value that the child returned.
 /// A stored value other than `null` does not read as `NoWorkflowOutput`.
 ///
-/// A definition with no output node declares `type Output =
-/// NoWorkflowOutput` when its sub-workflow node is read, and `type Output =
-/// OutputlessResults` when its own result is read as the outcome of each
-/// node.
+/// A definition with no output node declares `type Output = NoWorkflowOutput`.
+/// The read of its sub-workflow node and `get()` of its handle give this
+/// value, or the stored error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct NoWorkflowOutput;
-
-/// The result of a workflow with no output node (Python's outputless
-/// result): the outcome of each node by node id, with the value as its
-/// stored text (`JsonText::decode` reads it with the node's type) and the
-/// custom codes as text, because the nodes are of many tasks.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutputlessResults {
-    by_node_id: BTreeMap<String, TaskOutcome<JsonText, CustomCode>>,
-}
-
-impl OutputlessResults {
-    /// The outcome of the node `node_id`, when the result holds it.
-    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<JsonText, CustomCode>> {
-        self.by_node_id.get(node_id)
-    }
-
-    /// Every node id and its outcome, by node id.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<JsonText, CustomCode>)> {
-        self.by_node_id
-            .iter()
-            .map(|(node_id, outcome)| (node_id.as_str(), outcome))
-    }
-
-    /// The number of nodes in the result.
-    pub fn len(&self) -> usize {
-        self.by_node_id.len()
-    }
-
-    /// Whether the result holds no node.
-    pub fn is_empty(&self) -> bool {
-        self.by_node_id.is_empty()
-    }
-
-    pub(crate) fn new(by_node_id: BTreeMap<String, TaskOutcome<JsonText, CustomCode>>) -> Self {
-        Self { by_node_id }
-    }
-}
-
-impl<'de> Deserialize<'de> for OutputlessResults {
-    /// An object of node id to the stored result of that node, each read as
-    /// a `TaskOutcome`. It lets an outputless definition meet the
-    /// `DeserializeOwned` bound of the registration, the start and the read;
-    /// the workflow handle reads the stored result of an outputless workflow
-    /// through its own envelope.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::<String, TaskOutcome<JsonText, CustomCode>>::deserialize(deserializer)
-            .map(Self::new)
-    }
-}
 
 /// The text of the result member that the check of a node's input puts in
 /// place of each `args_from` member: a failed dependency
@@ -153,7 +101,7 @@ pub(crate) fn placeholder_context_text() -> String {
 mod tests {
     use std::convert::Infallible;
 
-    use horsies_core::BuiltInTaskCode;
+    use horsies_core::{BuiltInTaskCode, CustomCode};
     use serde_json::json;
 
     use super::*;
@@ -188,35 +136,6 @@ mod tests {
             "ok": null,
             "err": {"error_code": "DECLINED", "message": "card declined"},
         })
-    }
-
-    #[test]
-    fn outputless_results_read_each_node_by_its_id() {
-        let stored = json!({
-            "a": {"__h_task_result__": true, "ok": {"rows": 2}, "err": null},
-            "b": declined(),
-        });
-        let results: OutputlessResults = serde_json::from_value(stored).unwrap();
-        assert_eq!(results.len(), 2);
-        let Some(TaskOutcome::Succeeded(rows)) = results.get("a") else {
-            panic!("a stored value reads as Succeeded");
-        };
-        assert_eq!(
-            rows.decode::<serde_json::Value>()
-                .expect("the stored value decodes"),
-            json!({"rows": 2})
-        );
-        let Some(TaskOutcome::Failed(error)) = results.get("b") else {
-            panic!("a stored error reads as Failed");
-        };
-        assert_eq!(error.code().as_str(), "DECLINED");
-        assert_eq!(results.get("c"), None);
-    }
-
-    #[test]
-    fn outputless_results_refuse_a_node_that_is_not_a_stored_result() {
-        let refused = serde_json::from_value::<OutputlessResults>(json!({"a": 3}));
-        assert!(refused.is_err());
     }
 
     #[test]

@@ -33,8 +33,9 @@ use horsies_core::events::{
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
     CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, MAX_EVENT_HANDLERS,
-    MAX_HANDLER_NAME_CHARS, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
-    REPARENT_FAILED_EXIT_CODE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    MAX_HANDLER_NAME_CHARS, MEMORY_LIMIT_EXIT_CODE, PARENT_GONE_EXIT_CODE,
+    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use horsies_core::monitoring::{
     LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
@@ -151,7 +152,7 @@ const MONITORING_CONSTANTS: [PublishedConstant; 10] = [
 /// The stem of the module of the monitoring bounds.
 const MONITORING_BOUNDS_MODULE: &str = "monitoring_bounds";
 
-const EXIT_CODE_CONSTANTS: [PublishedConstant; 11] = [
+const EXIT_CODE_CONSTANTS: [PublishedConstant; 12] = [
     PublishedConstant::Integer {
         name: "PARENT_GONE_EXIT_CODE",
         value: PARENT_GONE_EXIT_CODE as i128,
@@ -191,6 +192,10 @@ const EXIT_CODE_CONSTANTS: [PublishedConstant; 11] = [
     PublishedConstant::Integer {
         name: "CORE_STOPPED_EXIT_CODE",
         value: CORE_STOPPED_EXIT_CODE as i128,
+    },
+    PublishedConstant::Integer {
+        name: "MEMORY_LIMIT_EXIT_CODE",
+        value: MEMORY_LIMIT_EXIT_CODE as i128,
     },
     PublishedConstant::Integer {
         name: "CHILD_HOOK_FAILED_EXIT_CODE",
@@ -720,6 +725,7 @@ mod tests {
             ("PROTOCOL_MISMATCH_EXIT_CODE", PROTOCOL_MISMATCH_EXIT_CODE),
             ("LIVENESS_LOCK_LOST_EXIT_CODE", LIVENESS_LOCK_LOST_EXIT_CODE),
             ("CORE_STOPPED_EXIT_CODE", CORE_STOPPED_EXIT_CODE),
+            ("MEMORY_LIMIT_EXIT_CODE", MEMORY_LIMIT_EXIT_CODE),
             ("CHILD_HOOK_FAILED_EXIT_CODE", CHILD_HOOK_FAILED_EXIT_CODE),
         ] {
             assert!(
@@ -727,7 +733,7 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(text.matches("export const ").count(), 11);
+        assert_eq!(text.matches("export const ").count(), 12);
     }
 
     /// The exit code module names every code of a child of the protocol,

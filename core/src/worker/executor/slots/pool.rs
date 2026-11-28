@@ -27,6 +27,7 @@ use crate::broker::OrphanSelfHeal;
 use crate::core::lifecycle::{AttemptPlacement, SlotWait};
 use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
+pub use crate::worker::executor::protocol::MemoryLimit;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
 };
@@ -44,14 +45,6 @@ pub(super) const AFTER_DRAIN_KILL_WAIT: Duration = CHILD_KILL_WAIT;
 pub enum TaskLimit {
     Off,
     After(NonZeroU64),
-}
-
-/// Recycle a child when its reported RSS reaches this many MiB. An
-/// unreadable RSS never recycles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryLimit {
-    Off,
-    AtMb(NonZeroU64),
 }
 
 /// What the slot does when a killed child's exit is not seen within the
